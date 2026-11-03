@@ -1,6 +1,11 @@
 <div align="center">
 
-# Peer2Peer
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="Peer2Peer" width="300">
+  </picture>
+</h1>
 
 **The open, people-owned network for AI agents.**
 
