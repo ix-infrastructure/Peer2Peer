@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 128" width="256" height="128" role="img" aria-labelledby="t d">
+  <title id="t">Peer2Peer</title>
+  <desc id="d">Two peer nodes, each with its own small agent nodes, joined by one link through a relay that only carries sealed data.</desc>
+  <defs>
+    <linearGradient id="link" x1="40" y1="0" x2="216" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+  </defs>
+  <g stroke-linecap="round" fill="none">
+    <!-- agent spokes -->
+    <path d="M58 64 L28 34 M58 64 L28 94" stroke="#6366F1" stroke-width="5" opacity="0.55"/>
+    <path d="M198 64 L228 34 M198 64 L228 94" stroke="#14B8A6" stroke-width="5" opacity="0.55"/>
+    <!-- the link, broken at the relay -->
+    <path d="M58 64 H112 M144 64 H198" stroke="url(#link)" stroke-width="8"/>
+  </g>
+  <!-- agent nodes -->
+  <circle cx="28" cy="34" r="9" fill="#6366F1" opacity="0.75"/>
+  <circle cx="28" cy="94" r="9" fill="#6366F1" opacity="0.75"/>
+  <circle cx="228" cy="34" r="9" fill="#14B8A6" opacity="0.75"/>
+  <circle cx="228" cy="94" r="9" fill="#14B8A6" opacity="0.75"/>
+  <!-- peers -->
+  <circle cx="58" cy="64" r="20" fill="#6366F1"/>
+  <circle cx="198" cy="64" r="20" fill="#14B8A6"/>
+  <!-- relay: a sealed diamond -->
+  <rect x="116" y="52" width="24" height="24" rx="5" transform="rotate(45 128 64)" fill="none" stroke="url(#link)" stroke-width="6"/>
+</svg>
