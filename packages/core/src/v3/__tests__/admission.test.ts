@@ -68,6 +68,36 @@ describe("T1: hostile relays can't starve an honest one", () => {
     void head;
   });
 
+  it("the chain walk too: the junk relays' pages use up only their own share of the time", async () => {
+    // A client 19 versions behind (more than the 8 tips a relay gives) fills the gap with the chain walk.
+    // The 4 hostile relays answer every chain request with 256 junk documents; the honest one with the
+    // real history. Each relay's share of the walk's checking time is its own: complete, current head,
+    // on any checking budget (a smaller one stands in for slower hardware), the honest relay first or last.
+    // (The chain work, placing the 19 real versions, keeps its own budget: checkMs bounds only the checks.)
+    for (const checkMs of [400, 50, 1]) {
+      for (const honest of [4, 0]) {
+        const u = makeUser("alice");
+        const store = await storeKnowing(u);
+        for (let i = 0; i < 19; i++) u.publish({ iat: NOW - 100 + i });
+        const head = u.docs[u.docs.length - 1];
+        const p = decodeJws(head.jws).payload;
+        const junk = Array.from({ length: 256 }, (_, i) => sameKeyJunk(p, i));
+        const fetcher: IdentityFetcher = {
+          tips: async () => [head.jws],
+          // As a relay walks (§5.6): from `to` back, newest first, at most n.
+          chain: async (_u, relays, to, n) => {
+            if (relays[0] !== RELAYS[honest]) return junk;
+            const at = u.docs.findIndex((d) => d.hash === to);
+            return at < 0 ? [] : u.docs.slice(Math.max(0, at - n + 1), at + 1).reverse().map((d) => d.jws);
+          },
+        };
+        const view = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: RELAYS, checkMs });
+        expect([checkMs, honest, view.incomplete]).toEqual([checkMs, honest, undefined]);
+        expect(view.head.hash).toBe(head.hash);
+      }
+    }
+  });
+
   it("an incomplete refresh doesn't count as a refresh", async () => {
     const { u, store, head } = await behindByOne();
     const p = decodeJws(head.jws).payload;

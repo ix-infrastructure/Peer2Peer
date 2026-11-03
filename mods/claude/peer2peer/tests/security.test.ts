@@ -36,7 +36,7 @@ import {
   routesToP2PFirst,
   stripPaths,
 } from '../hooks/lib'
-import { ANA_ID, BEN, BEN_ID, CIRCLE } from './world'
+import { ANA_ID, BEN, BEN_ID, CIRCLE, growth } from './world'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -556,23 +556,28 @@ describe('pre-release review: the home folder as a last word, globs at its name,
   })
 
   test('L1: 100 KB inputs stay fast; over 16 KiB, refused only when they name a home', () => {
-    const big = (s: string) => s.repeat(Math.ceil(100_000 / s.length))
-    const t0 = Date.now()
+    const big = (s: string, size = 100_000) => s.repeat(Math.ceil(size / s.length))
     const plain = p2pHomeAccess({ tool: 'Bash', command: big('a=a;') }, [home])
     const named = p2pHomeAccess({ tool: 'Bash', command: `${big('x ')} ~/.p2p` }, [home])
-    uncheckableShell(big('a;'))
-    uncheckableShell(big('/x/y '))
-    // Linear vs quadratic on 100 KB: quadratic would take minutes; a slow runner's linear pass stays far below this.
-    expect(Date.now() - t0).toBeLessThan(2000)
     expect(plain).toBeNull()
     expect(named).toBe('keys')
-    // Under the cap, the worst cases are linear too.
-    const t1 = Date.now()
-    p2pHomeAccess({ tool: 'Bash', command: 'a;'.repeat(8000) }, [home])
-    p2pHomeAccess({ tool: 'Bash', command: '/'.repeat(16000) }, [home])
-    uncheckableShell('p2p ' + ';'.repeat(16000))
-    uncheckableShell('=x'.repeat(8000))
-    expect(Date.now() - t1).toBeLessThan(2000)
+    // Linear, not quadratic: the cost from n to 4n (about 4 when linear, 16 when quadratic), measured
+    // against this machine itself, so a slow runner passes and a quadratic rescan doesn't.
+    const over = (n: number) => {
+      p2pHomeAccess({ tool: 'Bash', command: big('a=a;', n) }, [home])
+      p2pHomeAccess({ tool: 'Bash', command: `${big('x ', n)} ~/.p2p` }, [home])
+      uncheckableShell(big('a;', n))
+      uncheckableShell(big('/x/y ', n))
+    }
+    expect(growth(over, 25_000)).toBeLessThan(9)
+    // Under the 16 KiB cap, the worst cases are linear too (4,000 to 16,000 characters).
+    const under = (n: number) => {
+      p2pHomeAccess({ tool: 'Bash', command: 'a;'.repeat(n / 2) }, [home])
+      p2pHomeAccess({ tool: 'Bash', command: '/'.repeat(n) }, [home])
+      uncheckableShell('p2p ' + ';'.repeat(n))
+      uncheckableShell('=x'.repeat(n / 2))
+    }
+    expect(growth(under, 4000)).toBeLessThan(9)
   })
 })
 

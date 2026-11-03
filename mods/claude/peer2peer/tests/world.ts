@@ -528,3 +528,22 @@ export const message = (w: World, over: Record<string, unknown> = {}) => ({
 })
 
 export const lastStatus = (w: World) => [...ran(w, 'status')].reverse()[0]?.argv ?? []
+
+/**
+ * How a call's cost grows from input size n to 4n: about 4 when linear, about 16 when quadratic. Each
+ * size is timed as the best of 7 runs of 5 calls (so scheduling noise and a slow runner cancel out: the
+ * ratio is against the same machine), with a floor so a sub-tick timing can't divide by ~0.
+ */
+export function growth(call: (n: number) => void, n: number): number {
+  const time = (m: number) => {
+    let best = Infinity
+    for (let k = 0; k < 7; k++) {
+      const t0 = performance.now()
+      for (let i = 0; i < 5; i++) call(m)
+      best = Math.min(best, performance.now() - t0)
+    }
+    return Math.max(best, 0.5)
+  }
+  call(n) // warm up (JIT)
+  return time(4 * n) / time(n)
+}

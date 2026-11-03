@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.0 17f1f12f2f753fc9
+// @peer2peer/core 0.1.0 63c8318de2399fe5
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -10180,6 +10180,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   let exhausted = false;
   const maxDocs = opts.maxDocs ?? MAX_REFRESH_DOCS;
   const budgetMs = opts.budgetMs ?? REFRESH_BUDGET_MS;
+  const checkMs = opts.checkMs ?? budgetMs;
   let examined = 0;
   const begin2 = () => {
     sectionStart = Date.now();
@@ -10216,6 +10217,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
         const p = decodeJws(j).payload;
         if (p.iss !== userId || before && p.ik !== before.ik)
           return void 0;
+        if (seen.has(jwsHash(j)))
+          return void 0;
         if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId)
           return void 0;
         return { j, ver: typeof p.ver === "number" ? p.ver : -1 };
@@ -10229,7 +10232,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     for (const { j } of claimed) {
       if (out.length >= keep)
         break;
-      if (used >= quota || (walk ? overBudget() : overDocs() || used > 0 && performance.now() - t0 > shareMs)) {
+      if (used >= quota || !walk && overDocs() || used > 0 && performance.now() - t0 > shareMs) {
         cut = true;
         break;
       }
@@ -10246,7 +10249,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
           throw e;
       }
     }
-    return { docs: out, cut, used };
+    return { docs: out, cut, used, ms: performance.now() - t0 };
   };
   const accepted = [];
   const rejected = /* @__PURE__ */ new Set();
@@ -10273,6 +10276,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const answeredRelays = /* @__PURE__ */ new Set();
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
+  const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / relays.length]));
   const fetchEach = async (f, keep, walk = false) => {
     const answers = await Promise.all(relays.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) {
@@ -10285,23 +10289,21 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       docsCapped = true;
       return [];
     }
-    if (walk)
-      begin2();
-    const share = budgetMs / relays.length;
+    const share = checkMs / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r) : quota;
-      const a = admit(forRelay(res, r), keep, q, walk, walk ? Infinity : share);
-      if (walk)
+      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r) : share);
+      if (walk) {
         walkLeft.set(r, q - a.used);
+        walkTimeLeft.set(r, walkTimeLeft.get(r) - a.ms);
+      }
       return { answered: res !== void 0, ...a };
     });
     const answered2 = results.filter((x) => x.answered);
-    if (answered2.length > 0 && answered2.every((x) => x.cut))
+    const docs = results.flatMap((x) => x.docs);
+    if (answered2.length > 0 && answered2.every((x) => x.cut) && (!walk || docs.length === 0))
       docsCapped = true;
-    const out = results.flatMap((x) => x.docs);
-    if (walk)
-      end();
-    return out;
+    return docs;
   };
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);
   if (tips.length === 0 && !exhausted && !docsCapped)

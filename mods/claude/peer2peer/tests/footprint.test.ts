@@ -10,7 +10,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import { mutatingP2PVerb, touchesP2PSettings, uncheckableShell } from '../hooks/lib'
-import { flag, ran, settle, sidOf, start, world, type World } from './world'
+import { flag, growth, ran, settle, sidOf, start, world, type World } from './world'
 
 const MARK = 'FOOTPRINT-BODY-MARKER'
 const LOADED = { body: { extensions: [{ ns: 'ix', name: '@peer2peer/ext-ix', version: '0.1.0', commands: ['footprint'] }], enabled: ['ix'] } }
@@ -260,11 +260,11 @@ describe('peer2peer: the Ix footprint', () => {
     // Over 16 KiB, refused only when it names p2p; and no quadratic rescans.
     expect(uncheckableShell(`echo ${'x'.repeat(17000)}`)).toBeNull()
     expect(uncheckableShell(`p2p ls # ${'x'.repeat(17000)}`)).toMatch(/too long/)
-    const t0 = Date.now()
-    uncheckableShell(`p2p ls; ${'a=1 '.repeat(2000)}`)
-    uncheckableShell(`p2p ls; ${'$('.repeat(4000)}`)
-    // No quadratic rescans: those would take minutes; the bound leaves room for a slow runner.
-    expect(Date.now() - t0).toBeLessThan(3000)
+    // No quadratic rescans: the cost from n to 4n, against this machine itself (about 4 when linear).
+    expect(growth((n) => {
+      uncheckableShell(`p2p ls; ${'a=1 '.repeat(n / 4)}`)
+      uncheckableShell(`p2p ls; ${'$('.repeat(n / 2)}`)
+    }, 2000)).toBeLessThan(9)
     const w = world(on)
     await loaded($, w)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'echo "p2p ix config names=plain" | sh' } as never)
