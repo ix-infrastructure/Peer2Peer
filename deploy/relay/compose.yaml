@@ -1,0 +1,103 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# A hardened, internet-facing Peer2Peer relay for a small VM (1 vCPU / 1 GB):
+# the relay, plus Caddy in front of it for TLS with automatic certificates.
+# docs/future/public-relay.md is the runbook. From this directory:
+#
+#   cp relay.env.example relay.env     # then edit both
+#   cp caddy.env.example caddy.env
+#   docker compose build
+#   docker compose up -d
+#
+# Only Caddy publishes a port, and only 443. The relay's own listener (8080)
+# exists only on the private compose network; its /metrics listener (9464) is
+# published on the host's 127.0.0.1 and nowhere else.
+name: p2p-relay
+
+services:
+  relay:
+    build:
+      # The Dockerfile builds from the repository root (the relay depends on packages/core).
+      context: ../..
+      dockerfile: packages/relay/Dockerfile
+    image: peer2peer/relay:local
+    restart: unless-stopped
+    env_file: relay.env
+    environment:
+      # Fixed by this layout; everything operator-specific is in relay.env.
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      DB_PATH: /data/relay.db
+      # Caddy is the only way in, and it replaces X-Forwarded-For: one hop.
+      TRUST_PROXY: "1"
+      # Inside the container the metrics listener must bind 0.0.0.0 to be published at all;
+      # the `ports` entry below publishes it on the host's loopback only.
+      METRICS_HOST: "0.0.0.0"
+      METRICS_PORT: "9464"
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:9464:9464"
+    volumes:
+      - relay-data:/data
+    # Hardening: read-only root filesystem, no capabilities, no privilege
+    # escalation, and hard memory / CPU / process limits. The image already
+    # runs as the distroless nonroot user (65532).
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [relay]
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    depends_on:
+      - relay
+    # RELAY_DOMAIN and ACME_EMAIL (caddy.env.example).
+    env_file: caddy.env
+    ports:
+      # 443 only: certificates come from the TLS-ALPN challenge, so port 80 stays closed.
+      - "443:443/tcp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.5
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [relay]
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  relay:

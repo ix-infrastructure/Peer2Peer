@@ -1,0 +1,217 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Publishes the free Peer2Peer packages to npm under @peer2peer:
+#   @peer2peer/core, @peer2peer/relay, @peer2peer/codex-bridge,
+#   @peer2peer/cli, @peer2peer/ext-ix
+# from the tarballs scripts/release-pack.mjs builds, in dependency order, with
+# npm provenance. docs/releasing.md is the runbook.
+#
+# Triggers: ONLY a manual dispatch or a pushed v* tag. Never a branch push or
+# a pull request.
+#   - A dispatch is always a dry run: the build job packs, verifies and runs
+#     `npm publish --dry-run`; the publish job is skipped.
+#   - A v* tag that matches the package version runs the publish job, which
+#     waits for the npm-publish environment's reviewers.
+#
+# Three jobs, so the code that builds never sees a credential:
+#   build    contents: read only, no environment, no token, no OIDC. Installs
+#            with --ignore-scripts, tests, packs, uploads the tarballs. It also
+#            makes the deterministic source tarball the relay install scripts
+#            download (peer2peer-<ver>-src.tar.gz: `git archive` of the tag
+#            with the commit's time as every file's mtime, `gzip -n`) and its
+#            SHA256SUMS, built twice and compared byte for byte.
+#   publish  environment npm-publish + id-token: write. No checkout, no
+#            install, no tests: it downloads the tarballs, checks them against
+#            the manifest and runs `npm publish` in order. NODE_AUTH_TOKEN
+#            exists only in its publish step.
+#   github-release  contents: write only, after publish. No checkout, no
+#            install: it downloads the source tarball, checks SHA256SUMS and
+#            attaches both to the tag's GitHub release. An asset already there
+#            is never replaced; a rerun only checks it matches.
+#
+# GitHub-hosted runners on purpose: npm refuses provenance from self-hosted
+# runners (RUNNER_ENVIRONMENT must be github-hosted) and from private
+# repositories, so the repository must be public before this can publish.
+name: release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+concurrency:
+  group: p2p-release
+  cancel-in-progress: false
+permissions: {}
+jobs:
+  build:
+    name: test, pack, verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.tag.outputs.release }}
+    env:
+      # Real publishes only from a pushed v* tag; everything else (incl. a manual run on a tag) is a dry run.
+      DRY_RUN: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'false' || 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+      - name: tag matches the package version
+        id: tag
+        run: |
+          set -euo pipefail
+          v=$(node -p 'require("./packages/core/package.json").version')
+          if [ "$DRY_RUN" = false ]; then
+            if [ "$GITHUB_REF" != "refs/tags/v$v" ]; then
+              echo "tag $GITHUB_REF does not match package version v$v" >&2
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry run ($GITHUB_REF): nothing will be published"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: test (core, relay, codex-bridge, p2p, ext-ix)
+        run: |
+          set -euo pipefail
+          for p in core relay codex-bridge p2p ext-ix; do (cd "packages/$p" && npm ci --ignore-scripts --no-audit --no-fund); done
+          (cd packages/core && npm run build) && (cd packages/relay && npm run build) && (cd packages/codex-bridge && npm run build)
+          for p in core relay codex-bridge p2p ext-ix; do (cd "packages/$p" && npm test); done
+          node scripts/check-boundaries.mjs
+          scripts/check-bundle.sh
+      - name: build, pack, verify and smoke-test the tarballs
+        run: node scripts/release-pack.mjs --clean-install
+      - name: npm publish --dry-run (no credentials)
+        run: |
+          set -euo pipefail
+          cd .release/tarballs
+          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.tarball)' |
+          while read -r tarball; do npm publish "./$tarball" --access public --dry-run; done
+      - name: source tarball for the relay install scripts (deterministic) and SHA256SUMS
+        run: |
+          set -euo pipefail
+          v=$(node -p 'require("./packages/core/package.json").version')
+          name="peer2peer-$v-src.tar.gz"
+          # Every entry gets the commit's time, and gzip -n drops its own name and time,
+          # so the same commit always gives the same bytes.
+          mtime=$(git log -1 --format=%ct HEAD)
+          mkdir -p .release/source
+          for out in "$name" "$name.again"; do
+            git archive --format=tar --prefix="peer2peer-$v/" --mtime="@$mtime" HEAD | gzip -n -9 > ".release/source/$out"
+          done
+          cmp ".release/source/$name" ".release/source/$name.again"
+          rm ".release/source/$name.again"
+          (cd .release/source && sha256sum "$name" > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: peer2peer-source
+          path: .release/source
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: peer2peer-tarballs
+          path: .release/tarballs
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish to npm
+    needs: build
+    # Only for a v* tag whose version check passed in the build job.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      id-token: write # npm provenance + trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: peer2peer-tarballs
+          path: tarballs
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: check npm and the tarballs
+        working-directory: tarballs
+        run: |
+          set -euo pipefail
+          # npm >= 11.5.1 for trusted publishing.
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error("npm >= 11.5.1 required"); process.exit(1) }' "$(npm --version)"
+          # The tarballs are the ones the build job verified, and the version is the tag's.
+          node -e '
+            const { createHash } = require("node:crypto");
+            const fs = require("node:fs");
+            const m = require("./manifest.json");
+            if (process.env.GITHUB_REF !== "refs/tags/v" + m.version) throw new Error("manifest version " + m.version + " is not the tag " + process.env.GITHUB_REF);
+            for (const p of m.publishOrder) {
+              const got = "sha512-" + createHash("sha512").update(fs.readFileSync(p.tarball)).digest("base64");
+              if (got !== p.integrity) throw new Error(p.tarball + " does not match the manifest");
+            }
+            console.log("tarballs match the manifest");
+          '
+      - name: publish (in dependency order)
+        working-directory: tarballs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./manifest.json").version')
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.name + " " + p.tarball)' |
+          while read -r name tarball; do
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published; skipping"
+              continue
+            fi
+            npm publish "./$tarball" --access public --tag "$tag" --provenance
+          done
+
+  github-release:
+    name: attach the source tarball to the GitHub release
+    needs: [build, publish]
+    # Only after a real publish from a v* tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the tag's release and upload its two assets; nothing else
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: peer2peer-source
+          path: source
+      - name: check and attach peer2peer-<ver>-src.tar.gz and SHA256SUMS
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          v="${TAG#v}"
+          name="peer2peer-$v-src.tar.gz"
+          [ -f "$name" ] || { echo "::error::no $name for tag $TAG"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if gh release download "$TAG" -p SHA256SUMS -O existing.sums 2>/dev/null; then
+              # Never replace an asset someone may already have pinned; only check it.
+              cmp existing.sums SHA256SUMS || { echo "::error::the release already has a different SHA256SUMS"; exit 1; }
+              echo "release $TAG already has these assets"
+              exit 0
+            fi
+            gh release upload "$TAG" "$name" SHA256SUMS
+          else
+            pre=()
+            case "$v" in *-*) pre=(--prerelease) ;; esac
+            gh release create "$TAG" "$name" SHA256SUMS --verify-tag "${pre[@]}" --title "Peer2Peer $TAG" \
+              --notes "npm packages: @peer2peer/*@$v. $name is the source the relay install scripts download; check it against SHA256SUMS."
+          fi

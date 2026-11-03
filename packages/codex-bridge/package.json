@@ -1,0 +1,69 @@
+{
+  "name": "@peer2peer/codex-bridge",
+  "version": "0.1.0",
+  "description": "Peer2Peer for OpenAI Codex: an MCP server, Codex hooks and an installer over the `p2p` CLI",
+  "keywords": [
+    "peer2peer",
+    "p2p",
+    "codex",
+    "openai-codex",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents"
+  ],
+  "homepage": "https://github.com/ix-infrastructure/Peer2Peer/tree/main/packages/codex-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/ix-infrastructure/Peer2Peer/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Ix Infrastructure",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ix-infrastructure/Peer2Peer.git",
+    "directory": "packages/codex-bridge"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true, force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "pretest": "node scripts/pretest.mjs",
+    "test": "vitest run",
+    "prepublishOnly": "node -e \"console.error('Do not publish from this directory: publish the tarballs scripts/release-pack.mjs builds (see docs/releasing.md).');process.exit(1)\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@peer2peer/relay": "file:../relay",
+    "@types/node": "^22.20.5",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^5.0.3"
+  }
+}

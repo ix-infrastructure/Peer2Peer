@@ -1,0 +1,14 @@
+# Code owners: GitHub requests their review on PRs that touch these paths.
+# Enforced only once the main ruleset requires code-owner review.
+# The maintainers are listed in GOVERNANCE.md; keep the two in step.
+
+*                                  @TannerTorrey3 @KageBinary
+
+# Security-sensitive paths (GOVERNANCE.md, "How decisions are made").
+/.github/workflows/                @TannerTorrey3 @KageBinary
+/docs/protocol.md                  @TannerTorrey3 @KageBinary
+/packages/core/**                  @TannerTorrey3 @KageBinary
+/packages/relay/src/**             @TannerTorrey3 @KageBinary
+/mods/claude/peer2peer/hooks/**    @TannerTorrey3 @KageBinary
+/packages/codex-bridge/src/**      @TannerTorrey3 @KageBinary
+/scripts/release-pack.mjs          @TannerTorrey3 @KageBinary

@@ -1,0 +1,9 @@
+{
+  "name": "peer2peer",
+  "version": "0.1.0",
+  "description": "Claude sessions on the account-free Peer2Peer v3 network: friends' and circle-mates' sessions show up in ListAgents, SendMessage reaches them end-to-end encrypted, with working-on status and conflict flags. No login.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Ix Infrastructure"
+  }
+}

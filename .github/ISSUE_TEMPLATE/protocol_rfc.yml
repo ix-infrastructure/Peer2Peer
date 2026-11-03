@@ -1,0 +1,56 @@
+name: Protocol RFC
+description: Propose a change to the Peer2Peer protocol (docs/protocol.md) or a new extension namespace.
+title: "RFC: "
+labels: ["rfc", "protocol"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Protocol changes follow [GOVERNANCE.md → How the protocol evolves](https://github.com/ix-infrastructure/Peer2Peer/blob/main/GOVERNANCE.md#how-the-protocol-evolves): at least 14 days of open comment and sign-off from a security reviewer, then a spec PR before any implementation.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One paragraph.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What can't be done today, and who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Proposed spec text
+      description: The normative change, written as it would appear in docs/protocol.md (sections, fields, MUST/SHOULD, limits).
+    validations:
+      required: true
+  - type: textarea
+    id: compat
+    attributes:
+      label: Compatibility and rollout
+      description: What do older clients and relays do? Is it gated by a capability (status `caps`) or a version bump? Do test vectors change?
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy analysis
+      description: Does it expose new metadata to relays or peers? Does it give a new capability to any attacker (relay, peer, stranger, network observer, malicious repo, prompt-injected model)? How is it bounded, and does it fail closed?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: Extensions only add information or badges, never authorisation (§8)
+          required: true
+        - label: I'm willing to help implement or review the reference implementation

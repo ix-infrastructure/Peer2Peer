@@ -1,0 +1,10 @@
+# Build context is the repository root; send only what the relay image needs.
+*
+!packages/core
+!packages/relay
+**/node_modules
+**/dist
+**/coverage
+**/*.tgz
+**/__tests__
+**/*.test.ts

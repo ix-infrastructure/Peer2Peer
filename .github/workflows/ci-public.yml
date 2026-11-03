@@ -1,0 +1,246 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Public CI: the full gate, on GitHub-hosted runners only (never
+# self-hosted), on Linux and/or macOS with Node 22 and 24.
+#
+# Manual only (workflow_dispatch): a maintainer runs it from the Actions tab
+# (or `gh workflow run ci-public.yml --ref <branch>`), on a pull request's
+# branch before merging. There is no push or pull_request trigger. The DCO
+# check (dco.yml) is the only workflow that runs on pull requests.
+#
+# Per job, in the build order core -> relay -> codex-bridge -> p2p -> ext-ix:
+#   - install every package with `npm ci --ignore-scripts` (no dependency needs
+#     its install scripts), then build them in that order;
+#   - typecheck, lint, test and build each package;
+#   - scripts/check-boundaries.mjs and scripts/check-bundle.sh (the committed
+#     single-file CLI and the mod's redact copy), plus ext-ix's bundle:check;
+#   - the Claude Code mod: `claude plugin validate` and `claude plugin test`
+#     with the public Claude CLI from npm (no account, no API key: neither
+#     command calls a model), and the mod's node-based integration tests;
+#   - the relay deploy recipe's backup tests (deploy/relay/backup.test.mjs and
+#     backup-sh.test.mjs).
+#
+# Safe to dispatch on a fork's code (fetched into a branch by a maintainer):
+#   - never `pull_request_target`; this workflow uses no secrets at all;
+#   - `permissions: contents: read`, and the checkout keeps no credentials;
+#   - every action is pinned by commit SHA;
+#   - this workflow restores the npm cache on every run but saves it only on a
+#     run on main; runs on other branches never save one. The key is the
+#     lockfiles' hash;
+#   - the Claude CLI is a pinned version at least two weeks old, fetched as
+#     its platform package and checked against a sha512 committed below.
+#
+# Windows isn't in the matrix yet: the suites spawn POSIX shells and git
+# fixtures, and nothing here has been run on Windows runners.
+#
+# The internal self-hosted workflow (ci.yml, manual dispatch only) is removed
+# from the public repository at launch.
+#
+# With compat_matrix=true a dispatch also runs the cross-version matrix
+# (scripts/compat/matrix.mjs, docs/compatibility.md): this tree's CLI against
+# the CLI bundles committed at earlier refs, both ways, over a local relay.
+# Part of the release checklist.
+name: ci
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Which runners: all (Linux and macOS), or one of them"
+        type: choice
+        options: [all, ubuntu-latest, macos-latest]
+        default: all
+      compat_matrix:
+        description: "Also run the cross-version matrix (scripts/compat/matrix.mjs)"
+        type: boolean
+        default: false
+      compat_refs:
+        description: "Earlier refs to test against, comma-separated (default: the script's, until release tags exist)"
+        type: string
+        default: ""
+concurrency:
+  group: ci-public-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  gate:
+    name: gate (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'all' && '["ubuntu-latest","macos-latest"]' || format('["{0}"]', inputs.os)) }}
+        node: ["22", "24"]
+    env:
+      # The public Claude CLI for the mod's tests: a pinned version at least two weeks old
+      # (2.1.296, published 2026-10-09). Only its platform package is fetched, and its
+      # sha512 must match the value below (npm's dist.integrity for that tarball).
+      CLAUDE_CLI_VERSION: "2.1.296"
+      CLAUDE_CLI_SHA512_LINUX_X64: "sha512-+m01urgelnI+VJxPaKPEK0wixgq42uZ8PeCaUk5tX/8YoDBvSmC/REVQG2jQfJAr8dxunpjJ600FvLrcj1WWTw=="
+      CLAUDE_CLI_SHA512_LINUX_ARM64: "sha512-Q6Qh6qFmwuBG9rQFiDR6bY3XkFnwTN9AAPrnnDgBvr9sbg1Ql5wrf0lfoCDiV369EUHOzxI4i5OdHW9Vf2/oeA=="
+      CLAUDE_CLI_SHA512_DARWIN_ARM64: "sha512-vqtx3kS3r1hNLMk+N8JMG5J4kcLHIbI3t/NSIdcFQZrRVCFA6NtcxJyn/B+Sf3GxJaFJOCEfoBQXsFo10+Oj9A=="
+      CLAUDE_CLI_SHA512_DARWIN_X64: "sha512-yCJe1vp7juHg3xVyk0Ts8b+mcEylCo6aINg7yC7r1eI8BKfm1DT15htxl1riz3y+B1FV25emIK90d7rH+zFjLA=="
+      DISABLE_AUTOUPDATER: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm cache dir
+        id: npm-cache
+        run: echo "dir=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+      - name: restore the npm cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache.outputs.dir }}
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node${{ matrix.node }}-${{ hashFiles('packages/*/package-lock.json') }}
+
+      - name: install (core, relay, codex-bridge, p2p, ext-ix)
+        run: |
+          set -euo pipefail
+          for p in core relay codex-bridge p2p ext-ix; do
+            (cd "packages/$p" && npm ci --ignore-scripts)
+          done
+      - name: build (core, relay, codex-bridge, p2p, ext-ix)
+        run: |
+          set -euo pipefail
+          for p in core relay codex-bridge p2p ext-ix; do
+            (cd "packages/$p" && npm run build)
+          done
+
+      - name: "core: typecheck, lint, test, build"
+        working-directory: packages/core
+        run: |
+          set -euo pipefail
+          npm run typecheck && npm run lint && npm test && npm run build
+          test -f dist/index.js && test -f dist/index.d.ts
+      - name: "relay: typecheck, lint, test, build"
+        working-directory: packages/relay
+        run: |
+          set -euo pipefail
+          npm run typecheck && npm run lint && npm test && npm run build
+          test -f dist/index.js && test -f dist/bin.js
+      - name: "codex-bridge: typecheck, lint, test, build"
+        working-directory: packages/codex-bridge
+        run: |
+          set -euo pipefail
+          # The real-Codex smoke test runs only with P2P_CODEX_SMOKE=1, never here.
+          npm run typecheck && npm run lint && npm test && npm run build
+          test -f dist/index.js
+      - name: "p2p: typecheck, lint, test, build"
+        working-directory: packages/p2p
+        run: |
+          set -euo pipefail
+          npm run typecheck && npm run lint && npm test && npm run build
+          test -f dist/index.js && test -x dist/bin.js
+      - name: "ext-ix: typecheck, lint, test, build"
+        working-directory: packages/ext-ix
+        run: |
+          set -euo pipefail
+          npm run typecheck && npm run lint && npm test && npm run build
+          test -f dist/index.js
+
+      - name: check-boundaries
+        run: node scripts/check-boundaries.mjs
+      - name: check-bundle (committed CLI bundle, redact copy, defaults.json) and the ext-ix bundle
+        run: |
+          set -euo pipefail
+          scripts/check-bundle.sh
+          (cd packages/ext-ix && npm run bundle:check)
+
+      - name: "mod: fetch the Claude CLI (pinned, sha512-checked, no credentials)"
+        id: claude
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64)   plat=linux-x64;    want="$CLAUDE_CLI_SHA512_LINUX_X64" ;;
+            Linux/ARM64) plat=linux-arm64;  want="$CLAUDE_CLI_SHA512_LINUX_ARM64" ;;
+            macOS/ARM64) plat=darwin-arm64; want="$CLAUDE_CLI_SHA512_DARWIN_ARM64" ;;
+            macOS/X64)   plat=darwin-x64;   want="$CLAUDE_CLI_SHA512_DARWIN_X64" ;;
+            *) echo "::error::no pinned Claude CLI for $RUNNER_OS/$RUNNER_ARCH"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/claude-cli"
+          mkdir -p "$dir"
+          cd "$dir"
+          # npm pack only downloads the tarball: nothing is installed and no script runs. Its own
+          # npm cache keeps the large binary out of the cached ~/.npm.
+          tgz=$(npm pack --silent --cache "$RUNNER_TEMP/claude-npm-cache" "@anthropic-ai/claude-code-$plat@$CLAUDE_CLI_VERSION")
+          got="sha512-$(openssl dgst -sha512 -binary "$tgz" | openssl base64 -A)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::$tgz sha512 is $got, expected $want"
+            exit 1
+          fi
+          tar -xzf "$tgz"
+          bin="$dir/package/claude"
+          test -x "$bin"
+          "$bin" --version
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: "mod: claude plugin validate, claude plugin test"
+        env:
+          CLAUDE: ${{ steps.claude.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "$CLAUDE" plugin validate mods/claude/peer2peer
+          "$CLAUDE" plugin test mods/claude/peer2peer
+      - name: "mod: integration tests (node, real CLI against a local relay)"
+        run: packages/p2p/node_modules/.bin/vitest run --config mods/claude/peer2peer/integration/vitest.config.mjs
+
+      - name: "relay deploy recipe: backup finishes under concurrent writes"
+        run: node --test deploy/relay/backup.test.mjs
+      - name: "relay deploy recipe: backup.sh (guards, budget, POST_BACKUP), with a fake docker"
+        run: node --test deploy/relay/backup-sh.test.mjs
+      - name: "soak harness: its pass/fail checks"
+        run: node --test scripts/soak/checks.test.mjs
+      - name: "relay install scripts: shellcheck, PSScriptAnalyzer, dry runs, checksums"
+        env:
+          # The Linux runner has shellcheck and pwsh; there the linters must run, not skip.
+          P2P_REQUIRE_INSTALLER_TOOLS: ${{ runner.os == 'Linux' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            pwsh -NoProfile -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force"
+          fi
+          node --test scripts/install-relay.test.mjs
+
+      - name: save the npm cache (runs on main only)
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.npm-cache.outputs.dir }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  compat:
+    name: cross-version matrix
+    if: ${{ inputs.compat_matrix }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # The old CLI bundles come from git history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+      - name: install and build (core, relay)
+        run: |
+          set -euo pipefail
+          for p in core relay; do
+            (cd "packages/$p" && npm ci --ignore-scripts && npm run build)
+          done
+      - name: matrix (this tree's committed CLI bundle against earlier refs, both ways)
+        env:
+          P2P_COMPAT_REFS: ${{ inputs.compat_refs }}
+        run: node scripts/compat/matrix.mjs

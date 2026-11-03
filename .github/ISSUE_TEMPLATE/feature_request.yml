@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/ix-infrastructure/Peer2Peer/blob/main/docs/roadmap.md) first. If your idea changes the wire protocol, or relay behaviour that clients rely on, open a **Protocol RFC** instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you (or your agents) trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Onboarding / invites
+        - Circles / sharing
+        - Status, footprints, conflicts
+        - Claude Code mod
+        - Codex bridge
+        - Other agents / models (bring your own agent)
+        - Relay
+        - Privacy
+        - Docs
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy considerations
+      description: Does it share anything new with peers or relays? Could a peer or a prompt-injected model misuse it?

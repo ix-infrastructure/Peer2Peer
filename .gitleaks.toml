@@ -1,0 +1,82 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# gitleaks configuration: the default rules, plus allowlists for the synthetic
+# test fixtures only. Each allowlist needs ALL of: the rule, the exact file,
+# and the exact fake value (or, for the long signed test-vector objects, a
+# 72-character prefix of that exact value). Any other value in these files,
+# for example a real `sk_live_` key or a new generic key, still fails, and so
+# does any finding anywhere else.
+#
+# If you regenerate the test vectors or change a fake token, the scan fails
+# until you update the matching value here. That's on purpose: look at the new
+# value before you allowlist it.
+#
+#   gitleaks git --redact .   # the whole history
+#   gitleaks dir --redact .   # a clean checkout (no node_modules), from its root
+#
+# Generated from the findings of the default rules; regenerate rather than
+# loosening a pattern by hand.
+
+[extend]
+useDefault = true
+
+# Protocol test vectors. Every key is derived from fixed byte fills (v3: fill(32, n);
+# go-vectors: sequential bytes from 0x80 and 0xa0). The "JWTs" are the signed protocol
+# objects (device certs, invites, identity documents) those keys sign.
+[[allowlists]]
+description = "Protocol test vectors: signed objects and derived keys from fixed byte fills"
+condition = "AND"
+targetRules = ["jwt", "generic-api-key"]
+paths = [
+  '''^packages/core/src/__tests__/testdata/go\-vectors\.json$''',
+  '''^packages/core/src/v3/__tests__/testdata/v3\-vectors\.json$''',
+]
+regexes = [
+  '''^3aaa8af7ec1a9d238c7b6a15c32fd5652451c00ab47c10c6f933fb13bc3e76d1$''',
+  '''^c0424947dca9d5b9f380c0c408966e7daa7e559e709fb975f5987716462506ac$''',
+  '''^eyJhbGciOiJFUzI1NiIsImtpZCI6IjhXOW8yOGtZME5QRFZZbEwiLCJ0eXAiOiJwMnAtZGV2''',
+  '''^eyJhbGciOiJFZERTQSIsImtpZCI6IjhXOW8yOGtZME5QRFZZbEwifQ\.eyJpc3MiOiJrYXJ0c''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC13b3Jrc3BhY2UrandzIiwia2lkIjoiOFc5bzI4''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1hY2NlcHQrandzIiwia2lkIjoiZF9FQkVTRXhR''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZpY2UrandzIiwia2lkIjoiOFc5bzI4a1kw''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZpY2UrandzIiwia2lkIjoiQUFBQUFBQUFB''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZpY2UrandzIiwia2lkIjoiaWsifQ\.eyJpc''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZyZWcrandzIiwia2lkIjoiZF9BQUVDQXdR''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZyZWcrandzIiwia2lkIjoiZF9NREV5TXpR''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1pZGVudGl0eStqd3MiLCJraWQiOiJpayJ9\.eyJ''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1pbnZpdGUrandzIiwia2lkIjoiZF9BQUVDQXdR''',
+  '''^eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1yZXZvY2F0aW9ucytqd3MiLCJraWQiOiI4Vzlv''',
+  '''^eyJhbGciOiJub25lIiwia2lkIjoiOFc5bzI4a1kwTlBEVllsTCIsInR5cCI6InAycC1kZXZp''',
+]
+
+# Redaction tests: fake tokens (abcdef0123-style, and a sample HS256 JWT) that the
+# redactor must mask.
+[[allowlists]]
+description = "Redaction tests: fake tokens the redactor must mask"
+condition = "AND"
+targetRules = ["gitlab-pat", "jwt", "stripe-access-token"]
+paths = [
+  '''^packages/core/src/v3/__tests__/redact\.test\.ts$''',
+  '''^mods/claude/peer2peer/tests/agents\.test\.ts$''',
+]
+regexes = [
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0In0\.c2lnbmF0dXJl$''',
+  '''^glpat\-abcdefghij0123456789$''',
+  '''^rk_live_abcdefghij0123$''',
+  '''^rk_test_abcdefghij0123$''',
+  '''^sk_live_abcdefghij0123$''',
+]
+
+# WebSocket handshake nonces (Sec-WebSocket-Key) in relay tests: a public, per-request
+# value, not a credential.
+[[allowlists]]
+description = "WebSocket handshake nonces in relay tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^packages/relay/src/__tests__/round3\.test\.ts$''',
+  '''^packages/relay/resilience/fuzz/http\-targets\.fuzz\.test\.ts$''',
+]
+regexes = [
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',
+]

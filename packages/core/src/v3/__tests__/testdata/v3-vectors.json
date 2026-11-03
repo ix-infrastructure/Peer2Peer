@@ -1,0 +1,70 @@
+{
+  "note": "Peer2Peer v3 test vectors (docs/protocol.md). All seeds are fixed byte fills; hex unless noted.",
+  "identity": {
+    "ikSeedHex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "ikPub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+    "userId": "p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a",
+    "displayFingerprint": "gr2q-7gf5-lh6p-zfdn",
+    "backupPhrase": "absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic avoid letter advice comic"
+  },
+  "device": {
+    "spkSeedHex": "0202020202020202020202020202020202020202020202020202020202020202",
+    "kpkSecretHex": "0303030303030303030303030303030303030303030303030303030303030303",
+    "spk": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+    "kpk": "Xf7dO2vUf2-ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI",
+    "did": "d_ni4ahvpqlgicuhdnv66jxjdssi",
+    "cert": "eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1kZXZpY2UrandzIiwia2lkIjoiaWsifQ.eyJpc3MiOiJwMnA6Z3IycTdnZjVsaDZwemZkbnVybmt2cHV0aHBxdmpqZnZiZmhieXN2N2lrZGdrYnB0emY3YSIsImlrIjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsImRpZCI6ImRfbmk0YWh2cHFsZ2ljdWhkbnY2Nmp4amRzc2kiLCJzcGsiOiJnVGwzRHFoOUYxOVdvMVJtdzB4LXpNdU5pcEcwN2plaVhmWVBXNF9KczVRIiwia3BrIjoiWGY3ZE8ydlVmMi1panVGZGxwMWJzT3BUZDAxSWk5cjUzeHh1QVNTejd5SSIsImxhYmVsIjoibGFwdG9wIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDc3NzYwMDB9.6aQ881UbbmdAHlbw25u5ufwxvPKH7jkeWqfkYn-P0-g9wc1E4iVII2pGAtm4Utg4CddsFumzeQDWjSvSJXiZCA"
+  },
+  "identityDoc": {
+    "relayInput": "wss://Relay.Example:443/v3/",
+    "relayCanonical": "wss://relay.example/v3",
+    "jws": "eyJhbGciOiJFZERTQSIsInR5cCI6InAycC1pZGVudGl0eStqd3MiLCJraWQiOiJpayJ9.eyJpc3MiOiJwMnA6Z3IycTdnZjVsaDZwemZkbnVybmt2cHV0aHBxdmpqZnZiZmhieXN2N2lrZGdrYnB0emY3YSIsImlrIjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInZlciI6MSwicHJldiI6bnVsbCwibmFtZSI6InRhbm5lciIsInJlbGF5cyI6WyJ3c3M6Ly9yZWxheS5leGFtcGxlL3YzIl0sImRldmljZXMiOlsiZF9uaTRhaHZwcWxnaWN1aGRudjY2anhqZHNzaSJdLCJrZXlob2xkZXJzIjpbImRfbmk0YWh2cHFsZ2ljdWhkbnY2Nmp4amRzc2kiXSwiY2VydHMiOlsiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkluQXljQzFrWlhacFkyVXJhbmR6SWl3aWEybGtJam9pYVdzaWZRLmV5SnBjM01pT2lKd01uQTZaM0l5Y1RkblpqVnNhRFp3ZW1aa2JuVnlibXQyY0hWMGFIQnhkbXBxWm5aaVptaGllWE4yTjJsclpHZHJZbkIwZW1ZM1lTSXNJbWxySWpvaWFXOXFhak5ZVVVvNFdsZzVWWFJ6ZEZCTWNHUmpjM0J1UTJJNFpHeENTV0k0TTFOSlFXSlJVR0l4ZHlJc0ltUnBaQ0k2SW1SZmJtazBZV2gyY0hGc1oybGpkV2hrYm5ZMk5tcDRhbVJ6YzJraUxDSnpjR3NpT2lKblZHd3pSSEZvT1VZeE9WZHZNVkp0ZHpCNExYcE5kVTVwY0Vjd04ycGxhVmhtV1ZCWE5GOUtjelZSSWl3aWEzQnJJam9pV0dZM1pFOHlkbFZtTWkxcGFuVkdaR3h3TVdKelQzQlVaREF4U1drNWNqVXplSGgxUVZOVGVqZDVTU0lzSW14aFltVnNJam9pYkdGd2RHOXdJaXdpYVdGMElqb3hPREF3TURBd01EQXdMQ0psZUhBaU9qRTRNRGMzTnpZd01EQjkuNmFRODgxVWJibWRBSGxidzI1dTV1Znd4dlBLSDdqa2VXcWZrWW4tUDAtZzl3YzFFNGlWSUkycEdBdG00VXRnNENkZHNGdW16ZVFEV2pTdlNKWGlaQ0EiXSwiYnkiOiJkX25pNGFodnBxbGdpY3VoZG52NjZqeGpkc3NpIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDI1OTIwMDB9.9G2AP7sf0eVm88amgP0Nz81QVbC9aJJlRCNtj5UNETWLR2Ij1zG7wRzlswhf8_KCkc726q8TZZXnAV_xd1mAAg",
+    "jwsHash": "3tOMzFQi-NjB0voLIXEh1c6LKDc6oNvBy9TK3yEN5Ko"
+  },
+  "circle": {
+    "founder": "p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a",
+    "nonce": "DAwMDAwMDAwMDAwMDAwMDA",
+    "cid": "c_u6zob2j7ozkkcwrfaysiukrtxk"
+  },
+  "envelope": {
+    "header": {
+      "from": "p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a",
+      "fdid": "d_ni4ahvpqlgicuhdnv66jxjdssi",
+      "to": "p2p:3pbjqji4kezbw4tg46gryfi4fnrk76glswzjgclngrrqdbke7lha",
+      "tdid": "d_kbxpdb45osgoa4j3bxib3izk2k",
+      "own": "p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a",
+      "sid": "s1",
+      "seq": 7,
+      "ts": 1800000000000,
+      "kind": "msg"
+    },
+    "aad": "p2p/v3|p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a|d_ni4ahvpqlgicuhdnv66jxjdssi|p2p:3pbjqji4kezbw4tg46gryfi4fnrk76glswzjgclngrrqdbke7lha|d_kbxpdb45osgoa4j3bxib3izk2k|p2p:gr2q7gf5lh6pzfdnurnkvputhpqvjjfvbfhbysv7ikdgkbptzf7a|s1|7|1800000000000|msg",
+    "kdfInfo": "p2p/v3/msg|d_ni4ahvpqlgicuhdnv66jxjdssi|d_kbxpdb45osgoa4j3bxib3izk2k",
+    "ephSecretHex": "0505050505050505050505050505050505050505050505050505050505050505",
+    "nonceHex": "060606060606060606060606060606060606060606060606",
+    "recipientKpk": "c7LYt2qptTZgAyvI9di-46OuTjs6f9Sa3oH3NHo0qmg",
+    "keyHex": "c0424947dca9d5b9f380c0c408966e7daa7e559e709fb975f5987716462506ac",
+    "plaintext": "{\"text\":\"hello\"}",
+    "ct": "c-obPPAVjA38QnVeN0AYC7v-lkjcKDwINMM8I_NeUBs"
+  },
+  "relayAuth": {
+    "message": "p2p/v3/relay-auth|wss://relay.example/v3|bm9uY2U",
+    "sig": "z9brvspl-lRZjs1KVGOTSeCJ7-78YYrZvhK7LQ94Eop2ErVLOUpkax2u6NOzd4Iq71M_fx2304ntS0-cP_KABA"
+  },
+  "link": {
+    "secretHex": "04040404040404040404040404040404",
+    "code": "p2p-link:aqcaibaeaqcaibaeaqcaibaeaq@relay.example/v3",
+    "lid": "iocubobdpdndaqtjb67li2orhy",
+    "macKeyHex": "3aaa8af7ec1a9d238c7b6a15c32fd5652451c00ab47c10c6f933fb13bc3e76d1",
+    "xPub": "MdSras7slhE3kXA3k25gcW-sVzr-lNnahKgCBEjfwRI",
+    "request": {
+      "did": "d_ni4ahvpqlgicuhdnv66jxjdssi",
+      "spk": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+      "kpk": "Xf7dO2vUf2-ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI",
+      "x": "MdSras7slhE3kXA3k25gcW-sVzr-lNnahKgCBEjfwRI",
+      "label": "laptop",
+      "mac": "GmlIVGQFSbJytzt40RZrapI6A90mYI2EhNGnVcwEoNQ"
+    },
+    "compareCode": "iwsdbllz"
+  }
+}

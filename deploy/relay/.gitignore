@@ -1,0 +1,5 @@
+# Local operator files: never committed.
+relay.env
+caddy.env
+backups/
+.backup.lock

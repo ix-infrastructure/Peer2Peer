@@ -1,0 +1,36 @@
+name: Relay operator
+description: For people running a relay for their group - operational issues, tuning limits, or deployment.
+labels: ["relay", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The operator guide is [docs/run-a-relay.md](https://github.com/ix-infrastructure/Peer2Peer/blob/main/docs/run-a-relay.md). Never post your `METRICS_TOKEN`, database files, or logs with unhashed IPs. Report security issues in the relay through SECURITY.md.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this about?
+      options:
+        - Operational problem (crash, memory, disk, performance)
+        - Limits / abuse / spam tuning
+        - Deployment (TLS, proxy, Docker, systemd)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: relay
+    attributes:
+      label: Relay URL
+      description: The canonical `RELAY_URL`, for example wss://relay.example.org/v3
+  - type: textarea
+    id: info
+    attributes:
+      label: "`/.well-known/p2p-relay.json`"
+      render: json
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Your setup (Node version, proxy chain and TRUST_PROXY, Docker or not), what you saw, and any relevant `/metrics` counters or log lines.
+    validations:
+      required: true

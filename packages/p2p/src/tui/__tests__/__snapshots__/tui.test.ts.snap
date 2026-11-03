@@ -1,0 +1,405 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`frames > modals: help, confirm and a message's full text 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+● tanner@k7qm-3xpd-9twa-hf2n  you                                               
+  ● [a1b2c3] relay busy  Peer2Peer@feat/tui  20s ago  (this device)             
+  ┌─ Keys ───────────────────────────────────────────────────────────────────┐  
+  │ 1 People 2 Held 3 Messages 4 Send 5 Health (Tab cycles)                  │  
+  │ ↑/↓ or j/k move, PgUp/PgDn, g/G first/last                               │  
+  │ People: m or Enter message a person or session; d doctor for them        │  
+  │ Held: a accept (invites, joins) or deliver (held messages); x decline; t │  
+  │ always deliver from the sender (asks first)                              │  
+  │ Messages: Enter opens one; r replies (this window sends no read          │  
+  │ receipts)                                                                │  
+  │ Send: pick, write, Enter sends; Esc cancels                              │  
+  │ Health: r runs the doctor again                                          │  
+  │ q or Ctrl-C quits. Nothing is accepted, sent or trusted except on your   │  
+  │ key press.                                                               │  
+  │ Esc closes                                                               │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ move · m message · d doctor · 1-5 screens · ? help · q quit                 "
+`;
+
+exports[`frames > modals: help, confirm and a message's full text 2`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+item invite        carolcopied@qq11-ww22-ee33-rr44  5m ago                      
+     friend invite (first contact)                                              
+  ┌─ Always deliver ─────────────────────────────────────────────────────────┐  
+  │ Always deliver messages from dave@pq23-oo34-ii45-uu56?                   │  
+  │ Check the fingerprint with them, out of band: pq23-oo34-ii45-uu56        │  
+  │ Their messages then reach sessions that approve their own tool calls     │  
+  │ without the hold.                                                        │  
+  │ Trust only skips the hold: their messages are still their words, never   │  
+  │ your instructions.                                                       │  
+  │                                                                          │  
+  │ To trust them, type the fingerprint's first four characters (pq23) and   │  
+  │ press Enter. Esc cancels.                                                │  
+  │                                                                          │  
+  │ > ▏                                                                      │  
+  │ Enter confirm Esc cancel                                                 │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+ Messages the Claude Code mod holds stay in Claude Code; the CLI can't see      
+ them, so they aren't listed here.                                              
+                                                                                
+ ↑↓ move · a accept/deliver · x decline · t always deliver · ? help · q quit    "
+`;
+
+exports[`frames > screen 1 at 80x24 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+● tanner@k7qm-3xpd-9twa-hf2n  you                                               
+  ● [a1b2c3] relay busy  Peer2Peer@feat/tui  20s ago  (this device)             
+      Writing the terminal UI                                                   
+      files: packages/p2p/src/tui/view.ts                                       
+● alice@ab12-cd34-ef56-gh78  friend · circle team                               
+  ○ [d4e5f6] web evilRED idle  site@main  1m ago                                
+      Reviewing click me safetxt.exe                                            
+      files: src/app.tsx, src/admin.ts, README.md                               
+      ↳ a1 Explore "find the bug name" (running)                                
+        ↳ a2 general-purpose "write a test" (done, fix/bug)                     
+○ bobxy@zz99-yy88-xx77-ww66  circle team                                        
+  · [0a0b0c] line1 line2 line3 tab offline  2h ago                              
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ move · m message · d doctor · 1-5 screens · ? help · q quit                 "
+`;
+
+exports[`frames > screen 1 at 120x40 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                   tanner@k7qm-3xpd-9twa-hf2n  1/2 relays 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+● tanner@k7qm-3xpd-9twa-hf2n  you                                                                                       
+  ● [a1b2c3] relay busy  Peer2Peer@feat/tui  20s ago  (this device)                                                     
+      Writing the terminal UI                                                                                           
+      files: packages/p2p/src/tui/view.ts                                                                               
+● alice@ab12-cd34-ef56-gh78  friend · circle team                                                                       
+  ○ [d4e5f6] web evilRED idle  site@main  1m ago                                                                        
+      Reviewing click me safetxt.exe                                                                                    
+      files: src/app.tsx, src/admin.ts, README.md                                                                       
+      ↳ a1 Explore "find the bug name" (running)                                                                        
+        ↳ a2 general-purpose "write a test" (done, fix/bug)                                                             
+○ bobxy@zz99-yy88-xx77-ww66  circle team                                                                                
+  · [0a0b0c] line1 line2 line3 tab offline  2h ago                                                                      
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ move · m message · d doctor · 1-5 screens · ? help · q quit                                                         "
+`;
+
+exports[`frames > screen 2 at 80x24 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+item invite        carolcopied@qq11-ww22-ee33-rr44  5m ago                      
+     friend invite (first contact)                                              
+msg  message (msg) dave@pq23-oo34-ii45-uu56  to codex@k7qm  2m ago              
+     this session approves its own tool calls ok                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Messages the Claude Code mod holds stay in Claude Code; the CLI can't see      
+ them, so they aren't listed here.                                              
+                                                                                
+ ↑↓ move · a accept/deliver · x decline · t always deliver · ? help · q quit    "
+`;
+
+exports[`frames > screen 2 at 120x40 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                   tanner@k7qm-3xpd-9twa-hf2n  1/2 relays 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+item invite        carolcopied@qq11-ww22-ee33-rr44  5m ago                                                              
+     friend invite (first contact)                                                                                      
+msg  message (msg) dave@pq23-oo34-ii45-uu56  to codex@k7qm  2m ago                                                      
+     this session approves its own tool calls ok                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Messages the Claude Code mod holds stay in Claude Code; the CLI can't see them, so they aren't listed here.            
+                                                                                                                        
+ ↑↓ move · a accept/deliver · x decline · t always deliver · ? help · q quit                                            "
+`;
+
+exports[`frames > screen 3 at 80x24 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+→ 14:59 to bobxy@zz99-yy88-xx77-ww66 [0a0b0c]  waiting at relays (offline, last…
+        ping Ź̂ok x                                                              
+→ 14:58 to alice@ab12-cd34-ef56-gh78 [d4e5f6]  shown                            
+        On it.                                                                  
+← 14:57 alice@ab12-cd34-ef56-gh78 [d4e5f6]                                      
+        Can you look at the relay? dingdong wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww…
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ move · Enter open · r reply · 1-5 screens · ? help · q quit                 "
+`;
+
+exports[`frames > screen 3 at 120x40 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                   tanner@k7qm-3xpd-9twa-hf2n  1/2 relays 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+→ 14:59 to bobxy@zz99-yy88-xx77-ww66 [0a0b0c]  waiting at relays (offline, last seen 2h ago)                            
+        ping Ź̂ok x                                                                                                      
+→ 14:58 to alice@ab12-cd34-ef56-gh78 [d4e5f6]  shown                                                                    
+        On it.                                                                                                          
+← 14:57 alice@ab12-cd34-ef56-gh78 [d4e5f6]                                                                              
+        Can you look at the relay? dingdong wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww…
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ move · Enter open · r reply · 1-5 screens · ? help · q quit                                                         "
+`;
+
+exports[`frames > screen 4 at 80x24 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+Pick who to message (Enter):                                                    
+  tanner@k7qm-3xpd-9twa-hf2n [a1b2c3] relay                                     
+  alice@ab12-cd34-ef56-gh78 [d4e5f6] web evilRED                                
+  bobxy@zz99-yy88-xx77-ww66 [0a0b0c] line1 line2 line3 tab (offline)            
+  alice@ab12-cd34-ef56-gh78 (any session)                                       
+  bobxy@zz99-yy88-xx77-ww66 (any session)                                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ pick · Enter write · then Enter send, Esc cancel, Ctrl-U clear · q quit     "
+`;
+
+exports[`frames > screen 4 at 120x40 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                   tanner@k7qm-3xpd-9twa-hf2n  1/2 relays 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Pick who to message (Enter):                                                                                            
+  tanner@k7qm-3xpd-9twa-hf2n [a1b2c3] relay                                                                             
+  alice@ab12-cd34-ef56-gh78 [d4e5f6] web evilRED                                                                        
+  bobxy@zz99-yy88-xx77-ww66 [0a0b0c] line1 line2 line3 tab (offline)                                                    
+  alice@ab12-cd34-ef56-gh78 (any session)                                                                               
+  bobxy@zz99-yy88-xx77-ww66 (any session)                                                                               
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ↑↓ pick · Enter write · then Enter send, Esc cancel, Ctrl-U clear · q quit                                             "
+`;
+
+exports[`frames > screen 5 at 80x24 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                  
+────────────────────────────────────────────────────────────────────────────────
+Relays                                                                          
+  ● wss://relay.team.example/v3  connected  members-only  @peer2peer/relay 0.1.0
+  ○ wss://backup.example/v3  down: can't reach it evilRED                       
+                                                                                
+Doctor: this device  2 ✓ 1 ✗ 1 ?  (30s ago)                                     
+  ✓ identity: tanner@k7qm-3xpd-9twa-hf2n, document expires in 21 days           
+  ✓ clock: within 2 s of the relays                                             
+  ✗ relays: 1 of 2 relays unreachable                                           
+      fix: check wss://backup.example/v3 or remove it with \`p2p relays remove\`  
+  ? sharing: no live session to check                                           
+      to tell: start a session                                                  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ r run doctor · d on People: one person · 1-5 screens · ? help · q quit         "
+`;
+
+exports[`frames > screen 5 at 120x40 1`] = `
+" Peer2Peer  1 People  2 Held (2)  3 Messages  4 Send  5 Health                   tanner@k7qm-3xpd-9twa-hf2n  1/2 relays 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Relays                                                                                                                  
+  ● wss://relay.team.example/v3  connected  members-only  @peer2peer/relay 0.1.0                                        
+  ○ wss://backup.example/v3  down: can't reach it evilRED                                                               
+                                                                                                                        
+Doctor: this device  2 ✓ 1 ✗ 1 ?  (30s ago)                                                                             
+  ✓ identity: tanner@k7qm-3xpd-9twa-hf2n, document expires in 21 days                                                   
+  ✓ clock: within 2 s of the relays                                                                                     
+  ✗ relays: 1 of 2 relays unreachable                                                                                   
+      fix: check wss://backup.example/v3 or remove it with \`p2p relays remove\`                                          
+  ? sharing: no live session to check                                                                                   
+      to tell: start a session                                                                                          
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ r run doctor · d on People: one person · 1-5 screens · ? help · q quit                                                 "
+`;

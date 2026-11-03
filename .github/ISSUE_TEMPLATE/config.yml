@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability (report privately)
+    url: https://github.com/ix-infrastructure/Peer2Peer/security/advisories/new
+    about: Never file security issues in public. Report privately here, or email contact@ix-infra.com. See SECURITY.md.
+  - name: Questions, ideas, show and tell
+    url: https://discord.gg/ncEYVHVqZ8
+    about: Chat with the community on the Ix Discord (shared with the Ix project).
+  - name: Questions and help
+    url: https://github.com/ix-infrastructure/Peer2Peer/blob/main/SUPPORT.md
+    about: Try `p2p doctor` first, then see SUPPORT.md for where to ask.

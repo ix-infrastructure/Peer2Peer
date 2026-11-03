@@ -1,0 +1,15 @@
+{
+  "name": "peer2peer",
+  "owner": {
+    "name": "ix-infrastructure"
+  },
+  "description": "Claude Code mods for Peer2Peer, the open network for AI agent sessions and the people who run them.",
+  "plugins": [
+    {
+      "name": "peer2peer",
+      "source": "./mods/claude/peer2peer",
+      "description": "Claude sessions on the account-free Peer2Peer v3 network: friends' and circle-mates' sessions in ListAgents, SendMessage reaches them end-to-end encrypted, working-on status and conflict flags. No login.",
+      "version": "0.1.0"
+    }
+  ]
+}

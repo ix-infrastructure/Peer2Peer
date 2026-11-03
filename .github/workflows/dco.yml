@@ -1,0 +1,78 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Developer Certificate of Origin check (CONTRIBUTING.md, "Developer
+# Certificate of Origin"): every non-merge commit in a pull request must carry
+# a `Signed-off-by: Name <email>` trailer that matches the commit's author.
+#
+# Safe for fork PRs by construction:
+#   - GitHub-hosted runner only (never self-hosted);
+#   - `pull_request` (not `pull_request_target`), read-only token (contents
+#     and pull-requests read);
+#   - no checkout, no install, no third-party action: it reads the PR's commit
+#     metadata from the API and checks it in an inline script. Commit messages
+#     and names are untrusted data: they are parsed as JSON by Node and never
+#     interpolated into a shell command.
+name: dco
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+concurrency:
+  group: dco-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: fetch the PR's commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR/commits?per_page=100" --jq '.[]' > "$RUNNER_TEMP/commits.jsonl"
+      - name: every commit is signed off by its author
+        env:
+          COMMITS: ${{ runner.temp }}/commits.jsonl
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from "node:fs";
+          const lines = readFileSync(process.env.COMMITS, "utf8").split("\n").filter(Boolean);
+          const commits = lines.map((l) => JSON.parse(l));
+          // The pull request commits API lists at most 250 commits.
+          if (commits.length >= 250) {
+            console.log("::error::this PR has 250 or more commits, more than the API lists; split it or squash it");
+            process.exit(1);
+          }
+          const clean = (s) => String(s ?? "").replace(/[\u0000-\u001f\u007f]/g, "?");
+          const SIGNOFF = /^Signed-off-by:[ \t]*(.*?)[ \t]*<([^<>\s]+)>[ \t]*$/gim;
+          let bad = 0;
+          for (const c of commits) {
+            const sha = String(c.sha).slice(0, 12);
+            if ((c.parents ?? []).length > 1) {
+              console.log(`skip  ${sha}  merge commit`);
+              continue;
+            }
+            const name = String(c.commit?.author?.name ?? "").trim();
+            const email = String(c.commit?.author?.email ?? "").trim().toLowerCase();
+            const offs = [...String(c.commit?.message ?? "").matchAll(SIGNOFF)].map((m) => ({ name: m[1].trim(), email: m[2].trim().toLowerCase() }));
+            const ok = name !== "" && email !== "" && offs.some((o) => o.name === name && o.email === email);
+            if (ok) {
+              console.log(`ok    ${sha}  ${clean(name)} <${clean(email)}>`);
+            } else {
+              bad++;
+              const found = offs.length ? offs.map((o) => `${clean(o.name)} <${clean(o.email)}>`).join(", ") : "none";
+              console.log(`::error::${sha}: no Signed-off-by matching the author ${clean(name)} <${clean(email)}> (found: ${found})`);
+            }
+          }
+          if (bad) {
+            console.log(`\n${bad} commit(s) are not signed off by their author. Sign off with \`git commit -s\`; to fix a branch: git rebase --signoff <base> && git push --force-with-lease, where <base> is your PR's base branch (e.g. upstream/main if you work from a fork). See CONTRIBUTING.md, "Developer Certificate of Origin".`);
+            process.exit(1);
+          }
+          console.log(`\nall ${commits.length} commit(s) checked`);
+          EOF

@@ -1,0 +1,82 @@
+{
+  "name": "@peer2peer/relay",
+  "version": "0.1.0",
+  "description": "Peer2Peer v3 open relay: dumb store-and-forward for end-to-end encrypted envelopes, identity documents and device-link mailboxes",
+  "keywords": [
+    "peer2peer",
+    "p2p",
+    "relay",
+    "store-and-forward",
+    "websocket",
+    "e2ee",
+    "self-hosted",
+    "ai-agents"
+  ],
+  "homepage": "https://github.com/ix-infrastructure/Peer2Peer/tree/main/packages/relay#readme",
+  "bugs": {
+    "url": "https://github.com/ix-infrastructure/Peer2Peer/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Ix Infrastructure",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ix-infrastructure/Peer2Peer.git",
+    "directory": "packages/relay"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "p2p-relay": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true, force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p resilience",
+    "lint": "eslint src resilience",
+    "test": "vitest run",
+    "test:resilience": "vitest run --config resilience/vitest.config.ts",
+    "test:fuzz": "vitest run --config resilience/vitest.fuzz.config.ts",
+    "start": "node dist/bin.js",
+    "prepublishOnly": "node -e \"console.error('Do not publish from this directory: publish the tarballs scripts/release-pack.mjs builds (see docs/releasing.md).');process.exit(1)\"",
+    "install-scripts:checksums": "node ../../scripts/install-relay-checksums.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@peer2peer/core": "file:../core",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "@types/ws": "8.18.1",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "fast-check": "4.10.2",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in p2p, the relay, the Claude Code mod or the Codex bridge doesn't work as documented.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Is it a security problem?** Stop and report it privately instead (see SECURITY.md).
+        **Remove secrets** before posting: backup phrases, invite or link codes (`relay/XXXX-…`, `p2p-link:…`), and anything from your P2P home folder. Addresses and relay URLs are fine.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - p2p CLI (@peer2peer/cli)
+        - Claude Code mod (peer2peer plugin)
+        - Codex bridge (p2p codex …)
+        - Relay (@peer2peer/relay)
+        - Core library (@peer2peer/core)
+        - Ix extension (@peer2peer/ext-ix)
+        - Docs
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: If you can, reproduce it against a local relay (`source docs/demo/demo-env.sh` gives you two users, `ann` and `ben`).
+      placeholder: |
+        1. ann invite ben
+        2. ben join <code>
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`p2p doctor [user] --json` output"
+      description: If it's about seeing someone, include it from both sides. For a hang, add the stderr of the command run with `P2P_DEBUG=1`.
+      render: json
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`p2p --version`, Node (`node --version`), your OS, and your Claude Code or Codex version if relevant"
+    validations:
+      required: true
+  - type: input
+    id: relay
+    attributes:
+      label: Relay
+      description: Which relay or relays, and is it self-hosted? Include the software version from `/.well-known/p2p-relay.json` if you know it.

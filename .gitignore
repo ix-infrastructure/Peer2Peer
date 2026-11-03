@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+relay.db
+relay.db-*
+
+# The ext-ix copy the Claude mod ships (packages/ext-ix/scripts/bundle.mjs): committed on purpose.
+!mods/claude/peer2peer/ext/node_modules/
+
+# Test homes the Codex bridge tests keep outside temp folders (packages/codex-bridge/src/__tests__/net.ts).
+.test-homes/
+
+# scripts/release-pack.mjs staging output (tarballs to publish).
+.release/
+
+# Local Claude Code state (agent worktrees, local settings). Never committed.
+/.claude/
+
+# packages/p2p/bench/latency.mjs: the mod backend it bundles for one run (removed after loading).
+packages/p2p/bench/.mod-backend.mjs

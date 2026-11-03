@@ -1,0 +1,79 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# Fly.io variant of the open relay recipe (docs/future/public-relay.md, "Fly.io").
+# Fly terminates TLS (automatic certificates) and proxies to the relay.
+# Deploy from the REPOSITORY ROOT, so the Dockerfile sees packages/core:
+#
+#   fly apps create peer2peer-relay
+#   fly volumes create relay_data --size 10 --region <region> --config deploy/relay/fly.toml
+#   fly deploy . --config deploy/relay/fly.toml --dockerfile packages/relay/Dockerfile --ha=false
+#   fly ips allocate-v4 --config deploy/relay/fly.toml   # dedicated IPv4 (optional; shared v4 works for TLS)
+#   fly certs add relay.example.org --config deploy/relay/fly.toml
+#
+# One machine only: the relay is one process and one SQLite file.
+
+app = "peer2peer-relay"   # your Fly app name
+primary_region = "iad"    # your region
+
+[env]
+  # Your relay's domain.
+  RELAY_URL = "wss://relay.example.org/v3"
+  RELAY_NAME = "Example relay"
+  # The abuse / operator contact: an address that a person reads.
+  OPERATOR_CONTACT = "mailto:abuse@example.org"
+  RELAY_POLICY = "Open relay. Carries end-to-end encrypted envelopes only; logs are counters, no contents, ids hashed. Envelopes are deleted on ack or after 7 days. Abuse: see operator contact."
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  DB_PATH = "/data/relay.db"
+  LOG_LEVEL = "info"
+  POW_BITS = "16"
+  # Fly's proxy appends the client address to X-Forwarded-For: one hop.
+  TRUST_PROXY = "1"
+  # Reachable on Fly's private network only (no [[services]] entry exposes it);
+  # Fly's managed Prometheus scrapes it through [metrics] below. On the first deploy,
+  # confirm the scrape works (Fly's metrics UI). Never add a service for 9464, and never
+  # bind metrics to "::".
+  METRICS_HOST = "0.0.0.0"
+  METRICS_PORT = "9464"
+  LIMIT_STORE_MAX_BYTES = "4294967296"
+  LIMIT_STORE_HARD_MAX_BYTES = "5368709120"
+  LIMIT_MAX_CONNECTIONS = "5000"
+  LIMIT_MAX_UNAUTH_CONNECTIONS = "1000"
+
+[[mounts]]
+  source = "relay_data"
+  destination = "/data"
+  # Daily volume snapshots, kept 14 days (in addition to the off-machine backups).
+  snapshot_retention = 14
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  # Never stop or scale this machine automatically: clients hold WebSockets open.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 4000
+    hard_limit = 5000
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "get"
+    path = "/healthz"
+
+[metrics]
+  port = 9464
+  path = "/metrics"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

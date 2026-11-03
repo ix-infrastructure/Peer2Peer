@@ -1,0 +1,86 @@
+{
+  "name": "@peer2peer/ext-ix",
+  "version": "0.1.0",
+  "description": "The Ix extension for Peer2Peer v3: share Ix session notes, subgraph references and blast-radius reports between agent sessions (x:ix.note, x:ix.subgraph, x:ix.impact), and flag semantic conflicts. Needs only a local Ix install.",
+  "keywords": [
+    "peer2peer",
+    "p2p",
+    "p2p-extension",
+    "ix",
+    "code-graph",
+    "blast-radius",
+    "ai-agents"
+  ],
+  "homepage": "https://github.com/ix-infrastructure/Peer2Peer/tree/main/packages/ext-ix#readme",
+  "bugs": {
+    "url": "https://github.com/ix-infrastructure/Peer2Peer/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Ix Infrastructure",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ix-infrastructure/Peer2Peer.git",
+    "directory": "packages/ext-ix"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/*.test.*",
+    "!dist/**/*.map",
+    "SPEC.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true, force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "pretest": "npm --prefix ../core run build && npm --prefix ../relay run build && npm --prefix ../p2p run build && npm run build",
+    "test": "vitest run",
+    "prepublishOnly": "node -e \"console.error('Do not publish from this directory: publish the tarballs scripts/release-pack.mjs builds (see docs/releasing.md).');process.exit(1)\"",
+    "bundle": "node scripts/bundle.mjs",
+    "bundle:check": "node scripts/bundle.mjs --check"
+  },
+  "dependencies": {
+    "@peer2peer/core": "file:../core"
+  },
+  "peerDependencies": {
+    "@peer2peer/cli": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@peer2peer/cli": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@peer2peer/cli": "file:../p2p",
+    "@peer2peer/relay": "file:../relay",
+    "@types/node": "^22.20.5",
+    "esbuild": "0.28.2",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^5.0.3"
+  }
+}

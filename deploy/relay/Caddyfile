@@ -1,0 +1,42 @@
+# Copyright 2026 Ix Infrastructure Inc.
+#
+# TLS front for the public Peer2Peer relay (compose.yaml). Caddy gets and
+# renews the certificate itself. Only 443 is open, so the HTTP-01 challenge is
+# off and the TLS-ALPN-01 challenge (over 443) is used.
+{
+	email {$ACME_EMAIL}
+	# Port 80 is closed: no HTTP->HTTPS redirect listener.
+	auto_https disable_redirects
+	# Access logs stay off (the default): Caddy would log client IPs and paths.
+	servers {
+		# HTTP/1.1 (WebSocket upgrades) and HTTP/2 over TCP 443 only: no HTTP/3,
+		# which would need UDP 443 open.
+		protocols h1 h2
+		# Clients' X-Forwarded-For is never trusted: Caddy replaces it with the
+		# address it saw, so the relay's TRUST_PROXY=1 is exact.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+	}
+}
+
+{$RELAY_DOMAIN} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	# /metrics and /debug/* are never served on the public port (the relay
+	# serves them only on its separate listener anyway); refuse them here too.
+	@private path /metrics /metrics/* /debug/*
+	respond @private 404
+	# The WebSocket endpoint (/v3), the identity and invite API, /healthz and
+	# /.well-known/p2p-relay.json. Caddy passes WebSocket upgrades through.
+	reverse_proxy relay:8080
+}
