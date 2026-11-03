@@ -52,13 +52,14 @@ describe("latency mechanisms", () => {
     // Ann's ls drains Ben's status (queued for her), well before the 6 s quiet period.
     let t0 = Date.now();
     const ls = await ann.ok(["ls"]);
-    expect(Date.now() - t0).toBeLessThan(3000);
+    // Well before the 6 s quiet period it no longer waits for (room for a slow runner).
+    expect(Date.now() - t0).toBeLessThan(5000);
     expect(ls.peers.map((p: { own: string; sid: string }) => `${p.own}/${p.sid}`)).toContain(`${ids.ben}/bs1`);
     // A message queued for Ben is handled by his next short command, which also doesn't wait.
     await ann.ok(["send", "--from-session", "as1", "--to", ids.ben, "--stdin"], { stdin: "queued for ben" });
     t0 = Date.now();
     await ben.ok(["friends"]);
-    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(Date.now() - t0).toBeLessThan(5000);
     const app = await ben.app();
     const events = (await app.state.get("events"))?.items ?? [];
     expect(events.some((e) => e.kind === "p2p.message" && e.data.text === "queued for ben")).toBe(true);
@@ -307,8 +308,8 @@ describe("latency mechanisms", () => {
     const t0 = Date.now();
     gate.open();
     await drained;
-    // Old: the drain waited for the live envelope too (here: never, until P2P_DRAIN_MAX_MS).
-    expect(Date.now() - t0).toBeLessThan(2500);
+    // Old: the drain waited for the live envelope too (here: never, until P2P_DRAIN_MAX_MS, 4 s).
+    expect(Date.now() - t0).toBeLessThan(3500);
     live.open();
     await app.close();
     // Kept: the next command applies both, once.

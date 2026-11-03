@@ -562,7 +562,8 @@ describe('pre-release review: the home folder as a last word, globs at its name,
     const named = p2pHomeAccess({ tool: 'Bash', command: `${big('x ')} ~/.p2p` }, [home])
     uncheckableShell(big('a;'))
     uncheckableShell(big('/x/y '))
-    expect(Date.now() - t0).toBeLessThan(200)
+    // Linear vs quadratic on 100 KB: quadratic would take minutes; a slow runner's linear pass stays far below this.
+    expect(Date.now() - t0).toBeLessThan(2000)
     expect(plain).toBeNull()
     expect(named).toBe('keys')
     // Under the cap, the worst cases are linear too.
@@ -571,7 +572,7 @@ describe('pre-release review: the home folder as a last word, globs at its name,
     p2pHomeAccess({ tool: 'Bash', command: '/'.repeat(16000) }, [home])
     uncheckableShell('p2p ' + ';'.repeat(16000))
     uncheckableShell('=x'.repeat(8000))
-    expect(Date.now() - t1).toBeLessThan(200)
+    expect(Date.now() - t1).toBeLessThan(2000)
   })
 })
 

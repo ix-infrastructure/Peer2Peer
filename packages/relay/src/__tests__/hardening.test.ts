@@ -272,7 +272,13 @@ describe("N5: a kicked connection leaves at once", () => {
 
 describe("N7: publish is atomic; anchoring is recomputed", () => {
   let dir: string;
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  // The relay (and its SQLite files) closes before its folder goes: an inner afterEach runs before the
+  // file's own, and removing a folder SQLite is still writing to fails (ENOTEMPTY) on a slow runner.
+  afterEach(async () => {
+    await r?.close();
+    r = undefined as unknown as TestRelay;
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
 
   it("a failure mid-publish leaves the documents and index untouched", async () => {
     dir = mkdtempSync(join(tmpdir(), "p2p-relay-n7-"));

@@ -184,7 +184,8 @@ describe("unreachable relays (a firewall that drops SYNs, as on a private networ
     const t0 = Date.now();
     await expect(pool.ensure(SILENT)).rejects.toThrow(/can't reach wss:\/\/silent-dial2\.test\/v3/);
     await expect(fetchTips({ ws: "", http: `http://127.0.0.1:${tcpPort}/v3` }, "p2p:x", 5000, progress)).rejects.toThrow(/can't reach/);
-    expect(Date.now() - t0).toBeLessThan(200);
+    // At once: no new dial (which would wait out its 800 ms timeout); room for a slow runner below that.
+    expect(Date.now() - t0).toBeLessThan(600);
     expect(pool.dials.get(SILENT)).toBe(1);
     pool.close();
   }, 30_000);

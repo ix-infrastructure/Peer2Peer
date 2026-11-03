@@ -204,21 +204,26 @@ describe("N3: the side store can't be flooded, and receive() is linear", () => {
     expect(c.sideCount).toBe(0);
   });
 
-  it("500 versions in one batch take under a second", () => {
+  it("500 versions in one batch: linear, about the cost of checking each once", () => {
     const owner = makeUser("owen");
     let head = verifyCircleGenesis(createCircle(owner.ik, { name: "c", iat: NOW - 1000 }));
     const all = [head.jws];
+    // This machine's own speed: making and checking the 499 links once, in order.
+    const s0 = performance.now();
     for (let i = 0; i < 499; i++) {
       const j = createNextCircleVersion(owner.ik, head, { name: `v${i}`, iat: NOW });
       head = verifyCircleLink(head, j);
       all.push(j);
     }
+    const linear = performance.now() - s0;
     const shuffled = [...all.slice(1)].reverse();
     const t0 = performance.now();
     const c = CircleChain.bootstrap([all[0], ...shuffled]);
     const ms = performance.now() - t0;
     expect(c.head.ver).toBe(500);
-    expect(ms).toBeLessThan(1000);
+    // Against this machine's speed, not a wall clock (a slow runner or a Pi is fine; a quadratic
+    // bootstrap, 500x the checks, is not).
+    expect(ms).toBeLessThan(Math.max(1000, 6 * linear));
   });
 });
 
