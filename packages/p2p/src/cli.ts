@@ -38,6 +38,7 @@ import type { Choice, SelectSpec } from "./prompt/picker.js";
 import type { Terminal } from "./tui/terminal.js";
 
 import { VERSION } from "./version.js";
+import { CLI_CAPS, PROTO_MINOR } from "./features.js";
 export { VERSION };
 
 /** How long a command that ran out of time waits for in-flight sends and writes to settle. */
@@ -129,6 +130,14 @@ export function buildProgram(deps: ProgramDeps): Command {
     .enablePositionalOptions()
     .exitOverride()
     .configureOutput({ writeOut: (s) => io.out(s.replace(/\n$/, "")), writeErr: (s) => io.err(s.replace(/\n$/, "")) });
+
+  program.command("version")
+    .description("Show CLI, protocol and runtime versions without opening an identity")
+    .option("--json", "JSON output")
+    .action((o: { json?: boolean }) => {
+      const info = { version: VERSION, protocol: "p2p/v3", protoMinor: PROTO_MINOR, caps: [...CLI_CAPS], node: process.version };
+      io.out(o.json ? safeJson(info) : `p2p ${VERSION} · protocol 3.${PROTO_MINOR} · node ${process.version}\n${CLI_CAPS.join(", ")}`);
+    });
 
   /** Runs one command: JSON or human output, exit code 1 on failure. */
   const run =
@@ -1618,10 +1627,10 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
   }
   // `p2p` alone on a terminal: the home screen. Piped, it prints the help as before.
   if (argv.length === 0 && deps.io.pretty && !deps.noInput) argv = ["home"];
-  // `doctor` is read-only and needs no extension: loading one records where it came from
+  // Built-in inspections need no extension: loading one records where it came from
   // (<home>/extension-locations.json) and runs its code, so it is skipped.
-  const isDoctor = argv.find((a) => !a.startsWith("-")) === "doctor";
-  const extensions = deps.extensions ?? (isDoctor ? new ExtensionRegistry() : await loadInstalled(deps));
+  const isInspection = ["doctor", "version"].includes(argv.find((a) => !a.startsWith("-")) ?? "");
+  const extensions = deps.extensions ?? (isInspection ? new ExtensionRegistry() : await loadInstalled(deps));
   const program = buildProgram({ ...deps, extensions });
   process.exitCode = 0;
   try {
