@@ -72,6 +72,7 @@ import {
   parseAutoDeliver,
   peerData,
   pickHolder,
+  isUnder,
   p2pSessionArgs,
   PROJECT_NOTICE_RE,
   routableOf,
@@ -2989,7 +2990,10 @@ export const register: Register = on => {
       // A file's folder; a shell or search path as named (the CLI finds its project, through symlinks too).
       const files = ['file_path', 'notebook_path'].map(k => input[k]).filter((x): x is string => typeof x === 'string')
       const paths = toolPaths(e, cwd, home).map(x => (files.includes(x) ? dirOf(x) : x))
-      if (noteDirs(S, $, S.run, [cwd, ...paths])) announce(S, $)
+      // Every p2p run carries these (P2P_PROJECT_DIRS), so the next status or send binds them; one outside
+      // this session's folder (likely another project) narrows who sees it now.
+      const before = new Set(S.run.projectDirs)
+      if (noteDirs(S, $, S.run, [cwd, ...paths]) && [...S.run.projectDirs].some(x => !before.has(x) && !(S.sessionDir && isUnder(x, S.sessionDir)))) announce(S, $)
     }
     if (!S) {
       // The model's share tool needs this session's state (what is shown, who may get it): none, nothing is shared.

@@ -113,8 +113,10 @@ describe('project boundaries: the mod', () => {
   test('a file read or changed outside this session\'s folder binds its project (P2P_PROJECT_DIRS)', async ($, on) => {
     const w = world(on, { gitTop: '/work/web' })
     await start($, w)
+    await $.turn.start({ text: 'work', turnId: 't1' } as never)
     await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: '/work/secret/keys.ts' } as never)
     await $.tool.call({ tool: 'Read', tool_use_id: 'r2', file_path: '/work/web/src/a.ts' } as never)
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
     await settle(w, () => ran(w, 'status').some(r => (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/secret') && (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/web/src')))
     const dirs = (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').split(':')
     // Inside its own folder too (a nested repository is its own project: the CLI decides by real path).
