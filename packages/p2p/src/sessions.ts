@@ -53,6 +53,7 @@ import {
   stripAbsolutePaths,
   type AcceptedMessageV3,
   type ProjectBound,
+  parseBound,
   type ExtensionKind,
   type StatusAgent,
   type StatusAgentState,
@@ -68,10 +69,12 @@ import {
   friendIds,
   PERSON_SESSION,
   sessionBinding,
+  agentContext,
   sessionCeiling,
   sessionProjectView,
   sessionDirs,
   sessionWorkdir,
+  MAX_SESSION_DIRS,
   shareHint,
   type Ceiling,
   type SessionProjectView,
@@ -323,6 +326,12 @@ export async function roster(
   const cur = await getSession(app, sid);
   const change = opts.circle !== undefined || opts.private || (opts.add?.length ?? 0) > 0 || (opts.remove?.length ?? 0) > 0;
   if (!change) return rosterView(app, cur);
+  // A change (even a narrowing one) only from the session's front end once one registered it, and
+  // never from an agent's own shell (projects.ts bindSession, N2).
+  if (!app.front) {
+    if (agentContext(app.env)) throw new CliError("refused", `session ${sid}: inside an agent's session only its front end changes who sees a session`);
+    if ((await sessionBinding(app, sid))?.registered) throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it changes who sees that session`);
+  }
   if (opts.circle !== undefined && opts.private) throw new CliError("usage", "--circle and --private are exclusive");
   let vis = cur.vis;
   let circle = cur.circle;
@@ -441,6 +450,8 @@ export interface StatusOpts {
    * project for the rest of its life (projects.ts), which can only narrow who sees it.
    */
   projectDirs?: string[];
+  /** The front end dropped folders past its cap (`--project-dirs-over`): private. */
+  projectDirsOver?: boolean;
   /**
    * The session's subagents (`--agents-json`), as the caller has them: entries
    * are normalized (sanitized, capped, ordered, trimmed), never trusted as is.
@@ -667,8 +678,8 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   // The folders of the files it says it changes are folders it works in too (a nested repository,
   // a path through a symlink): each binds its project.
   const work = sessionWorkdir(app.env);
-  const fileDirs = (o.files ?? []).filter((f) => typeof f === "string" && f.length <= 200).map((f) => dirname(resolvePath(work, f)));
-  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs]);
+  const fileDirs = (o.files ?? []).filter((f) => typeof f === "string").map((f) => dirname(resolvePath(work, f)));
+  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs], { ...(o.projectDirsOver ? { over: true } : {}) });
   const prev = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
   const before = (await app.state.get("sessions"))?.[sid];
   const warnings: string[] = [];
@@ -831,6 +842,8 @@ export interface SendOpts {
   notifyWhenIdle?: boolean;
   /** Directories the sending session works in besides its working directory (see StatusOpts.projectDirs). */
   projectDirs?: string[];
+  /** See StatusOpts.projectDirsOver. */
+  projectDirsOver?: boolean;
   /**
    * The person at their own terminal (`p2p send` typed with no --from-session, `p2p tui`): their
    * session is theirs, never bound to a project. Set only by those two paths, never from a flag.
@@ -992,7 +1005,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
   if (Buffer.byteLength(o.text, "utf8") > MAX_TEXT_BYTES) throw new CliError("too_large", `message text is at most ${MAX_TEXT_BYTES} bytes`);
   if (o.text === "" && !o.notifyWhenIdle) throw new CliError("usage", "nothing to send (give text, or --notify-when-idle)");
   // Bound before anything is read or sent: the project ceiling decides who this may reach.
-  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true });
+  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...(o.projectDirsOver ? { over: true } : {}) });
   // This device can't reach any of its relays: the message can still be sealed and kept in the
   // outbox (outbox.ts) for `watch` to send once it can.
   let offline = false;
@@ -1119,7 +1132,7 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
   // From another session of ours: whatever bounded it now bounds the session it went into.
   const bound = (pt as { bound?: ProjectBound }).bound;
   if (carries && from.self && bound !== undefined && toSession !== undefined && toSession !== PERSON_SESSION) {
-    await bindSession(app, toSession, [], { constraint: bound });
+    await bindSession(app, toSession, [], { constraint: bound, inbound: true });
   }
   const sess = { own: e.own, sid: e.sid, ref, rule: r.rule, ...(r.viewerRule ? { viewerRule: r.viewerRule } : {}) };
   const extra = { own: e.own, sid: e.sid, ...(toSession ? { toSession } : {}) };
@@ -1139,7 +1152,10 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
       // back. Same sender, same text, same hold and screen rules; if the session does resume, it
       // still gets the message itself (and this copy isn't shown there).
       if (toSession !== undefined && sessionEnded(app, toSession)) {
-        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}), ...(from.self ? {} : { routable: await routableSessions(app, e.from) }) }, {}, "unclaimed");
+        // From another session of ours with a bound: only sessions already within it may hold it, and the
+        // one that does takes the bound on (the front end binds it on Deliver: `bound` rides with it).
+        const held = from.self ? (bound !== undefined ? { routable: await sessionsWithin(app, bound), bound } : {}) : { routable: await routableSessions(app, e.from) };
+        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}), ...held }, {}, "unclaimed");
         out.push(copy);
         if (asks) await rememberAsked(app, copy.id, { id: pt.rcpt!, from: e.from, did: e.fdid, unclaimedFor: toSession });
       }
@@ -1206,9 +1222,42 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
  * Binds `sid` to the folders its front end reports (projects.ts sessionDirs: P2P_WORKDIR,
  * P2P_PROJECT_DIRS, past its cap private) and any more the caller names.
  */
-export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean } = {}): Promise<void> {
+export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean; over?: boolean } = {}): Promise<void> {
   const { dirs, over } = sessionDirs(app.env);
-  await bindSession(app, sid, [...dirs, ...extra], { ...(o.person ? { person: true } : {}), ...(over ? { over: true } : {}) });
+  // Past the cap in folders named on the command line too: private, never the first N.
+  const tooMany = extra.length > MAX_SESSION_DIRS;
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over || tooMany || o.over ? { over: true } : {}) });
+}
+
+/** Whether a ceiling is within a bound (narrower or equal): private always is. */
+function within(c: Ceiling, b: ProjectBound): boolean {
+  if (c.kind === "private") return true;
+  if (c.kind === "none" || b === "private") return false;
+  return c.circles.every((x) => b.circles.includes(x)) && c.people.every((x) => b.people.includes(x));
+}
+
+/** This device's live sessions already within a bound (and the person's own terminal session): who may hold an own-session message that carries it. */
+export async function sessionsWithin(app: App, b: ProjectBound, now = Date.now()): Promise<string[]> {
+  const peers = (await app.state.get("peers")) ?? {};
+  const out = new Set<string>([PERSON_SESSION]);
+  for (const p of Object.values(peers)) {
+    if (p.own !== app.userId || p.did !== app.did || !isLive(p.ts, now) || out.has(p.sid)) continue;
+    if (within(await sessionCeiling(app, p.sid), b)) out.add(p.sid);
+  }
+  return [...out].sort();
+}
+
+/** `p2p session bound`: a front end binds the session that took an own-session message to that message's bound (sticky). */
+export async function bindBound(app: App, sid: string, bound: unknown): Promise<SessionProjectView> {
+  checkSid(sid, "sid");
+  let b: ProjectBound;
+  try {
+    b = parseBound(bound, "bound");
+  } catch {
+    throw new CliError("usage", 'bound must be "private" or {circles, people}');
+  }
+  await bindSession(app, sid, [], { constraint: b });
+  return sessionProjectView(app, sid);
 }
 
 /**

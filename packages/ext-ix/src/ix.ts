@@ -41,6 +41,8 @@ const NOISE = /^ix: failed to load [^\n]*$/gm;
 
 export function ixRunner(opts: { env?: Record<string, string | undefined>; cwd?: string } = {}): IxRunner {
   const env = { ...process.env, ...opts.env } as NodeJS.ProcessEnv;
+  // Never a secret of p2p's (packages/p2p/src/projects.ts: the person token), whatever the caller passed.
+  delete env.P2P_PERSON_TOKEN;
   const name = env.IX_BIN?.trim() || "ix";
   // Absolute, from PATH's absolute entries: never a program planted in the repo (cwd).
   const bin = whichAbsolute(name, env);

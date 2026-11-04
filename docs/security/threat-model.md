@@ -6,7 +6,7 @@ This page says, in plain language, what Peer2Peer protects, against whom, and wh
 
 1. **Confidentiality of content:** message text, status contents (summaries, labels, files, agents), circle names and membership, rosters and friendship certificates. *Not* covered: the envelope's plaintext routing header (below), which includes the kind and the session id.
 2. **Authenticity:** every envelope comes from the device of the identity it claims. Nobody can impersonate a userId, claim another device's mailbox, or forge a circle version.
-3. **Consent:** without a capability you issued (friendship, a circle you joined, or a code you redeemed), nobody can message you. A stranger can only send a rate-limited **first-contact request** (an invite), which is **held** for your approval and never delivered to your agent. Nobody can enrol you into a circle. Your agent can't be made to change who reaches you.
+3. **Consent:** without a capability you issued (friendship, a circle you joined, or a code you redeemed), nobody can message you. A stranger can only send a rate-limited **first-contact request** (an invite), which is **held** for your approval and never delivered to your agent. Nobody can enrol you into a circle. Your agent's tools never change who reaches you, and its shell is refused when it tries (best effort against an agent with your shell: see [project boundaries](#project-boundaries)).
 4. **Your agent's integrity:** peers' text can't instruct your agent, and a peer can't start unlimited work in your session.
 5. **Your secrets:** keys, backup phrases, invite and link codes never reach a relay in the clear, the model's context, a process listing or the logs.
 6. **Availability:** one relay going down, or flooding one, doesn't cut you off.
@@ -64,27 +64,93 @@ The reference relay keeps the smallest record it can. Envelopes are stored with 
 
 You may share one project with your circle and keep others private. Peer2Peer enforces that in the `p2p` CLI itself, so the Claude Code mod, the Codex bridge, `p2p tui` and any client that runs `p2p --json` all get the same boundary ([concepts](../concepts.md#projects-project-boundaries) has the full rules).
 
-**What it guarantees.** Peer2Peer never carries a private project's status, files, subagents, footprints, summaries or messages to anyone but you (your own devices):
+**Read this first.** Peer2Peer's project boundaries are a hard rule for what *Peer2Peer* carries. Against an AI agent that runs as your user with an unrestricted shell, though, Peer2Peer's own checks are **best effort**. Such an agent can do anything you can: read `P2P_HOME`, run its own copy of the CLI where no check sees it, or open a network connection. **For a hard barrier, run your agents sandboxed with `P2P_HOME` denied for reads and writes** (below). The checks listed here raise the bar; the sandbox is what holds.
 
-- **A project is private until you share it**, and only you share it: the policy lives in your `P2P_HOME` on each device, `p2p project share` is refused from an agent's shell and from the mod's model-run `/peers`, and nothing in a repository can widen it. A committed `.p2p-private` can only make a repository private. The project key includes the clone's git common dir, so another clone of a shared repository's remote, or the same folder with its remote changed, is a new project, private until shared.
+### What Peer2Peer guarantees
+
+Peer2Peer itself never carries a private project's status, files, subagents, footprints, summaries or messages to anyone but you (your own devices):
+
+- **A project is private until you share it.** The policy lives in your `P2P_HOME`, on each device, and nothing in a repository can widen it. A committed `.p2p-private` can only make a repository private. The project key includes the clone's git common dir, so another clone of a shared repository's remote, or the same folder with its remote changed, is a new project, private until shared.
 - **Status and roster:** a private project's sessions sign a private roster with nobody on it, so their statuses go to your own devices only. A shared project's sessions reach exactly who it shares (one circle and named friends per roster, §3.4).
 - **Summaries:** a private session sends none, and the mod makes no model call for one.
 - **Footprints and overlap:** Ix footprints go to the roster's audience, and overlap or semantic-conflict checks compare a session only with sessions it is shared with.
-- **Sends:** every send from an agent's session, `p2p send --from-session`, MCP `p2p_send`, SendMessage, and `ix note`/`subgraph`/`impact` shares, is refused to anyone outside its projects' audience, queued copies included. The refusal names the command **you** run to share the project; there is no flag that lets a caller skip it.
-- **Sessions that move:** a session is bound to every project it works in (its folder, a `cd`, files it reads or changes elsewhere) until it ends, and reaches only who **all** of them share. A session that touched a private project's files stays private, so what it read can't leave through Peer2Peer later.
-- **Your own sessions can't launder it:** a message from one of your sessions to another carries the sender's bound (cap `projects.v1`, a critical field), and the receiving session takes it on for good. A session of yours on a device whose client can't honour that isn't sent to.
-- **Agents can't widen it or speak for the person:** widening commands (`project share`, `circle default`, `session roster --add/--circle`, invites, joins, trust, friends) are refused when an agent runs them: its environment (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, other `CODEX_*` but `CODEX_HOME`) or, when that was scrubbed, a Claude Code or Codex process among its ancestors (`ps`; not on Windows). A session id an agent names that no front end of yours registered starts private. The person's front ends (the mod, the Codex bridge) prove themselves with a token in `P2P_HOME/cli/person.key`, which the mod's guards keep from the model. Session `tui` (the person's) also requires no agent in sight.
-- **Inbound:** a message to you with no session named is held only in a session whose projects reach its sender, and a message into a session from outside its audience is refused at the sender and dropped on your device, even with a wider roster signed elsewhere (by an older client of yours, say). Your own devices are always allowed.
-- **Relays:** unchanged and content-blind. A relay sees that a private session's status went to your own devices, nothing more.
+- **Sends:** every send from a session (`p2p send --from-session`, MCP `p2p_send`, SendMessage, `ix note`/`subgraph`/`impact`, queued copies) is refused to anyone outside its projects' audience. The refusal names the command **you** run to share the project; no flag lets a caller skip it.
+- **Sessions that move:** a session is bound to every project it works in, until it ends, and reaches only who **all** of them share. That covers its folder, a `cd`, files it reads or changes elsewhere, and paths its shell commands name (more under "what it can't see"). A session that touched a private project stays private. Past a cap (folders per command or per session) a session is private; it never keeps "the first N".
+- **Your own sessions don't launder it:** a message from one of your sessions to another carries the sender's bound (cap `projects.v1`, a critical field). The receiving session takes it on for good, and so does a session of yours that holds such a message sent to you with no session named. A session on a device of yours whose client can't honour that isn't sent to.
+- **Inbound:** a message to you with no session named is held only in a session whose projects reach its sender. A message into a session from outside its audience is refused at the sender, and dropped on your device even with a wider roster signed elsewhere (by an older client of yours, say). Your own devices are always allowed.
+- **Relays:** unchanged and content-blind.
 
-**What it can't do.**
+### What Peer2Peer checks, best effort
 
-- **It can't stop an agent leaking through its other tools.** An agent that read a private repository can still paste it into a web request, a `git push`, an email, a file in a shared folder or any other channel its tools give it. Project boundaries close Peer2Peer as a channel; they don't sandbox the agent. That is the agent's own permission prompt's job, and a session that approves its own tool calls has no such boundary (above).
-- **A same-user agent with an unrestricted shell can ultimately act as you.** It runs as your user: it can read `P2P_HOME` (the person token, your keys) in a form the guards don't recognise, run a copy of `p2p` with its ancestry hidden (a detached daemon, `launchd`, a remote shell back to the machine), or talk to a relay with code of its own. Peer2Peer's checks (the token, the agent-environment and ancestry checks, the shell guards) are defence in depth; **the real backstop is the agent's own permission mode**: one that asks before running shell commands. Codex's sandbox may let a model's command *read* `P2P_HOME` even where it can't write it, so under Codex the token is a backstop only.
-- **Folders the front end never hears about.** A session is bound to the folders its front end reports: the Claude mod reports the session folder, its current folder (at each status and before each send), the paths of files read or changed through Claude Code's file and search tools (relative search roots included), and the absolute, `~` and `..` paths a shell command names; the Codex bridge reports every cwd Codex reports, the files an `apply_patch` or edit names, and the same shell paths. These lists are kept per conversation (Claude Code) or thread (Codex), so a resume stays bound (`/clear` starts afresh). What a parser can't see stays unseen: a path built at run time (`$X/y`, `$(…)`), encoded, read by a script the command runs, or reached by a relative path from a folder the session `cd`'d to inside one command. The CLI still binds the shell's own folder whenever that shell runs `p2p`.
-- **What was already shared stays shared.** A session that was shared and then touched a private project stops sending at once, but its last shared status stays in peers' lists until it ages out (150 s), and anything sent before stays sent.
-- **Two lows, documented rather than fixed:** a summary the front end made before the session's first binding can reach the earlier audience once (the CLI drops summaries from any session that is private by the time it posts); and Ix content (a note, an impact report) is checked against the sending session's projects, not against the project the Ix graph it came from describes.
-- **Each device decides for itself.** Policies aren't synced: share a project on each device that works in it. A device still running a client from before project boundaries keeps the old rule for its own sessions (new sessions follow the default circle), so update every device. An older device can't widen a session that runs on an updated one: that session's own device drops whatever comes in outside its projects' audience.
+Only the person widens sharing, and only a session's front end speaks for it. These checks make that hard to get around, but not impossible:
+
+- **The person token.** `P2P_HOME/cli/person.key` (0600, made once). The mod and the Codex bridge pass it to their own `p2p` runs as `P2P_PERSON_TOKEN`. The CLI checks it once at start and removes it from its own environment, so no child process (git, `ix`, an extension's tool) inherits it. ext-ix runs git with `core.fsmonitor`, hooks and external diffs switched off and an allow-listed environment. The Codex bridge passes the token to `p2p` and `p2p watch` only.
+- **Agent detection:**
+  - the variables Claude Code and Codex set in the commands their agents run: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` (Claude Code's documented ones), `CODEX_TOOL_CALL_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` (from Codex's source). Variables a person sets (`CODEX_HOME`, `CODEX_API_KEY`) don't count;
+  - a Claude Code or Codex ancestor, matched by executable name, walking `ps` (not on Windows).
+- **Widening commands:** `project share`, `circle default`, `session roster --add/--circle`, invites, joins, accepts, `trust add`, `held approve`, circle invites, joins and policy, unblock, device links, `identity follow` and `extensions enable`.
+  - They run only with the token, or, outside any agent's session, after you type `yes` on your **controlling terminal**: read from `/dev/tty` (`CONIN$` on Windows), never from stdin or a flag.
+  - A process with no terminal is refused, even with `--yes` or `--no-input`. That covers a daemon, `setsid`, `(sh x.sh &)` and CI.
+  - The same "yes" is asked for a send as you (`p2p send` with no `--from-session`), and for the first send from a session id nobody has used.
+  - Scripts and CI that should act as you pass the token.
+- **Sessions are their front end's:**
+  - inside an agent's session, `p2p status`, `send` and extension sends are refused without the token (the agent's path is SendMessage, `ix_share` or `p2p_send`);
+  - a session a front end registered refuses everyone else, even a narrowing roster change.
+- **Shell guards** in the mod and the Codex bridge refuse:
+  - mutating verbs and `project share|private`;
+  - interpreter code (`python -c`, `node -e`, …) and pseudo-terminal wrappers (`script`, `expect`, `unbuffer`, `tmux`, …) on a line that names p2p;
+  - any `--from-session`/`--session` but the session's own (read as the shell reads words, without a cap that padding could exhaust);
+  - a command naming p2p that's longer than 16 KiB, or that a guard fails to check.
+
+None of these can stop an agent that runs as you and wants past them. A pseudo-terminal spawned from a script file can answer the terminal "yes". A process can be started outside the agent's tree, by `launchd`, `cron` or an ssh back to the machine. `P2P_HOME` can be read in a form the guards don't recognise (the token, the keys). That agent can also run another `p2p` or speak to a relay itself.
+
+### The hard barrier: sandbox your agents
+
+Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), and the token, the keys, the policies and the CLI's own state are out of its reach. Peer2Peer's checks then hold.
+
+**Claude Code** (`settings.json`, see [sandboxing](https://code.claude.com/docs/en/sandboxing) and [permissions](https://code.claude.com/docs/en/permissions)). The sandbox (`sandbox.filesystem.denyRead` / `denyWrite`) is enforced by the OS on Bash and its child processes. It doesn't cover Claude Code's built-in file tools, so add the `Read`/`Edit` deny rules for those:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": ["~/.p2p"],
+      "denyWrite": ["~/.p2p"]
+    }
+  },
+  "permissions": {
+    "deny": ["Read(~/.p2p/**)", "Edit(~/.p2p/**)"]
+  }
+}
+```
+
+Use your own `P2P_HOME` if you moved it. The mod's own `p2p` runs aren't the agent's commands, so they still work.
+
+**Codex** (`config.toml`). The legacy `sandbox_mode` and `[sandbox_workspace_write]` settings can't deny reads. A named permission profile can: map a path to `"deny"` and select the profile with `default_permissions`. On macOS this is enforced by Seatbelt, on Linux by bubblewrap (openai/codex: `config/src/permissions_toml.rs`, `sandboxing/src/seatbelt.rs`, `linux-sandbox/src/bwrap.rs`). Don't combine it with `sandbox_mode`. Use an absolute path:
+
+```toml
+default_permissions = "p2p-safe"
+
+[permissions.p2p-safe.filesystem]
+":workspace" = "write"
+"/Users/you/.p2p" = "deny"
+```
+
+Administrators can enforce the same with `[permissions.filesystem] deny_read = ["…/.p2p"]` in Codex's `requirements.toml`.
+
+### What it can't do
+
+- **Stop an agent leaking through its other tools.** An agent that read a private repository can still paste it into a web request, a `git push`, an email or a file in a shared folder. Project boundaries close Peer2Peer as a channel; they don't sandbox the agent. The sandbox and the agent's own permission prompt do that.
+- **See paths it can't parse.** A session is bound to the folders its front end reports:
+  - the Claude mod reports its folder, its current folder (at each status and before each send), the files its file and search tools touch, and the paths its shell commands name (absolute, `~`, `..` and relative, with `$HOME` and `$PWD` expanded);
+  - the Codex bridge reports every cwd Codex reports, the files an `apply_patch` or edit names, and the same shell paths.
+
+  A path built at run time any other way (`$X/y`, `$(…)`, backticks) makes the session private, since it can't be resolved. Paths a script opens by itself, or encoded paths, aren't seen. The CLI still binds the shell's own folder whenever that shell runs `p2p`. These lists are kept per conversation (Claude Code) or thread (Codex), so a resume stays bound. A store that can't be read, and a forked conversation (`claude --resume … --fork-session`: a new id, and hooks name no parent), make the session private.
+- **Unsend what was shared.** A session that was shared and then touched a private project sends its former audience one blank "private" status and nothing more. Anything sent before stays sent.
+- **Two lows, documented rather than fixed:** a summary the front end made before the session's first binding can reach the earlier audience once; and Ix content (a note, an impact report) is checked against the sending session's projects, not against the project the Ix graph it came from describes.
+- **Decide for other devices.** Policies aren't synced: share a project on each device that works in it. A device still running a client from before project boundaries keeps the old rule for its own sessions (new sessions follow the default circle), so update every device (`p2p doctor` warns). An older device can't widen a session that runs on an updated one.
+- **Ask for the terminal "yes" on Windows without a console.** `CONIN$` needs one, so detached Windows processes are refused like the rest. The ancestry check doesn't run on Windows.
 
 ## How the agent integrations defend you
 

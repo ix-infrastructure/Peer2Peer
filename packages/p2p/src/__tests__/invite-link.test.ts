@@ -355,6 +355,7 @@ describe("one code, several circles", () => {
   it("a bundle that won't fit fails with a clear message, never dropping a circle", async () => {
     const small = user("alice", { P2P_INVITE_BLOB_MAX: "2000" });
     Object.defineProperty(small, "home", { value: alice.home });
+    Object.defineProperty(small, "personToken", { value: alice.personToken });
     const r = await small.run(["invite", "--circle", team, "--circle", ops]);
     expect(r.json).toMatchObject({ error: "too_large" });
     expect(r.json.reason).toMatch(/joining these 2 circles doesn't fit in a code .*name fewer circles/);

@@ -10,7 +10,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { isMutating, isUnder, mutatingP2PVerb, p2pSessionArgs, parsePeersArgs, pickHolder, routableOf, shellPaths, shellTokens, toolPaths, uncheckableShell } from '../hooks/lib'
-import { BEN_ID, NOW_MS, flag, gather, message, ran, settle, sidOf, slash, start, typed, world } from './world'
+import { BEN_ID, NOW_MS, flag, gather, message, ran, settle, sidOf, slash, start, typed, world, type World } from './world'
+
+/** Every folder handed to the CLI so far (each goes once: the CLI keeps it bound). */
+const handed = (w: World, verb = 'status') => ran(w, verb).flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':').filter(Boolean))
 
 const PRIVATE = { sid: 'x', ref: 'ffffff', ver: 1, vis: 'private', parts: [] }
 
@@ -117,13 +120,14 @@ describe('project boundaries: the mod', () => {
     await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: '/work/secret/keys.ts' } as never)
     await $.tool.call({ tool: 'Read', tool_use_id: 'r2', file_path: '/work/web/src/a.ts' } as never)
     await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
-    await settle(w, () => ran(w, 'status').some(r => (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/secret') && (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/web/src')))
-    const dirs = (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').split(':')
+    await settle(w, () => handed(w).includes('/work/secret') && handed(w).includes('/work/web/src'))
+    const dirs = handed(w)
     // Inside its own folder too (a nested repository is its own project: the CLI decides by real path).
     expect(dirs).toEqual(expect.arrayContaining(['/work/secret', '/work/web/src']))
     // Every later p2p run of this session carries it: a send included.
     await $.session.send({ to: `${BEN_ID}`, text: 'hi' } as never).catch(() => undefined)
-    for (const r of ran(w, 'send')) expect(r.env?.P2P_PROJECT_DIRS).toContain('/work/secret')
+    // Never handed twice.
+    expect(dirs.filter(x => x === '/work/secret')).toHaveLength(1)
   })
 
   test('a message for no session that the CLI routes elsewhere is not held here', async ($, on) => {
@@ -143,9 +147,10 @@ describe('project boundaries: the mod', () => {
     await start($, w)
     await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'cat /work/secret/keys.ts | head -5' } as never)
     await $.tool.call({ tool: 'Bash', tool_use_id: 'b2', command: "grep -r token ../other-repo/src && ls '~/notes'" } as never)
-    await settle(w, () => (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').includes('/work/other-repo/src'))
-    const dirs = (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').split(':')
-    expect(dirs).toEqual(expect.arrayContaining(['/work/secret/keys.ts', '/work/other-repo/src']))
+    await settle(w, () => handed(w).includes('/work/other-repo/src'))
+    const dirs = handed(w)
+    // A file's folder; a folder as named.
+    expect(dirs).toEqual(expect.arrayContaining(['/work/secret', '/work/other-repo/src']))
     // A relative search root (Grep, Glob) resolves against where the session is.
     expect(toolPaths({ tool: 'Grep', pattern: 'x', path: '../third' }, '/work/web')).toEqual(['/work/third'])
   })
@@ -154,7 +159,7 @@ describe('project boundaries: the mod', () => {
     const w = world(on, { gitTop: '/work/web', store: { 'dirs:claude-session-1': { dirs: ['/work/secret'], over: false, at: 1 } } })
     await start($, w)
     await settle(w, () => ran(w, 'status').length > 0)
-    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS).toContain('/work/secret')
+    expect(handed(w)).toContain('/work/secret')
   })
 
   test('past the folder cap the CLI is told to keep it private, never the first N (M1)', async ($, on) => {
@@ -173,7 +178,17 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     expect(p2pSessionArgs("p2p send --from-session=''x1 --to ben hi")).toEqual(['x1'])
     expect(p2pSessionArgs('p2p send --from-session "x"1 --to ben hi')).toEqual(['x1'])
     expect(p2pSessionArgs('p2p send --from-\\session x1')).toEqual(['x1'])
-    expect(shellPaths('cat /a/b ../c ~/d e', '/w/r', '/home/u')).toEqual(['/a/b', '/w/c', '/home/u/d'])
+    expect(shellPaths('cat /a/b ../c ~/d e', '/w/r', '/home/u')).toEqual({ paths: ['/a/b', '/w/c', '/home/u/d'], over: false })
+    // $HOME and $PWD expand; any other expansion in a path can't be resolved: private.
+    expect(shellPaths('cat $HOME/notes/a.md ${PWD}/../x', '/w/r', '/home/u')).toEqual({ paths: ['/home/u/notes', '/w/x'], over: false })
+    expect(shellPaths('cat $SECRET_DIR/keys', '/w/r', '/home/u').over).toBe(true)
+    expect(shellPaths('cat "$(echo /secret)/k"', '/w/r', '/home/u').over).toBe(true)
+    // Relative ones resolve against the folder (a symlink in it binds its target's project, in the CLI).
+    expect(shellPaths('cat link/inside.txt', '/w/r').paths).toEqual(['/w/r/link'])
+    // Past the per-command cap: private, never the first N.
+    expect(shellPaths(Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(' '), '/w/r').over).toBe(true)
+    // Padding can't push a session id past what is read.
+    expect(p2pSessionArgs(`p2p ${'x '.repeat(6000)} --from-session fake --to ben hi`)).toEqual(['fake'])
   })
 
   test('interpreter code, pseudo-terminals and project shares on a line naming p2p are refused', () => {

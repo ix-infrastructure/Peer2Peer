@@ -313,7 +313,7 @@ describe("CLI: link --expect-compare, secret phrase prompt, send --stdin", () =>
   async function cli(argv: string[], ops: Record<string, unknown>, io: Record<string, unknown> = {}) {
     const out: string[] = [];
     const err: string[] = [];
-    const code = await main(argv, { env: {}, io: { out: (s) => out.push(s), err: (s) => err.push(s), ...io }, ops: ops as never, makeApp: () => stub });
+    const code = await main(argv, { env: {}, confirmTty: async () => true, io: { out: (s) => out.push(s), err: (s) => err.push(s), ...io }, ops: ops as never, makeApp: () => stub });
     process.exitCode = 0;
     let json: any;
     try {

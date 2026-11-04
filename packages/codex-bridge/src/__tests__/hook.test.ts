@@ -1,10 +1,10 @@
 // Copyright 2026 Ix Infrastructure Inc.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { guard, runHook, touchedPaths } from "../hook.js";
-import { loadThreadDirs, saveThreadDirs } from "../bridge.js";
+import { loadThread, loadThreadDirs, saveThreadDirs } from "../bridge.js";
 import { findEntry, readEntries, serve, socketPath, writeEntry, type Entry } from "../ipc.js";
 import { lineFeeder, McpServer, text } from "../mcp.js";
 
@@ -145,8 +145,8 @@ describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)",
   });
 
   it("paths a call reaches outside its folder are reported (H2)", () => {
-    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual(["/secret/keys.ts", "/w/other/x", "/home/u/notes"]);
-    expect(touchedPaths("apply_patch", { input: "*** Begin Patch\n*** Update File: ../lib/a.ts\n" }, "/w/repo", undefined)).toContain("/w/lib/a.ts");
+    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual({ paths: ["/secret", "/w/other/x", "/home/u/notes"], over: false });
+    expect(touchedPaths("apply_patch", { input: "*** Begin Patch\n*** Update File: ../lib/a.ts\n" }, "/w/repo", undefined).paths).toContain("/w/lib/a.ts");
   });
 
   it("a thread's folders survive a resume (H3)", () => {
@@ -155,5 +155,30 @@ describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)",
     saveThreadDirs(home, "thread-1", ["/secret", "/w/repo"]);
     expect(loadThreadDirs(home, "thread-1")).toEqual(["/secret", "/w/repo"]);
     expect(loadThreadDirs(home, "thread-2")).toEqual([]);
+  });
+});
+
+describe("project boundaries in the Codex guard: caps and residuals (PR #30 re-review)", () => {
+  it("padding can't push a session id past what is read (N3), and a long command naming p2p is refused unread", () => {
+    expect(guard("Bash", { command: `p2p ${"x ".repeat(6000)} --from-session fake --to ben hi` }, [], "codex-1")).not.toBeNull();
+    expect(guard("Bash", { command: `p2p ls ${"y".repeat(20 * 1024)}` }, [], "codex-1")).toContain("too long");
+  });
+
+  it("paths built at run time, or too many, make the session private; $HOME and $PWD resolve (M1, H2)", () => {
+    expect(touchedPaths("Bash", { command: "cat $HOME/notes/a.md" }, "/w/repo", "/home/u")).toEqual({ paths: ["/home/u/notes"], over: false });
+    expect(touchedPaths("Bash", { command: "cat $SECRET/x" }, "/w/repo", "/home/u").over).toBe(true);
+    expect(touchedPaths("Bash", { command: Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(" ") }, "/w/repo", "/home/u").over).toBe(true);
+    expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).over).toBe(true);
+  });
+
+  it("a thread saved as over stays over; a file it can't read fails closed (H3)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-thread-over-"));
+    homes.push(home);
+    saveThreadDirs(home, "t-over", ["/a"], true);
+    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true });
+    saveThreadDirs(home, "t-bad", ["/a"]);
+    const f = readdirSync(join(home, "codex-threads")).map((n) => join(home, "codex-threads", n));
+    for (const x of f) writeFileSync(x, "{not json");
+    expect(loadThread(home, "t-bad").over).toBe(true);
   });
 });

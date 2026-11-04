@@ -1791,11 +1791,11 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
       // The CLI by its documented variable is read as the CLI (mutatingP2PVerb checks it).
       if (m && m[2] !== 'P2P_BIN') return 'a command word built at run time on a line that names p2p'
     }
-    if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun|php|lua|osascript|tclsh|awk|gawk)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|r|-eval|-print|-command)\b/.test(c)) {
-      return 'interpreter code on a line that names p2p'
-    }
-    // A pseudo-terminal or scripted terminal around anything that names p2p (it could drive a picker or pass as the person).
-    if (/(?:^|[\s;&|(/])(?:script|expect|unbuffer|socat|tmux|screen|pty|ptyspawn|zpty|winpty)(?:\.exe)?(?=$|[\s;&|)])/.test(c)) return 'a pseudo-terminal wrapper on a line that names p2p'
+    // Read by words (linear): interpreter code given inline, or a pseudo-terminal wrapper (it could
+    // drive a picker or pass as the person), on a line that names p2p.
+    const hidden = hidesCommand(c)
+    if (hidden === 'interpreter') return 'interpreter code on a line that names p2p'
+    if (hidden === 'pty') return 'a pseudo-terminal wrapper on a line that names p2p'
   }
   // Widening a project's sharing is the person's alone, however it is spelled to the shell.
   if (/project["'\s,\]]+share/.test(c) && (names(c) || /p2p|peer2peer/i.test(c))) return 'a project share, which only your user runs'
@@ -1894,7 +1894,8 @@ export function p2pSessionArgs(command: string, homes: readonly string[] = []): 
  * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
  * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
  * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
- * (`$X`, `$(…)`, backticks) stay as text. Best effort: no aliases, no globbing.
+ * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
  */
 export function shellTokens(command: string): string[] {
   const out: string[] = []
@@ -1906,7 +1907,7 @@ export function shellTokens(command: string): string[] {
     cur = ''
     has = false
   }
-  for (let i = 0; i < command.length && out.length < 4096; i++) {
+  for (let i = 0; i < command.length; i++) {
     const c = command[i] as string
     if (q === "'") {
       if (c === "'") q = ''
@@ -1949,7 +1950,7 @@ export function shellTokens(command: string): string[] {
 
       continue
     }
-    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
       push()
 
       continue
@@ -1979,7 +1980,6 @@ export function resolveLike(cwd: string, p: string): string {
     prefix = full.slice(0, 2)
     rest = full.slice(2)
   } else if (unc(full)) {
-    // \\server\share
     let i = 2
     let parts = 0
     while (i < full.length && parts < 2) {
@@ -2005,27 +2005,81 @@ export function resolveLike(cwd: string, p: string): string {
   return `${prefix}${sep}${out.join(sep)}`
 }
 
+/** At most this many folders one command may name; past it the session is private (`over`). */
+export const MAX_COMMAND_PATHS = 256
+
 /**
- * Paths a shell command names that may lie outside its folder: absolute ones, `~` ones, and any
- * with a `..` segment, each resolved (against `cwd`, `~` against `home`). An option's value
- * (`--file=/x`) counts. Best effort: a path built at run time (`$X/y`, `$(…)`, an encoded one) is
- * not seen; the CLI still binds the shell's own folder when that shell runs p2p.
+ * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
+ * against `cwd`, a file to its folder, `$HOME`/`${HOME}` and `$PWD`/`${PWD}` expanded). A path
+ * built any other way (`$X/y`, `$(…)`, backticks) can't be resolved, so the session is `over`
+ * (private), and so it is past MAX_COMMAND_PATHS. URLs are not paths.
  */
-export function shellPaths(command: string, cwd: string, home?: string): string[] {
+export function shellPaths(command: string, cwd: string, home?: string): { paths: string[]; over: boolean } {
   const out = new Set<string>()
+  let over = false
+  const isSep = (c: string | undefined) => c === '/' || c === '\\'
   for (const word of shellTokens(command)) {
-    for (const t of [word, word.includes('=') ? word.slice(word.lastIndexOf('=') + 1) : '']) {
-      if (t === '' || t.length > 4096 || /[\0\n$`]/.test(t)) continue
-      if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
-        if (home) out.add(resolveLike(home, t.slice(2) || '.'))
-      } else if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')) out.add(resolveLike('/', t))
-      else if (/(^|[\\/])\.\.([\\/]|$)/.test(t)) out.add(resolveLike(cwd, t))
-      if (out.size >= 64) return [...out]
+    const eq = word.startsWith('-') ? word.indexOf('=') : -1
+    let t = eq >= 0 ? word.slice(eq + 1) : word
+    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
+    for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
+      if (t === v || (t.startsWith(v) && isSep(t[v.length]))) {
+        if (val === undefined) over = true
+        t = `${val ?? ''}${t.slice(v.length)}`
+        break
+      }
+    }
+    const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
+    if (!pathLike) continue
+    if (t.includes('$') || t.includes('`')) {
+      over = true
+      continue
+    }
+    let p: string
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) {
+        over = true
+        continue
+      }
+      p = resolveLike(home, t.slice(2) || '.')
+    } else p = resolveLike(cwd, t)
+    // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
+    const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    const name = p.slice(last + 1)
+    const folder = name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
+    out.add(folder)
+    if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
+  }
+
+  return { paths: [...out], over }
+}
+
+/** Interpreters that run code given as an argument, and terminals that run a command under a pseudo-terminal. */
+const INTERPRETERS = new Set(['python', 'python2', 'python3', 'node', 'nodejs', 'perl', 'ruby', 'deno', 'bun', 'php', 'lua', 'osascript', 'tclsh', 'pwsh', 'powershell'])
+const CODE_FLAGS = new Set(['-c', '-e', '-E', '-p', '-r', '--eval', '--print', '-command', '-Command'])
+const PTY_WRAPPERS = new Set(['script', 'expect', 'unbuffer', 'socat', 'tmux', 'screen', 'pty', 'zpty', 'winpty'])
+
+/** Whether a command runs interpreter code given inline, or anything under a pseudo-terminal wrapper (by its words: linear). */
+export function hidesCommand(command: string): 'interpreter' | 'pty' | null {
+  const words = shellTokens(command)
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string
+    let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase()
+    if (base.endsWith('.exe')) base = base.slice(0, -4)
+    // python3.12, node22: the name without its version (a loop, not a regex over the word).
+    let end = base.length
+    while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+    const bare = base.slice(0, end)
+    if (PTY_WRAPPERS.has(base) || PTY_WRAPPERS.has(bare)) return 'pty'
+    if (INTERPRETERS.has(base) || INTERPRETERS.has(bare)) {
+      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) if (CODE_FLAGS.has(words[j] as string)) return 'interpreter'
     }
   }
 
-  return [...out]
+  return null
 }
+
 
 
 /**
@@ -2043,11 +2097,22 @@ export function toolPaths(input: unknown, cwd?: string, home?: string): string[]
     // A relative search root (Grep, Glob) is relative to where the session is now.
     else if (cwd) out.push(v === '~' || v.startsWith('~/') ? (home ? resolveLike(home, v.slice(2) || '.') : v) : resolveLike(cwd, v))
   }
-  // A shell command's paths: absolute, ~ and .. ones (best effort, see shellPaths).
-  const tool = String(e.tool ?? '')
-  if ((tool === 'Bash' || tool === 'PowerShell') && typeof e.command === 'string' && cwd) out.push(...shellPaths(e.command, cwd, home))
-
   return out
+}
+
+/** toolPaths, plus a shell command's folders (shellPaths) and whether any couldn't be resolved or were too many (`over`: private). */
+export function toolPathsAll(input: unknown, cwd?: string, home?: string): { paths: string[]; over: boolean } {
+  const e = (input ?? {}) as Record<string, unknown>
+  const paths = toolPaths(input, cwd, home)
+  const tool = String(e.tool ?? '')
+  if ((tool === 'Bash' || tool === 'PowerShell') && typeof e.command === 'string') {
+    if (!cwd) return { paths, over: true }
+    const r = shellPaths(e.command, cwd, home)
+
+    return { paths: [...paths, ...r.paths], over: r.over }
+  }
+
+  return { paths, over: false }
 }
 
 /** Whether `path` is `dir` or under it (either separator, case-insensitive on a drive path). */

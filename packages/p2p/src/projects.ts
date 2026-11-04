@@ -19,7 +19,7 @@
 //  - `p2p tui` and `p2p send` typed at a terminal with no --from-session are the person's own
 //    session: never bound, no ceiling.
 
-import { execFileSync } from "node:child_process";
+import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
@@ -436,7 +436,7 @@ export async function bindSession(
   app: App,
   sid: string,
   dirs: readonly string[],
-  o: { person?: boolean; over?: boolean; constraint?: ProjectShare } = {},
+  o: { person?: boolean; over?: boolean; constraint?: ProjectShare; inbound?: boolean } = {},
 ): Promise<SessionBinding | undefined> {
   if (sid === PERSON_SESSION) {
     if (o.person) return undefined;
@@ -448,13 +448,21 @@ export async function bindSession(
     const r = projectOf(d);
     refs.set(r.id, r);
   }
-  const front = personTokenOk(app.env, app.home);
-  const agent = !front && agentContext(app.env);
+  // Who may speak for a session (statuses, sends): its front end (the person token), or, for a session
+  // no front end registered, a caller outside any agent's session. An agent's own shell never may.
+  const front = app.front === true;
+  if (!o.inbound && !front && agentContext(app.env)) {
+    throw new CliError("refused", `session ${sid}: inside an agent's session only its front end speaks for a session (the Claude mod's SendMessage, the Codex bridge's p2p_send), never the shell`);
+  }
   const now = Date.now();
   return app.state.update("sessionProjects", (cur) => {
     const all = { ...((cur as SessionProjectsDoc | undefined) ?? {}) };
     for (const [k, v] of Object.entries(all)) if (!v || typeof v.at !== "number" || now - v.at > SESSION_BINDING_TTL_MS) delete all[k];
     const have: SessionBinding | undefined = all[sid];
+    // A session a front end registered is that front end's: nobody else acts on it, not even to narrow it.
+    if (!o.inbound && !front && have?.registered) {
+      throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
+    }
     const projects = { ...(have?.projects ?? {}) };
     let over = have?.over === true || o.over === true;
     for (const r of refs.values()) {
@@ -472,8 +480,7 @@ export async function bindSession(
       else constraints.push(o.constraint);
     }
     const registered = front || have?.registered === true;
-    // An agent's first use of a session nobody registered: private (until a front end registers it).
-    const unregistered = !registered && (have?.unregistered === true || (agent && !have));
+    const unregistered = !registered && have?.unregistered === true;
     const next: SessionBinding = {
       projects,
       ...(over ? { over: true as const } : {}),
@@ -489,87 +496,69 @@ export async function bindSession(
 // ---------------------------------------------------------------------------
 // Who is calling: the person's front end, or an agent
 
-/** Codex variables a person's own shell may carry too (not a sign of an agent's tool call). */
-const PERSON_CODEX_VARS = new Set(["CODEX_HOME"]);
+/**
+ * The variables Claude Code and Codex set in the commands their agents run (an allow-list, from
+ * their documentation and source: docs/security/threat-model.md "Project boundaries"). Variables a
+ * person sets in their own shell (CODEX_HOME, CODEX_API_KEY, CODEX_PROFILE) never count.
+ */
+export const AGENT_ENV_VARS: readonly string[] = [
+  // Claude Code (code.claude.com/docs/en/env-vars): its Bash, PowerShell and Monitor tools, hooks.
+  "CLAUDECODE",
+  "CLAUDE_CODE_CHILD_SESSION",
+  // Codex (openai/codex codex-rs core/src/unified_exec/process_manager.rs, exec_env.rs, sandboxing/mod.rs):
+  // every model tool call, the sandbox markers, and the thread (its user `!` shell sets the last two too).
+  "CODEX_TOOL_CALL_ID",
+  "CODEX_CI",
+  "CODEX_SANDBOX",
+  "CODEX_SANDBOX_NETWORK_DISABLED",
+  "CODEX_THREAD_ID",
+  "CODEX_SESSION_ID",
+];
 
-/** Whether the environment says this runs inside an agent's tool call (Claude Code or Codex set these). */
+/** Whether the environment says this runs inside an agent's tool call. */
 export function agentEnv(env: Record<string, string | undefined> | undefined): boolean {
   if (!env) return false;
-  if (env.CLAUDECODE || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID) return true;
-  return Object.keys(env).some((k) => k.startsWith("CODEX_") && !PERSON_CODEX_VARS.has(k) && (env[k] ?? "") !== "");
+  return AGENT_ENV_VARS.some((k) => (env[k] ?? "") !== "");
 }
 
-let ancestryCache: boolean | undefined;
-
-/**
- * Tests only: what agentAncestor answers in this process (the suites may themselves run inside an
- * agent's session). In-process state, never an environment variable or a flag: a child `p2p`
- * process an agent starts still walks its own ancestry.
- */
-export function setAgentAncestorForTests(v: boolean | undefined): void {
-  ancestryCache = v;
-}
-
-/**
- * Whether a Claude Code or Codex process is an ancestor of this one (environment variables can be
- * scrubbed; the process tree can't be, by the agent). Unix: `ps`, walking parent ids. Elsewhere,
- * or when `ps` can't answer: false (callers that widen sharing also check agentEnv and the token).
- */
-export function agentAncestor(): boolean {
-  if (ancestryCache !== undefined) return ancestryCache;
-  ancestryCache = false;
-  if (process.platform === "win32") return false;
-  try {
-    let pid = process.ppid;
-    for (let i = 0; i < 64 && pid > 1; i++) {
-      const line = execFileSync("ps", ["-o", "ppid=,args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
-      const m = /^(\d+)\s+(.*)$/s.exec(line);
-      if (!m) break;
-      if (isAgentProcess(m[2])) {
-        ancestryCache = true;
-        break;
-      }
-      pid = Number(m[1]);
-    }
-  } catch {
-    // ps unavailable: unknown
-  }
-  return ancestryCache;
-}
-
-/** A process command line that is Claude Code or Codex (their binaries, or their npm packages under node). */
-export function isAgentProcess(args: string): boolean {
-  const words = args.split(/\s+/).slice(0, 4);
-  for (const w of words) {
-    const base = (w.split(/[\\/]/).pop() ?? "").toLowerCase();
-    if (base === "claude" || base === "codex" || base === "claude.exe" || base === "codex.exe") return true;
-  }
-  return /@anthropic-ai\/claude-code|@openai\/codex/.test(args);
-}
-
-/** Whether this call runs on an agent's behalf: its environment, or its process ancestry. */
+/** Whether this call runs on an agent's behalf: its environment, or a Claude Code or Codex ancestor (ancestry.ts). */
 export function agentContext(env: Record<string, string | undefined> | undefined): boolean {
   return agentEnv(env) || agentAncestor();
 }
+
+export { isAgentProcess };
 
 /** `<home>/cli/person.key`: a random secret the person's front ends (the Claude mod, the Codex bridge) pass back as P2P_PERSON_TOKEN. */
 export function personTokenFile(home: string): string {
   return join(home, "cli", "person.key");
 }
 
-/** The person token, made on first use (0600, in the CLI's own folder, which the mod's guards keep from the model). */
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/** The person token, made once (exclusively, 0600, in the CLI's own folder, which the mod's guards keep from the model). */
 export function personToken(home: string): string {
   const f = personTokenFile(home);
-  try {
-    const t = readFileSync(f, "utf8").trim();
-    if (/^[A-Za-z0-9_-]{43}$/.test(t)) return t;
-  } catch {
-    // none yet
-  }
+  const read = () => {
+    try {
+      const t = readFileSync(f, "utf8").trim();
+      return TOKEN_RE.test(t) ? t : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const have = read();
+  if (have) return have;
   mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
   const t = randomBytes(32).toString("base64url");
-  writeFileSync(f, t, { mode: 0o600 });
-  return t;
+  try {
+    writeFileSync(f, t, { mode: 0o600, flag: "wx" });
+    return t;
+  } catch {
+    // Made meanwhile by another process (or a file in the way): that one, if it is a token.
+    const again = read();
+    if (again) return again;
+    throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
+  }
 }
 
 /** Whether P2P_PERSON_TOKEN is this home's person token (read only: a missing file is no match). */
@@ -588,23 +577,41 @@ export function personTokenOk(env: Record<string, string | undefined> | undefine
 }
 
 /**
- * Refuses a command that widens who reaches this user (sharing a project, a session, a default
- * circle, invites, joins, trust, friends) when an agent runs it: its environment, or a Claude Code
- * or Codex ancestor, and no person token from the person's front end. Reads are never refused.
+ * Checks the person token once, at the start of a command, and takes it out of the environment
+ * (this object and the process's), so no child (git, ix, an extension's tool) ever inherits it.
  */
-export function assertPersonForWidening(env: Record<string, string | undefined> | undefined, home: string | undefined, what: string): void {
-  if (personTokenOk(env, home)) return;
-  if (agentContext(env)) {
+export function takePersonToken(env: Record<string, string | undefined>, home: string | undefined): boolean {
+  const ok = personTokenOk(env, home);
+  delete env.P2P_PERSON_TOKEN;
+  delete process.env.P2P_PERSON_TOKEN;
+  return ok;
+}
+
+/** The person's confirmation on their own terminal (tty-confirm.ts), or a test's stand-in. */
+export type ConfirmTty = (question: string) => Promise<boolean>;
+
+/**
+ * Lets a command that widens who reaches this user (sharing a project, a session, a default
+ * circle, invites, joins, trust, friends) run only for the person: their front end's token; or,
+ * outside any agent's session, their "yes" typed on the controlling terminal (never stdin, never a
+ * flag: a process detached from every terminal can't give it). Reads are never asked.
+ */
+export async function assertPersonForWidening(app: Pick<App, "env"> & { front?: boolean }, what: string, confirm: ConfirmTty): Promise<void> {
+  if (app.front === true) return;
+  if (agentContext(app.env)) {
     throw new CliError(
       "refused",
       `\`p2p ${what}\` changes who reaches you, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`,
     );
   }
+  if (!(await confirm(`p2p ${what} changes who reaches you.`))) {
+    throw new CliError("refused", `\`p2p ${what}\` changes who reaches you: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
+  }
 }
 
-/** Whether a person-only path (session `tui`) may run here: the person's front end, or no agent in sight. */
-export function personHere(env: Record<string, string | undefined> | undefined, home: string | undefined): boolean {
-  return personTokenOk(env, home) || !agentContext(env);
+/** Whether a person-only path (session `tui`) may run here: the person's front end, or no agent in sight (then a terminal "yes" too). */
+export function personHere(app: Pick<App, "env"> & { front?: boolean }): boolean {
+  return app.front === true || !agentContext(app.env);
 }
 
 export async function sessionBinding(app: App, sid: string): Promise<SessionBinding | undefined> {

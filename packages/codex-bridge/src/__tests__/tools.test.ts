@@ -244,6 +244,14 @@ describe("hooks: delivery, turn caps, status", () => {
     expect(atPrompt.hookSpecificOutput?.additionalContext ?? "").not.toContain("p2p_status");
   });
 
+  it("past the bridge's folder cap the CLI is told the session is private, never the first 512 (M1)", async () => {
+    const { bridge, world } = await makeBridge();
+    bridge.noteTouched(Array.from({ length: 600 }, (_, i) => `/many/d${i}`));
+    await bridge.settled();
+    expect(bridge.isDirsOver).toBe(true);
+    expect(world.statuses().at(-1)?.argv).toContain("--project-dirs-over");
+  });
+
   it("status and p2p_send carry every folder the session has worked in (projects.ts binds each one's project)", async () => {
     const { bridge, world } = await makeBridge();
     await bridge.setCwd("/elsewhere/secret");

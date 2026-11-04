@@ -54,7 +54,7 @@ Each project has a **policy**, kept only on your device (in `P2P_HOME`, never sy
 - **shared** with circles you joined and friends you name, or
 - **private**: only your own devices see its sessions. **A project you never shared is private.**
 
-`p2p project share [<circle>…] [--person <friend>]…`, `p2p project private`, `p2p project ls` and `p2p project show` change and show it, run in the repository (or with `--dir`). On a terminal `share` with nothing named opens a picker; off one it shares the project with your default circle. In Claude Code it's `/peers project …`, typed by you: the model can't run it, nor `p2p project share|private` from its shell. Every command takes `--json`.
+`p2p project share [<circle>…] [--person <friend>]…`, `p2p project private`, `p2p project ls` and `p2p project show` change and show it, run in the repository (or with `--dir`). On a terminal `share` with nothing named opens a picker; off one it shares the project with your default circle. In Claude Code it's `/peers project …`, typed by you: the model's own `/peers project share` and `p2p project share|private` from its shell are refused (best effort: see below). Every command takes `--json`.
 
 **What a project decides.** A session's audience comes from its projects' policies:
 
@@ -68,7 +68,11 @@ Each project has a **policy**, kept only on your device (in `P2P_HOME`, never sy
 
 **Repositories can only ask for more privacy.** Nothing committed in a repository can share it: a cloned repository that carries a file claiming "shared with circle X" changes nothing. A `.p2p-private` file at a repository's top level makes it private whatever your policy says, and `p2p project share` refuses it.
 
-**Who may widen it.** Only the person. `project share`, `circle default`, `session roster --add/--circle`, invites, joins, trust and friend changes are refused inside an agent's session (its environment, or a Claude Code or Codex ancestor), unless the person's front end (the mod's typed `/peers`, the Codex bridge) passes its token from `P2P_HOME/cli/person.key`. A session id an agent makes up starts private until a front end registers it. Between your own sessions, a message carries the sending session's bound, and the receiving session takes it on (so a private session can't hand its secrets to a shared one of yours).
+**Who may widen it.** Only the person:
+- **Widening commands:** `project share`, `circle default`, `session roster --add/--circle`, invites, joins, trust and friend changes run only with the person's front end's token (`P2P_HOME/cli/person.key`, passed by the mod's typed `/peers` and the Codex bridge), or, outside any agent's session, after the person types `yes` on their controlling terminal (never stdin, never a flag). Scripts and CI that act as you pass the token.
+- **Sending:** inside an agent's session, the shell can't send or post statuses at all: only the session's front end can. A session a front end registered is that front end's alone.
+
+These checks are best effort against an agent with your shell; [sandbox your agents](security/threat-model.md#the-hard-barrier-sandbox-your-agents) for a hard barrier. Between your own sessions, a message carries the sending session's bound, and the receiving session takes it on (so a private session can't hand its secrets to a shared one of yours).
 
 **Your own terminal.** `p2p tui`, and `p2p send` typed at a terminal with no `--from-session`, send as you (session `tui`). They cross no project boundary, and say which one the folder you're in has. A script or an agent naming session `tui` is refused.
 

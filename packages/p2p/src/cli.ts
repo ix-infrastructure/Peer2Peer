@@ -29,6 +29,7 @@ import { receiving } from "./inbound.js";
 import * as rotation from "./rotation.js";
 import * as sessions from "./sessions.js";
 import * as projects from "./projects.js";
+import { confirmOnTty } from "./tty-confirm.js";
 import * as social from "./social.js";
 import { watch } from "./watch.js";
 import * as doctorOps from "./doctor.js";
@@ -72,6 +73,10 @@ export interface ProgramDeps {
   isTTY?: boolean;
   /** `--no-input` (anywhere on the command line): no pickers and no questions, as in a script. */
   noInput?: boolean;
+  /** The person token was valid (main() checks it once and removes it from the environment: projects.ts). */
+  front?: boolean;
+  /** The person's "yes" on their controlling terminal (tty-confirm.ts; tests stand in). */
+  confirmTty?: projects.ConfirmTty;
 }
 
 interface Output {
@@ -109,6 +114,7 @@ const posInt = (name: string) => (v: string) => {
 
 export function buildProgram(deps: ProgramDeps): Command {
   const ops: Ops = { ...realOps, ...deps.ops } as Ops;
+  const confirmTty: projects.ConfirmTty = deps.confirmTty ?? confirmOnTty;
   // review M2: every diagnostic goes through safeTerminal; human stdout too (below); JSON through safeJson.
   // Time spent waiting on the user (prompts, stdin) doesn't count against the command deadline.
   let waitingOnUser = 0;
@@ -140,6 +146,7 @@ export function buildProgram(deps: ProgramDeps): Command {
   const makeApp = (env: Env, i: Io, o?: { readOnly?: boolean }): App => {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
+    app.front = deps.front === true;
     return app;
   };
   const program = new Command("p2p")
@@ -164,7 +171,7 @@ export function buildProgram(deps: ProgramDeps): Command {
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
         // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
         const widening = wideningOf(cmd);
-        if (widening) projects.assertPersonForWidening(app.env, app.home, widening);
+        if (widening) await projects.assertPersonForWidening(app, widening, confirmTty);
         if (opts.requireIdentity !== false) await app.load(true);
         // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
         if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
@@ -1248,8 +1255,9 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--notify-when-idle", "Tell this session when the target next goes idle")
     .option("--stdin", "Read the text from stdin (also: a single `-` as the text)")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect)
+    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
     .option("--json", "JSON output")
-    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[] }, cmd: Command) => {
+    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }, cmd: Command) => {
       // Without a picker these stay required, with commander's own error (as before they were requiredOption).
       if (!canAsk(cmd)) {
         if (o.fromSession === undefined) cmd.error("error: required option '--from-session <sid>' not specified", { code: "commander.missingMandatoryOptionValue" });
@@ -1257,7 +1265,7 @@ export function buildProgram(deps: ProgramDeps): Command {
       }
       return (sendAction as (...a: unknown[]) => Promise<void>)(text, o, cmd);
     });
-  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[] }) => {
+  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }) => {
         if (o.to === undefined) {
           await app.connectAndDrain().catch(() => undefined);
           const peers = await ops.listPeers(app, { all: true });
@@ -1272,9 +1280,16 @@ export function buildProgram(deps: ProgramDeps): Command {
         // The person's own session (projects.ts): only from a terminal. Named by a script or an agent, it is refused.
         // And never from inside an agent's session (its environment, or a Claude Code or Codex ancestor),
         // even under a pseudo-terminal: only the person's own terminal, or their front end's token.
-        const personOk = projects.personHere(app.env, app.home);
+        const personOk = projects.personHere(app);
         if (fromTui && !personOk) throw new CliError("refused", "`p2p send` with no --from-session sends as you, from your own terminal; inside an agent's session, send from that session (--from-session)");
         const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o)) && personOk;
+        // Without the front end's token, the person confirms on their own terminal: a send as them, or the
+        // first send from a session nobody has used yet (a process detached from every terminal can't).
+        if (!app.front && (person || fromTui || !(await ops.sessionBinding(app, o.fromSession!).catch(() => undefined)))) {
+          if (!(await confirmTty(`p2p send from session ${o.fromSession} to ${o.to}.`))) {
+            throw new CliError("refused", "this send needs your \"yes\" on your own terminal (read from the terminal itself, never stdin or a flag)");
+          }
+        }
         if (text.length === 0 && !o.stdin && !o.notifyWhenIdle && io.prompt) {
           text = [(await io.prompt("Message: ")).trim()];
           if (text[0] === "") throw new CliError("cancelled", "no message: nothing was sent");
@@ -1299,7 +1314,7 @@ export function buildProgram(deps: ProgramDeps): Command {
           const s = await ops.sendSharing(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle });
           r = s.result;
           if (s.shared) shared = `shared session tui with ${s.shared.address}\n`;
-        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(person ? { person: true } : {}) });
+        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}), ...(person ? { person: true } : {}) });
         const tail = r.notifyWhenIdle ? `; will notify when ${r.to.address} [${r.to.ref}] is idle` : "";
         const where = r.to.own === r.to.userId ? `${r.to.address} [${r.to.ref}]` : `${r.to.address} (in your session ${r.to.sid})`;
         const ago = (ms: number) => {
@@ -1361,9 +1376,10 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--cap <cap>", "Something this session's client understands, e.g. agents.v1 (repeatable)", collect)
     .option("--agents-json <json>", "The session's subagents as a JSON array (`-` reads it from stdin); sent only to peers that understand agents.v1")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who sees it", collect)
+    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
     .option("--json", "JSON output")
     .action(
-      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string; projectDir?: string[] }) => {
+      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string; projectDir?: string[]; projectDirsOver?: boolean }) => {
         let agents: unknown;
         if (o.agentsJson !== undefined) {
           const text = o.agentsJson === "-" ? (io.readStdin ? await io.readStdin() : "") : o.agentsJson;
@@ -1374,7 +1390,7 @@ export function buildProgram(deps: ProgramDeps): Command {
             throw new CliError("usage", "--agents-json must be a JSON array of agents");
           }
         }
-        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...(o.projectDir ? { projectDirs: o.projectDir } : {}) });
+        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}) });
         for (const w of r.warnings ?? []) io.err(`p2p: ${w}`);
         const n = r.delivered.length;
         return {
@@ -1491,6 +1507,24 @@ export function buildProgram(deps: ProgramDeps): Command {
       }),
     );
 
+  session
+    .command("bound <sid>")
+    .description("Bind a session to the bound an own-session message it took carried (front ends call it on Deliver; narrowing only)")
+    .requiredOption("--bound <json>", '"private" or {"circles": [...], "people": [...]}, as the message carried it')
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, sid: string, o: { bound: string }) => {
+        let v: unknown;
+        try {
+          v = JSON.parse(o.bound);
+        } catch {
+          throw new CliError("usage", "--bound must be JSON");
+        }
+        const r = await ops.bindBound(app, sid, v);
+        return { json: { project: r }, human: `session ${sid}: ${r.policy}${r.why ? ` (${r.why})` : ""}` };
+      }),
+    );
+
   program
     .command("doctor [user]")
     .description("Explain why sessions are or aren't visible: this device's identity, relays, clock, circle and sharing, or (with a user) whether you can see them")
@@ -1561,7 +1595,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--session <sid>", "This TUI's session id (default: tui)")
     .action(async (o: { session?: string }) => {
       process.exitCode = await tuiCommand(
-        { env: deps.env, io, version: VERSION, makeApp: (env, i) => makeApp(env, i), ...(deps.isTTY !== undefined ? { isTTY: deps.isTTY } : {}), ...(deps.terminal ? { terminal: deps.terminal } : {}), ...(deps.signal ? { signal: deps.signal } : {}) },
+        { env: deps.env, io, version: VERSION, makeApp: (env, i) => makeApp(env, i), front: deps.front === true, ...(deps.isTTY !== undefined ? { isTTY: deps.isTTY } : {}), ...(deps.terminal ? { terminal: deps.terminal } : {}), ...(deps.signal ? { signal: deps.signal } : {}) },
         o,
       );
     });
@@ -1735,6 +1769,15 @@ async function loadInstalled(deps: ProgramDeps): Promise<ExtensionRegistry> {
 
 /** Parses and runs; returns the exit code. */
 export async function main(argvIn: string[], deps: ProgramDeps): Promise<number> {
+  // The person token: checked once, then taken out of the environment before anything runs, so no
+  // child process (git, ix, an extension's tool) can read it (projects.ts).
+  {
+    // A copy without it (an embedder's object is left as it was); the process's own environment loses it too.
+    const env = { ...deps.env };
+    const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
+    if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
+    deps = { ...deps, front, env };
+  }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
   const end = argvIn.indexOf("--");
   const head = end < 0 ? argvIn : argvIn.slice(0, end);

@@ -189,7 +189,10 @@ export class User {
   /** An App on this home (for flows driven programmatically, e.g. linking). */
   async app(): Promise<App> {
     const lines = { out: [] as string[], err: [] as string[] };
-    return new App({ env: this.env, io: this.io(lines) });
+    const app = new App({ env: this.env, io: this.io(lines) });
+    // These users are their own front end (their token): an App made here speaks for their sessions.
+    app.front = true;
+    return app;
   }
 
   cleanup(): void {

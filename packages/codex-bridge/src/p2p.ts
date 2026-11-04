@@ -109,19 +109,20 @@ export class P2P {
    * This session's status. Never a mode: what this session auto-approves is nobody else's business.
    * `projectDirs`: every folder the session has worked in (projects.ts binds each one's project).
    */
-  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[] }, timeoutMs?: number) {
+  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[]; projectDirsOver?: boolean }, timeoutMs?: number) {
     const args = ["status", `--session=${o.session}`, `--state=${o.state}`, `--label=${o.label}`];
     if (o.repo) args.push(`--repo=${o.repo}`);
     if (o.branch) args.push(`--branch=${o.branch}`);
     if (o.summary) args.push(`--summary=${o.summary}`);
     for (const file of o.files ?? []) args.push(`--file=${file}`);
     for (const dir of o.projectDirs ?? []) args.push(`--project-dir=${dir}`);
+    if (o.projectDirsOver) args.push("--project-dirs-over");
     return this.call<{ delivered: unknown[]; failed: { address: string; error: string }[]; roster?: RosterView; warnings?: string[]; project?: ProjectInfo }>(args, timeoutMs !== undefined ? { timeoutMs } : {});
   }
 
   /** A message from this session; refused (`not_shared`) to anyone its projects don't share (projects.ts). */
-  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[] }): Promise<Outcome<SendResult>> {
-    const dirs = (o.projectDirs ?? []).map((d) => `--project-dir=${d}`);
+  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[]; projectDirsOver?: boolean }): Promise<Outcome<SendResult>> {
+    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...(o.projectDirsOver ? ["--project-dirs-over"] : [])];
     return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
   }
 

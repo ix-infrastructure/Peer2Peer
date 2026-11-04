@@ -755,7 +755,8 @@ export function editedFiles(toolName: string, input: unknown): string[] {
  * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
  * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
  * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
- * (`$X`, `$(…)`, backticks) stay as text. Best effort: no aliases, no globbing.
+ * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
  */
 export function shellTokens(command: string): string[] {
   const out: string[] = [];
@@ -767,7 +768,7 @@ export function shellTokens(command: string): string[] {
     cur = '';
     has = false;
   }
-  for (let i = 0; i < command.length && out.length < 4096; i++) {
+  for (let i = 0; i < command.length; i++) {
     const c = command[i] as string;
     if (q === "'") {
       if (c === "'") q = ''
@@ -793,7 +794,7 @@ export function shellTokens(command: string): string[] {
       if (i + 1 < command.length && command[i + 1] !== '\n') {
         cur += command[++i];
         has = true;
-      } else i++;
+      } else i++
 
       continue;
     }
@@ -810,37 +811,36 @@ export function shellTokens(command: string): string[] {
 
       continue;
     }
-    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
-      push()
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
+      push();
 
       continue;
     }
     cur += c;
     has = true;
   }
-  push()
+  push();
 
   return out;
 }
 
 /** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. Linear: no regex over the input. */
 export function resolveLike(cwd: string, p: string): string {
-  const isSep = (c: string | undefined) => c === "/" || c === "\\";
-  const drive = (s: string) => s.length >= 3 && /[A-Za-z]/.test(s[0] as string) && s[1] === ":" && isSep(s[2]);
-  const unc = (s: string) => s.startsWith("\\\\");
-  const abs = p.startsWith("/") || drive(p) || unc(p);
-  const win = drive(p) || unc(p) || (!p.startsWith("/") && (drive(cwd) || unc(cwd)));
-  const sep = win ? "\\" : "/";
+  const isSep = (c: string | undefined) => c === '/' || c === '\\';
+  const drive = (s: string) => s.length >= 3 && /[A-Za-z]/.test(s[0] as string) && s[1] === ':' && isSep(s[2]);
+  const unc = (s: string) => s.startsWith('\\\\');
+  const abs = p.startsWith('/') || drive(p) || unc(p);
+  const win = drive(p) || unc(p) || (!p.startsWith('/') && (drive(cwd) || unc(cwd)));
+  const sep = win ? '\\' : '/';
   let base = cwd;
   while (base.length > 1 && isSep(base[base.length - 1])) base = base.slice(0, -1)
   const full = abs ? p : `${base}${sep}${p}`;
-  let prefix = "";
+  let prefix = '';
   let rest = full;
   if (drive(full)) {
     prefix = full.slice(0, 2);
     rest = full.slice(2);
   } else if (unc(full)) {
-    // \\server\share
     let i = 2;
     let parts = 0;
     while (i < full.length && parts < 2) {
@@ -851,11 +851,11 @@ export function resolveLike(cwd: string, p: string): string {
     rest = full.slice(i);
   }
   const out: string[] = [];
-  let seg = "";
+  let seg = '';
   const flush = () => {
-    if (seg === "..") out.pop()
-    else if (seg !== "" && seg !== ".") out.push(seg)
-    seg = "";
+    if (seg === '..') out.pop()
+    else if (seg !== '' && seg !== '.') out.push(seg)
+    seg = '';
   }
   for (const c of rest) {
     if (isSep(c)) flush()
@@ -866,27 +866,86 @@ export function resolveLike(cwd: string, p: string): string {
   return `${prefix}${sep}${out.join(sep)}`;
 }
 
+/** At most this many folders one command may name; past it the session is private (`over`). */
+export const MAX_COMMAND_PATHS = 256;
+
 /**
- * Paths a shell command names that may lie outside its folder: absolute ones, `~` ones, and any
- * with a `..` segment, each resolved (against `cwd`, `~` against `home`). An option's value
- * (`--file=/x`) counts. Best effort: a path built at run time (`$X/y`, `$(…)`, an encoded one) is
- * not seen; the CLI still binds the shell's own folder when that shell runs p2p.
+ * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
+ * against `cwd`, a file to its folder, `$HOME`/`${HOME}` and `$PWD`/`${PWD}` expanded). A path
+ * built any other way (`$X/y`, `$(…)`, backticks) can't be resolved, so the session is `over`
+ * (private), and so it is past MAX_COMMAND_PATHS. URLs are not paths.
  */
-export function shellPaths(command: string, cwd: string, home?: string): string[] {
+export function shellPaths(command: string, cwd: string, home?: string): { paths: string[]; over: boolean } {
   const out = new Set<string>();
+  let over = false;
+  const isSep = (c: string | undefined) => c === '/' || c === '\\';
   for (const word of shellTokens(command)) {
-    for (const t of [word, word.includes('=') ? word.slice(word.lastIndexOf('=') + 1) : '']) {
-      if (t === '' || t.length > 4096 || /[\0\n$`]/.test(t)) continue
-      if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
-        if (home) out.add(resolveLike(home, t.slice(2) || '.'))
-      } else if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')) out.add(resolveLike('/', t))
-      else if (/(^|[\\/])\.\.([\\/]|$)/.test(t)) out.add(resolveLike(cwd, t))
-      if (out.size >= 64) return [...out]
+    const eq = word.startsWith('-') ? word.indexOf('=') : -1;
+    let t = eq >= 0 ? word.slice(eq + 1) : word;
+    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
+    for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
+      if (t === v || (t.startsWith(v) && isSep(t[v.length]))) {
+        if (val === undefined) over = true
+        t = `${val ?? ''}${t.slice(v.length)}`;
+        break;
+      }
     }
+    const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\');
+    if (!pathLike) continue
+    if (t.includes('$') || t.includes('`')) {
+      over = true;
+      continue;
+    }
+    let p: string;
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) {
+        over = true;
+        continue;
+      }
+      p = resolveLike(home, t.slice(2) || '.');
+    } else p = resolveLike(cwd, t)
+    // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
+    const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    const name = p.slice(last + 1);
+    const folder = name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p;
+    out.add(folder);
+    if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
   }
-  return [...out];
+
+  return { paths: [...out], over }
 }
 
+/** Interpreters that run code given as an argument, and terminals that run a command under a pseudo-terminal. */
+const INTERPRETERS = new Set(['python', 'python2', 'python3', 'node', 'nodejs', 'perl', 'ruby', 'deno', 'bun', 'php', 'lua', 'osascript', 'tclsh', 'pwsh', 'powershell']);
+const CODE_FLAGS = new Set(['-c', '-e', '-E', '-p', '-r', '--eval', '--print', '-command', '-Command']);
+const PTY_WRAPPERS = new Set(['script', 'expect', 'unbuffer', 'socat', 'tmux', 'screen', 'pty', 'zpty', 'winpty']);
+
+/** Whether a command runs interpreter code given inline, or anything under a pseudo-terminal wrapper (by its words: linear). */
+export function hidesCommand(command: string): 'interpreter' | 'pty' | null {
+  const words = shellTokens(command);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string;
+    let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase();
+    if (base.endsWith('.exe')) base = base.slice(0, -4)
+    // python3.12, node22: the name without its version (a loop, not a regex over the word).
+    let end = base.length;
+    while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+    const bare = base.slice(0, end);
+    if (PTY_WRAPPERS.has(base) || PTY_WRAPPERS.has(bare)) return 'pty'
+    if (INTERPRETERS.has(base) || INTERPRETERS.has(bare)) {
+      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) if (CODE_FLAGS.has(words[j] as string)) return 'interpreter'
+    }
+  }
+
+  return null;
+}
+
+
+
+
+/** Commands naming p2p longer than this are refused unread. */
+export const MAX_GUARDED_COMMAND = 16 * 1024;
 
 /** Whether a command line names the p2p CLI (as a word, a path ending in it, the bundle or its variables). */
 export function namesP2PCli(command: string): boolean {
@@ -901,8 +960,11 @@ export function namesP2PCli(command: string): boolean {
 export function boundaryRefusal(command: string, ownSid: string | undefined): string | null {
   if (/project["'\s,\]]+share/.test(command) && /p2p|peer2peer/i.test(command)) return "`p2p project share` decides who sees your user's projects: only they run it, in their own terminal";
   if (!namesP2PCli(command)) return null;
-  if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun|php|lua|osascript|tclsh)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|r|-eval|-print|-command)\b/.test(command)) return "interpreter code that runs p2p can't be checked";
-  if (/(?:^|[\s;&|(/])(?:script|expect|unbuffer|socat|tmux|screen|pty|zpty|winpty)(?:\.exe)?(?=$|[\s;&|)])/.test(command)) return "p2p under a pseudo-terminal can't be checked";
+  // Too long to check quickly: refused when it names p2p (the hook must never stall or guess).
+  if (command.length > MAX_GUARDED_COMMAND) return "a command too long to check names p2p";
+  const hidden = hidesCommand(command);
+  if (hidden === "interpreter") return "interpreter code that runs p2p can't be checked";
+  if (hidden === "pty") return "p2p under a pseudo-terminal can't be checked";
   const words = shellTokens(command);
   for (let i = 0; i < words.length; i++) {
     const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");

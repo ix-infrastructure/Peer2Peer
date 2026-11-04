@@ -76,7 +76,7 @@ import {
   p2pSessionArgs,
   PROJECT_NOTICE_RE,
   routableOf,
-  toolPaths,
+  toolPathsAll,
   parsePeersArgs,
   pathBasename,
   PEERS_USAGE,
@@ -185,7 +185,12 @@ type Run = {
    * project. A session that touched a private project stays private until it ends.
    */
   projectDirs: Set<string>
-  /** More folders than MAX_RUN_DIRS: the CLI keeps the session private (P2P_PROJECT_DIRS_OVER). */
+  /**
+   * The folders not yet handed to the CLI: the next status or send carries them (P2P_PROJECT_DIRS),
+   * and the CLI keeps them bound for good, so each goes once.
+   */
+  pendingDirs: Set<string>
+  /** Past a cap, or a path that couldn't be resolved: the CLI keeps the session private (P2P_PROJECT_DIRS_OVER). */
   isDirsOver: boolean
   /** The CLI's open-circle notes already shown this run. */
   openCircleNotes: Set<string>
@@ -228,6 +233,8 @@ const newSess = () => ({
   engineSession: undefined as string | undefined,
   /** The person token (`<P2P_HOME>/cli/person.key`): this mod's p2p runs pass it as P2P_PERSON_TOKEN, the model's shell never has it. */
   personToken: undefined as string | undefined,
+  /** This conversation was forked (`claude --resume … --fork-session`): its folders can't be traced, so private. */
+  isForked: false,
   /** Ended by /clear or a resume: the next new session id that appears is this one's. */
   isAwaitingId: false,
   /** Ended for good (exit, logout): dropped. */
@@ -440,7 +447,7 @@ const binOf = async (S: Sess, $: EngineInterface): Promise<string[]> => {
  * directory as the one extension commands treat as the user's (the repo an Ix command looks at),
  * since p2p itself runs from the plugin folder.
  */
-const p2pEnv = (S: Sess, $: EngineInterface): Record<string, string> => {
+const p2pEnv = (S: Sess, $: EngineInterface, dirs: readonly string[] = []): Record<string, string> => {
   const sep = /^[A-Za-z]:[\\/]|\\/.test($.plugin.root) ? ';' : ':'
   const ext = `${$.plugin.root}/ext`
 
@@ -453,8 +460,7 @@ const p2pEnv = (S: Sess, $: EngineInterface): Record<string, string> => {
   // never a variable that happens to be in the environment Claude Code was started from.
   // P2P_EXTENSION_EXCLUDE: p2p itself also drops entries inside the repo, by real path (symlinks included).
   // P2P_MOD_ROOT: lets `p2p doctor` compare itself with the CLI this plugin bundles.
-  // P2P_PROJECT_DIRS: the other folders this run worked in (Run.projectDirs): each binds the session to its project.
-  const dirs = [...(S.run?.projectDirs ?? [])]
+  // P2P_PROJECT_DIRS: the folders this run worked in that the CLI hasn't bound yet (Run.pendingDirs).
   const over = S.run?.isDirsOver === true
 
   return {
@@ -473,7 +479,21 @@ const p2pEnv = (S: Sess, $: EngineInterface): Record<string, string> => {
 const execOf = (S: Sess, $: EngineInterface): Exec => ({
   // Every p2p and node run starts in the plugin's own folder, never the
   // session's (on Windows the current directory is searched first).
-  run: (argv, init) => $.process.run(argv, { cwd: $.plugin.root, env: p2pEnv(S, $), timeoutMs: init?.timeoutMs ?? 30_000, ...(init?.stdin !== undefined ? { stdin: init.stdin } : {}) }),
+  run: async (argv, init) => {
+    // A run that binds (a status, a send, an Ix share) carries the folders not bound yet; once it
+    // succeeds the CLI holds them for good. More than the CLI takes at once: private, never the first N.
+    const run = S.run
+    const binds = argv.some(a => a === 'status' || a === 'send' || a === 'ix')
+    const pending = binds && run ? [...run.pendingDirs] : []
+    if (run && pending.length > MAX_PENDING_DIRS) {
+      run.isDirsOver = true
+      pending.length = 0
+    }
+    const r = await $.process.run(argv, { cwd: $.plugin.root, env: p2pEnv(S, $, pending), timeoutMs: init?.timeoutMs ?? 30_000, ...(init?.stdin !== undefined ? { stdin: init.stdin } : {}) })
+    if (run && pending.length > 0 && r.exitCode === 0) for (const d of pending) run.pendingDirs.delete(d)
+
+    return r
+  },
   // `$.process.spawn` takes no signal and has no kill (ProcessSpawnRequest is
   // argv, cwd, env, input). Per its contract the child dies when the stream's
   // `return()` is called, when the dispatch that started it is abandoned, or
@@ -647,8 +667,10 @@ const myAgents = async (S: Sess, $: EngineInterface) => {
 /** The folder a path names: itself when it is one, else its parent (a file, or one not there yet). */
 const dirOf = (path: string): string => path.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, '') || path
 
-/** At most this many folders a run reports; past it the CLI keeps the session private (fails closed). */
-const MAX_RUN_DIRS = 512
+/** At most this many folders a run keeps (for a resume); past it the session is private (fails closed). */
+const MAX_RUN_DIRS = 4096
+/** At most this many folders one p2p run hands the CLI (its own cap); past it, private. */
+const MAX_PENDING_DIRS = 512
 
 /**
  * Notes every folder (or path) the run worked in, inside its own folder too (a nested repository,
@@ -666,6 +688,7 @@ const noteDirs = (S: Sess, $: EngineInterface, current: Run, dirs: readonly stri
       continue
     }
     current.projectDirs.add(dir)
+    current.pendingDirs.add(dir)
     added = true
   }
   if (added && S.engineSession) bg($.store.set(`${DIRS_PREFIX}${S.engineSession}`, { dirs: [...current.projectDirs], over: current.isDirsOver, at: Date.now() }))
@@ -673,10 +696,22 @@ const noteDirs = (S: Sess, $: EngineInterface, current: Run, dirs: readonly stri
   return added
 }
 
-/** The folders an earlier run of this engine conversation worked in (a resume carries them on; /clear starts a new conversation). */
+/**
+ * The folders an earlier run of this engine conversation worked in (a resume carries them on; /clear
+ * starts a new conversation). A store that can't be read, or a fork (`--fork-session`: a new id, and
+ * the engine names no parent to look under), makes the session private (fails closed).
+ */
 const restoreDirs = async (S: Sess, $: EngineInterface, current: Run) => {
+  if (S.isForked) current.isDirsOver = true
   if (!S.engineSession) return
-  const saved = (await $.store.get(`${DIRS_PREFIX}${S.engineSession}`).catch(() => undefined)) as { dirs?: unknown; over?: unknown } | undefined
+  let saved: { dirs?: unknown; over?: unknown } | undefined
+  try {
+    saved = (await $.store.get(`${DIRS_PREFIX}${S.engineSession}`)) as { dirs?: unknown; over?: unknown } | undefined
+  } catch {
+    current.isDirsOver = true
+
+    return
+  }
   if (!saved || typeof saved !== 'object') return
   if (Array.isArray(saved.dirs)) noteDirs(S, $, current, saved.dirs.filter((x): x is string => typeof x === 'string'))
   if (saved.over === true) current.isDirsOver = true
@@ -1438,6 +1473,14 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
         // Only among the sessions whose projects reach the sender (the CLI's `routable`).
         const pick = await holderOf($, current, routableOf(event as { routable?: unknown }))
         if (pick.holder === current.sid) {
+          // From another session of this user's that has a bound: this session takes it on before holding
+          // its text (the CLI routed it only to sessions already within it; this keeps it so).
+          const bound = (event as { bound?: unknown }).bound
+          if (bound !== undefined) {
+            const r = await (await client(S, $)).sessionBound(current.sid, bound)
+            if (!r.ok) return
+            announce(S, $)
+          }
           $.ui.toast(`${address}: ${firstLine(event.text, 80)}`)
           await hold(S, $, { ...message, why: 'sent to you, not to a session: Deliver picks this one' })
         } else if (pick.holder === undefined && pick.noticeBy === current.sid) {
@@ -1736,7 +1779,7 @@ const startRun = async (S: Sess, $: EngineInterface) => {
   // field is fresh. Kept: which session this is, and its live permission mode (the engine's, not the
   // conversation's; a run still counts as auto-approving until a typed prompt confirms it).
   Object.assign(S, newSess(), { engineSession: S.engineSession, isAwaitingId: S.isAwaitingId, isClosed: S.isClosed, mode: S.mode })
-  const current: Run = { sid: crypto.randomUUID(), label: 'session', files: [], summarySeq: 0, isEnded: false, isOnline: false, timers: [], child: null, announcing: null, isAnnounceQueued: false, stop: new AbortController(), isPrivate: true, projectDirs: new Set(), isDirsOver: false, openCircleNotes: new Set(), codes: new Map(), activeAt: 0, isModeConfirmed: false }
+  const current: Run = { sid: crypto.randomUUID(), label: 'session', files: [], summarySeq: 0, isEnded: false, isOnline: false, timers: [], child: null, announcing: null, isAnnounceQueued: false, stop: new AbortController(), isPrivate: true, projectDirs: new Set(), pendingDirs: new Set(), isDirsOver: false, openCircleNotes: new Set(), codes: new Map(), activeAt: 0, isModeConfirmed: false }
   S.run = current
   S.status = 'idle'
   S.health = freshHealth()
@@ -2747,6 +2790,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const S = await bindSess($, 'start')
     if (!S) return next(e)
+    // A fork gets a new id with no link to its parent (hooks name no parent session): fail closed.
+    S.isForked = (e as { source?: unknown }).source === 'fork'
     const started = await next(e)
     // `/peers` is Claude Code's own name: the mod extends it (command.run and
     // command.describe below) and registers `/peer2peer` as a name of its own.
@@ -2989,11 +3034,16 @@ export const register: Register = on => {
       const input = e as Record<string, unknown>
       // A file's folder; a shell or search path as named (the CLI finds its project, through symlinks too).
       const files = ['file_path', 'notebook_path'].map(k => input[k]).filter((x): x is string => typeof x === 'string')
-      const paths = toolPaths(e, cwd, home).map(x => (files.includes(x) ? dirOf(x) : x))
-      // Every p2p run carries these (P2P_PROJECT_DIRS), so the next status or send binds them; one outside
-      // this session's folder (likely another project) narrows who sees it now.
+      const all = toolPathsAll(e, cwd, home)
+      const paths = all.paths.map(x => (files.includes(x) ? dirOf(x) : x))
+      // A path that couldn't be resolved ($X/y, $(…)) or too many: private from now on.
+      const wasOver = S.run.isDirsOver
+      if (all.over) S.run.isDirsOver = true
+      // The next status or send binds these (P2P_PROJECT_DIRS); one outside this session's folder
+      // (likely another project) narrows who sees it now.
       const before = new Set(S.run.projectDirs)
-      if (noteDirs(S, $, S.run, [cwd, ...paths]) && [...S.run.projectDirs].some(x => !before.has(x) && !(S.sessionDir && isUnder(x, S.sessionDir)))) announce(S, $)
+      const added = noteDirs(S, $, S.run, [cwd, ...paths])
+      if ((S.run.isDirsOver && !wasOver) || (added && [...S.run.projectDirs].some(x => !before.has(x) && !(S.sessionDir && isUnder(x, S.sessionDir))))) announce(S, $)
     }
     if (!S) {
       // The model's share tool needs this session's state (what is shown, who may get it): none, nothing is shared.

@@ -468,6 +468,11 @@ export class P2P {
     return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])
   }
 
+  /** `p2p session bound`: binds this session to the bound an own-session message it holds carried (narrowing only). */
+  sessionBound(sid: string, bound: unknown): Promise<Outcome<Record<string, unknown>>> {
+    return this.call(['session', 'bound', `--bound=${JSON.stringify(bound)}`, '--', sid])
+  }
+
   /** `p2p circle <verb> …` as the person typed it: options stay options, the rest follows `--`. */
   circle(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
     const [verb = '', ...rest] = args

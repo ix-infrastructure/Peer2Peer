@@ -12,7 +12,6 @@ import type { Env } from "../config.js";
 import { CliError, toErrorJson } from "../errors.js";
 import { checkSid } from "../sessions.js";
 import { personHere } from "../projects.js";
-import { resolveHome } from "../config.js";
 import { TtyTerminal, type Terminal } from "./terminal.js";
 import { Tui, TUI_SESSION } from "./tui.js";
 
@@ -25,12 +24,14 @@ export interface TuiCommandDeps {
   /** Tests: a fake terminal. */
   terminal?: Terminal;
   signal?: AbortSignal;
+  /** The person token was valid (cli.ts main). */
+  front?: boolean;
 }
 
 /** Why `p2p tui` won't start here, or undefined. */
-export function tuiRefusal(env: Env, isTTY: boolean): string | undefined {
+export function tuiRefusal(env: Env, isTTY: boolean, front = false): string | undefined {
   // An agent's session: its environment, or (scrubbed) a Claude Code or Codex ancestor (projects.ts).
-  if (env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.CLAUDECODE || !personHere(env, resolveHome(env))) {
+  if (env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.CLAUDECODE || !personHere({ env, front })) {
     return "p2p tui is for you to run in your own terminal, not from an agent's tool call";
   }
   if (!isTTY) return "p2p tui needs an interactive terminal (stdin and stdout); in scripts use `p2p ls`, `p2p held`, `p2p watch`";
@@ -39,7 +40,7 @@ export function tuiRefusal(env: Env, isTTY: boolean): string | undefined {
 
 export async function tuiCommand(d: TuiCommandDeps, o: { session?: string }): Promise<number> {
   const isTTY = d.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const refusal = tuiRefusal(d.env, d.terminal ? true : isTTY);
+  const refusal = tuiRefusal(d.env, d.terminal ? true : isTTY, d.front === true);
   if (refusal) {
     d.io.err(`p2p tui: ${refusal}`);
     return 1;

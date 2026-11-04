@@ -19,7 +19,7 @@
 
 import { isAbsolute } from "node:path";
 import type { CodexMode } from "./lib.js";
-import { boundaryRefusal, editedFiles, mutatingP2PVerb, resolveLike, shellPaths, touchesSecrets } from "./lib.js";
+import { boundaryRefusal, editedFiles, MAX_COMMAND_PATHS, mutatingP2PVerb, namesP2PCli, resolveLike, shellPaths, touchesSecrets } from "./lib.js";
 import { ancestors, ask, findEntry, readEntries } from "./ipc.js";
 
 const SHELL_TOOLS = /^(bash|shell|local_shell|exec_command|unified_exec|container\.exec|powershell|write_stdin)$/i;
@@ -52,11 +52,24 @@ export function guard(toolName: string, input: unknown, binNames: readonly strin
  * The paths a tool call names outside its folder (a shell command's absolute, ~ and .. paths; the
  * files an apply_patch or edit names), resolved: the bridge binds each one's project (projects.ts).
  */
-export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): string[] {
+export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): { paths: string[]; over: boolean } {
   const out: string[] = [];
-  if (cwd && SHELL_TOOLS.test(toolName)) out.push(...shellPaths(commandOf(input), cwd, home));
-  for (const f of editedFiles(toolName, input)) if (cwd || isAbsolute(f)) out.push(resolveLike(cwd ?? "/", f));
-  return out.slice(0, 64);
+  let over = false;
+  if (SHELL_TOOLS.test(toolName)) {
+    // No folder to resolve against: what it names can't be placed, so private.
+    if (!cwd) over = true;
+    else {
+      const r = shellPaths(commandOf(input), cwd, home);
+      out.push(...r.paths);
+      over ||= r.over;
+    }
+  }
+  for (const f of editedFiles(toolName, input)) {
+    if (cwd || isAbsolute(f)) out.push(resolveLike(cwd ?? "/", f));
+    else over = true;
+  }
+  if (out.length > MAX_COMMAND_PATHS) over = true;
+  return { paths: out.slice(0, MAX_COMMAND_PATHS), over };
 }
 
 export interface HookDeps {
@@ -86,11 +99,19 @@ export async function runHook(event: string, stdin: string, deps: HookDeps): Pro
   const entry = bound ?? findEntry(entries, { ...(sessionId ? { sessionId } : {}), ancestors: await (deps.ancestors ?? ancestors)(), ...(cwd ? { cwd } : {}) });
   if (name === "PreToolUse") {
     // This bridge's own session is the only one the model's shell may name (none known: none at all).
-    const deny = guard(String(payload.tool_name ?? ""), payload.tool_input, deps.binNames, entry?.sid);
+    // Fails closed: a guard that throws on a command naming p2p denies it.
+    let deny: string | null;
+    try {
+      deny = guard(String(payload.tool_name ?? ""), payload.tool_input, deps.binNames, entry?.sid);
+    } catch {
+      deny = namesP2PCli(commandOf(payload.tool_input)) ? "Refused by Peer2Peer: this command couldn't be checked; ask your user to run it." : null;
+    }
     if (deny) return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: deny } });
-    // Paths the call reaches outside its folder bind their projects before it runs.
-    const dirs = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : [];
-    if (entry && dirs.length > 0) await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs } }, 8_000).catch(() => undefined);
+    // Paths the call reaches bind their projects before it runs (any that can't be placed: private).
+    const t = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
+    if (entry && (t.paths.length > 0 || t.over)) {
+      await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true } : {}) } }, 8_000).catch(() => undefined);
+    }
     return "";
   }
   // Subagents' events belong to the parent's turn: only the main thread reports.

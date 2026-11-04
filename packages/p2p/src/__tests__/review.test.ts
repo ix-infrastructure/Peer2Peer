@@ -83,8 +83,8 @@ describe("pre-release review regressions", () => {
       throw new CliError("x", `relay said ${OSC} bye`);
     };
     const io = { out: (s: string) => out.push(s), err: (s: string) => err.push(s) };
-    await main(["accept", "p2p://invite/x"], { env: {}, io, ops: { accept } as never, makeApp: () => ({ load: async () => true, close: async () => {} }) as never });
-    await main(["accept", "p2p://invite/x", "--json"], { env: {}, io, ops: { accept } as never, makeApp: () => ({ load: async () => true, close: async () => {} }) as never });
+    await main(["accept", "p2p://invite/x"], { env: {}, confirmTty: async () => true, io, ops: { accept } as never, makeApp: () => ({ load: async () => true, close: async () => {} }) as never });
+    await main(["accept", "p2p://invite/x", "--json"], { env: {}, confirmTty: async () => true, io, ops: { accept } as never, makeApp: () => ({ load: async () => true, close: async () => {} }) as never });
     process.exitCode = 0;
     expect(err.join("")).not.toMatch(/[\u001b\u0007]/);
     expect(out.join("")).not.toMatch(/[\u001b\u0007]/);

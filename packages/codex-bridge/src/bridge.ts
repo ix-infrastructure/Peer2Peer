@@ -178,6 +178,8 @@ export type HookReport = {
   files?: string[];
   /** PreToolUse: absolute paths the call reaches (a shell command's, an apply_patch's): their projects bind this session. */
   dirs?: string[];
+  /** PreToolUse: some path couldn't be resolved, or there were too many: the session is private. */
+  over?: boolean;
   stopHookActive?: boolean;
 };
 
@@ -189,22 +191,34 @@ function threadDirsFile(home: string | undefined, threadId: string): string | un
 }
 
 export function loadThreadDirs(home: string | undefined, threadId: string): string[] {
+  return loadThread(home, threadId).dirs;
+}
+
+/** A thread's saved folders, and whether it was already over its cap. A file that exists but can't be read: over (fails closed). */
+export function loadThread(home: string | undefined, threadId: string): { dirs: string[]; over: boolean } {
   const f = threadDirsFile(home, threadId);
-  if (!f) return [];
+  if (!f) return { dirs: [], over: false };
+  let text: string;
   try {
-    const v = JSON.parse(readFileSync(f, "utf8")) as { dirs?: unknown };
-    return Array.isArray(v.dirs) ? v.dirs.filter((x): x is string => typeof x === "string" && isAbsolute(x)).slice(0, 512) : [];
+    text = readFileSync(f, "utf8");
+  } catch (e) {
+    return { dirs: [], over: (e as NodeJS.ErrnoException).code !== "ENOENT" };
+  }
+  try {
+    const v = JSON.parse(text) as { dirs?: unknown; over?: unknown };
+    const dirs = Array.isArray(v.dirs) ? v.dirs.filter((x): x is string => typeof x === "string" && isAbsolute(x)) : [];
+    return { dirs: dirs.slice(0, 512), over: v.over === true || dirs.length > 512 };
   } catch {
-    return [];
+    return { dirs: [], over: true };
   }
 }
 
-export function saveThreadDirs(home: string | undefined, threadId: string, dirs: readonly string[]): void {
+export function saveThreadDirs(home: string | undefined, threadId: string, dirs: readonly string[], over = false): void {
   const f = threadDirsFile(home, threadId);
   if (!f) return;
   try {
     mkdirSync(join(home!, "codex-threads"), { recursive: true, mode: 0o700 });
-    writeFileSync(f, JSON.stringify({ dirs: dirs.slice(0, 512), at: Date.now() }), { mode: 0o600 });
+    writeFileSync(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: over || dirs.length > 512, at: Date.now() }), { mode: 0o600 });
   } catch {
     // best effort: the session stays bound for this run either way
   }
@@ -253,6 +267,8 @@ export class Bridge {
   private readonly projectSeen = new Set<string>();
   /** Paths the session's tool calls reached (hooks): bound to their projects with every send (projects.ts), kept per thread. */
   private readonly touched = new Set<string>();
+  /** Past a cap, or a path that couldn't be resolved: the CLI keeps this session private (`--project-dirs-over`). */
+  isDirsOver = false;
   /** Where sandboxed commands may write, per the trusted turn context ("all": no sandbox; undefined: unknown). */
   trustedWritable: string[] | "all" | undefined;
   /** Why this thread's rollout file isn't trusted (planted or malformed), once found. */
@@ -335,7 +351,9 @@ export class Bridge {
 
   /** Every folder this session has worked in: each one's project bounds who it reaches (projects.ts). */
   sessionDirs(): string[] {
-    return [...new Set([...(this.deps.projectDirs ?? []), this.deps.cwd, ...this.projectSeen, ...this.touched])].slice(0, 512);
+    const all = [...new Set([...(this.deps.projectDirs ?? []), this.deps.cwd, ...this.projectSeen, ...this.touched])];
+    if (all.length > 512) this.isDirsOver = true;
+    return all.slice(0, 512);
   }
 
   private async goOnline(): Promise<void> {
@@ -406,12 +424,18 @@ export class Bridge {
   noteTouched(dirs: readonly string[]): void {
     let added = false;
     for (const d of dirs) {
-      if (typeof d !== "string" || !isAbsolute(d) || this.touched.has(d) || this.touched.size >= 512) continue;
+      if (typeof d !== "string" || !isAbsolute(d) || this.touched.has(d)) continue;
+      if (this.touched.size >= 512) {
+        // Past the cap: private, never "the first 512".
+        if (!this.isDirsOver) added = true;
+        this.isDirsOver = true;
+        continue;
+      }
       this.touched.add(d);
       added = true;
     }
     if (!added) return;
-    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched]);
+    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched], this.isDirsOver);
     this.announce();
   }
 
@@ -464,7 +488,7 @@ export class Bridge {
         this.isAnnounceQueued = false;
         const summary = this.sharedSummary();
         const r = await this.deps.p2p
-          .status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...(summary ? { summary } : {}), ...(this.shareStatus ? { files: this.files } : {}), projectDirs: this.sessionDirs() })
+          .status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...(summary ? { summary } : {}), ...(this.shareStatus ? { files: this.files } : {}), projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver })
           .catch(() => null);
         if (r && !r.ok) this.lastError = `status not shared: ${r.reason}`;
         else if (r && r.ok && this.lastError?.startsWith("status not shared")) this.lastError = undefined;
@@ -507,7 +531,9 @@ export class Bridge {
     if (info.threadId && !this.threadId) {
       this.threadId = info.threadId;
       // A resumed thread stays bound to every folder it worked in before (projects.ts).
-      for (const d of loadThreadDirs(this.deps.p2pHome, info.threadId)) this.touched.add(d);
+      const saved = loadThread(this.deps.p2pHome, info.threadId);
+      for (const d of saved.dirs) this.touched.add(d);
+      if (saved.over) this.isDirsOver = true;
       this.transcript = this.deps.transcript?.(info.threadId);
       this.deps.onChange?.();
     }
@@ -757,7 +783,7 @@ export class Bridge {
       this.activityNotes.push(`POTENTIAL CONFLICT with ${sessionAddress(c.peer)}: you both changed ${c.files.map(inert).join(", ")}.`);
       // The file names go only where the status already goes; with status sharing off, nothing is sent.
       if (this.shareStatus && this.repo) {
-        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs() }).catch(() => undefined);
+        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => undefined);
       }
     }
   }
@@ -902,7 +928,7 @@ export class Bridge {
 
   private async notice(item: InboxItem, what: string): Promise<void> {
     if (item.kind !== "message" || !this.isOnline) return;
-    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs() }).catch(() => undefined);
+    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => undefined);
   }
 
   async expireHeld(): Promise<void> {
@@ -1101,6 +1127,11 @@ export class Bridge {
         return context("UserPromptSubmit", [items.length > 0 ? this.frame(items) : undefined, this.takeActivityNotes(), this.heldNote(), reminder]);
       }
       case "PreToolUse": {
+        if (r.over && !this.isDirsOver) {
+          this.isDirsOver = true;
+          if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched], true);
+          this.announce();
+        }
         this.noteTouched(r.dirs ?? []);
         return {};
       }

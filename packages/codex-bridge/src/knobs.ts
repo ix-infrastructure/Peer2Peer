@@ -404,7 +404,7 @@ export function envFromPs(withEnv: string, command: string, name: string): strin
  * from the user-level config; status caps from `"statusCaps"` in the p2p
  * home's config.json.)
  */
-export const CHILD_P2P_DENY = ["P2P_EXTENSION_PATH", "P2P_EXTENSIONS", "P2P_EXTENSION_EXCLUDE", "P2P_DEFAULTS_FILE", "P2P_WRITE_VECTORS", "P2P_GO_VECTORS", "P2P_STATUS_CAPS"] as const;
+export const CHILD_P2P_DENY = ["P2P_PERSON_TOKEN", "P2P_EXTENSION_PATH", "P2P_EXTENSIONS", "P2P_EXTENSION_EXCLUDE", "P2P_DEFAULTS_FILE", "P2P_WRITE_VECTORS", "P2P_GO_VECTORS", "P2P_STATUS_CAPS"] as const;
 
 /** Exact names (besides P2P_* and LC_*) a child may get from the bridge's env. */
 const CHILD_ALLOW = ["LANG", "TZ", "TERM"];

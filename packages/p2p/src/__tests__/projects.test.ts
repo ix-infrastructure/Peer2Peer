@@ -12,8 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRosterV3 } from "@peer2peer/core/v3";
-import { assertPersonForWidening, isAgentProcess, normalizeRemote, projectOf, PRIVATE_MARKER, assertMayReach, agentEnv } from "../projects.js";
+import { assertPersonForWidening, isAgentProcess, personToken, takePersonToken, normalizeRemote, projectOf, PRIVATE_MARKER, assertMayReach, agentEnv } from "../projects.js";
 import { main } from "../cli.js";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { linkJoin, linkStart } from "../identity.js";
 import { receiving } from "../inbound.js";
 import { publishExtensionState } from "../xstate.js";
@@ -136,16 +138,34 @@ describe("project identity (projects.ts projectOf)", () => {
     }
   });
 
-  it("agent detection: its variables and its process names", () => {
-    expect(agentEnv({ CLAUDECODE: "1" })).toBe(true);
-    expect(agentEnv({ CODEX_THREAD_ID: "t" })).toBe(true);
-    expect(agentEnv({ CODEX_SANDBOX: "seatbelt" })).toBe(true);
-    expect(agentEnv({ CODEX_HOME: "/home/x/.codex", PATH: "/bin" })).toBe(false);
-    expect(isAgentProcess("/Users/x/.local/bin/claude --resume abc")).toBe(true);
-    expect(isAgentProcess("node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")).toBe(true);
-    expect(isAgentProcess("/opt/homebrew/bin/codex exec")).toBe(true);
-    expect(isAgentProcess("/bin/zsh -l")).toBe(false);
-    expect(isAgentProcess("vim notes-about-claude.md")).toBe(false);
+  it("the person token is checked once and taken out of the environment, so no child inherits it (N1)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-tok-"));
+    try {
+      const t = personToken(home);
+      // Made exclusively, and the same on the next call.
+      expect(personToken(home)).toBe(t);
+      const env: Record<string, string | undefined> = { P2P_PERSON_TOKEN: t, PATH: "/bin" };
+      process.env.P2P_PERSON_TOKEN = t;
+      expect(takePersonToken(env, home)).toBe(true);
+      expect(env.P2P_PERSON_TOKEN).toBeUndefined();
+      expect(process.env.P2P_PERSON_TOKEN).toBeUndefined();
+      expect(takePersonToken({ P2P_PERSON_TOKEN: "x".repeat(43) }, home)).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("agent detection: the variables Claude Code and Codex set, and executables by name only (no false positives)", () => {
+    for (const k of ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CODEX_TOOL_CALL_ID", "CODEX_CI", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX"]) expect(agentEnv({ [k]: "1" }), k).toBe(true);
+    // A person's own shell: Codex's config variables, an API key, a profile.
+    expect(agentEnv({ CODEX_HOME: "/home/x/.codex", CODEX_API_KEY: "sk-x", CODEX_PROFILE: "work", PATH: "/bin" })).toBe(false);
+    expect(isAgentProcess("/Users/x/.local/bin/claude")).toBe(true);
+    expect(isAgentProcess("/opt/homebrew/bin/codex")).toBe(true);
+    expect(isAgentProcess("claude")).toBe(true);
+    // A tmux session named codex, an editor on a file named claude: neither is the agent.
+    expect(isAgentProcess("tmux")).toBe(false);
+    expect(isAgentProcess("/usr/bin/vim")).toBe(false);
+    expect(isAgentProcess("node")).toBe(false);
   });
 
   it("a committed .p2p-private marks the repository private", () => {
@@ -254,6 +274,8 @@ describe("project boundaries", () => {
     // An extension kind (ix note, subgraph and impact go this way) from the same session.
     const app = await inDir(ann, repo.P).app();
     await app.load();
+    // This App speaks as the front end (as its token would make it).
+    app.front = true;
     try {
       await expect(sendExtension(app, { fromSession: "p1", to: ids.ben, kind: "x:ix.note", v: 1, body: { text: "the secret plan" }, fallback: "a note" })).rejects.toMatchObject({ code: "not_shared" });
       // Its extension state (an Ix footprint) reaches nobody.
@@ -270,6 +292,7 @@ describe("project boundaries", () => {
     // The shared session's state does reach the circle.
     const sapp = await inDir(ann, repo.S).app();
     await sapp.load();
+    sapp.front = true;
     try {
       const pub = await publishExtensionState(sapp, { fromSession: "s1", kind: "x:ix.footprint", v: 1, body: { files: ["src/login.ts"] }, fallback: "footprint", ttl: 60 });
       expect([...pub.delivered, ...pub.skipped].map((x) => x.userId)).toContain(ids.ben);
@@ -499,6 +522,10 @@ describe("project boundaries", () => {
     const a = await inDir(ann, repo.S, many).ok(["status", "--session", "o1", "--state", "busy", "--label", "o"]);
     expect(a.roster.vis).toBe("private");
     expect(a.project.why).toMatch(/more than/);
+    // --project-dir past the cap, and a front end's --project-dirs-over (the Codex bridge's).
+    const flags = many.flatMap((x) => ["--project-dir", x]);
+    expect((await inDir(ann, repo.S).ok(["status", "--session", "o3", "--state", "busy", "--label", "o", ...flags])).roster.vis).toBe("private");
+    expect((await inDir(ann, repo.S).ok(["status", "--session", "o4", "--state", "busy", "--label", "o", "--project-dirs-over"])).roster.vis).toBe("private");
     const over = Object.create(ann) as User;
     Object.defineProperty(over, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.S, P2P_PROJECT_DIRS_OVER: "1" }) });
     expect((await over.ok(["status", "--session", "o2", "--state", "busy", "--label", "o"])).roster.vis).toBe("private");
@@ -519,24 +546,61 @@ describe("project boundaries", () => {
     expect((await agent.run(["project", "show"])).code).toBe(0);
     expect((await agent.run(["project", "private"])).code).toBe(0);
     // The person's front end (its token) may.
-    expect(() => assertPersonForWidening({ CLAUDECODE: "1", P2P_PERSON_TOKEN: ann.personToken }, ann.home, "project share")).not.toThrow();
-    expect(() => assertPersonForWidening({ CLAUDECODE: "1", P2P_PERSON_TOKEN: "x".repeat(43) }, ann.home, "project share")).toThrow(/only you run it/);
+    const yes = async () => true;
+    await expect(assertPersonForWidening({ env: { CLAUDECODE: "1" }, front: true }, "project share", yes)).resolves.toBeUndefined();
+    await expect(assertPersonForWidening({ env: { CLAUDECODE: "1" }, front: false }, "project share", yes)).rejects.toThrow(/only you run it/);
+    // Outside an agent's session: the person's terminal "yes", never a flag.
+    await expect(assertPersonForWidening({ env: {}, front: false }, "project share", async () => false)).rejects.toThrow(/confirm it with "yes" on your own terminal/);
+    await expect(assertPersonForWidening({ env: {}, front: false }, "project share", yes)).resolves.toBeUndefined();
   });
 
-  it("a session id an agent makes up starts private until a front end registers it (H5)", async () => {
+  it("only a session's front end speaks for it: an agent's shell never, a registered session never without the token (N2)", async () => {
     const agent = Object.create(ann) as User;
     Object.defineProperty(agent, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.S, P2P_PERSON_TOKEN: "", CLAUDECODE: "1" }) });
-    // In the shared project, under a fresh id: private, so nothing reaches ben.
-    const st = await agent.ok(["status", "--session", "fake-1", "--state", "busy", "--label", "f", "--summary", "smuggled summary"]);
-    expect(st.roster.vis).toBe("private");
-    expect(st.project.why).toMatch(/no front end of yours has registered it/);
-    const sent = await agent.run(["send", "--from-session", "fake-2", "--to", `${ids.ben}/bs1`, "--stdin"], { stdin: "smuggled" });
-    expect(sent.json).toMatchObject({ error: "not_shared" });
-    // The front end's own session (it holds the token): registered, shared as the project says.
+    // A made-up session id, or the front end's own: refused from an agent's shell either way.
     const ok = await inDir(ann, repo.S).ok(["status", "--session", "front-1", "--state", "busy", "--label", "f"]);
     expect(ok.roster.vis).toBe("circle");
-    // And once registered, the agent's shell may speak for it (within the project).
-    expect((await agent.ok(["send", "--from-session", "front-1", "--to", `${ids.ben}/bs1`, "--stdin"], { stdin: "fine" })).delivered).toBe(true);
+    for (const args of [
+      ["status", "--session", "fake-1", "--state", "busy", "--label", "f", "--summary", "smuggled summary"],
+      ["send", "--from-session", "fake-2", "--to", `${ids.ben}/bs1`, "--stdin"],
+      ["send", "--from-session", "front-1", "--to", `${ids.ben}/bs1`, "--stdin"],
+      ["status", "--session", "front-1", "--state", "idle", "--label", "hijacked"],
+    ]) {
+      const r = await agent.run(args, { stdin: "smuggled" });
+      expect(r.json?.error, `${args.join(" ")}: ${r.out} ${r.err}`).toBe("refused");
+    }
+    // Outside any agent's session, without the token: a registered session is still the front end's,
+    // not even to narrow it.
+    const script = Object.create(ann) as User;
+    Object.defineProperty(script, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.S, P2P_PERSON_TOKEN: "" }) });
+    for (const args of [["send", "--from-session", "front-1", "--to", `${ids.ben}/bs1`, "--stdin"], ["status", "--session", "front-1", "--state", "idle", "--label", "x"]]) {
+      expect((await script.run(args, { stdin: "x" })).json?.error, args.join(" ")).toBe("refused");
+    }
+    const narrow = await script.run(["session", "roster", "front-1", "--private"]);
+    expect(narrow.json?.error).toBe("refused");
+    expect(JSON.stringify(await ben.ok(["ls"]))).not.toContain("hijacked");
+  });
+
+  it("a process detached from every terminal can't widen anything or send as the person, whatever it claims (H4-H6 residual)", async () => {
+    // A child p2p, detached (setsid): no controlling terminal, no token, no agent variables.
+    const bin = fileURLToPath(new URL("../../dist/bin.js", import.meta.url));
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", ...ann.env, P2P_PERSON_TOKEN: "", P2P_WORKDIR: repo.P };
+    delete env.P2P_PERSON_TOKEN;
+    const runDetached = (args: string[]) =>
+      new Promise<{ code: number; out: string }>((done) => {
+        const c = spawn(process.execPath, [bin, ...args, "--json"], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+        let out = "";
+        let err = "";
+        c.stdout.on("data", (d) => (out += String(d)));
+        c.stderr.on("data", (d) => (err += String(d)));
+        c.on("close", (code) => done({ code: code ?? 1, out: out || err }));
+      });
+    for (const args of [["project", "share", team, "--no-input"], ["circle", "default", team], ["send", "--from-session", "brand-new", "--to", ids.ben, "x"]]) {
+      const r = await runDetached(args);
+      expect(r.code, args.join(" ")).toBe(1);
+      expect(r.out, args.join(" ")).toMatch(/"error":"refused"/);
+    }
+    expect((await inDir(ann, repo.P).ok(["project", "show"])).project.policy).toBe("private");
   });
 
   it("a pseudo-terminal inside an agent's session doesn't make it the person (H6)", async () => {
