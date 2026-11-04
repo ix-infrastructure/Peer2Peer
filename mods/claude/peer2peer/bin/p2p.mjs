@@ -50,13 +50,13 @@ var __toESM = (mod2, isNodeMode, target) => (target = mod2 != null ? __create(__
   mod2
 ));
 
-// packages/core/dist/errors.js
+// ../contrib-peer2peer/packages/core/dist/errors.js
 function fail(reason, message) {
   throw new P2PError(reason, message);
 }
 var P2PError;
 var init_errors = __esm({
-  "packages/core/dist/errors.js"() {
+  "../contrib-peer2peer/packages/core/dist/errors.js"() {
     "use strict";
     P2PError = class extends Error {
       reason;
@@ -69,7 +69,7 @@ var init_errors = __esm({
   }
 });
 
-// packages/core/dist/encoding.js
+// ../contrib-peer2peer/packages/core/dist/encoding.js
 function b64uEncode(bytes2) {
   let out = "";
   let i = 0;
@@ -180,7 +180,7 @@ function bytesEqual(a, b) {
 }
 var B64U_RE, B64U_ALPHABET, B64U_INDEX, B32_ALPHABET, B32_INDEX, encoder, decoder;
 var init_encoding = __esm({
-  "packages/core/dist/encoding.js"() {
+  "../contrib-peer2peer/packages/core/dist/encoding.js"() {
     "use strict";
     init_errors();
     B64U_RE = /^[A-Za-z0-9_-]*$/;
@@ -193,7 +193,7 @@ var init_encoding = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/_u64.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/_u64.js
 function fromBig(n, le = false) {
   if (le)
     return { h: Number(n & U32_MASK64), l: Number(n >> _32n & U32_MASK64) };
@@ -221,7 +221,7 @@ function add(Ah, Al, Bh, Bl) {
 }
 var U32_MASK64, _32n, fromNumH, fromNumL, shrSH, shrSL, rotrSH, rotrSL, rotrBH, rotrBL, add3L, add3H, add4L, add4H, add5L, add5H;
 var init_u64 = __esm({
-  "packages/core/node_modules/@noble/hashes/_u64.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/_u64.js"() {
     U32_MASK64 = /* @__PURE__ */ (() => BigInt(2 ** 32 - 1))();
     _32n = /* @__PURE__ */ BigInt(32);
     fromNumH = (n) => n / 2 ** 32 | 0;
@@ -241,7 +241,7 @@ var init_u64 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/utils.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/utils.js
 function isBytes(a) {
   return a instanceof Uint8Array || ArrayBuffer.isView(a) && a.constructor.name === "Uint8Array" && "BYTES_PER_ELEMENT" in a && a.BYTES_PER_ELEMENT === 1;
 }
@@ -384,7 +384,7 @@ function randomBytes4(bytesLength = 32) {
 }
 var atitle, aobject, aopts, hasHexBuiltin, hexes, oidNist;
 var init_utils = __esm({
-  "packages/core/node_modules/@noble/hashes/utils.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/utils.js"() {
     atitle = (title) => title ? `"${title}" ` : "";
     aobject = (value, label) => {
       if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -411,7 +411,7 @@ var init_utils = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/_md.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/_md.js
 function Chi(a, b, c) {
   return a & b ^ ~a & c;
 }
@@ -420,7 +420,7 @@ function Maj(a, b, c) {
 }
 var HashMD, SHA256_IV, SHA512_IV;
 var init_md = __esm({
-  "packages/core/node_modules/@noble/hashes/_md.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/_md.js"() {
     init_u64();
     init_utils();
     HashMD = class {
@@ -549,10 +549,10 @@ var init_md = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/sha2.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/sha2.js
 var SHA256_K, SHA256_W, SHA2_32B, _SHA256, K512, SHA512_Kh, SHA512_Kl, SHA512_W_H, SHA512_W_L, SHA2_64B, _SHA512, sha256, sha512;
 var init_sha2 = __esm({
-  "packages/core/node_modules/@noble/hashes/sha2.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/sha2.js"() {
     init_md();
     init_u64();
     init_utils();
@@ -954,7 +954,7 @@ var init_sha2 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/utils.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/utils.js
 function aarray(item, title, inner = () => {
 }) {
   if (!Array.isArray(item))
@@ -1061,7 +1061,7 @@ function validateObject(object, fields = {}, optFields = {}, title = "object") {
 }
 var abytes2, anumber2, bytesToHex2, concatBytes2, hexToBytes2, isBytes2, randomBytes5, _0n, _1n, atitle2, bitMask;
 var init_utils2 = __esm({
-  "packages/core/node_modules/@noble/curves/utils.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/utils.js"() {
     init_utils();
     abytes2 = (value, length, title) => abytes(value, length, title);
     anumber2 = anumber;
@@ -1080,7 +1080,7 @@ var init_utils2 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/abstract/modular.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/modular.js
 function mod(a, b) {
   if (b <= _0n2)
     throw new Error("mod: expected positive modulus, got " + b);
@@ -1343,7 +1343,7 @@ function Field(ORDER, opts = {}) {
 }
 var _0n2, _1n2, _2n, _3n, _4n, _5n, _7n, _8n, _9n, _15n, _16n, POW_WINDOWED_MIN, isNegativeLE, FIELD_FIELDS, FIELD_SQRT, _Field;
 var init_modular = __esm({
-  "packages/core/node_modules/@noble/curves/abstract/modular.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/modular.js"() {
     init_utils2();
     _0n2 = /* @__PURE__ */ BigInt(0);
     _1n2 = /* @__PURE__ */ BigInt(1);
@@ -1515,7 +1515,7 @@ var init_modular = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/abstract/curve.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/curve.js
 function validatePointCons(Point) {
   const pc = Point;
   if (typeof pc !== "function")
@@ -1690,7 +1690,7 @@ function createKeygen(randomSecretKey, getPublicKey) {
 }
 var _0n3, _1n3, _4n2, BLIND_BYTES, BLIND_BITS, FW_WINDOW, TABLE_BYTES_MAX, pointWindowSizes, ScalarMultiplier;
 var init_curve = __esm({
-  "packages/core/node_modules/@noble/curves/abstract/curve.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/curve.js"() {
     init_utils2();
     init_modular();
     _0n3 = /* @__PURE__ */ BigInt(0);
@@ -1909,7 +1909,7 @@ var init_curve = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/abstract/edwards.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/edwards.js
 function isEdValidXY(Fp2, CURVE, x, y) {
   const x2 = Fp2.sqr(x);
   const y2 = Fp2.sqr(y);
@@ -2356,7 +2356,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
 }
 var _0n4, _1n4, _2n2, _4n3, _8n2;
 var init_edwards = __esm({
-  "packages/core/node_modules/@noble/curves/abstract/edwards.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/edwards.js"() {
     init_utils2();
     init_curve();
     init_modular();
@@ -2368,7 +2368,7 @@ var init_edwards = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/abstract/montgomery.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/montgomery.js
 function cmask(P, swap) {
   return P + swap - (swap >> _1n5 << _1n5);
 }
@@ -2513,7 +2513,7 @@ function montgomery(curveDef) {
 }
 var _0n5, _1n5, _2n3;
 var init_montgomery = __esm({
-  "packages/core/node_modules/@noble/curves/abstract/montgomery.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/abstract/montgomery.js"() {
     init_utils2();
     init_curve();
     init_modular();
@@ -2523,7 +2523,7 @@ var init_montgomery = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/curves/ed25519.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/curves/ed25519.js
 function ed25519_pow_2_252_3(x) {
   const _10n = BigInt(10), _20n = BigInt(20), _40n = BigInt(40), _80n = BigInt(80);
   const P = ed25519_CURVE_p;
@@ -2581,7 +2581,7 @@ function ed(opts) {
 }
 var _0n6, _1n6, _2n4, _3n2, _5n2, _8n3, ed25519_CURVE_p, ed25519_CURVE, ED25519_SQRT_M1, ed25519_Point, Fp, ed25519, x25519;
 var init_ed25519 = __esm({
-  "packages/core/node_modules/@noble/curves/ed25519.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/curves/ed25519.js"() {
     init_sha2();
     init_utils();
     init_edwards();
@@ -2633,7 +2633,7 @@ var init_ed25519 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/ciphers/utils.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/utils.js
 function isBytes3(a) {
   return a instanceof Uint8Array || ArrayBuffer.isView(a) && a.constructor.name === "Uint8Array" && "BYTES_PER_ELEMENT" in a && a.BYTES_PER_ELEMENT === 1;
 }
@@ -2758,7 +2758,7 @@ function copyBytes2(bytes2) {
 }
 var atitle3, aobject3, isLE, swap32IfBE, wrapCipher;
 var init_utils3 = __esm({
-  "packages/core/node_modules/@noble/ciphers/utils.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/utils.js"() {
     atitle3 = (title) => title ? `"${title}" ` : "";
     aobject3 = (value, label) => {
       if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -2816,7 +2816,7 @@ var init_utils3 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/ciphers/_arx.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/_arx.js
 function rotl(a, b) {
   return a << b | a >>> 32 - b;
 }
@@ -2940,7 +2940,7 @@ function createCipher(core, opts) {
 }
 var encodeStr, sigma16_32, sigma32_32, BLOCK_LEN, BLOCK_LEN32, MAX_COUNTER, U32_EMPTY;
 var init_arx = __esm({
-  "packages/core/node_modules/@noble/ciphers/_arx.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/_arx.js"() {
     init_utils3();
     encodeStr = (str4) => Uint8Array.from(str4.split(""), (c) => c.charCodeAt(0));
     sigma16_32 = /* @__PURE__ */ (() => swap32IfBE(u32(encodeStr("expand 16-byte k"))))();
@@ -2952,13 +2952,13 @@ var init_arx = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/ciphers/_poly1305.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/_poly1305.js
 function u8to16(a, i) {
   return a[i++] & 255 | (a[i++] & 255) << 8;
 }
 var Poly1305, poly1305;
 var init_poly1305 = __esm({
-  "packages/core/node_modules/@noble/ciphers/_poly1305.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/_poly1305.js"() {
     init_utils3();
     Poly1305 = class {
       blockLen = 16;
@@ -3209,7 +3209,7 @@ var init_poly1305 = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/ciphers/chacha.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/chacha.js
 function chachaCore(s2, k, n, out, cnt, rounds = 20) {
   let y00 = s2[0], y01 = s2[1], y02 = s2[2], y03 = s2[3], y04 = k[0], y05 = k[1], y06 = k[2], y07 = k[3], y08 = k[4], y09 = k[5], y10 = k[6], y11 = k[7], y12 = cnt, y13 = n[0], y14 = n[1], y15 = n[2];
   let x00 = y00, x01 = y01, x02 = y02, x03 = y03, x04 = y04, x05 = y05, x06 = y06, x07 = y07, x08 = y08, x09 = y09, x10 = y10, x11 = y11, x12 = y12, x13 = y13, x14 = y14, x15 = y15;
@@ -3333,7 +3333,7 @@ function computeTag(fn, key, nonce, ciphertext, AAD) {
 }
 var xchacha20, ZEROS16, updatePadded, ZEROS32, _poly1305_aead, xchacha20poly1305;
 var init_chacha = __esm({
-  "packages/core/node_modules/@noble/ciphers/chacha.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/ciphers/chacha.js"() {
     init_arx();
     init_poly1305();
     init_utils3();
@@ -3388,10 +3388,10 @@ var init_chacha = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/hmac.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/hmac.js
 var _HMAC, hmac;
 var init_hmac = __esm({
-  "packages/core/node_modules/@noble/hashes/hmac.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/hmac.js"() {
     init_utils();
     _HMAC = class {
       oHash;
@@ -3471,7 +3471,7 @@ var init_hmac = __esm({
   }
 });
 
-// packages/core/node_modules/@noble/hashes/hkdf.js
+// ../contrib-peer2peer/packages/core/node_modules/@noble/hashes/hkdf.js
 function expand(hash, prk, info, length = 32, _recycled) {
   ahash(hash);
   anumber(length, "length");
@@ -3524,7 +3524,7 @@ function expand(hash, prk, info, length = 32, _recycled) {
 }
 var HKDF_COUNTER, EMPTY_BUFFER, hkdf;
 var init_hkdf = __esm({
-  "packages/core/node_modules/@noble/hashes/hkdf.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@noble/hashes/hkdf.js"() {
     init_hmac();
     init_utils();
     HKDF_COUNTER = /* @__PURE__ */ Uint8Array.of(0);
@@ -3539,7 +3539,7 @@ var init_hkdf = __esm({
   }
 });
 
-// packages/core/dist/crypto.js
+// ../contrib-peer2peer/packages/core/dist/crypto.js
 function randomBytes7(n) {
   return randomBytes4(n);
 }
@@ -3635,7 +3635,7 @@ function aeadOpen(key, nonce, ciphertext, aad2) {
 }
 var ED25519_KEY_LEN, ED25519_SIG_LEN, X25519_KEY_LEN, XCHACHA_NONCE_LEN, MEMO_MAX, PositiveMemo, verifiedSignatures, strongEd25519Keys, strongX25519Keys, PROBE_SCALAR;
 var init_crypto = __esm({
-  "packages/core/dist/crypto.js"() {
+  "../contrib-peer2peer/packages/core/dist/crypto.js"() {
     "use strict";
     init_ed25519();
     init_chacha();
@@ -3675,7 +3675,7 @@ var init_crypto = __esm({
   }
 });
 
-// packages/core/dist/replay.js
+// ../contrib-peer2peer/packages/core/dist/replay.js
 function sessionKey(own, sid) {
   return JSON.stringify([own, sid]);
 }
@@ -3760,7 +3760,7 @@ function mergeReplay(a, b) {
 }
 var REPLAY_FUTURE_SKEW_MS, REPLAY_MAX_AGE_MS, REPLAY_MAX_AGE_MS_V3, NONCE_LRU_SIZE, REPLAY_WINDOW, WINDOW_BYTES;
 var init_replay = __esm({
-  "packages/core/dist/replay.js"() {
+  "../contrib-peer2peer/packages/core/dist/replay.js"() {
     "use strict";
     init_encoding();
     REPLAY_FUTURE_SKEW_MS = 10 * 60 * 1e3;
@@ -3772,14 +3772,14 @@ var init_replay = __esm({
   }
 });
 
-// packages/core/dist/docbackend.js
+// ../contrib-peer2peer/packages/core/dist/docbackend.js
 var init_docbackend = __esm({
-  "packages/core/dist/docbackend.js"() {
+  "../contrib-peer2peer/packages/core/dist/docbackend.js"() {
     "use strict";
   }
 });
 
-// packages/core/dist/jws.js
+// ../contrib-peer2peer/packages/core/dist/jws.js
 function signJws(typ, kid, payload, secretKey) {
   const header = { alg: "EdDSA", typ, kid };
   const signingInput = `${b64uEncode(utf8(JSON.stringify(header)))}.${b64uEncode(utf8(JSON.stringify(payload)))}`;
@@ -3835,7 +3835,7 @@ function expectTyp(d, typ) {
 }
 var MAX_JWS_BYTES, MAX_ENVELOPE_BYTES;
 var init_jws = __esm({
-  "packages/core/dist/jws.js"() {
+  "../contrib-peer2peer/packages/core/dist/jws.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -3845,7 +3845,7 @@ var init_jws = __esm({
   }
 });
 
-// packages/core/dist/v3/base.js
+// ../contrib-peer2peer/packages/core/dist/v3/base.js
 function nowSec() {
   return Math.floor(Date.now() / 1e3);
 }
@@ -3965,7 +3965,7 @@ function asciiCompare(a, b) {
 }
 var TYP3, IK_KID, HOUR, DAY, DEVICE_CERT_MAX_TTL_SEC, IDENTITY_DOC_MAX_TTL_SEC, IDENTITY_FAIL_CLOSED_AFTER_SEC, INVITE_MAX_TTL_SEC, CAP_MAX_TTL_SEC, ANSWER_CAP_MAX_TTL_SEC, DEFAULT_SKEW_SEC, MAX_RELAYS, MAX_DEVICES, USER_ID_RE2, DID_RE, CID_RE, CRIT_MAX, CRIT_FIELD_RE;
 var init_base = __esm({
-  "packages/core/dist/v3/base.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/base.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -4008,7 +4008,7 @@ var init_base = __esm({
   }
 });
 
-// packages/core/dist/v3/redact.js
+// ../contrib-peer2peer/packages/core/dist/v3/redact.js
 function stripAbsolutePaths(text2) {
   return text2.replace(PATH_RE, (m, lead, path2) => SLASH_COMMAND.test(path2) ? m : lead).replace(/\s+/g, " ").replace(/\s+([.,;:])/g, "$1").trim();
 }
@@ -4038,7 +4038,7 @@ function redactSecrets(text2) {
 }
 var PATH_LEAD, PATH_START, PATH_RE, SLASH_COMMAND, SECRET_PATTERNS, KEYWORD_SECRET, BEARER, HEX_RUN, LONG_RUN, UUID, isGitSha;
 var init_redact = __esm({
-  "packages/core/dist/v3/redact.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/redact.js"() {
     "use strict";
     PATH_LEAD = "(^|[\\s\\[{(<:,\"'`=;|*@!\\-“”‘’])";
     PATH_START = "(?:[A-Za-z][A-Za-z0-9+.-]*:\\/\\/\\/|~[A-Za-z0-9._-]*[\\\\/]|\\/(?!\\/)|\\\\\\\\|\\\\(?!\\\\)|[A-Za-z]:[\\\\/]|\\$HOME[\\\\/]|%[A-Za-z_]+%[\\\\/])";
@@ -4067,7 +4067,7 @@ var init_redact = __esm({
   }
 });
 
-// packages/core/dist/v3/sanitize.js
+// ../contrib-peer2peer/packages/core/dist/v3/sanitize.js
 function sanitizePeerText(s2, max = PEER_TEXT_MAX) {
   if (typeof s2 !== "string")
     return "";
@@ -4099,7 +4099,7 @@ function sanitizeFiles(files, max = 200) {
 }
 var PEER_TEXT_MAX, PEER_TEXT_CAPS, BREAKS, STRIP;
 var init_sanitize = __esm({
-  "packages/core/dist/v3/sanitize.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/sanitize.js"() {
     "use strict";
     init_redact();
     PEER_TEXT_MAX = 200;
@@ -4118,7 +4118,7 @@ var init_sanitize = __esm({
   }
 });
 
-// packages/core/dist/v3/relayurl.js
+// ../contrib-peer2peer/packages/core/dist/v3/relayurl.js
 function canonicalRelayUrl(url) {
   if (typeof url !== "string" || url.length > 2048)
     fail("bad-relay-url", "relay URL must be a string");
@@ -4165,14 +4165,14 @@ function relayHttpsBase(relay) {
 }
 var DEFAULT_RELAY_PATH;
 var init_relayurl = __esm({
-  "packages/core/dist/v3/relayurl.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/relayurl.js"() {
     "use strict";
     init_errors();
     DEFAULT_RELAY_PATH = "/v3";
   }
 });
 
-// packages/core/node_modules/@scure/bip39/index.js
+// ../contrib-peer2peer/packages/core/node_modules/@scure/bip39/index.js
 function isWellFormedUnicode(value) {
   for (let i = 0; i < value.length; i++) {
     const current = value.charCodeAt(i);
@@ -4283,7 +4283,7 @@ function validateMnemonic(mnemonic, wordlist2) {
 }
 var isJapanese, calcChecksum;
 var init_bip39 = __esm({
-  "packages/core/node_modules/@scure/bip39/index.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@scure/bip39/index.js"() {
     init_sha2();
     init_utils();
     isJapanese = (wordlist2) => wordlist2[0] === "あいこくしん";
@@ -4294,10 +4294,10 @@ var init_bip39 = __esm({
   }
 });
 
-// packages/core/node_modules/@scure/bip39/wordlists/english.js
+// ../contrib-peer2peer/packages/core/node_modules/@scure/bip39/wordlists/english.js
 var wordlist;
 var init_english = __esm({
-  "packages/core/node_modules/@scure/bip39/wordlists/english.js"() {
+  "../contrib-peer2peer/packages/core/node_modules/@scure/bip39/wordlists/english.js"() {
     wordlist = /* @__PURE__ */ Object.freeze(`abandon
 ability
 able
@@ -6349,7 +6349,7 @@ zoo`.split("\n"));
   }
 });
 
-// packages/core/dist/v3/identity.js
+// ../contrib-peer2peer/packages/core/dist/v3/identity.js
 function generateIdentityKey() {
   return identityKeyFromSeed(randomBytes7(32));
 }
@@ -6469,7 +6469,7 @@ function rotationConflicts(rotations) {
 }
 var NAME_RE;
 var init_identity = __esm({
-  "packages/core/dist/v3/identity.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/identity.js"() {
     "use strict";
     init_bip39();
     init_english();
@@ -6482,7 +6482,7 @@ var init_identity = __esm({
   }
 });
 
-// packages/core/dist/v3/identitydoc.js
+// ../contrib-peer2peer/packages/core/dist/v3/identitydoc.js
 function isHttpsUrl(s2) {
   if (s2.length > PROFILE_URL_MAX)
     return false;
@@ -6811,7 +6811,7 @@ function docCertFor(doc, did) {
 }
 var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, IdentityChain;
 var init_identitydoc = __esm({
-  "packages/core/dist/v3/identitydoc.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/identitydoc.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7095,7 +7095,7 @@ var init_identitydoc = __esm({
   }
 });
 
-// packages/core/dist/v3/device.js
+// ../contrib-peer2peer/packages/core/dist/v3/device.js
 function generateDeviceKeysV3(userId) {
   return deviceKeysV3FromSecrets(userId, randomBytes7(32), randomBytes7(32));
 }
@@ -7191,7 +7191,7 @@ function certExpiresWithin(cert, withinSec, now = nowSec()) {
   return cert.exp - now <= withinSec;
 }
 var init_device = __esm({
-  "packages/core/dist/v3/device.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/device.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7202,14 +7202,14 @@ var init_device = __esm({
   }
 });
 
-// packages/core/dist/objects.js
+// ../contrib-peer2peer/packages/core/dist/objects.js
 function unfriendApplies(f, u) {
   const samePair = u.iss === f.inviter && u.peer === f.invitee || u.iss === f.invitee && u.peer === f.inviter;
   return samePair && (u.inv === f.inv || f.inviteIat <= u.iat);
 }
 var DEVICE_CERT_MAX_TTL_SEC2, WORKSPACE_MAX_TTL_SEC, INVITE_MAX_TTL_SEC2;
 var init_objects = __esm({
-  "packages/core/dist/objects.js"() {
+  "../contrib-peer2peer/packages/core/dist/objects.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7221,7 +7221,7 @@ var init_objects = __esm({
   }
 });
 
-// packages/core/dist/envelope.js
+// ../contrib-peer2peer/packages/core/dist/envelope.js
 function envelopeAad(h, profile = ENVELOPE_PROFILE_V2) {
   return utf8(`${profile.aadPrefix}|${h.from}|${h.fdid}|${h.to}|${h.tdid}|${h.own}|${h.sid}|${h.seq}|${h.ts}|${h.kind}`);
 }
@@ -7242,7 +7242,7 @@ function openBox(p) {
 }
 var ENVELOPE_PROFILE_V2;
 var init_envelope = __esm({
-  "packages/core/dist/envelope.js"() {
+  "../contrib-peer2peer/packages/core/dist/envelope.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7253,7 +7253,7 @@ var init_envelope = __esm({
   }
 });
 
-// packages/core/dist/v3/link.js
+// ../contrib-peer2peer/packages/core/dist/v3/link.js
 function newLinkSecret() {
   return randomBytes7(LINK_SECRET_LEN);
 }
@@ -7420,7 +7420,7 @@ function openLinkResponse(s2, device, xSecretKey, frame, opts = {}) {
 }
 var LINK_SECRET_LEN, LINK_TTL_SEC, LINK_LABEL_MAX, LINK_ID_PREFIX, LINK_MAC_INFO, LINK_CMP_PREFIX, LINK_SEAL_INFO, LINK_KEY_INFO;
 var init_link = __esm({
-  "packages/core/dist/v3/link.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/link.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7443,7 +7443,7 @@ var init_link = __esm({
   }
 });
 
-// packages/core/dist/v3/proofs.js
+// ../contrib-peer2peer/packages/core/dist/v3/proofs.js
 function canonicalProofLoc(kind, claim, gistId) {
   if (kind === "github") {
     if (!GITHUB_HANDLE_RE.test(claim))
@@ -7533,7 +7533,7 @@ async function verifiedProofs(doc, fetchers, opts = {}) {
 }
 var GITHUB_HANDLE_RE, DOMAIN_RE, EXT_KIND_RE, GIST_ID_RE;
 var init_proofs = __esm({
-  "packages/core/dist/v3/proofs.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/proofs.js"() {
     "use strict";
     init_encoding();
     init_jws();
@@ -7547,7 +7547,7 @@ var init_proofs = __esm({
   }
 });
 
-// packages/core/dist/v3/signers.js
+// ../contrib-peer2peer/packages/core/dist/v3/signers.js
 async function verifyDeviceSignedV3(jws, typ, ctx, opts = {}) {
   const now = ctx.now ?? nowSec();
   const d = decodeTyped(jws, typ);
@@ -7582,7 +7582,7 @@ function certIsFor(certJws, iss, did) {
   }
 }
 var init_signers = __esm({
-  "packages/core/dist/v3/signers.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/signers.js"() {
     "use strict";
     init_jws();
     init_errors();
@@ -7591,7 +7591,7 @@ var init_signers = __esm({
   }
 });
 
-// packages/core/dist/v3/caps.js
+// ../contrib-peer2peer/packages/core/dist/v3/caps.js
 function createCap(device, certJws, p) {
   const iat = p.iat ?? nowSec();
   const ttl = p.ttlSec ?? CAP_MAX_TTL_SEC;
@@ -7691,7 +7691,7 @@ function capAllowsKind(kinds, kind) {
   return kinds[0] === "*" || kinds.includes(kind);
 }
 var init_caps = __esm({
-  "packages/core/dist/v3/caps.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/caps.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7703,7 +7703,7 @@ var init_caps = __esm({
   }
 });
 
-// packages/core/dist/v3/friends.js
+// ../contrib-peer2peer/packages/core/dist/v3/friends.js
 function createInviteV3(signer, p) {
   const iat = p.iat ?? nowSec();
   const ttl = p.ttlSec ?? INVITE_MAX_TTL_SEC;
@@ -7955,7 +7955,7 @@ function liveFriendship(a, b, friendships, unfriends) {
 }
 var INVITE_LINK_PREFIX, INVITE_WEB_PREFIX, LEGACY_INVITE_WEB_PREFIXES;
 var init_friends = __esm({
-  "packages/core/dist/v3/friends.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/friends.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -7973,7 +7973,7 @@ var init_friends = __esm({
   }
 });
 
-// packages/core/dist/v3/circles.js
+// ../contrib-peer2peer/packages/core/dist/v3/circles.js
 function userIdList(o, k) {
   return strArray(o, k, {
     max: MAX_CIRCLE_MEMBERS,
@@ -8487,7 +8487,7 @@ function buildCircleBundle(chain, book, opts = {}) {
 }
 var CIRCLE_NAME_MAX, MAX_CIRCLE_MEMBERS, PROPOSAL_MAX_AGE_SEC, HEAD_RESEND_SEC, HEAD_CATCH_UP_SEC, JOIN_CONFIRM_WAIT_SEC, OPEN_JOIN_MAX_PER_HOUR, MAX_PENDING_VERSIONS, VERSION_FIELDS, strongIks2, MAX_PENDING_AHEAD, MAX_SIDE_VERSIONS, CircleChain, OPEN_JOIN_CAP_MAX_TTL_SEC, OPEN_JOIN_CAP_RENEW_SEC, CIRCLE_LINK_PREFIX, CIRCLE_WEB_PREFIX, LEGACY_CIRCLE_WEB_PREFIXES;
 var init_circles = __esm({
-  "packages/core/dist/v3/circles.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/circles.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -8907,7 +8907,7 @@ var init_circles = __esm({
   }
 });
 
-// packages/core/dist/v3/roster.js
+// ../contrib-peer2peer/packages/core/dist/v3/roster.js
 function createRosterV3(signer, p) {
   const payload = {
     iss: signer.userId,
@@ -8971,7 +8971,7 @@ function compareRoster(held2, r) {
 }
 var MAX_ROSTER_PARTS;
 var init_roster = __esm({
-  "packages/core/dist/v3/roster.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/roster.js"() {
     "use strict";
     init_jws();
     init_errors();
@@ -8981,7 +8981,7 @@ var init_roster = __esm({
   }
 });
 
-// packages/core/dist/v3/authz.js
+// ../contrib-peer2peer/packages/core/dist/v3/authz.js
 function partyAuthorizedV3(user, roster2, facts) {
   if (user === roster2.iss)
     return { ok: true, rule: "owner" };
@@ -9010,13 +9010,13 @@ function authorizeExchangeV3(viewer, sender, roster2, facts) {
   return { ok: true, rule: s2.rule, viewerRule: v.rule };
 }
 var init_authz = __esm({
-  "packages/core/dist/v3/authz.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/authz.js"() {
     "use strict";
     init_friends();
   }
 });
 
-// packages/core/dist/v3/envelope.js
+// ../contrib-peer2peer/packages/core/dist/v3/envelope.js
 function isExtensionKind(k) {
   return typeof k === "string" && EXT_KIND_RE2.test(k);
 }
@@ -9499,7 +9499,7 @@ function isLive(lastStatusTs, nowMs) {
 }
 var ENVELOPE_VERSION_V3, ENVELOPE_PROFILE_V3, CONTACT_SID_V3, CIRCLE_SID, RECEIPT_SID, RECEIPT_OUTCOMES, RECEIPT_ID_RE, STATUS_CAP_RECEIPTS, CORE_KINDS, EXT_KIND_RE2, FUTURE_KIND_RE, MAX_ANSWER_PARTS, STATUS_CAP_XSTATE, EXT_STATE_TTL_MIN, EXT_STATE_TTL_MAX, EXT_STATE_TTL_DEFAULT, EXT_STATE_MAX_BYTES, EXT_STATE_MIN_INTERVAL_MS, FALLBACK_MAX, MAX_CHAIN_IN_BUNDLE, STATUS_CAPS_MAX, STATUS_CAP_MAX_LEN, STATUS_CAP_RE, STATUS_CAP_TOLERANT, STATUS_CAP_AGENTS, STATUS_AGENTS_MAX, STATUS_AGENT_FILES_MAX, STATUS_AGENT_TASK_MAX, STATUS_AGENT_TYPE_MAX, STATUS_AGENT_FILE_MAX_LEN, STATUS_AGENT_STATES, AGENT_ID_RE, AGENT_TYPE_RE, AGENT_BRANCH_RE, AGENT_FIELDS, STATUS_LIVE_MS;
 var init_envelope2 = __esm({
-  "packages/core/dist/v3/envelope.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/envelope.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -9548,7 +9548,7 @@ var init_envelope2 = __esm({
   }
 });
 
-// packages/core/dist/v3/relay.js
+// ../contrib-peer2peer/packages/core/dist/v3/relay.js
 function relayAuthMessage(relay, nonce) {
   return utf8(`${RELAY_AUTH_PREFIX}${relay}|${nonce}`);
 }
@@ -9586,7 +9586,7 @@ function solvePow(envBytes, bits, maxTries = 1 << 28) {
 }
 var RELAY_AUTH_PREFIX, MAX_RELAY_FRAME_BYTES;
 var init_relay = __esm({
-  "packages/core/dist/v3/relay.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/relay.js"() {
     "use strict";
     init_encoding();
     init_crypto();
@@ -9603,10 +9603,10 @@ var init_relay = __esm({
   }
 });
 
-// packages/core/dist/v3/store.js
+// ../contrib-peer2peer/packages/core/dist/v3/store.js
 var REPLAY_MAX_ATTEMPTS, REPLAY_MAX_ABANDONS, REPLAY_CLAIM_TTL_MS, CLAIM_GC_MS, replayClaimKey, liveTries, standingClaims, PROVISIONAL_MAX, PROVISIONAL_TTL_SEC, rosterKey, REFRESH_MARK_SLACK_SEC, docName, TrustStoreV3;
 var init_store = __esm({
-  "packages/core/dist/v3/store.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/store.js"() {
     "use strict";
     init_docbackend();
     init_errors();
@@ -10064,7 +10064,7 @@ var init_store = __esm({
   }
 });
 
-// packages/core/dist/v3/state.js
+// ../contrib-peer2peer/packages/core/dist/v3/state.js
 async function addIdentityVersion(store2, jws, opts = {}) {
   const iss = peekIdentityDoc(jws).iss;
   return store2.updateIdentity(iss, (stored2) => {
@@ -10735,7 +10735,7 @@ async function outgoingCircleBundle(store2, cid, opts = {}) {
 }
 var CHAIN_WALK_PAGE, CHAIN_WALK_MAX_REQUESTS, MAX_TIPS_PER_RELAY, MAX_EXAMINED_PER_RELAY, MAX_REFRESH_DOCS, REFRESH_BUDGET_MS, WALK_ALLOWANCE_PER_RELAY, RELAY_FETCH_TIMEOUT_MS, reverified, REVERIFY_MAX_AGE_SEC, VIEW_CACHE_MAX, viewCache;
 var init_state = __esm({
-  "packages/core/dist/v3/state.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/state.js"() {
     "use strict";
     init_errors();
     init_base();
@@ -10760,7 +10760,7 @@ var init_state = __esm({
   }
 });
 
-// packages/core/dist/v3/incoming.js
+// ../contrib-peer2peer/packages/core/dist/v3/incoming.js
 async function withFdidLock(store2, fdid, fn) {
   let m = locks.get(store2);
   if (!m)
@@ -11100,7 +11100,7 @@ async function authorizeCircle(pt, p, signerCtx, ctx) {
 }
 var OWNER_ONLY_KINDS, locks, COMPACT_RE;
 var init_incoming = __esm({
-  "packages/core/dist/v3/incoming.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/incoming.js"() {
     "use strict";
     init_jws();
     init_replay();
@@ -11122,9 +11122,9 @@ var init_incoming = __esm({
   }
 });
 
-// packages/core/dist/v3/index.js
+// ../contrib-peer2peer/packages/core/dist/v3/index.js
 var init_v3 = __esm({
-  "packages/core/dist/v3/index.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/index.js"() {
     "use strict";
     init_errors();
     init_encoding();
@@ -11154,7 +11154,7 @@ var init_v3 = __esm({
   }
 });
 
-// packages/core/dist/filebackend.js
+// ../contrib-peer2peer/packages/core/dist/filebackend.js
 import { constants as fsConstants2, promises as fs2 } from "node:fs";
 import { homedir as homedir2, hostname } from "node:os";
 import { join as join9 } from "node:path";
@@ -11190,7 +11190,7 @@ function pidAlive(pid) {
 }
 var DIR_MODE, FILE_MODE, FileDocBackend, NO_LINKS, LockCreator, sleep, LOCK_TIMEOUT_MS, LOCK_STALE_MS, LOCK_REFRESH_MS;
 var init_filebackend = __esm({
-  "packages/core/dist/filebackend.js"() {
+  "../contrib-peer2peer/packages/core/dist/filebackend.js"() {
     "use strict";
     init_crypto();
     init_encoding();
@@ -11429,7 +11429,7 @@ var init_filebackend = __esm({
   }
 });
 
-// packages/core/dist/v3/node.js
+// ../contrib-peer2peer/packages/core/dist/v3/node.js
 import { homedir as homedir3 } from "node:os";
 import { join as join10 } from "node:path";
 function defaultTrustDirV3() {
@@ -11437,7 +11437,7 @@ function defaultTrustDirV3() {
 }
 var FileTrustStoreV3;
 var init_node = __esm({
-  "packages/core/dist/v3/node.js"() {
+  "../contrib-peer2peer/packages/core/dist/v3/node.js"() {
     "use strict";
     init_filebackend();
     init_store();
@@ -11697,9 +11697,9 @@ var init_config = __esm({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/constants.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/constants.js
 var require_constants = __commonJS({
-  "packages/p2p/node_modules/ws/lib/constants.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/constants.js"(exports, module) {
     "use strict";
     var BINARY_TYPES = ["nodebuffer", "arraybuffer", "fragments"];
     var hasBlob = typeof Blob !== "undefined";
@@ -11720,9 +11720,9 @@ var require_constants = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/buffer-util.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/buffer-util.js
 var require_buffer_util = __commonJS({
-  "packages/p2p/node_modules/ws/lib/buffer-util.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/buffer-util.js"(exports, module) {
     "use strict";
     var { EMPTY_BUFFER: EMPTY_BUFFER2 } = require_constants();
     var FastBuffer = Buffer[Symbol.species];
@@ -11795,9 +11795,9 @@ var require_buffer_util = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/limiter.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/limiter.js
 var require_limiter = __commonJS({
-  "packages/p2p/node_modules/ws/lib/limiter.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/limiter.js"(exports, module) {
     "use strict";
     var kDone = /* @__PURE__ */ Symbol("kDone");
     var kRun = /* @__PURE__ */ Symbol("kRun");
@@ -11845,9 +11845,9 @@ var require_limiter = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/permessage-deflate.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/permessage-deflate.js
 var require_permessage_deflate = __commonJS({
-  "packages/p2p/node_modules/ws/lib/permessage-deflate.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/permessage-deflate.js"(exports, module) {
     "use strict";
     var zlib = __require("zlib");
     var bufferUtil = require_buffer_util();
@@ -12228,9 +12228,9 @@ var require_permessage_deflate = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/validation.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/validation.js
 var require_validation = __commonJS({
-  "packages/p2p/node_modules/ws/lib/validation.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/validation.js"(exports, module) {
     "use strict";
     var { isUtf8 } = __require("buffer");
     var { hasBlob } = require_constants();
@@ -12429,9 +12429,9 @@ var require_validation = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/receiver.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/receiver.js
 var require_receiver = __commonJS({
-  "packages/p2p/node_modules/ws/lib/receiver.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/receiver.js"(exports, module) {
     "use strict";
     var { Writable } = __require("stream");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -13052,9 +13052,9 @@ var require_receiver = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/sender.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/sender.js
 var require_sender = __commonJS({
-  "packages/p2p/node_modules/ws/lib/sender.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/sender.js"(exports, module) {
     "use strict";
     var { Duplex } = __require("stream");
     var { randomFillSync } = __require("crypto");
@@ -13545,9 +13545,9 @@ var require_sender = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/event-target.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/event-target.js
 var require_event_target = __commonJS({
-  "packages/p2p/node_modules/ws/lib/event-target.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/event-target.js"(exports, module) {
     "use strict";
     var { kForOnEventAttribute, kListener } = require_constants();
     var kCode = /* @__PURE__ */ Symbol("kCode");
@@ -13774,9 +13774,9 @@ var require_event_target = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/extension.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/extension.js
 var require_extension = __commonJS({
-  "packages/p2p/node_modules/ws/lib/extension.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/extension.js"(exports, module) {
     "use strict";
     var { tokenChars } = require_validation();
     function push(dest, name2, elem) {
@@ -13927,9 +13927,9 @@ var require_extension = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/websocket.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/websocket.js
 var require_websocket = __commonJS({
-  "packages/p2p/node_modules/ws/lib/websocket.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/websocket.js"(exports, module) {
     "use strict";
     var EventEmitter2 = __require("events");
     var https = __require("https");
@@ -14836,9 +14836,9 @@ var require_websocket = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/stream.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/stream.js
 var require_stream = __commonJS({
-  "packages/p2p/node_modules/ws/lib/stream.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/stream.js"(exports, module) {
     "use strict";
     var WebSocket2 = require_websocket();
     var { Duplex } = __require("stream");
@@ -14934,9 +14934,9 @@ var require_stream = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/subprotocol.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/subprotocol.js
 var require_subprotocol = __commonJS({
-  "packages/p2p/node_modules/ws/lib/subprotocol.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/subprotocol.js"(exports, module) {
     "use strict";
     var { tokenChars } = require_validation();
     function parse(header) {
@@ -14979,9 +14979,9 @@ var require_subprotocol = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/lib/websocket-server.js
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/lib/websocket-server.js
 var require_websocket_server = __commonJS({
-  "packages/p2p/node_modules/ws/lib/websocket-server.js"(exports, module) {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/lib/websocket-server.js"(exports, module) {
     "use strict";
     var EventEmitter2 = __require("events");
     var http = __require("http");
@@ -15380,10 +15380,10 @@ var require_websocket_server = __commonJS({
   }
 });
 
-// packages/p2p/node_modules/ws/wrapper.mjs
+// ../contrib-peer2peer/packages/p2p/node_modules/ws/wrapper.mjs
 var import_stream, import_extension, import_permessage_deflate, import_receiver, import_sender, import_subprotocol, import_websocket, import_websocket_server, wrapper_default;
 var init_wrapper = __esm({
-  "packages/p2p/node_modules/ws/wrapper.mjs"() {
+  "../contrib-peer2peer/packages/p2p/node_modules/ws/wrapper.mjs"() {
     import_stream = __toESM(require_stream(), 1);
     import_extension = __toESM(require_extension(), 1);
     import_permessage_deflate = __toESM(require_permessage_deflate(), 1);
@@ -24920,7 +24920,7 @@ import { createInterface } from "node:readline/promises";
 import { realpathSync as realpathSync5 } from "node:fs";
 import { resolve as resolve2 } from "node:path";
 
-// packages/codex-bridge/dist/lib.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/lib.js
 var P2P_PREFIX = "p2p:";
 var FP = "[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}";
 var USER_ID_RE = /^p2p:[a-z2-7]{20,}$/;
@@ -25407,7 +25407,7 @@ function idleNotice(address, reason) {
   return `[Peer2Peer idle notice] ${inert(address)} ${IDLE_WORDING[reason] ?? "changed state"}.`;
 }
 
-// packages/codex-bridge/dist/mcp.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/mcp.js
 var PROTOCOL_VERSION = "2025-06-18";
 var SUPPORTED_VERSIONS = /* @__PURE__ */ new Set(["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]);
 var text = (body, isError = false) => ({ content: [{ type: "text", text: body }], ...isError ? { isError: true } : {} });
@@ -25570,7 +25570,7 @@ function lineFeeder(onLine) {
   };
 }
 
-// packages/codex-bridge/dist/p2p.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/p2p.js
 import { spawn } from "node:child_process";
 var TIMEOUT_MS = 3e4;
 function nodeExec(env = process.env) {
@@ -25665,14 +25665,14 @@ var P2P = class {
   }
 };
 
-// packages/codex-bridge/dist/bridge.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/bridge.js
 import { randomUUID } from "node:crypto";
 import { lstatSync as lstatSync2, realpathSync as realpathSync2 } from "node:fs";
 import { readFile as readFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import { isAbsolute as isAbsolute2, join as join2, sep } from "node:path";
 
-// packages/codex-bridge/dist/knobs.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/knobs.js
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -26438,7 +26438,7 @@ function bridgeHome(env, home = userHome()) {
   return fromConfig || env.P2P_HOME?.trim() || join(home, DEFAULT_P2P_DIR);
 }
 
-// packages/codex-bridge/dist/bridge.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/bridge.js
 var STATUS_EVERY_MS = 6e4;
 var PEERS_EVERY_MS = 6e4;
 var SOCIAL_EVERY_MS = 10 * 6e4;
@@ -27382,7 +27382,7 @@ function reachHit(roots, paths) {
   return void 0;
 }
 
-// packages/codex-bridge/dist/tools.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/tools.js
 var MAX_MESSAGE_CHARS = 16e3;
 var PERSON_COMMANDS = {
   p2p_join: "p2p join <code>",
@@ -27581,13 +27581,13 @@ function serverInstructions() {
   ].join("\n");
 }
 
-// packages/codex-bridge/dist/server.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/server.js
 import { execFile as execFile3, spawn as spawn2 } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
 import { isAbsolute as isAbsolute3, join as join6 } from "node:path";
 
-// packages/codex-bridge/dist/confirm.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/confirm.js
 import { createHash, randomBytes as randomBytes2, randomInt } from "node:crypto";
 import { chmodSync as chmodSync2, closeSync as closeSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2, writeSync } from "node:fs";
 import { join as join3 } from "node:path";
@@ -27789,7 +27789,7 @@ var PersonGate = class {
   }
 };
 
-// packages/codex-bridge/dist/ipc.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/ipc.js
 import { execFile as execFile2 } from "node:child_process";
 import { chmodSync as chmodSync3, mkdirSync as mkdirSync3, mkdtempSync, readdirSync, readFileSync as readFileSync3, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { randomBytes as randomBytes3 } from "node:crypto";
@@ -28035,7 +28035,7 @@ async function descendsFromCodex(pid, codexPids, depth = 24) {
   return false;
 }
 
-// packages/codex-bridge/dist/trusted.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/trusted.js
 import { open, readdir } from "node:fs/promises";
 import { join as join5 } from "node:path";
 var CHUNK = 256 * 1024;
@@ -28184,7 +28184,7 @@ var RolloutReader = class {
   }
 };
 
-// packages/codex-bridge/dist/server.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/server.js
 var BRIDGE_VERSION = "0.1.0";
 function childWatch(env) {
   return (argv, onLine, signal) => new Promise((resolve3, reject) => {
@@ -28366,7 +28366,7 @@ async function runMcpServer(o) {
   ipc?.close();
 }
 
-// packages/codex-bridge/dist/hook.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/hook.js
 var SHELL_TOOLS = /^(bash|shell|local_shell|exec_command|unified_exec|container\.exec|powershell|write_stdin)$/i;
 function commandOf(input) {
   if (typeof input === "string")
@@ -28431,7 +28431,7 @@ async function runHook(event, stdin, deps) {
   }
 }
 
-// packages/codex-bridge/dist/install.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/install.js
 import { copyFileSync, existsSync, lstatSync as lstatSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, readlinkSync, realpathSync as realpathSync3, renameSync as renameSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname2, isAbsolute as isAbsolute4, join as join7 } from "node:path";
 var BEGIN = "# >>> peer2peer (managed by `p2p codex install`; edit with care) >>>";
@@ -28653,7 +28653,7 @@ function printedInstructions(plan) {
   ].join("\n");
 }
 
-// packages/codex-bridge/dist/commands.js
+// ../contrib-peer2peer/packages/codex-bridge/dist/commands.js
 import { isAbsolute as isAbsolute5, join as join8, resolve } from "node:path";
 var CodexCommandError = class extends Error {
   code;
@@ -28759,7 +28759,7 @@ async function resolveCommand(o) {
   throw new CodexCommandError("not_found", `no live Codex session holds ${inert(o.id)} (it may have expired after 10 minutes)`);
 }
 
-// packages/p2p/node_modules/commander/lib/error.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/error.js
 var CommanderError = class extends Error {
   /**
    * Constructs the CommanderError class
@@ -28788,7 +28788,7 @@ var InvalidArgumentError = class extends CommanderError {
   }
 };
 
-// packages/p2p/node_modules/commander/lib/argument.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/argument.js
 var Argument = class {
   /**
    * Initialize a new command argument with the given name and description.
@@ -28909,7 +28909,7 @@ function humanReadableArgName(arg) {
   return arg.required ? "<" + nameOutput + ">" : "[" + nameOutput + "]";
 }
 
-// packages/p2p/node_modules/commander/lib/command.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/command.js
 import { EventEmitter } from "node:events";
 import childProcess from "node:child_process";
 import path from "node:path";
@@ -28917,7 +28917,7 @@ import fs from "node:fs";
 import process2 from "node:process";
 import { stripVTControlCharacters as stripVTControlCharacters2 } from "node:util";
 
-// packages/p2p/node_modules/commander/lib/help.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/help.js
 import { stripVTControlCharacters } from "node:util";
 var Help = class {
   constructor() {
@@ -29509,7 +29509,7 @@ ${itemIndentStr}`);
   }
 };
 
-// packages/p2p/node_modules/commander/lib/option.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/option.js
 var Option = class {
   /**
    * Initialize a new `Option` with the given `flags` and `description`.
@@ -29815,7 +29815,7 @@ function splitOptionFlags(flags) {
   return { shortFlag, longFlag };
 }
 
-// packages/p2p/node_modules/commander/lib/suggestSimilar.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/suggestSimilar.js
 var maxDistance = 3;
 function editDistance(a, b) {
   if (Math.abs(a.length - b.length) > maxDistance)
@@ -29890,7 +29890,7 @@ function suggestSimilar(word, candidates) {
   return "";
 }
 
-// packages/p2p/node_modules/commander/lib/command.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/lib/command.js
 var Command = class _Command extends EventEmitter {
   /**
    * Initialize a new `Command`.
@@ -32124,7 +32124,7 @@ function useColor() {
   return void 0;
 }
 
-// packages/p2p/node_modules/commander/index.js
+// ../contrib-peer2peer/packages/p2p/node_modules/commander/index.js
 var program = new Command();
 
 // packages/p2p/src/cli.ts
@@ -32230,7 +32230,7 @@ init_errors2();
 // packages/p2p/src/format.ts
 init_v3();
 
-// packages/p2p/node_modules/uqr/dist/index.mjs
+// ../contrib-peer2peer/packages/p2p/node_modules/uqr/dist/index.mjs
 var QrCodeDataType = /* @__PURE__ */ ((QrCodeDataType2) => {
   QrCodeDataType2[QrCodeDataType2["Border"] = -1] = "Border";
   QrCodeDataType2[QrCodeDataType2["Data"] = 0] = "Data";
@@ -33740,10 +33740,40 @@ async function modVersions(root) {
   }
   return out;
 }
+var CHECK_DOCS = {
+  clock: "docs/faq.md#faq",
+  version: "docs/getting-started.md#3-install",
+  identity: "docs/getting-started.md#4-set-up-and-invite",
+  device: "docs/getting-started.md#4-set-up-and-invite",
+  relays: "docs/getting-started.md#2-get-a-relay",
+  relay: "docs/run-a-relay.md#operations",
+  published: "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  document: "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "their-document": "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "document-fork": "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "document-rotated": "docs/faq.md#faq",
+  "their-rotation": "docs/faq.md#faq",
+  friendship: "docs/getting-started.md#4-set-up-and-invite",
+  "cap-ours": "docs/getting-started.md#4-set-up-and-invite",
+  "cap-theirs": "docs/getting-started.md#4-set-up-and-invite",
+  "default-circle": "docs/getting-started.md#7-control-what-you-share",
+  shared: "docs/getting-started.md#7-control-what-you-share",
+  "their-session": "docs/getting-started.md#7-control-what-you-share",
+  "their-sessions": "docs/getting-started.md#6-see-each-other",
+  publisher: "docs/getting-started.md#6-see-each-other",
+  received: "docs/getting-started.md#6-see-each-other",
+  watch: "docs/getting-started.md#6-see-each-other"
+};
+function doctorDocs(id2) {
+  const family = id2.split(":", 1)[0];
+  const page = Object.hasOwn(CHECK_DOCS, family) ? CHECK_DOCS[family] : void 0;
+  return page ? `https://github.com/ix-infrastructure/Peer2Peer/blob/main/${page}` : void 0;
+}
 var Checks = class {
   list = [];
   add(id2, status, title, detail, fix) {
-    const c = { id: id2, status, title, detail, ...fix && status !== "ok" ? { fix } : {} };
+    const docs = status !== "ok" ? doctorDocs(id2) : void 0;
+    const c = { id: id2, status, title, detail, ...fix && status !== "ok" ? { fix } : {}, ...docs ? { docs } : {} };
     this.list.push(c);
     return c;
   }
@@ -34212,6 +34242,7 @@ function formatDoctor(r) {
   for (const x of r.checks) {
     lines.push(`${MARK[x.status]} ${x.title}: ${x.detail}`);
     if (x.fix) lines.push(`    ${x.status === "unknown" ? "to tell" : "fix"}: ${x.fix}`);
+    if (x.docs && x.status !== "ok") lines.push(`    see: ${x.docs}`);
   }
   lines.push("", `${r.summary.ok} ✓  ${r.summary.fail} ✗  ${r.summary.unknown} ?`);
   return lines.join("\n");
@@ -35993,7 +36024,7 @@ function prettyDoctor(r, plain, p) {
     if (s2.startsWith("✓")) return st.green("✓") + s2.slice(1);
     if (s2.startsWith("✗")) return st.red("✗") + s2.slice(1);
     if (s2.startsWith("?")) return st.yellow("?") + s2.slice(1);
-    if (/^\s+(fix|to tell):/.test(s2)) return st.dim(s2);
+    if (/^\s+(fix|to tell|see):/.test(s2)) return st.dim(s2);
     return s2;
   }).join("\n").concat(r.summary.fail === 0 ? `
 ${st.green("Everything checks out.")}` : "");

@@ -64,6 +64,8 @@ export interface Check {
   detail: string;
   /** One line: what to do (✗), or what would tell (?). */
   fix?: string;
+  /** More detail in the project's documentation, when a relevant section exists. */
+  docs?: string;
 }
 
 export interface DoctorResult {
@@ -325,10 +327,43 @@ export async function modVersions(root: string): Promise<{ plugin?: string; bund
 // ---------------------------------------------------------------------------
 // The checks
 
+const CHECK_DOCS: Readonly<Record<string, string>> = {
+  clock: "docs/faq.md#faq",
+  version: "docs/getting-started.md#3-install",
+  identity: "docs/getting-started.md#4-set-up-and-invite",
+  device: "docs/getting-started.md#4-set-up-and-invite",
+  relays: "docs/getting-started.md#2-get-a-relay",
+  relay: "docs/run-a-relay.md#operations",
+  published: "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  document: "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "their-document": "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "document-fork": "docs/run-a-relay.md#identity-documents-what-a-relay-can-and-cant-vouch-for",
+  "document-rotated": "docs/faq.md#faq",
+  "their-rotation": "docs/faq.md#faq",
+  friendship: "docs/getting-started.md#4-set-up-and-invite",
+  "cap-ours": "docs/getting-started.md#4-set-up-and-invite",
+  "cap-theirs": "docs/getting-started.md#4-set-up-and-invite",
+  "default-circle": "docs/getting-started.md#7-control-what-you-share",
+  shared: "docs/getting-started.md#7-control-what-you-share",
+  "their-session": "docs/getting-started.md#7-control-what-you-share",
+  "their-sessions": "docs/getting-started.md#6-see-each-other",
+  publisher: "docs/getting-started.md#6-see-each-other",
+  received: "docs/getting-started.md#6-see-each-other",
+  watch: "docs/getting-started.md#6-see-each-other",
+};
+
+/** Static links only: peer-controlled parts of diagnostic ids never become URLs. */
+export function doctorDocs(id: string): string | undefined {
+  const family = id.split(":", 1)[0];
+  const page = Object.hasOwn(CHECK_DOCS, family) ? CHECK_DOCS[family] : undefined;
+  return page ? `https://github.com/ix-infrastructure/Peer2Peer/blob/main/${page}` : undefined;
+}
+
 class Checks {
   readonly list: Check[] = [];
   add(id: string, status: CheckStatus, title: string, detail: string, fix?: string): Check {
-    const c: Check = { id, status, title, detail, ...(fix && status !== "ok" ? { fix } : {}) };
+    const docs = status !== "ok" ? doctorDocs(id) : undefined;
+    const c: Check = { id, status, title, detail, ...(fix && status !== "ok" ? { fix } : {}), ...(docs ? { docs } : {}) };
     this.list.push(c);
     return c;
   }
@@ -884,6 +919,7 @@ export function formatDoctor(r: DoctorResult): string {
   for (const x of r.checks) {
     lines.push(`${MARK[x.status]} ${x.title}: ${x.detail}`);
     if (x.fix) lines.push(`    ${x.status === "unknown" ? "to tell" : "fix"}: ${x.fix}`);
+    if (x.docs && x.status !== "ok") lines.push(`    see: ${x.docs}`);
   }
   lines.push("", `${r.summary.ok} ✓  ${r.summary.fail} ✗  ${r.summary.unknown} ?`);
   return lines.join("\n");

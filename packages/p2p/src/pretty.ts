@@ -232,7 +232,7 @@ export function prettyDoctor(r: DoctorResult, plain: string, p: Pretty): string 
       if (s.startsWith("✓")) return st.green("✓") + s.slice(1);
       if (s.startsWith("✗")) return st.red("✗") + s.slice(1);
       if (s.startsWith("?")) return st.yellow("?") + s.slice(1);
-      if (/^\s+(fix|to tell):/.test(s)) return st.dim(s);
+      if (/^\s+(fix|to tell|see):/.test(s)) return st.dim(s);
       return s;
     })
     .join("\n")
