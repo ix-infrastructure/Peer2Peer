@@ -9,8 +9,8 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { isMutating, isUnder, mutatingP2PVerb, p2pSessionArgs, parsePeersArgs, pickHolder, routableOf, shellPaths, shellTokens, toolPaths, uncheckableShell } from '../hooks/lib'
-import { BEN_ID, NOW_MS, flag, gather, message, ran, settle, sidOf, slash, start, typed, world, type World } from './world'
+import { isMutating, sha256Hex, isUnder, mutatingP2PVerb, p2pSessionArgs, parsePeersArgs, pickHolder, routableOf, shellPaths, shellTokens, toolPaths, uncheckableShell } from '../hooks/lib'
+import { BEN_ID, CODE, NOW_MS, flag, gather, message, ran, settle, sidOf, slash, start, typed, world, type World } from './world'
 
 /** Every folder handed to the CLI so far (each goes once: the CLI keeps it bound). */
 const handed = (w: World, verb = 'status') => ran(w, verb).flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':').filter(Boolean))
@@ -241,5 +241,22 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     await settle(w, () => ran(w, 'status').length > 0 && w.spawnEnvs.length > 0)
     expect(ran(w, 'status').at(-1)?.env?.P2P_PERSON_TOKEN).toBe(token)
     for (const env of w.spawnEnvs) expect((env as Record<string, string> | undefined)?.P2P_PERSON_TOKEN).toBeUndefined()
+  })
+
+  test('the held Join reads the person token itself, so it works in a session that has none yet (after /clear or a resume)', async ($, on) => {
+    // No token when the session started and when /peers join ran (as in a fresh Sess after /clear).
+    const options: { personToken?: string } = {}
+    const w = world(on, options)
+    await start($, w)
+    const ui = await $.ui.mount({ plugin: 'peer2peer', surface: 'terminal', component: 'AbovePrompt', props: {} } as never)
+    await slash($, 'peers', `join ${CODE}`)
+    expect(ran(w, 'join').at(-1)?.env?.P2P_PERSON_TOKEN).toBeUndefined()
+    // The token exists by the time the person presses Join: the press makes or reads it.
+    const token = 'J'.repeat(43)
+    options.personToken = token
+    await ui.press({ key: `accept-codejoin:${(await sha256Hex(CODE)).slice(0, 16)}` })
+    await settle(w, () => ran(w, 'join').some(r => r.argv.includes('--confirmed')))
+    const confirmed = ran(w, 'join').find(r => r.argv.includes('--confirmed'))
+    expect(confirmed?.env?.P2P_PERSON_TOKEN).toBe(token)
   })
 })

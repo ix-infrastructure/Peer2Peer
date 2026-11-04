@@ -2261,6 +2261,9 @@ const joinCommand = async (S: Sess, $: EngineInterface, _current: Run, code: str
 
 /** The person pressed Join on a code: friends, the code's circles, the default (only when there was none). Creates the identity if needed. */
 const finishJoin = async (S: Sess, $: EngineInterface, current: Run, code: string, allowPrivateRelay = false): Promise<string> => {
+  // The held Join can be pressed in a session that typed no /peers command and has no identity yet
+  // (after a /clear or a resume): make or read the person token first, as a typed command does.
+  await readPersonToken(S, $)
   const p = await client(S, $)
   const r = await p.join(code, { allowPrivateRelay })
   if (!r.ok) return `Join failed: ${r.reason}`
