@@ -36060,6 +36060,7 @@ function prettyHome(d, p) {
 
 // packages/p2p/src/cli.ts
 init_version();
+init_features();
 var SETTLE_MS = 5e3;
 var realOps = { ...identity_exports, ...social_exports, ...circle_ops_exports, ...sessions_exports, ...codes_exports, ...rotation_exports, watch, doctor };
 var collect = (v, prev = []) => [...prev, v];
@@ -36100,6 +36101,11 @@ function buildProgram(deps) {
     return app;
   };
   const program2 = new Command("p2p").description("Peer2Peer: an account-free network for AI agent sessions and the people who run them").version(VERSION).showHelpAfterError().enablePositionalOptions().exitOverride().configureOutput({ writeOut: (s2) => io2.out(s2.replace(/\n$/, "")), writeErr: (s2) => io2.err(s2.replace(/\n$/, "")) });
+  program2.command("version").description("Show CLI, protocol and runtime versions without opening an identity").option("--json", "JSON output").action((o) => {
+    const info = { version: VERSION, protocol: "p2p/v3", protoMinor: PROTO_MINOR, caps: [...CLI_CAPS], node: process.version };
+    io2.out(o.json ? safeJson(info) : `p2p ${VERSION} · protocol 3.${PROTO_MINOR} · node ${process.version}
+${CLI_CAPS.join(", ")}`);
+  });
   const run = (fn, opts = {}) => async (...args) => {
     const cmd = args[args.length - 1];
     const json = Boolean(cmd.opts().json);
@@ -37191,8 +37197,8 @@ async function main(argvIn, deps) {
     deps = { ...deps, noInput: true };
   }
   if (argv.length === 0 && deps.io.pretty && !deps.noInput) argv = ["home"];
-  const isDoctor = argv.find((a) => !a.startsWith("-")) === "doctor";
-  const extensions = deps.extensions ?? (isDoctor ? new ExtensionRegistry() : await loadInstalled(deps));
+  const isInspection = ["doctor", "version"].includes(argv.find((a) => !a.startsWith("-")) ?? "");
+  const extensions = deps.extensions ?? (isInspection ? new ExtensionRegistry() : await loadInstalled(deps));
   const program2 = buildProgram({ ...deps, extensions });
   process.exitCode = 0;
   try {

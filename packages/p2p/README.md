@@ -58,6 +58,7 @@ On a terminal, `p2p` alone and `p2p relays` connect to your own relays (bounded)
 
 | Command | What it does |
 |---|---|
+| `version [--json]` | CLI version, protocol minor, advertised capabilities and Node.js version. Works offline without an identity. `--version` still prints only the package version. |
 | `setup [--name n] [--relay url]… [--backup-file [path] \| --print-backup \| --no-backup]` | The friendly `init`: the name defaults to your OS user name, and relays come from the defaults. Interactively it offers to save the backup phrase to a 0600 file (default `<home>/backup-phrase.txt`, never overwritten) or print it. It is idempotent: on a home that already has an identity it changes nothing and reports `created: false`. |
 | `init [--name n] [--relay url]… [--yes]` | Creates the identity key and the first device (a key holder), and publishes document v1. It strongly prompts for a backup or a second key holder (§2.5). `--yes` skips the prompt but still warns. |
 | `whoami` | Shows your address and grouped fingerprint, devices, relays and document expiry. |
