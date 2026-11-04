@@ -269,7 +269,7 @@ describe("p2p doctor", () => {
     homes.push(none.home);
     const r = await none.run(["doctor"]);
     expect(r.code).toBe(0);
-    expect(byId(r.json.checks, "identity")).toMatchObject({ status: "fail", fix: expect.stringContaining("/peers setup") });
+    expect(byId(r.json.checks, "identity")).toMatchObject({ status: "fail", fix: expect.stringContaining("/peers setup"), docs: "https://github.com/ix-infrastructure/Peer2Peer/blob/main/docs/getting-started.md#4-set-up-and-invite" });
     expect(byId(r.json.checks, `relay:${R}`)).toMatchObject({ status: "ok" });
   });
 
