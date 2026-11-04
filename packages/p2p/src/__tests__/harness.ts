@@ -76,8 +76,30 @@ export class User {
     };
   }
 
+  /**
+   * Project boundaries (projects.ts): a session is private until the person shares its project.
+   * Tests about something else share a session with `session roster <sid> --add|--circle`, or by
+   * setting a default circle (which shared new sessions before project boundaries); with this on
+   * (the default), the harness first shares the test's project (this process's folder) with the
+   * same people or circle, as the person would with `p2p project share`. The project boundary
+   * tests turn it off.
+   */
+  autoShareProject = true;
+
   /** Runs `p2p <args> --json` and parses the single JSON object. */
   async run(args: string[], opts: { stdin?: string; json?: boolean } = {}): Promise<RunResult> {
+    if (this.autoShareProject && args[0] === "session" && args[1] === "roster") {
+      const share: string[] = [];
+      for (let i = 2; i < args.length; i++) {
+        if (args[i] === "--add" && args[i + 1]) share.push("--person", args[++i]);
+        else if (args[i].startsWith("--add=")) share.push("--person", args[i].slice("--add=".length));
+        else if (args[i] === "--circle" && args[i + 1]) share.push(args[++i]);
+      }
+      if (share.length > 0) await this.run(["project", "share", "--add", ...share]);
+    }
+    if (this.autoShareProject && args[0] === "circle" && args[1] === "default" && args[2] && !args[2].startsWith("-")) {
+      await this.run(["project", "share", "--add", args[2]]);
+    }
     const lines = { out: [] as string[], err: [] as string[] };
     const argv = opts.json === false ? args : [...args, "--json"];
     const code = await main(argv, { env: this.env, io: this.io(lines, opts.stdin) });
@@ -92,6 +114,11 @@ export class User {
       }
     }
     return { code, out, err: lines.err.join("\n"), json };
+  }
+
+  /** Shares this test's project (this process's folder) with circles (`c_…`) and friends, as the person would. */
+  async share(...targets: string[]): Promise<void> {
+    await this.ok(["project", "share", "--add", ...targets.flatMap((t) => (t.startsWith("c_") ? [t] : ["--person", t]))]);
   }
 
   /** Runs and expects success. */

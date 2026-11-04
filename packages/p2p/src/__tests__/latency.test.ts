@@ -55,6 +55,8 @@ describe("latency mechanisms", () => {
     expect(Date.now() - t0).toBeLessThan(3000);
     expect(ls.peers.map((p: { own: string; sid: string }) => `${p.own}/${p.sid}`)).toContain(`${ids.ben}/bs1`);
     // A message queued for Ben is handled by his next short command, which also doesn't wait.
+    // (Ann's project is shared with Ben: a session sends only within its project, projects.ts.)
+    await ann.ok(["project", "share", "--add", "--person", ids.ben]);
     await ann.ok(["send", "--from-session", "as1", "--to", ids.ben, "--stdin"], { stdin: "queued for ben" });
     t0 = Date.now();
     await ben.ok(["friends"]);

@@ -1,10 +1,10 @@
 // Copyright 2026 Ix Infrastructure Inc.
 //
-// A session nobody shared explicitly follows the default circle (§6). The
-// live bug: a session started before its user joined the circle (or before
-// the default was set, or the join approved) kept the private roster it was
-// made with, so its statuses reached only its owner: the circle's members
-// saw nothing, though friendship, caps and relays were all fine.
+// A session nobody shared explicitly follows its project's policy (§6, projects.ts): private until
+// the person shares the project, and re-signed as that policy changes. (Before project boundaries
+// it followed the default circle; the live bug that fixed, a session started before its circle
+// existed keeping its private roster for good, stays fixed: an untouched session follows its
+// project's sharing as it changes.)
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { docFromStored, isAutoRoster } from "../sessions.js";
@@ -52,15 +52,19 @@ describe("docFromStored (pre-release review lows)", () => {
   });
 });
 
-describe("a default roster follows the default circle", () => {
+describe("a default roster follows its project", () => {
   beforeAll(async () => {
     relay = await startRelay(R);
     const t = { [R]: `ws://127.0.0.1:${relay.port}/v3` };
     ann = new User("ann", t);
     ben = new User("ben", t);
+    // These tests are about the policy itself: nothing is shared for them.
+    ann.autoShareProject = false;
+    ben.autoShareProject = false;
     for (const u of [ann, ben]) ids[u.name] = (await u.ok(["init", "--name", u.name, "--relay", R, "--yes"])).userId;
     cid = (await ann.ok(["circle", "create", "ix-team"])).cid;
     await ann.ok(["circle", "default", cid]);
+    await ann.ok(["project", "share", cid]);
     await ann.ok(["session", "roster", "as1"]);
   }, 60_000);
 
@@ -70,17 +74,14 @@ describe("a default roster follows the default circle", () => {
     ben?.cleanup();
   });
 
-  it("ben's session, started before his code join, stays as it was; he moves it (or sets the default) himself", async () => {
-    // His session starts first: no default circle yet, so private.
+  it("ben's session stays private through his code join; sharing the project moves it, and every untouched session, into the circle", async () => {
     const before = await ben.ok(["status", "--session", "bs1", "--state", "busy", "--label", "web"]);
     expect(before.roster).toMatchObject({ vis: "private", ver: 1 });
-    // Then he joins ann's circle with her code (which makes it his default).
+    expect(before.project).toMatchObject({ policy: "private" });
+    // He joins ann's circle with her code (which makes it his default circle).
     const inv = await ann.ok(["invite", "ben"]);
     const j = await alongside(ben.run(["join", "--confirmed", inv.code, "--wait", "12"]), () => ann.ok(["invites"]));
     expect(j.code).toBe(0);
-    // An existing identity's join may still be finishing when `join` returns ("pending"): the
-    // circle arrives in a later drain, as the live case's did. The same session's next status
-    // (which drains first) goes to the circle all the same.
     expect(j.json.circle).toMatchObject({ cid });
     expect(["joined", "pending"]).toContain(j.json.circle.status);
     for (let i = 0; i < 10; i++) {
@@ -90,50 +91,48 @@ describe("a default roster follows the default circle", () => {
     const app = await ben.app();
     await app.load();
     expect(app.self?.defaultCircle).toBe(cid);
-    expect(app.self?.defaultFromJoin).toBe(cid);
     await app.close();
-    // A code join made the circle his default: a session already running doesn't move into it.
+    // A default circle shares nothing by itself: the session, and a new one, stay private.
     const held = await ben.ok(["status", "--session", "bs1", "--state", "busy", "--label", "web", "--summary", "Fixing login."]);
     expect(held.roster).toMatchObject({ vis: "private", ver: 1 });
-    // A new session starts in it.
+    // Nobody but ben sees it, so its summary doesn't go out (nor to his own devices).
+    expect(held.status.summary).toBeUndefined();
     const fresh = await ben.ok(["status", "--session", "bs0", "--state", "busy", "--label", "web"]);
-    expect(fresh.roster).toMatchObject({ vis: "circle", circle: cid });
-    // The live bug stays fixed: once ben sets the default himself, the untouched session follows it.
-    await ben.ok(["circle", "default", cid]);
-    let after: any;
-    for (let i = 0; i < 5; i++) {
-      after = await ben.ok(["status", "--session", "bs1", "--state", "busy", "--label", "web", "--summary", "Fixing login."]);
-      if (after.roster.vis === "circle") break;
-    }
+    expect(fresh.roster).toMatchObject({ vis: "private" });
+    // He shares the project (bare: with his default circle): the untouched sessions follow it.
+    const shared = await ben.ok(["project", "share"]);
+    expect(shared.project).toMatchObject({ policy: "shared", circles: [{ cid, joined: true }] });
+    const after = await ben.ok(["status", "--session", "bs1", "--state", "busy", "--label", "web", "--summary", "Fixing login."]);
     expect(after.roster).toMatchObject({ vis: "circle", circle: cid, ver: 2 });
+    expect(after.project).toMatchObject({ policy: "shared", circles: [cid] });
     expect(after.delivered.map((d: { userId: string }) => d.userId)).toContain(ids.ann);
     const row = (await ann.ok(["ls"])).peers.find((p: { own: string; sid: string }) => p.own === ids.ben && p.sid === "bs1");
     expect(row).toMatchObject({ label: "web", summary: "Fixing login.", state: "busy" });
   });
 
-  it("an explicitly shared session keeps what its user chose", async () => {
+  it("an explicitly private session keeps what its user chose", async () => {
     await ben.ok(["session", "roster", "bs2", "--private"]);
     const st = await ben.ok(["status", "--session", "bs2", "--state", "busy", "--label", "web"]);
     expect(st.roster).toMatchObject({ vis: "private" });
   });
 
-  it("no default any more: back to private (never wider than the user's setting)", async () => {
-    await ben.ok(["circle", "default", "--none"]);
+  it("a project made private again: back to private, and back when shared (never wider than the person's policy)", async () => {
+    await ben.ok(["project", "private"]);
     const st = await ben.ok(["status", "--session", "bs1", "--state", "idle", "--label", "web"]);
     expect(st.roster).toMatchObject({ vis: "private", ver: 3 });
-    await ben.ok(["circle", "default", cid]);
+    await ben.ok(["project", "share", cid]);
     const again = await ben.ok(["status", "--session", "bs1", "--state", "idle", "--label", "web"]);
     expect(again.roster).toMatchObject({ vis: "circle", circle: cid, ver: 4 });
-    // Unchanged default: no new version.
+    // Unchanged policy: no new version.
     const same = await ben.ok(["status", "--session", "bs1", "--state", "idle", "--label", "web"]);
     expect(same.roster.ver).toBe(4);
   });
 
   it("review M1: a status post racing `session roster --private` never undoes it; versions only go up", async () => {
-    await ben.ok(["circle", "default", cid]);
+    await ben.ok(["project", "share", cid]);
     for (let i = 0; i < 6; i++) {
       const sid = `race${i}`;
-      await ben.ok(["session", "roster", sid]); // made under the default: the circle, auto
+      await ben.ok(["status", "--session", sid, "--state", "busy", "--label", "web"]); // bound, under the policy: the circle, auto
       const [a, b] = await Promise.all([
         ben.run(["status", "--session", sid, "--state", "busy", "--label", "web"]),
         ben.run(["session", "roster", sid, "--private"]),
@@ -183,6 +182,7 @@ describe("a default roster follows the default circle", () => {
   });
 
   it("review M-new: a status repairs state from a store that is ahead, keeping the store's roster", async () => {
+    await ben.ok(["project", "share", cid]);
     const sid = "ahead2";
     await ben.ok(["session", "roster", sid, "--private"]);
     const app = await ben.app();
@@ -195,8 +195,8 @@ describe("a default roster follows the default circle", () => {
     }
     const st = await ben.ok(["status", "--session", sid, "--state", "busy", "--label", "web"]);
     expect(st.roster).toMatchObject({ vis: "circle", circle: cid, ver: 7 });
-    // Pre-release review low: it is exactly the default roster this device would sign (ben's default circle, nobody
-    // added), so it keeps following the default.
+    // Pre-release review low: it is exactly the roster this device would sign for the project (the circle it
+    // shares, nobody added), so it keeps following the project.
     const check = await ben.app();
     await check.load();
     try {
@@ -206,27 +206,18 @@ describe("a default roster follows the default circle", () => {
     }
   });
 
-  it("review M2: a running session doesn't move into an open default circle by itself, and says why", async () => {
+  it("an open circle: sharing a project with it is the person's choice, and says what it means", async () => {
     const open = (await ben.ok(["circle", "create", "community", "--open"])).cid as string;
-    await ben.ok(["circle", "default", "--none"]);
-    await ben.ok(["status", "--session", "op1", "--state", "busy", "--label", "web"]);
-    await ben.ok(["circle", "default", open]);
+    const r = await ben.run(["project", "share", open]);
+    expect(r.code).toBe(0);
+    expect(r.err).toMatch(/circle c_\S+ is open: anyone its owner admits will see \S+'s sessions/);
     const st = await ben.ok(["status", "--session", "op1", "--state", "busy", "--label", "web"]);
-    expect(st.roster.vis).toBe("private");
-    expect(st.warnings.join("\n")).toMatch(/kept private: your default circle is open/);
-    // A session started now, under that default, is the circle's (as before).
-    const fresh = await ben.ok(["status", "--session", "op2", "--state", "busy", "--label", "web"]);
-    expect(fresh.roster).toMatchObject({ vis: "circle", circle: open });
-    // And one following the old (closed) default leaves it for private rather than going open.
-    await ben.ok(["circle", "default", cid]);
-    await ben.ok(["status", "--session", "op3", "--state", "busy", "--label", "web"]);
-    await ben.ok(["circle", "default", open]);
-    const moved = await ben.ok(["status", "--session", "op3", "--state", "busy", "--label", "web"]);
-    expect(moved.roster.vis).toBe("private");
+    expect(st.roster).toMatchObject({ vis: "circle", circle: open });
+    expect((st.warnings ?? []).join("\n")).toMatch(/open circle/);
   });
 
   it("review L1: summaryAt stays put while the line is the same, (+N agents) or not", async () => {
-    await ben.ok(["circle", "default", "--none"]);
+    await ben.ok(["project", "share", "--person", ids.ann]);
     const off = { ...ben.env, P2P_STATUS_CAPS: "0" };
     const u = Object.create(ben) as User;
     Object.defineProperty(u, "env", { get: () => off });
@@ -240,6 +231,8 @@ describe("a default roster follows the default circle", () => {
 
   it("review L-c: a session in a circle whose policy became open is warned about once", async () => {
     const team = (await ben.ok(["circle", "create", "later-open"])).cid as string;
+    await ben.ok(["project", "share", team]);
+    await ben.ok(["status", "--session", "lc1", "--state", "busy", "--label", "web"]);
     await ben.ok(["session", "roster", "lc1", "--circle", team]);
     const before = await ben.ok(["status", "--session", "lc1", "--state", "busy", "--label", "web"]);
     expect(before.warnings ?? []).toEqual([]);
@@ -250,4 +243,3 @@ describe("a default roster follows the default circle", () => {
     expect((again.warnings ?? []).filter((w: string) => /open circle/.test(w))).toHaveLength(0);
   });
 });
-

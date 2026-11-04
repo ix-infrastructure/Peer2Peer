@@ -455,6 +455,19 @@ export class P2P {
     return this.call(['accept', '--', link], { timeoutMs: LONG_TIMEOUT_MS })
   }
 
+  /**
+   * `p2p project show|ls|share|private` (projects.ts) in this session's folder (P2P_WORKDIR): who sees
+   * sessions working in it. share and private are the person's, typed (lib isMutating); circles and
+   * people follow `--`, `--person=` carries a friend.
+   */
+  project(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
+    const [verb = 'show', ...rest] = args
+    const flags = rest.filter(a => a === '--add' || a.startsWith('--person='))
+    const positionals = rest.filter(a => !a.startsWith('--'))
+
+    return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])
+  }
+
   /** `p2p circle <verb> …` as the person typed it: options stay options, the rest follows `--`. */
   circle(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
     const [verb = '', ...rest] = args

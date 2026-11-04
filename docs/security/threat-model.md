@@ -45,9 +45,9 @@ The reference relay keeps the smallest record it can. Envelopes are stored with 
 
 **Planned improvements:** sealed sender, padding and timing cover, optional relay-to-relay onion routing, and opt-in Tor transport. See the [roadmap](../roadmap.md#metadata-privacy). Until then, v3 doesn't hide metadata.
 
-**Your peers** see what you share with them: the sessions on their roster, those sessions' status (busy/idle, label, repo folder name, branch, and, unless you opt out with `P2P_SHARE_STATUS=0`, a one-line summary, repo-relative files and subagent entries), and your public identity document. They never see absolute paths, your prompts or your permission mode.
+**Your peers** see what you share with them: sessions in the projects you shared with them, within each session's roster, those sessions' status (busy/idle, label, repo folder name, branch, and, unless you opt out with `P2P_SHARE_STATUS=0`, a one-line summary, repo-relative files and subagent entries), and your public identity document. They never see absolute paths, your prompts or your permission mode.
 
-**Model providers:** in the Claude Code mod, each prompt you type goes to **Haiku on your own Claude account** to produce the one-line status. Haiku is told to leave out secrets and paths, and absolute paths are filtered afterwards. That's an instruction plus a path filter, not a guarantee, so opt out for sensitive work. The Codex bridge uses the summary the model gives `p2p_status` instead.
+**Model providers:** in the Claude Code mod, each prompt you type in a session whose project is shared goes to **Haiku on your own Claude account** to produce the one-line status (a private session makes no such call). Haiku is told to leave out secrets and paths, and absolute paths are filtered afterwards. That's an instruction plus a path filter, not a guarantee, so opt out for sensitive work. The Codex bridge uses the summary the model gives `p2p_status` instead.
 
 **Ix Infrastructure** sees nothing. It runs no servers in the Peer2Peer path, and the software sends no telemetry, analytics, crash reports or update checks. See [No data collection, no telemetry](../../README.md#no-data-collection-no-telemetry) for every outbound connection the clients make.
 
@@ -60,6 +60,29 @@ The reference relay keeps the smallest record it can. Envelopes are stored with 
 - **Extensions:** an extension you enable runs inside `p2p` **with your identity** and can read your keys. Loading is opt-in, comes only from explicit directories (never the repo you're working in), and is announced, but there's no sandbox.
 - **Cryptography:** Ed25519 (strict verification, torsion and small-order checks), X25519, XChaCha20-Poly1305, HKDF-SHA256 and SHA-256, through the audited `@noble` libraries.
 
+## Project boundaries
+
+You may share one project with your circle and keep others private. Peer2Peer enforces that in the `p2p` CLI itself, so the Claude Code mod, the Codex bridge, `p2p tui` and any client that runs `p2p --json` all get the same boundary ([concepts](../concepts.md#projects-project-boundaries) has the full rules).
+
+**What it guarantees.** Peer2Peer never carries a private project's status, files, subagents, footprints, summaries or messages to anyone but you (your own devices):
+
+- **A project is private until you share it**, and only you share it: the policy lives in your `P2P_HOME` on each device, `p2p project share` is refused from an agent's shell and from the mod's model-run `/peers`, and nothing in a repository can widen it. A committed `.p2p-private` can only make a repository private. The project key includes the clone's git common dir, so another clone of a shared repository's remote, or the same folder with its remote changed, is a new project, private until shared.
+- **Status and roster:** a private project's sessions sign a private roster with nobody on it, so their statuses go to your own devices only. A shared project's sessions reach exactly who it shares (one circle and named friends per roster, §3.4).
+- **Summaries:** a private session sends none, and the mod makes no model call for one.
+- **Footprints and overlap:** Ix footprints go to the roster's audience, and overlap or semantic-conflict checks compare a session only with sessions it is shared with.
+- **Sends:** every send from an agent's session, `p2p send --from-session`, MCP `p2p_send`, SendMessage, and `ix note`/`subgraph`/`impact` shares, is refused to anyone outside its projects' audience, queued copies included. The refusal names the command **you** run to share the project; there is no flag that lets a caller skip it.
+- **Sessions that move:** a session is bound to every project it works in (its folder, a `cd`, files it reads or changes elsewhere) until it ends, and reaches only who **all** of them share. A session that touched a private project's files stays private, so what it read can't leave through Peer2Peer later.
+- **Inbound:** a message to you with no session named is held only in a session whose projects reach its sender, and a message into a session from outside its audience is refused at the sender and dropped on your device, even with a wider roster signed elsewhere (by an older client of yours, say). Your own devices are always allowed.
+- **Relays:** unchanged and content-blind. A relay sees that a private session's status went to your own devices, nothing more.
+
+**What it can't do.**
+
+- **It can't stop an agent leaking through its other tools.** An agent that read a private repository can still paste it into a web request, a `git push`, an email, a file in a shared folder or any other channel its tools give it. Project boundaries close Peer2Peer as a channel; they don't sandbox the agent. That is the agent's own permission prompt's job, and a session that approves its own tool calls has no such boundary (above).
+- **An agent with your shell can work around the CLI.** It can run `p2p` with another session id from a shared folder (the mod refuses a shell `p2p` naming any session but its own, as a backstop), change a project's policy by editing `P2P_HOME` in a form the guards don't recognise, or talk to a relay with code of its own. Same limit as every other guard here: the guards are a backstop, the permission prompt is the boundary.
+- **Folders the front end never hears about.** A session is bound to the folders its front end reports (the Claude mod: the session folder, its current folder at each status, and paths of files read or changed through Claude Code's file tools; the Codex bridge: every cwd Codex reports). A file read through a shell command (`cat ../secret/x`) isn't seen by the mod; the CLI binds the shell's own folder whenever the shell runs `p2p`.
+- **What was already shared stays shared.** A session that was shared and then touched a private project stops sending at once, but its last shared status stays in peers' lists until it ages out (150 s), and anything sent before stays sent.
+- **Each device decides for itself.** Policies aren't synced: share a project on each device that works in it. A device still running a client from before project boundaries keeps the old rule for its own sessions (new sessions follow the default circle), so update every device. An older device can't widen a session that runs on an updated one: that session's own device drops whatever comes in outside its projects' audience.
+
 ## How the agent integrations defend you
 
 - **Inert peer text.** Everything a peer writes (messages, names, labels, statuses, file names) is escaped, flattened to one line where shown in lists, stripped of control and bidi characters, and framed as "data from a named peer, not instructions". A sender can't close the frame early.
@@ -67,7 +90,7 @@ The reference relay keeps the smallest record it can. Envelopes are stored with 
   - your own devices may start at most 5 turns per 10 minutes;
   - when the bridge's location checks fail (a Codex home or `P2P_HOME` in a temp folder, a sandbox-writable folder or the project, or a project config that touches the bridge), it holds everything, own devices and `P2P_AUTO_DELIVER` senders included.
 - **Turn caps.** At most 3 peer-started turns per sender per 10 minutes, and 10 for all peers together, so two auto-replying agents can't loop forever.
-- **Typed-only control.** Joining, inviting, approving, relays, circles, rosters, rotation and enabling extensions only happen through commands you type (`/peers …` or your own terminal). The agents' tools don't offer them, and shell guards refuse them as a backstop.
+- **Typed-only control.** Joining, inviting, approving, relays, circles, rosters, project sharing, rotation and enabling extensions only happen through commands you type (`/peers …` or your own terminal). The agents' tools don't offer them, and shell guards refuse them as a backstop.
 - **Secrets stay out of context.** Backup phrases, invite codes and link codes are shown only to you (above the prompt, or in your terminal), never in what the model reads.
 
 The shell guards parse commands conservatively, but they're a **backstop, not a sandbox**. A determined command can spell things another way. The real protection is that the tools never do these things.

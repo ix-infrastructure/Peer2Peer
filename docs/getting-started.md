@@ -109,8 +109,9 @@ When two sessions in the same repo change the same file, each agent gets a **`PO
 
 ## 7. Control what you share
 
-- A session is shared with your **default circle**. With no default circle, it's **private**.
-- `/peers private`, `/peers add <user>` and `/peers circle <cid>` change who sees *this* session (`p2p session roster …` in a terminal).
+- Each **project** (a git repository, or a folder) is **private until you share it**: only your own devices see its sessions. Share the repo you're in with `/peers project share` (your default circle) or `/peers project share <circle>` / `--person <friend>`; in a terminal, `p2p project share …` in the repo. `p2p project ls` lists what you shared. See [projects](concepts.md#projects-project-boundaries).
+- A session that works in several projects reaches only who all of them share, and one that touched a private project stays private until it ends.
+- `/peers private`, `/peers add <user>` and `/peers circle <cid>` narrow who sees *this* session, within what its project shares (`p2p session roster …` in a terminal).
 - `P2P_SHARE_STATUS=0` shares only busy/idle, label, repo and branch: no summary and no files.
 - See [what a status shares](../mods/claude/peer2peer/README.md#privacy-what-a-status-shares).
 

@@ -32,10 +32,13 @@
 //   receipts  delivery receipts (receipts.ts): ids this device asked for, messages that asked it, what it sent
 //   unknownKinds  when each (sender, kind) of an envelope this version doesn't know was last noticed
 //   relayInfo the relays' /.well-known/p2p-relay.json (features and frames), as last fetched
+//   projects  project policies (projects.ts): shared with circles and people, or private (the default)
+//   sessionProjects  the projects each session worked in (projects.ts), by sid
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";
 import type { RelayInfoRec } from "./relay-info.js";
+import type { ProjectsDoc, SessionProjectsDoc } from "./projects.js";
 import { join } from "node:path";
 import { FileDocBackend, type LockOptions } from "@peer2peer/core/v3/node";
 import type { DocBackend, RotationStatement, StatusBody } from "@peer2peer/core/v3";
@@ -371,6 +374,10 @@ type Docs = {
   unknownKinds: Record<string, number>;
   /** Relays' /.well-known/p2p-relay.json, as last fetched (relay-info.ts), by canonical URL. */
   relayInfo: Record<string, RelayInfoRec>;
+  /** Project policies (projects.ts): this device's own, keyed by project id. Never synced, never read from a repository. */
+  projects: ProjectsDoc;
+  /** Which projects each session has worked in (projects.ts), by sid: sticky until the session ends. */
+  sessionProjects: SessionProjectsDoc;
 };
 
 export const sessKey = (own: string, sid: string) => `${own}|${sid}`;

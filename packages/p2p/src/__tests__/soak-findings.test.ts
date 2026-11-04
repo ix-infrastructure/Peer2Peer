@@ -163,6 +163,7 @@ describe("soak findings: an envelope applied after a later one from the same ses
     await ben.ok(["accept", (await ann.ok(["invite", "--link"])).link]);
     await ann.ok(["friends"]);
     await ann.ok(["session", "roster", "as1", "--add", id.ben]);
+    await ben.share(id.ann);
     await ann.ok(["status", "--session", "as1", "--state", "busy"]);
     await ben.ok(["ls"]);
     await ben.ok(["send", "--from-session", "bs1", "--to", `${id.ann}/as1`, "first"]);

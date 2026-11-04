@@ -487,6 +487,9 @@ const MUTATING_TWO = new Set([
   "codex release",
   "codex decline",
   "codex install",
+  // Who sees a project's sessions (projects.ts): the person's alone.
+  "project share",
+  "project private",
 ]);
 
 function shellWords(segment: string): string[] {

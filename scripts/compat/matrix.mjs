@@ -151,6 +151,14 @@ async function scenario(a, b) {
   });
   const caps = (p) => (p.receipts ? ["--cap", "receipts.v1"] : []);
   await check("statuses (each sees the other's live session)", async () => {
+    // A build with project boundaries shares the project its sessions run in (this folder) first,
+    // as its person would: until then they reach nobody.
+    for (const [p, other] of [
+      [a, b],
+      [b, a],
+    ]) {
+      if (p.projects) await p.ok(["project", "share", "--add", "--person", ids[other.name]]);
+    }
     await a.ok(["session", "roster", "sa", "--add", ids[b.name]]);
     await b.ok(["session", "roster", "sb", "--add", ids[a.name]]);
     await a.ok(["status", "--session", "sa", "--state", "idle", "--label", "sa", ...caps(a)]);
@@ -167,6 +175,28 @@ async function scenario(a, b) {
     const ga = a.events("p2p.message").map((e) => e.data.text);
     const gb = b.events("p2p.message").map((e) => e.data.text);
     if (!gb.includes(`hello from ${a.label}`) || !ga.includes(`hello from ${b.label}`)) throw new Error(`got ${JSON.stringify({ [a.name]: ga, [b.name]: gb })}`);
+  });
+  await check("project boundaries: a session in an unshared project reaches nobody, an older peer included", async () => {
+    const x = a.projects ? a : b.projects ? b : undefined;
+    if (!x) return "neither side has project boundaries";
+    const y = x === a ? b : a;
+    const ySid = y === a ? "sa" : "sb";
+    const dir = mkdtempSync(join(tmpdir(), "p2p-matrix-private-"));
+    const saved = x.env;
+    x.env = { ...saved, P2P_WORKDIR: dir };
+    try {
+      const st = await x.ok(["status", "--session", "priv", "--state", "busy", "--label", "priv", "--summary", "private work"]);
+      if (st.delivered.length !== 0 || st.roster.vis !== "private") throw new Error(`a private project's status went out: ${JSON.stringify(st)}`);
+      const out = await x.run(["send", "--from-session", "priv", "--to", `${ids[y.name]}/${ySid}`, "--stdin"], "smuggled");
+      if (out.code === 0 || out.json?.error !== "not_shared") throw new Error(`a private session sent: ${JSON.stringify(out.json)}`);
+    } finally {
+      x.env = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const ls = (await y.ok(["ls", "--all"])).peers.map((r) => r.sid);
+    if (ls.includes("priv")) throw new Error(`${y.label} sees the private session: ${JSON.stringify(ls)}`);
+    if (y.events("p2p.message").some((e) => e.data.text === "smuggled")) throw new Error(`${y.label} got the private session's message`);
+    return `${x.label} kept it from ${y.label}`;
   });
   await check("delivery receipts where both have them; left out cleanly where one doesn't", async () => {
     const r = await a.ok(["send", "--from-session", "sa", "--to", `${ids[b.name]}/sb`, "--stdin"], "with a receipt?");
@@ -243,6 +273,11 @@ function hasReceipts(bin) {
   return readFileSync(bin, "utf8").includes('command("receipt <event>")');
 }
 
+/** Does this build keep sessions within their project (`p2p project share`, projects.ts)? */
+function hasProjects(bin) {
+  return readFileSync(bin, "utf8").includes('command("share [circles...]")');
+}
+
 /** Does this build take invite links and codes for several circles (`p2p join --confirmed`)? */
 function hasInviteLinks(bin) {
   return readFileSync(bin, "utf8").includes('"--confirmed"');
@@ -258,7 +293,7 @@ export async function runMatrix(opts = {}) {
       const old = bundleAt(ref, cache);
       for (const dir of ["new→old", "old→new"]) {
         const relay = await startRelay();
-        const mk = (name, bin, label, env) => Object.assign(new Peer(name, bin, relay.port, label, env), { receipts: hasReceipts(bin), inviteLinks: hasInviteLinks(bin) });
+        const mk = (name, bin, label, env) => Object.assign(new Peer(name, bin, relay.port, label, env), { receipts: hasReceipts(bin), inviteLinks: hasInviteLinks(bin), projects: hasProjects(bin) });
         const nw = mk("nina", newBin, "new", opts.newEnv ?? {});
         const od = mk("otto", old.file, `old ${old.sha}`);
         const [a, b] = dir === "new→old" ? [nw, od] : [od, nw];

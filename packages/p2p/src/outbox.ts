@@ -37,7 +37,7 @@ import { orderRelays, type App } from "./app.js";
 import { CliError } from "./errors.js";
 import { makeEvent } from "./inbound.js";
 import { sessKey, type EventRec } from "./state.js";
-import { getSession, rosterAudience } from "./sessions.js";
+import { getSession, mayReach, rosterAudience } from "./sessions.js";
 
 export const OUTBOX_TTL_MS = 7 * 24 * 3600 * 1000;
 export const OUTBOX_PER_RECIPIENT = 10;
@@ -324,6 +324,9 @@ export async function stillAllowed(app: App, item: OutboxItem, views: RoundViews
     if (!fresh) return "later";
     if (!view || (view.rotations?.length ?? 0) > 0 || !view.devices.includes(item.tdid)) return "refused";
     relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
+    // Still within the sending session's projects (projects.ts): a session that has since worked in
+    // a private project sends nothing more, queued copies included.
+    if (!(await mayReach(app, item.fromSession, to))) return "refused";
     if (item.dest.own === app.userId) {
       const sess = await getSession(app, item.dest.sid).catch(() => undefined);
       if (!sess || !(await rosterAudience(app, sess)).includes(to)) return "refused";

@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import type { App } from "./app.js";
 import { CliError } from "./errors.js";
 import { MAX_RENDERED_BYTES, renderExtension, type ExtensionRegistry } from "./extensions.js";
+import { bindSession, sessionDirs } from "./projects.js";
 import { checkSid, getSession, rosterAudience, sessionRef } from "./sessions.js";
 import { supportsIn } from "./features.js";
 import { sessKey, type PeerStatusRec, type XStateIndex, type XStateRec, type XStateSenderDoc } from "./state.js";
@@ -167,6 +168,8 @@ export async function publishExtensionState(app: App, o: PublishStateOpts): Prom
   });
   if (wait > 0) throw new CliError("rate_limited", `${o.kind} for session ${sid} was published less than ${EXT_STATE_MIN_INTERVAL_MS / 1000} s ago; try again in ${Math.ceil(wait / 1000)} s`, { retryAfterMs: wait });
 
+  // Bound like a status (projects.ts): the session's projects decide who its state reaches.
+  await bindSession(app, sid, sessionDirs(app.env));
   await app.connectAndDrain();
   const sess = await getSession(app, sid);
   const audience = await rosterAudience(app, sess);

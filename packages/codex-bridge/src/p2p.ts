@@ -66,6 +66,8 @@ export type Whoami = { userId: string; name: string; address: string; did: strin
 export type HeldItem = { id: string; type: string; from: string; at: number; address: string; summary: string; cid?: string };
 export type RosterView = { sid: string; ref: string; vis: "circle" | "private"; circle?: string; parts: { userId: string; address: string }[] };
 export type SendResult = { delivered: boolean; to: { userId: string; address: string; own: string; sid: string; ref: string }; relays: number };
+/** What `p2p status` says about the session's projects (projects.ts). */
+export type ProjectInfo = { projects: { id: string; name: string }[]; policy: "private" | "shared" | "none"; why?: string; circles?: string[]; people?: string[] };
 export type RelaysInfo = { listed: string[]; connected: string[]; failed: { url: string; reason: string }[] };
 
 export class P2P {
@@ -103,18 +105,24 @@ export class P2P {
     return { ok: true, value: { peers: Array.isArray(r.value.peers) ? r.value.peers : [], ...(r.value.relays ? { relays: r.value.relays } : {}) } };
   }
 
-  /** This session's status. Never a mode: what this session auto-approves is nobody else's business. */
-  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[] }, timeoutMs?: number) {
+  /**
+   * This session's status. Never a mode: what this session auto-approves is nobody else's business.
+   * `projectDirs`: every folder the session has worked in (projects.ts binds each one's project).
+   */
+  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[] }, timeoutMs?: number) {
     const args = ["status", `--session=${o.session}`, `--state=${o.state}`, `--label=${o.label}`];
     if (o.repo) args.push(`--repo=${o.repo}`);
     if (o.branch) args.push(`--branch=${o.branch}`);
     if (o.summary) args.push(`--summary=${o.summary}`);
     for (const file of o.files ?? []) args.push(`--file=${file}`);
-    return this.call<{ delivered: unknown[]; failed: { address: string; error: string }[] }>(args, timeoutMs !== undefined ? { timeoutMs } : {});
+    for (const dir of o.projectDirs ?? []) args.push(`--project-dir=${dir}`);
+    return this.call<{ delivered: unknown[]; failed: { address: string; error: string }[]; roster?: RosterView; warnings?: string[]; project?: ProjectInfo }>(args, timeoutMs !== undefined ? { timeoutMs } : {});
   }
 
-  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean }): Promise<Outcome<SendResult>> {
-    return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), "--stdin"], { stdin: o.text });
+  /** A message from this session; refused (`not_shared`) to anyone its projects don't share (projects.ts). */
+  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[] }): Promise<Outcome<SendResult>> {
+    const dirs = (o.projectDirs ?? []).map((d) => `--project-dir=${d}`);
+    return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
   }
 
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */

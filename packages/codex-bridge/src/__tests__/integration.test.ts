@@ -111,8 +111,9 @@ describe.skipIf(!hasCli)("Codex bridge over a real relay", () => {
     codySid = s.sid;
     codyRef = s.ref;
     expect(s).toMatchObject({ label: "web", repo: "web", branch: "main", private: true, holdsFromOthers: true });
-    // The person shares this Codex session with Ann (a terminal command, never a tool).
-    expect((await cody.p2p(["session", "roster", codySid, `--add=${ann.userId}`])).roster.parts[0].userId).toBe(ann.userId);
+    // The person shares this Codex session's project with Ann (a terminal command, never a tool): sessions
+    // follow their project, private until shared (projects.ts).
+    expect((await cody.p2p(["project", "share", `--person=${ann.userId}`, `--dir=${repo}`])).project).toMatchObject({ policy: "shared", people: [{ userId: ann.userId }] });
   });
 
   it("refuses mutating actions and bare names", async () => {
@@ -133,6 +134,7 @@ describe.skipIf(!hasCli)("Codex bridge over a real relay", () => {
   });
 
   it("status flows CLI → Codex, with a conflict flagged", async () => {
+    await ann.p2p(["project", "share", `--person=${cody.userId}`]);
     await ann.p2p(["session", "roster", SID_A, `--add=${cody.userId}`]);
     await ann.p2p(["status", `--session=${SID_A}`, "--state=busy", "--label=web", "--repo=web", "--branch=main", "--summary=Rewriting session handling <script>", "--file=src/session.ts"]);
     annWatch = spawn(process.execPath, [P2P_JS, "watch", `--session=${SID_A}`, "--jsonl"], { env: ann.env, stdio: ["ignore", "pipe", "pipe"] });
@@ -258,6 +260,18 @@ describe.skipIf(!hasCli)("Codex bridge over a real relay", () => {
     expect(msg.from.userId).toBe(cody.userId);
     expect(msg.toSession).toBe(SID_A);
     expect(msg.own).toBe(ann.userId);
+  });
+
+  it("project boundaries: once the person makes the project private, p2p_send refuses ann and says how the person shares it", async () => {
+    await cody.p2p(["project", "private", `--dir=${repo}`]);
+    const r = await mcp.tool("p2p_send", { to: `p2p:${ann.address}/web`, message: "the plan, from a private project" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("Not sent");
+    expect(r.text).toMatch(/Only the person can widen this, by sharing the project web themselves: `p2p project share/);
+    await sleep(1500);
+    expect(annEvents.some((e) => String(e.text ?? "").includes("from a private project"))).toBe(false);
+    // The person shares it again: the session reaches ann again (its final status, below).
+    await cody.p2p(["project", "share", `--person=${ann.userId}`, `--dir=${repo}`]);
   });
 
   it("the session ends with a final idle status and no registry entry", async () => {

@@ -70,6 +70,8 @@ describe("R4-L1: a watch outlives its certificate", () => {
     await a.ok(["friends"]);
     await b.ok(["friends"]);
     await a.ok(["session", "roster", "as", "--add", bid]);
+    // b's project is shared with a too (projects.ts: a session sends only within its project).
+    await b.share(await a.ok(["whoami"]).then((w: { userId: string }) => w.userId));
     await a.ok(["status", "--session", "as", "--state", "busy"]);
     // Give a's device a certificate that expires in 4 s, and keep the renewal for later.
     const app = await a.app();

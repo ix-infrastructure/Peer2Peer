@@ -314,7 +314,9 @@ describe("commands", () => {
     const piped = await runWith(alice, ["send", "--from-session", "s-other", "--to", bobWho.address, "x"]);
     expect(piped.code).toBe(1);
     expect(piped.err).toContain("not_shared");
-    expect(sent.out.split("\n").at(-1)).toBe("sent from session tui; replies show in `p2p tui`");
+    expect(sent.out).toContain("\nsent from session tui; replies show in `p2p tui`\n");
+    // The person's own send crosses no project boundary, and says which one this folder has (projects.ts).
+    expect(sent.out.split("\n").at(-1)).toMatch(/^project \S+ here is (private \(agent sessions in it reach only your own devices\)|shared); this send was yours, from your terminal$/);
 
     await alice.ok(["circle", "invite", team, bobWho.userId]);
     let held: { id: string }[] = [];

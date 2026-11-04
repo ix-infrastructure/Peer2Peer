@@ -129,7 +129,34 @@ export class User {
   /** Questions asked through the (simulated) terminal, for tests that answer prompts. */
   readonly asked: string[] = [];
 
+  /**
+   * Project boundaries (packages/p2p/src/projects.ts): a session is private until the person shares
+   * its project, and these tests run commands in several folders (a repository, the process's own).
+   * With this on (the default), sharing a session with `session roster <sid> --add|--circle` also
+   * shares, as the person would with `p2p project share --add`, every folder this user runs p2p in.
+   */
+  autoShareProject = true;
+  private shareTargets: string[] = [];
+  private sharedDirs = new Set<string>();
+  private usedDirs = new Set<string>();
+
   async run(args: string[], opts: { stdin?: string; json?: boolean; cwd?: string; answer?: string } = {}): Promise<RunResult> {
+    if (this.autoShareProject && args[0] !== "project") {
+      const dir = opts.cwd ?? process.cwd();
+      this.usedDirs.add(dir);
+      if (args[0] === "session" && args[1] === "roster") {
+        for (let i = 2; i < args.length; i++) {
+          if (args[i] === "--add" && args[i + 1]) this.shareTargets.push("--person", args[++i]);
+          else if (args[i] === "--circle" && args[i + 1]) this.shareTargets.push(args[++i]);
+        }
+        this.sharedDirs.clear();
+      }
+      for (const d of this.shareTargets.length > 0 ? this.usedDirs : []) {
+        if (this.sharedDirs.has(d)) continue;
+        this.sharedDirs.add(d);
+        await this.run(["project", "share", "--add", ...this.shareTargets], { cwd: d });
+      }
+    }
     const lines = { out: [] as string[], err: [] as string[] };
     const argv = opts.json === false ? args : [...args, "--json"];
     const before = process.cwd();

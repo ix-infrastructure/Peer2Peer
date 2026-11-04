@@ -156,6 +156,10 @@ describe("conflicts and activity", () => {
 describe("guards (PreToolUse backstop)", () => {
   it("finds mutating p2p verbs, also wrapped in a shell", () => {
     expect(mutatingP2PVerb("p2p join relay/ABCD")).toBe("join");
+    // Who sees a project's sessions is the person's (projects.ts).
+    expect(mutatingP2PVerb("p2p project share c_team")).toBe("project share");
+    expect(mutatingP2PVerb("p2p project private")).toBe("project private");
+    expect(mutatingP2PVerb("p2p project show")).toBe(null);
     // send with no --from-session is the person's terminal path (it shares the tui session): refused.
     expect(mutatingP2PVerb("p2p send --to bob hi")).toBe("send (no --from-session)");
     expect(mutatingP2PVerb("p2p send")).toBe("send (no --from-session)");

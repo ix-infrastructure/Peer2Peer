@@ -307,14 +307,25 @@ export function pickHolder(
   board: readonly { sid: string; isPrivate: boolean; activeAt: number; seenAt: number }[],
   now: number,
   staleMs: number,
+  /**
+   * The sessions the CLI says may hold it (the event's `routable`: those whose projects reach the
+   * sender). When given, no other session holds it, private or not.
+   */
+  routable?: readonly string[],
 ): { holder: string; noticeBy?: undefined } | { holder?: undefined; noticeBy: string | undefined } {
   const live = board.filter(one => now - one.seenAt <= staleMs)
+  const allowed = routable ? live.filter(one => routable.includes(one.sid)) : live
   const bySid = (a: { sid: string }, b: { sid: string }) => (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0)
-  const open = live.filter(one => !one.isPrivate).sort((a, b) => b.activeAt - a.activeAt || bySid(a, b))
+  const open = allowed.filter(one => !one.isPrivate).sort((a, b) => b.activeAt - a.activeAt || bySid(a, b))
   const holder = open[0]?.sid
   if (holder) return { holder }
 
-  return { noticeBy: [...live].sort(bySid)[0]?.sid }
+  return { noticeBy: [...allowed].sort(bySid)[0]?.sid }
+}
+
+/** The routable list a `p2p.message` event carries (sessions.ts routableSessions), or undefined from an older CLI. */
+export function routableOf(event: { routable?: unknown }): string[] | undefined {
+  return Array.isArray(event.routable) ? event.routable.filter((x): x is string => typeof x === 'string') : undefined
 }
 
 // ── framing ─────────────────────────────────────────────────────────────────
@@ -984,6 +995,9 @@ export const PEERS_USAGE = [
   '  /peers remove <user>        take them off this session',
   '  /peers private              only the people you added see this session',
   '  /peers circle <cid>         share this session with a circle you joined',
+  '  /peers project [show|ls]    who sees sessions in this project (private until you share it)',
+  '  /peers project share [<circle>…] [--person <user>]…  share this project (bare: your default circle)',
+  '  /peers project private      only your own devices see this project\'s sessions',
   '  /peers approve <id>         act on a held item (friend invite, circle invite, join request, moved key)',
   '  /peers decline <id>         drop a held item',
   '  /peers dismiss [n|all]      clear a notice above the prompt (bare: the only one, or a numbered list)',
@@ -1026,6 +1040,7 @@ export type PeersCommand =
   | { verb: 'share-circle'; cid: string }
   | { verb: 'add' | 'remove'; user: string }
   | { verb: 'private' }
+  | { verb: 'project'; args: string[] }
   | { verb: 'approve' | 'decline'; id: string }
   | { verb: 'rotate'; resume?: boolean }
   | { verb: 'doctor'; user?: string }
@@ -1100,6 +1115,28 @@ export function parsePeersArgs(args: string): PeersCommand {
       return first && rest.length === 1 ? { verb: verb.toLowerCase() as 'add' | 'remove', user: first } : { verb: 'usage', error: `${verb} needs one user` }
     case 'private':
       return rest.length === 0 ? { verb: 'private' } : { verb: 'usage', error: 'private takes no arguments' }
+    case 'project': {
+      // `/peers project [show|ls|share [<circle>…] [--person <user>]…|private]`: as `p2p project`, in this session's folder.
+      const sub = (first ?? 'show').toLowerCase()
+      if (sub === 'show' || sub === 'ls' || sub === 'private') return rest.length <= 1 ? { verb: 'project', args: [sub] } : { verb: 'usage', error: `project ${sub} takes no arguments` }
+      if (sub === 'share') {
+        const args = ['share']
+        for (let i = 1; i < rest.length; i++) {
+          const w = rest[i] as string
+          if (w === '--person') {
+            const u = rest[++i]
+            if (!u) return { verb: 'usage', error: '--person needs a friend (p2p:… or name@fingerprint)' }
+            args.push(`--person=${u}`)
+          } else if (w === '--add') args.push('--add')
+          else if (w.startsWith('-')) return { verb: 'usage', error: `project share: unknown option ${w}` }
+          else args.push(w)
+        }
+
+        return { verb: 'project', args }
+      }
+
+      return { verb: 'usage', error: 'project takes show, ls, share [<circle>…] [--person <user>]… or private' }
+    }
     case 'approve':
     case 'decline':
       return first && !second ? { verb: verb.toLowerCase() as 'approve' | 'decline', id: first } : { verb: 'usage', error: `${verb} needs one held id` }
@@ -1190,6 +1227,8 @@ export function parseIxArgs(rest: readonly string[]): PeersCommand {
  */
 export function isMutating(command: PeersCommand): boolean {
   if (command.verb === 'circle-cmd') return command.args[0] !== 'ls' && command.args[0] !== 'members'
+  // Who sees this project's sessions is the person's decision alone: share and private are typed only.
+  if (command.verb === 'project') return command.args[0] === 'share' || command.args[0] === 'private'
   // Sharing sends this user's data (a stored note, graph-derived reports): typed only. The model's own
   // path is the ix_share tool, which waits for the person's Send.
   if (command.verb === 'ix-list' || command.verb === 'ix-show') return false
@@ -1460,7 +1499,7 @@ const MUTATING_FIRST = new Set(['status'])
 // `ix import` writes a peer's note into the local Ix graph and `ix resolve` runs Ix for a peer's reference:
 // the user's decisions (ext-ix SPEC §2), never the model's. `extensions enable` makes p2p load and run
 // an extension's code with the user's identity: the user's call too.
-const MUTATING_TWO = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config'])
+const MUTATING_TWO = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config', 'project share', 'project private'])
 
 /** Shell words of one simple command, quotes removed (no expansion). */
 function shellWords(segment: string): string[] {
@@ -1824,6 +1863,49 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
 
   return null
 }
+
+/**
+ * The session ids a shell command hands the p2p CLI (`--from-session`, `--session`), on a command
+ * that names p2p. The model's shell may only speak for its own session: one it makes up (or another
+ * session's) would start a session of its own, bound only to wherever the command runs, and slip
+ * past this session's project boundary. Best effort, like every guard here; the CLI's own barrier
+ * binds the shell's directory either way.
+ */
+export function p2pSessionArgs(command: string, homes: readonly string[] = []): string[] {
+  if (!namesP2P(command, homes)) return []
+  const out: string[] = []
+  for (const m of command.matchAll(/--(?:from-)?session(?:=|\s+)["']?([^\s"';&|)]+)/g)) out.push(m[1] ?? '')
+
+  return out
+}
+
+/**
+ * Absolute paths a tool call works on (file_path, notebook_path, path), as written: the mod binds
+ * the session to each one's project (the CLI's --project-dir), so a session that read or changed a
+ * private project's files stays private. A relative path is the session's own folder.
+ */
+export function toolPaths(input: unknown): string[] {
+  const e = (input ?? {}) as Record<string, unknown>
+  const out: string[] = []
+  for (const k of ['file_path', 'notebook_path', 'path']) {
+    const v = e[k]
+    if (typeof v === 'string' && v.length <= 4096 && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v) && !/[\0\n]/.test(v)) out.push(v)
+  }
+
+  return out
+}
+
+/** Whether `path` is `dir` or under it (either separator, case-insensitive on a drive path). */
+export function isUnder(path: string, dir: string): boolean {
+  const norm = (x: string) => x.replace(/\\/g, '/').replace(/\/+$/, '')
+  const p = norm(path)
+  const r = norm(dir)
+
+  return r !== '' && (p === r || p.startsWith(`${r}/`))
+}
+
+/** The CLI's one-time notice that sessions follow their project now (projects.ts PROJECT_NOTICE_PREFIX). */
+export const PROJECT_NOTICE_RE = /^project boundaries:/
 
 /** Tools whose whole input can read or list files (a shell, a search). */
 const READING_TOOLS = new Set(['Read', 'Bash', 'PowerShell', 'Glob', 'Grep', 'LS', 'NotebookRead', 'WebFetch'])

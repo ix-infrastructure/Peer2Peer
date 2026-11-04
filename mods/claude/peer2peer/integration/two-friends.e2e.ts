@@ -90,7 +90,7 @@ describe('peer2peer mod backend over a real relay', () => {
     const byId = (id: string) => r.value.checks.find(c => c.id === id)
     expect(byId('friendship')?.status).toBe('ok')
     expect(byId('relays')?.status).toBe('ok')
-    expect(byId('their-sessions')).toMatchObject({ status: 'fail', fix: expect.stringContaining('/peers add') })
+    expect(byId('their-sessions')).toMatchObject({ status: 'fail', fix: expect.stringContaining('/peers project share') })
     const text = doctorText(r.value)
     expect(text.split('\n')[0]).toBe(`Peer2Peer doctor: can you see ${ann.address}?`)
     expect(text).toContain('✗ their sessions: no status from any of their sessions has reached you.')
@@ -103,6 +103,8 @@ describe('peer2peer mod backend over a real relay', () => {
     // As the mod does at start (default roster), then /peers add ben.
     const roster = await ann.p2p.roster(SID_A)
     expect(roster.ok && roster.value.vis).toBe('private')
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ann.p2p.project(['share', `--person=${ben.userId}`])
     const shared = await ann.p2p.roster(SID_A, { add: ben.userId })
     expect(shared.ok && shared.value.parts.map(p => p.userId)).toEqual([ben.userId])
     const st = await ann.p2p.status({ session: SID_A, state: 'busy', label: 'web', repo: 'web', branch: 'main', mode: 'default', summary: 'Refactoring the login form validation.', files: ['src/login.tsx'] })
@@ -129,6 +131,8 @@ describe('peer2peer mod backend over a real relay', () => {
 
   it('a message from A reaches B\'s watcher as a framed cross-session message', async () => {
     // Ben's session: shared with Ann, live (status), watched as the mod does.
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ben.p2p.project(['share', `--person=${ann.userId}`])
     await ben.p2p.roster(SID_B, { add: ann.userId })
     await ben.p2p.status({ session: SID_B, state: 'idle', label: 'api', mode: 'default' })
     benWatch = watchLoop(ben.exec, BIN, SID_B, {

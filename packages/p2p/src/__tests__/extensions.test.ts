@@ -101,6 +101,8 @@ describe("extension seam", () => {
       await u.ok(["session", "roster", `${u.name}-s`, "--add", ids.alice]);
       await u.ok(["status", "--session", `${u.name}-s`, "--state", "busy"]);
     }
+    // Alice's project is shared with both (projects.ts: a session sends only within its project).
+    await alice.share(ids.bob, ids.carol);
     await alice.ok(["ls"]);
   });
 
