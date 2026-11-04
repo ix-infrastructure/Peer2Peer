@@ -57,6 +57,7 @@ export class Person {
     if (!this.madeHome) {
       this.madeHome = safeTmp(`p2p-codex-${this.name}-`);
       // The person token (packages/p2p/src/projects.ts): a person's terminal commands carry it here.
+      // Pre-seeded on purpose: it stands in for the person's terminal "yes" (tests have no terminal); a fresh install's own creation is tested apart (mods/claude/peer2peer/integration/first-run.e2e.ts, the bridge's personTokenOf, the CLI's personToken).
       mkdirSync(join(this.madeHome, "cli"), { recursive: true, mode: 0o700 });
       writeFileSync(join(this.madeHome, "cli", "person.key"), this.token, { mode: 0o600 });
     }

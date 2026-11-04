@@ -56,6 +56,23 @@ function isAgentProcess(executable) {
   const base = (executable.trim().split(/[\\/]/).pop() ?? "").toLowerCase();
   return base === "claude" || base === "codex" || base === "claude.exe" || base === "codex.exe";
 }
+function isScriptHost(comm) {
+  const base = (comm.trim().split(/[\\/]/).pop() ?? "").toLowerCase();
+  return base === "node" || base === "nodejs" || base === "bun" || base === "node.exe";
+}
+function argsOf(pid) {
+  try {
+    return execFileSync2("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return "";
+  }
+}
+function isAgentScript(args) {
+  const words = args.split(/\s+/).filter(Boolean);
+  const script = words.slice(1).find((w) => !w.startsWith("-")) ?? "";
+  const p = script.replace(/\\/g, "/");
+  return p.includes("/@anthropic-ai/claude-code/") || p.includes("/@openai/codex/");
+}
 function agentAncestor() {
   if (cached !== void 0) return cached;
   cached = false;
@@ -67,7 +84,8 @@ function agentAncestor() {
       const sp = line.search(/\s/);
       if (sp < 0) break;
       const ppid = Number(line.slice(0, sp));
-      if (isAgentProcess(line.slice(sp + 1))) {
+      const comm = line.slice(sp + 1);
+      if (isAgentProcess(comm) || isScriptHost(comm) && isAgentScript(argsOf(pid))) {
         cached = true;
         break;
       }
@@ -13822,7 +13840,7 @@ async function sendStatus(app, o) {
   }
   const rec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: void 0 }));
-  return { status, roster: await rosterView(app, sess), delivered, failed, ...warnings.length > 0 ? { warnings } : {}, project: await sessionProjectView(app, sid) };
+  return { status, roster: await rosterView(app, sess), delivered, failed, ...warnings.length > 0 ? { warnings } : {}, project: await sessionProjectView(app, sid), bound: true };
 }
 async function retract(app, sid, before, now) {
   const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
@@ -13991,6 +14009,7 @@ async function sendMessage(app, o) {
   const relays = d?.relays.length ?? 0;
   const queued = d && relays === 0 && outboxed ? { queued: true, state: "outbox", expiresAt: outboxed.expiresAt, ...offlineSince !== void 0 ? { lastSeen: offlineSince } : {} } : d && offlineSince !== void 0 ? { queued: true, state: "offline", lastSeen: offlineSince, expiresAt: Date.now() + OUTBOX_TTL_MS } : {};
   return {
+    ...o.person ? {} : { bound: true },
     // Accepted by a relay (it stores ciphertext for its session for 7 days), or not yet.
     delivered: d !== void 0 && relays > 0,
     to,
@@ -14025,7 +14044,7 @@ async function sendExtension(app, o) {
   if (target.own !== app.userId) {
     await app.state.update("spoke", (cur = {}) => ({ next: { ...cur, [sessKey(target.own, target.sid)]: fromSession }, result: void 0 }));
   }
-  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes: bytes2 };
+  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes: bytes2, bound: true };
 }
 async function onSessionEnvelope(app, env, r) {
   const accepted = r;
@@ -24358,6 +24377,11 @@ async function bindSession(app, sid, dirs, o = {}) {
   if (!o.inbound && !front && agentContext(app.env)) {
     throw new CliError("refused", `session ${sid}: inside an agent's session only its front end speaks for a session (the Claude mod's SendMessage, the Codex bridge's p2p_send), never the shell`);
   }
+  if (!o.inbound && !front && !await sessionBinding(app, sid)) {
+    if (!await app.confirmTty(`p2p is about to speak for a new session ${sid}.`)) {
+      throw new CliError("refused", `session ${sid} is new: without your front end's token, confirm it with "yes" on your own terminal (read from the terminal itself, never stdin or a flag)`);
+    }
+  }
   const now = Date.now();
   return app.state.update("sessionProjects", (cur) => {
     const all = { ...cur ?? {} };
@@ -24599,6 +24623,50 @@ var init_projects = __esm({
   }
 });
 
+// packages/p2p/src/tty-confirm.ts
+import { closeSync as closeSync3, openSync as openSync3, readSync, writeSync as writeSync2 } from "node:fs";
+async function confirmOnTty(question) {
+  let inFd;
+  let outFd;
+  try {
+    if (process.platform === "win32") {
+      inFd = openSync3("CONIN$", "r");
+      outFd = openSync3("CONOUT$", "w");
+    } else {
+      inFd = openSync3("/dev/tty", "r+");
+      outFd = inFd;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    writeSync2(outFd, `${question} Type yes to go on: `);
+    const buf = Buffer.alloc(1);
+    let answer = "";
+    for (let i = 0; i < 64; i++) {
+      const n = readSync(inFd, buf, 0, 1, null);
+      if (n <= 0) break;
+      const c = buf.toString("utf8");
+      if (c === "\n" || c === "\r") break;
+      answer += c;
+    }
+    return answer.trim().toLowerCase() === "yes";
+  } catch {
+    return false;
+  } finally {
+    try {
+      closeSync3(inFd);
+      if (outFd !== inFd) closeSync3(outFd);
+    } catch {
+    }
+  }
+}
+var init_tty_confirm = __esm({
+  "packages/p2p/src/tty-confirm.ts"() {
+    "use strict";
+  }
+});
+
 // packages/p2p/src/readonly.ts
 var OverlayDocBackend, ReadOnlyTrustStoreV3;
 var init_readonly = __esm({
@@ -24808,6 +24876,7 @@ var init_app = __esm({
   "packages/p2p/src/app.ts"() {
     "use strict";
     init_projects();
+    init_tty_confirm();
     init_v3();
     init_node();
     init_readonly();
@@ -24833,6 +24902,8 @@ var init_app = __esm({
     App = class {
       /** The person's front end vouched for this command (P2P_PERSON_TOKEN, checked once and removed: projects.ts). */
       front = false;
+      /** The person's "yes" on their controlling terminal (tty-confirm.ts); cli.ts may stand another in (tests). */
+      confirmTty = confirmOnTty;
       env;
       io;
       home;
@@ -26140,7 +26211,8 @@ function editedFiles(toolName, input) {
   }
   return [...out];
 }
-function shellTokens(command) {
+var LITERAL = "";
+function shellTokens(command, markLiteral = false) {
   const out = [];
   let cur = "";
   let has = false;
@@ -26157,7 +26229,7 @@ function shellTokens(command) {
       if (c === "'")
         q = "";
       else
-        cur += c;
+        cur += markLiteral && (c === "$" || c === "`") ? LITERAL : c;
       continue;
     }
     if (q === "$") {
@@ -26166,7 +26238,7 @@ function shellTokens(command) {
       else if (c === "'")
         q = "";
       else
-        cur += c;
+        cur += markLiteral && (c === "$" || c === "`") ? LITERAL : c;
       continue;
     }
     if (q === '"') {
@@ -26258,26 +26330,47 @@ function shellPaths(command, cwd, home) {
   const out = /* @__PURE__ */ new Set();
   let over = false;
   const isSep = (c) => c === "/" || c === "\\";
-  for (const word of shellTokens(command)) {
+  for (const word of shellTokens(command, true)) {
     const eq = word.startsWith("-") ? word.indexOf("=") : -1;
     let t2 = eq >= 0 ? word.slice(eq + 1) : word;
     if (t2 === "" || word.startsWith("-") && eq < 0 || t2.includes("://") || t2.includes("\0") || t2.includes("\n"))
       continue;
     for (const [v, val] of [["${HOME}", home], ["$HOME", home], ["${PWD}", cwd], ["$PWD", cwd]]) {
-      if (t2 === v || t2.startsWith(v) && isSep(t2[v.length])) {
+      let k = t2.indexOf(v);
+      while (k >= 0) {
+        const after2 = t2[k + v.length];
+        if (v.startsWith("$") && !v.startsWith("${") && after2 !== void 0 && /[A-Za-z0-9_]/.test(after2)) {
+          k = t2.indexOf(v, k + 1);
+          continue;
+        }
         if (val === void 0)
           over = true;
-        t2 = `${val ?? ""}${t2.slice(v.length)}`;
-        break;
+        t2 = `${t2.slice(0, k)}${val ?? ""}${t2.slice(k + v.length)}`;
+        k = t2.indexOf(v, k + (val ?? "").length);
       }
     }
     const pathLike = t2.startsWith("~") || t2.startsWith(".") || t2.includes("/") || t2.includes("\\");
     if (!pathLike)
       continue;
-    if (t2.includes("$") || t2.includes("`")) {
-      over = true;
-      continue;
+    let x = -1;
+    for (let k = 0; k < t2.length; k++) {
+      if (t2[k] === "$" || t2[k] === "`") {
+        x = k;
+        break;
+      }
     }
+    if (x >= 0) {
+      let lastSep = -1;
+      for (let k = 0; k < x; k++)
+        if (isSep(t2[k]))
+          lastSep = k;
+      if (lastSep <= 0) {
+        over = true;
+        continue;
+      }
+      t2 = t2.slice(0, lastSep);
+    }
+    t2 = t2.split(LITERAL).join("$");
     let p;
     if (t2 === "~" || t2.startsWith("~/") || t2.startsWith("~\\")) {
       if (!home) {
@@ -26289,7 +26382,7 @@ function shellPaths(command, cwd, home) {
       p = resolveLike(cwd, t2);
     const last = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
     const name2 = p.slice(last + 1);
-    const folder = name2.includes(".") && !name2.startsWith(".") && last > 0 ? p.slice(0, last) : p;
+    const folder = x < 0 && name2.includes(".") && !name2.startsWith(".") && last > 0 ? p.slice(0, last) : p;
     out.add(folder);
     if (out.size > MAX_COMMAND_PATHS)
       return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true };
@@ -29353,7 +29446,9 @@ async function runMcpServer(o) {
   const bridge = new Bridge({
     p2p,
     bin,
-    watch: childWatch(env, front),
+    // The long-lived watch never gets it: it needs none, and its environment is readable by others
+    // running as this user (/proc/<pid>/environ on Linux).
+    watch: childWatch(env),
     env,
     transcript: (threadId) => new RolloutReader(eff.codexHome, threadId),
     codexHome: eff.codexHome,
@@ -29521,7 +29616,10 @@ async function runHook(event, stdin, deps) {
       return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: deny } });
     const t2 = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
     if (entry && (t2.paths.length > 0 || t2.over)) {
-      await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...sessionId ? { sessionId } : {}, ...cwd ? { cwd } : {}, mode: {}, dirs: t2.paths, ...t2.over ? { over: true } : {} } }, 8e3).catch(() => void 0);
+      const told = await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...sessionId ? { sessionId } : {}, ...cwd ? { cwd } : {}, mode: {}, dirs: t2.paths, ...t2.over ? { over: true } : {} } }, 8e3).then((r) => r?.ok === true).catch(() => false);
+      if (!told) {
+        return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Refused by Peer2Peer: this call reaches folders outside the session's, and the Peer2Peer bridge couldn't be told (its project boundary would be wrong). Try again; if it keeps failing, ask your user." } });
+      }
     }
     return "";
   }
@@ -34460,47 +34558,7 @@ init_inbound();
 init_rotation();
 init_sessions();
 init_projects();
-
-// packages/p2p/src/tty-confirm.ts
-import { closeSync as closeSync3, openSync as openSync3, readSync, writeSync as writeSync2 } from "node:fs";
-async function confirmOnTty(question) {
-  let inFd;
-  let outFd;
-  try {
-    if (process.platform === "win32") {
-      inFd = openSync3("CONIN$", "r");
-      outFd = openSync3("CONOUT$", "w");
-    } else {
-      inFd = openSync3("/dev/tty", "r+");
-      outFd = inFd;
-    }
-  } catch {
-    return false;
-  }
-  try {
-    writeSync2(outFd, `${question} Type yes to go on: `);
-    const buf = Buffer.alloc(1);
-    let answer = "";
-    for (let i = 0; i < 64; i++) {
-      const n = readSync(inFd, buf, 0, 1, null);
-      if (n <= 0) break;
-      const c = buf.toString("utf8");
-      if (c === "\n" || c === "\r") break;
-      answer += c;
-    }
-    return answer.trim().toLowerCase() === "yes";
-  } catch {
-    return false;
-  } finally {
-    try {
-      closeSync3(inFd);
-      if (outFd !== inFd) closeSync3(outFd);
-    } catch {
-    }
-  }
-}
-
-// packages/p2p/src/cli.ts
+init_tty_confirm();
 init_social();
 
 // packages/p2p/src/watch.ts
@@ -37272,6 +37330,7 @@ function buildProgram(deps) {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
     app.front = deps.front === true;
+    app.confirmTty = confirmTty;
     return app;
   };
   const program2 = new Command("p2p").description("Peer2Peer: an account-free network for AI agent sessions and the people who run them").version(VERSION).showHelpAfterError().enablePositionalOptions().exitOverride().configureOutput({ writeOut: (s2) => io2.out(s2.replace(/\n$/, "")), writeErr: (s2) => io2.err(s2.replace(/\n$/, "")) });
@@ -38101,7 +38160,7 @@ or, for a browser: ${r2.web}` };
     const personOk = personHere(app);
     if (fromTui && !personOk) throw new CliError("refused", "`p2p send` with no --from-session sends as you, from your own terminal; inside an agent's session, send from that session (--from-session)");
     const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o)) && personOk;
-    if (!app.front && (person || fromTui || !await ops.sessionBinding(app, o.fromSession).catch(() => void 0))) {
+    if (!app.front && (person || fromTui)) {
       if (!await confirmTty(`p2p send from session ${o.fromSession} to ${o.to}.`)) {
         throw new CliError("refused", 'this send needs your "yes" on your own terminal (read from the terminal itself, never stdin or a flag)');
       }

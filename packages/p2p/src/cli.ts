@@ -147,6 +147,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
     app.front = deps.front === true;
+    app.confirmTty = confirmTty;
     return app;
   };
   const program = new Command("p2p")
@@ -1285,7 +1286,8 @@ export function buildProgram(deps: ProgramDeps): Command {
         const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o)) && personOk;
         // Without the front end's token, the person confirms on their own terminal: a send as them, or the
         // first send from a session nobody has used yet (a process detached from every terminal can't).
-        if (!app.front && (person || fromTui || !(await ops.sessionBinding(app, o.fromSession!).catch(() => undefined)))) {
+        // (A first send from a new session is confirmed where every new session is: projects.ts bindSession.)
+        if (!app.front && (person || fromTui)) {
           if (!(await confirmTty(`p2p send from session ${o.fromSession} to ${o.to}.`))) {
             throw new CliError("refused", "this send needs your \"yes\" on your own terminal (read from the terminal itself, never stdin or a flag)");
           }

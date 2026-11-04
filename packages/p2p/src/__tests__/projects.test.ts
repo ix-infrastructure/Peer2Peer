@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRosterV3 } from "@peer2peer/core/v3";
 import { assertPersonForWidening, isAgentProcess, personToken, takePersonToken, normalizeRemote, projectOf, PRIVATE_MARKER, assertMayReach, agentEnv } from "../projects.js";
 import { main } from "../cli.js";
+import { isAgentScript } from "../ancestry.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { linkJoin, linkStart } from "../identity.js";
@@ -579,6 +580,38 @@ describe("project boundaries", () => {
     const narrow = await script.run(["session", "roster", "front-1", "--private"]);
     expect(narrow.json?.error).toBe("refused");
     expect(JSON.stringify(await ben.ok(["ls"]))).not.toContain("hijacked");
+  });
+
+  it("a session nobody used yet needs the person's terminal yes for a status, an extension send or state, not only a send (M1)", async () => {
+    const out: string[] = [];
+    const env = { ...ann.env, P2P_WORKDIR: repo.S, P2P_PERSON_TOKEN: "" };
+    const run = async (args: string[], yes: boolean) => {
+      const code = await main([...args, "--json"], { env, io: { out: (l) => out.push(l), err: () => {} }, confirmTty: async () => yes });
+      process.exitCode = 0;
+      return { code, json: JSON.parse(out.at(-1) ?? "{}") };
+    };
+    expect((await run(["status", "--session", "fresh-st", "--state", "busy", "--label", "f"], false)).json.error).toBe("refused");
+    expect((await run(["status", "--session", "fresh-st", "--state", "busy", "--label", "f"], true)).code).toBe(0);
+    // Once used, the same session goes on without asking again.
+    expect((await run(["status", "--session", "fresh-st", "--state", "idle", "--label", "f"], false)).code).toBe(0);
+    // An extension's state from a new session (an Ix footprint), through the App directly.
+    const app = await inDir(ann, repo.S).app();
+    await app.load();
+    app.front = false;
+    app.confirmTty = async () => false;
+    try {
+      await expect(publishExtensionState(app, { fromSession: "fresh-xs", kind: "x:ix.footprint", v: 1, body: {}, fallback: "fp", ttl: 60 })).rejects.toMatchObject({ code: "refused" });
+      await expect(sendExtension(app, { fromSession: "fresh-xe", to: ids.ben, kind: "x:ix.note", v: 1, body: {}, fallback: "n" })).rejects.toMatchObject({ code: "refused" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("npm-installed Claude Code and Codex count as agents by their script path, not a word on the line (M1)", () => {
+    expect(isAgentScript("node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume x")).toBe(true);
+    expect(isAgentScript("node --max-old-space-size=4096 /home/u/.npm/_npx/1/node_modules/@openai/codex/bin/codex.js")).toBe(true);
+    expect(isAgentScript("node /work/scripts/build.js --label @anthropic-ai/claude-code")).toBe(false);
+    expect(isAgentScript("node /work/claude-code-notes/index.js")).toBe(false);
   });
 
   it("a process detached from every terminal can't widen anything or send as the person, whatever it claims (H4-H6 residual)", async () => {

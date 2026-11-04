@@ -14,7 +14,7 @@ import { App, type Io } from "../app.js";
 import { main } from "../cli.js";
 import type { Env } from "../config.js";
 
-/** Writes a person token into `home` (as the CLI makes one) and returns it. */
+/** Writes a person token into `home` (as the CLI makes one) and returns it. Pre-seeded on purpose: it stands in for the person's terminal "yes" (tests have no terminal); a fresh install's own creation is tested apart (mods/claude/peer2peer/integration/first-run.e2e.ts, the bridge's personTokenOf, the CLI's personToken). */
 export function personTokenFor(home: string): string {
   const t = randomBytes(32).toString("base64url");
   mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });

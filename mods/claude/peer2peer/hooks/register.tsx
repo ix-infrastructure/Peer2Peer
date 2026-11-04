@@ -77,6 +77,7 @@ import {
   PROJECT_NOTICE_RE,
   routableOf,
   toolPathsAll,
+  PERSON_TOKEN_SCRIPT,
   parsePeersArgs,
   pathBasename,
   PEERS_USAGE,
@@ -476,6 +477,13 @@ const p2pEnv = (S: Sess, $: EngineInterface, dirs: readonly string[] = []): Reco
   }
 }
 
+const withoutToken = (env: Record<string, string>): Record<string, string> => {
+  const { P2P_PERSON_TOKEN: _drop, ...rest } = env
+  void _drop
+
+  return rest
+}
+
 const execOf = (S: Sess, $: EngineInterface): Exec => ({
   // Every p2p and node run starts in the plugin's own folder, never the
   // session's (on Windows the current directory is searched first).
@@ -484,13 +492,16 @@ const execOf = (S: Sess, $: EngineInterface): Exec => ({
     // succeeds the CLI holds them for good. More than the CLI takes at once: private, never the first N.
     const run = S.run
     const binds = argv.some(a => a === 'status' || a === 'send' || a === 'ix')
+    // (Any of these may bind; which one did, its answer says.)
     const pending = binds && run ? [...run.pendingDirs] : []
     if (run && pending.length > MAX_PENDING_DIRS) {
       run.isDirsOver = true
       pending.length = 0
     }
     const r = await $.process.run(argv, { cwd: $.plugin.root, env: p2pEnv(S, $, pending), timeoutMs: init?.timeoutMs ?? 30_000, ...(init?.stdin !== undefined ? { stdin: init.stdin } : {}) })
-    if (run && pending.length > 0 && r.exitCode === 0) for (const d of pending) run.pendingDirs.delete(d)
+    // Only a run whose answer says `bound: true` (a status, a send, an extension send) bound them; any
+    // other (ix inbox, show, conflicts, a dry run) leaves them pending for the next one.
+    if (run && pending.length > 0 && r.exitCode === 0 && confirmsBound(r.stdout)) for (const d of pending) run.pendingDirs.delete(d)
 
     return r
   },
@@ -499,7 +510,9 @@ const execOf = (S: Sess, $: EngineInterface): Exec => ({
   // `return()` is called, when the dispatch that started it is abandoned, or
   // when the module unloads; watchLoop calls `return()` the moment the run's
   // signal aborts and stops waiting on the stream, so `init.signal` is unused here.
-  spawn: argv => $.process.spawn({ argv, cwd: $.plugin.root, env: p2pEnv(S, $) }),
+  // The long-lived watch never gets the person token: it needs none, and a process's environment can
+  // be read by others running as this user (/proc/<pid>/environ on Linux).
+  spawn: argv => $.process.spawn({ argv, cwd: $.plugin.root, env: withoutToken(p2pEnv(S, $)) }),
 })
 
 const client = async (S: Sess, $: EngineInterface) => new P2P(execOf(S, $), await binOf(S, $))
@@ -667,6 +680,17 @@ const myAgents = async (S: Sess, $: EngineInterface) => {
 /** The folder a path names: itself when it is one, else its parent (a file, or one not there yet). */
 const dirOf = (path: string): string => path.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, '') || path
 
+/** Whether a `--json` answer confirms the session's folders are bound (`bound: true`). */
+const confirmsBound = (stdout: string): boolean => {
+  try {
+    const v = JSON.parse(stdout.trim().split('\n').at(-1) ?? '') as { bound?: unknown }
+
+    return v.bound === true
+  } catch {
+    return false
+  }
+}
+
 /** At most this many folders a run keeps (for a resume); past it the session is private (fails closed). */
 const MAX_RUN_DIRS = 4096
 /** At most this many folders one p2p run hands the CLI (its own cap); past it, private. */
@@ -717,12 +741,12 @@ const restoreDirs = async (S: Sess, $: EngineInterface, current: Run) => {
   if (saved.over === true) current.isDirsOver = true
 }
 
-/** Reads the person token the CLI keeps in its own folder (made by its first command), once. */
+/** The person token in the CLI's own folder, made here if there is none yet (a fresh install), once. */
 const readPersonToken = async (S: Sess, $: EngineInterface) => {
   if (S.personToken) return
   const home = (await $.env.get('P2P_HOME')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.p2p`
   const r = await $.process
-    .run(['node', '-e', 'try{process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8").trim())}catch{}', `${home.replace(/[\\/]+$/, '')}/cli/person.key`], { cwd: $.plugin.root, timeoutMs: 10_000 })
+    .run(['node', '-e', PERSON_TOKEN_SCRIPT, `${home.replace(/[\\/]+$/, '')}/cli/person.key`], { cwd: $.plugin.root, timeoutMs: 10_000 })
     .catch(() => null)
   const t = r && r.exitCode === 0 ? r.stdout.trim() : ''
   if (/^[A-Za-z0-9_-]{43}$/.test(t)) S.personToken = t
@@ -2569,6 +2593,9 @@ const peersCommand = async (S: Sess, $: EngineInterface, args: string, origin: s
   if ((command.verb === 'trust' || command.verb === 'untrust') && origin !== 'composer') return 'Trust changes only from your own terminal: type this /peers command there.'
   // Notices are this session's own (above its prompt): no network needed.
   if (command.verb === 'dismiss') return dismissCommand($, command.target)
+  // The person token before any typed command runs (made here on a fresh install): join, accept and the
+  // other commands that widen sharing need it, and run before this session is online.
+  await readPersonToken(S, $)
   const current = S.run
   if (!isLive(current)) return 'Peer2Peer is not running in this session (headless sessions need P2P_HEADLESS=1).'
   if (command.verb === 'setup') return setupCommand(S, $, current, command.name)

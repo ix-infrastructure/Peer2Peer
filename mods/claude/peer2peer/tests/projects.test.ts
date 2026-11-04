@@ -182,6 +182,13 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     // $HOME and $PWD expand; any other expansion in a path can't be resolved: private.
     expect(shellPaths('cat $HOME/notes/a.md ${PWD}/../x', '/w/r', '/home/u')).toEqual({ paths: ['/home/u/notes', '/w/x'], over: false })
     expect(shellPaths('cat $SECRET_DIR/keys', '/w/r', '/home/u').over).toBe(true)
+    // Quoted text is never an expansion, and $PWD/$HOME expand anywhere in a word (M2).
+    expect(shellPaths("sed 's/$/;/' notes.txt", '/w/r').over).toBe(false)
+    expect(shellPaths('docker run -v $PWD:/app img', '/w/r').over).toBe(false)
+    expect(shellPaths("printf '%s' '$HOME/x'", '/w/r', '/home/u').paths).not.toContain('/home/u')
+    // An expansion past the first segment: the folder before it binds. In the first: the location is unknown.
+    expect(shellPaths('cat src/$NAME.ts', '/w/r')).toEqual({ paths: ['/w/r/src'], over: false })
+    expect(shellPaths('tsc --outDir=$OUT/dist', '/w/r').over).toBe(true)
     expect(shellPaths('cat "$(echo /secret)/k"', '/w/r', '/home/u').over).toBe(true)
     // Relative ones resolve against the folder (a symlink in it binds its target's project, in the CLI).
     expect(shellPaths('cat link/inside.txt', '/w/r').paths).toEqual(['/w/r/link'])
@@ -209,5 +216,30 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     await start($, w)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'q1', command: "p2p send --from-session=''fake --to ben hi" } as never)
     expect(JSON.stringify(r)).toContain('speaks only for this session')
+  })
+
+  test('folders stay pending through runs that don\'t bind (ix inbox, a dry run): only a run that answers bound: true clears them (R2)', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web' })
+    await start($, w)
+    // A nested repository inside the session's folder: no status at once, so it waits for the next binding run.
+    await $.tool.call({ tool: 'Read', tool_use_id: 'n1', file_path: '/work/web/vendor/secret/keys.ts' } as never)
+    await slash($, 'peers', 'ix')
+    const ix = ran(w, 'ix')
+    expect(ix.length).toBeGreaterThan(0)
+    // The ix run carried it, but didn't bind it (its answer has no bound: true)...
+    await $.turn.start({ text: 'work', turnId: 't9' } as never)
+    await $.turn.complete({ turnId: 't9', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    // ...so the next status still carries it, and only then is it cleared.
+    await settle(w, () => ran(w, 'status').some(r => (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/web/vendor/secret')))
+    expect(ran(w, 'status').some(r => (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/web/vendor/secret'))).toBe(true)
+  })
+
+  test('the long-lived watch never gets the person token; short runs do (M3)', async ($, on) => {
+    const token = 'T'.repeat(43)
+    const w = world(on, { personToken: token })
+    await start($, w)
+    await settle(w, () => ran(w, 'status').length > 0 && w.spawnEnvs.length > 0)
+    expect(ran(w, 'status').at(-1)?.env?.P2P_PERSON_TOKEN).toBe(token)
+    for (const env of w.spawnEnvs) expect((env as Record<string, string> | undefined)?.P2P_PERSON_TOKEN).toBeUndefined()
   })
 })

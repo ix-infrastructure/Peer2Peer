@@ -469,6 +469,8 @@ export interface StatusResult {
   warnings?: string[];
   /** The projects this session works in and what they allow (projects.ts). */
   project?: SessionProjectView;
+  /** The folders it was given are bound for good (a front end may stop passing them). */
+  bound?: true;
 }
 
 /**
@@ -730,7 +732,8 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   // This device keeps the full status: its own `ls` and ExtContext.ownStatus see the agents.
   const rec: PeerStatusRec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: undefined }));
-  return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid) };
+  // `bound`: the folders the front end passed are bound for good (it can stop sending them).
+  return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid), bound: true };
 }
 
 /** The blank status a narrowed session leaves with those it no longer reaches (under their roster). */
@@ -875,6 +878,8 @@ export interface SendResult {
    */
   receipts?: "requested" | "unsupported";
   receiptId?: string;
+  /** The folders it was given are bound for good (see StatusResult.bound). */
+  bound?: true;
 }
 
 /** `user`, `user [ref]`, `user/ref` or `user/sid`. */
@@ -1053,6 +1058,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
         ? { queued: true as const, state: "offline" as const, lastSeen: offlineSince, expiresAt: Date.now() + OUTBOX_TTL_MS }
         : {};
   return {
+    ...(o.person ? {} : { bound: true as const }),
     // Accepted by a relay (it stores ciphertext for its session for 7 days), or not yet.
     delivered: d !== undefined && relays > 0,
     to,
@@ -1108,7 +1114,7 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   if (target.own !== app.userId) {
     await app.state.update("spoke", (cur = {}) => ({ next: { ...cur, [sessKey(target.own, target.sid)]: fromSession }, result: undefined }));
   }
-  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes };
+  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes, bound: true };
 }
 
 // ---------------------------------------------------------------------------

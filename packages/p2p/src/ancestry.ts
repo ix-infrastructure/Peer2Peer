@@ -15,6 +15,33 @@ export function isAgentProcess(executable: string): boolean {
   return base === "claude" || base === "codex" || base === "claude.exe" || base === "codex.exe";
 }
 
+/** A runtime that runs an agent's npm package as a script (`node …/@anthropic-ai/claude-code/cli.js`). */
+function isScriptHost(comm: string): boolean {
+  const base = (comm.trim().split(/[\\/]/).pop() ?? "").toLowerCase();
+  return base === "node" || base === "nodejs" || base === "bun" || base === "node.exe";
+}
+
+/** The command line of `pid` (`ps -o args=`), or "". */
+function argsOf(pid: number): string {
+  try {
+    return execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Whether a script host's command line runs Claude Code's or Codex's npm package: its script (the
+ * first argument after the runtime and its options) lies inside `@anthropic-ai/claude-code` or
+ * `@openai/codex`. A path, never a word elsewhere on the line.
+ */
+export function isAgentScript(args: string): boolean {
+  const words = args.split(/\s+/).filter(Boolean);
+  const script = words.slice(1).find((w) => !w.startsWith("-")) ?? "";
+  const p = script.replace(/\\/g, "/");
+  return p.includes("/@anthropic-ai/claude-code/") || p.includes("/@openai/codex/");
+}
+
 /**
  * Walks parent process ids with `ps` (unix), comparing each one's executable (`comm`) by basename.
  * Windows, or `ps` unable to answer: false (the token and the tty confirmation still apply).
@@ -30,7 +57,8 @@ export function agentAncestor(): boolean {
       const sp = line.search(/\s/);
       if (sp < 0) break;
       const ppid = Number(line.slice(0, sp));
-      if (isAgentProcess(line.slice(sp + 1))) {
+      const comm = line.slice(sp + 1);
+      if (isAgentProcess(comm) || (isScriptHost(comm) && isAgentScript(argsOf(pid)))) {
         cached = true;
         break;
       }

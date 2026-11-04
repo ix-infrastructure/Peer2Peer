@@ -84,7 +84,7 @@ Peer2Peer itself never carries a private project's status, files, subagents, foo
 
 Only the person widens sharing, and only a session's front end speaks for it. These checks make that hard to get around, but not impossible:
 
-- **The person token.** `P2P_HOME/cli/person.key` (0600, made once). The mod and the Codex bridge pass it to their own `p2p` runs as `P2P_PERSON_TOKEN`. The CLI checks it once at start and removes it from its own environment, so no child process (git, `ix`, an extension's tool) inherits it. ext-ix runs git with `core.fsmonitor`, hooks and external diffs switched off and an allow-listed environment. The Codex bridge passes the token to `p2p` and `p2p watch` only.
+- **The person token.** `P2P_HOME/cli/person.key` (0600). The mod and the Codex bridge make it themselves, exclusively, before any typed command, so a fresh install works. They pass it to their own short `p2p` runs as `P2P_PERSON_TOKEN`, never to the long-lived `p2p watch` (on Linux, a process's environment is readable by others running as you, in `/proc/<pid>/environ`). The CLI checks it once at start and removes it from its own environment, so no child process (git, `ix`, an extension's tool) inherits it. ext-ix runs git with `core.fsmonitor`, hooks and external diffs switched off and an allow-listed environment. The Codex bridge passes the token to `p2p` and `p2p watch` only.
 - **Agent detection:**
   - the variables Claude Code and Codex set in the commands their agents run: `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` (Claude Code's documented ones), `CODEX_TOOL_CALL_ID`, `CODEX_CI`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID` and `CODEX_SESSION_ID` (from Codex's source). Variables a person sets (`CODEX_HOME`, `CODEX_API_KEY`) don't count;
   - a Claude Code or Codex ancestor, matched by executable name, walking `ps` (not on Windows).
@@ -106,14 +106,15 @@ None of these can stop an agent that runs as you and wants past them. A pseudo-t
 
 ### The hard barrier: sandbox your agents
 
-Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), and the token, the keys, the policies and the CLI's own state are out of its reach. Peer2Peer's checks then hold.
+Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), with no way to step outside the sandbox. The token, the keys, the policies and the CLI's state are then out of the agent's reach, and Peer2Peer's checks hold. The configurations below were checked against the vendors' documentation on 2026-11-04. The Codex one was also run with codex-cli 0.156.1 on macOS (a read and a write under the denied folder failed with "Operation not permitted"; the workspace stayed readable).
 
-**Claude Code** (`settings.json`, see [sandboxing](https://code.claude.com/docs/en/sandboxing) and [permissions](https://code.claude.com/docs/en/permissions)). The sandbox (`sandbox.filesystem.denyRead` / `denyWrite`) is enforced by the OS on Bash and its child processes. It doesn't cover Claude Code's built-in file tools, so add the `Read`/`Edit` deny rules for those:
+**Claude Code** (`settings.json`). Sources: [sandboxing](https://code.claude.com/docs/en/sandboxing) and [permissions](https://code.claude.com/docs/en/permissions).
 
 ```json
 {
   "sandbox": {
     "enabled": true,
+    "allowUnsandboxedCommands": false,
     "filesystem": {
       "denyRead": ["~/.p2p"],
       "denyWrite": ["~/.p2p"]
@@ -125,16 +126,30 @@ Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by defau
 }
 ```
 
-Use your own `P2P_HOME` if you moved it. The mod's own `p2p` runs aren't the agent's commands, so they still work.
+- **`allowUnsandboxedCommands: false`.** Without it, a command that fails in the sandbox may be retried with `dangerouslyDisableSandbox`. The docs: "You can disable the unsandboxed retry by setting `"allowUnsandboxedCommands": false` … With the retry disabled, Claude Code ignores the `dangerouslyDisableSandbox` parameter." In `bypassPermissions` mode such a retry "runs without a prompt".
+- **`excludedCommands`.** Commands listed in `sandbox.excludedCommands` run outside the sandbox, "which means no filesystem restrictions", and in `bypassPermissions` mode "without a prompt unless an ask rule matches it". Keep that list empty, or limited to tools you'd trust with `P2P_HOME`.
+- **`bypassPermissions` mode** (`--dangerously-skip-permissions`) approves everything the sandbox lets out. Don't combine it with this barrier unless both settings above are in place.
+- **The file tools.** The sandbox covers Bash and its children, not Claude Code's built-in file tools ("A `denyRead` entry doesn't stop the Read tool"). The `Read`/`Edit` deny rules cover those.
+- **Other homes.** Use your own `P2P_HOME` if you moved it. The mod's own `p2p` runs aren't the agent's commands, so they still work.
 
-**Codex** (`config.toml`). The legacy `sandbox_mode` and `[sandbox_workspace_write]` settings can't deny reads. A named permission profile can: map a path to `"deny"` and select the profile with `default_permissions`. On macOS this is enforced by Seatbelt, on Linux by bubblewrap (openai/codex: `config/src/permissions_toml.rs`, `sandboxing/src/seatbelt.rs`, `linux-sandbox/src/bwrap.rs`). Don't combine it with `sandbox_mode`. Use an absolute path:
+**Codex** (`config.toml`). Sources: [permissions](https://developers.openai.com/codex/permissions) and agent approvals & security, both now served from learn.chatgpt.com/docs.
+
+- The legacy `sandbox_mode` and `[sandbox_workspace_write]` settings can't deny reads. A named permission profile can. The docs: "`deny`: Denies both reads and writes under the path."
+- Permission profiles don't combine with `sandbox_mode`. The docs: "Permission profiles do not compose with the older sandbox settings."
+- Use an absolute path:
 
 ```toml
 default_permissions = "p2p-safe"
+# No approval prompts, so no escalation out of the sandbox is offered (the docs: "You can disable
+# approval prompts with --ask-for-approval never").
+approval_policy = "never"
 
 [permissions.p2p-safe.filesystem]
-":workspace" = "write"
+":minimal" = "read"
 "/Users/you/.p2p" = "deny"
+
+[permissions.p2p-safe.filesystem.":workspace_roots"]
+"." = "write"
 ```
 
 Administrators can enforce the same with `[permissions.filesystem] deny_read = ["…/.p2p"]` in Codex's `requirements.toml`.

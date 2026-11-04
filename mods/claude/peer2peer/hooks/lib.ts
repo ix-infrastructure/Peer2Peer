@@ -1890,6 +1890,9 @@ export function p2pSessionArgs(command: string, homes: readonly string[] = []): 
   return out
 }
 
+/** Stands for a `$` or backtick that was quoted text (shellTokens' markLiteral): never an expansion. */
+export const LITERAL = '\uE000'
+
 /**
  * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
  * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
@@ -1897,7 +1900,7 @@ export function p2pSessionArgs(command: string, homes: readonly string[] = []): 
  * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
  * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
  */
-export function shellTokens(command: string): string[] {
+export function shellTokens(command: string, markLiteral = false): string[] {
   const out: string[] = []
   let cur = ''
   let has = false
@@ -1911,14 +1914,15 @@ export function shellTokens(command: string): string[] {
     const c = command[i] as string
     if (q === "'") {
       if (c === "'") q = ''
-      else cur += c
+      // A `$` or backtick inside single quotes is text, never an expansion (marked when asked).
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
 
       continue
     }
     if (q === '$') {
       if (c === '\\' && i + 1 < command.length) cur += command[++i]
       else if (c === "'") q = ''
-      else cur += c
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
 
       continue
     }
@@ -2019,23 +2023,46 @@ export function shellPaths(command: string, cwd: string, home?: string): { paths
   const out = new Set<string>()
   let over = false
   const isSep = (c: string | undefined) => c === '/' || c === '\\'
-  for (const word of shellTokens(command)) {
+  for (const word of shellTokens(command, true)) {
     const eq = word.startsWith('-') ? word.indexOf('=') : -1
     let t = eq >= 0 ? word.slice(eq + 1) : word
     if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
+    // $HOME, ${HOME}, $PWD and ${PWD} anywhere in the word (only real expansions: quoted ones are LITERAL).
     for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
-      if (t === v || (t.startsWith(v) && isSep(t[v.length]))) {
+      let k = t.indexOf(v)
+      while (k >= 0) {
+        const after = t[k + v.length]
+        // `$HOMEDIR` is another variable: only the whole name.
+        if (v.startsWith('$') && !v.startsWith('${') && after !== undefined && /[A-Za-z0-9_]/.test(after)) {
+          k = t.indexOf(v, k + 1)
+          continue
+        }
         if (val === undefined) over = true
-        t = `${val ?? ''}${t.slice(v.length)}`
-        break
+        t = `${t.slice(0, k)}${val ?? ''}${t.slice(k + v.length)}`
+        k = t.indexOf(v, k + (val ?? '').length)
       }
     }
     const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
     if (!pathLike) continue
-    if (t.includes('$') || t.includes('`')) {
-      over = true
-      continue
+    // Any other expansion: where it sits decides. In the path's first segment, the location itself
+    // is unknown: private. Further in, the folder before it is known: that one binds.
+    let x = -1
+    for (let k = 0; k < t.length; k++) {
+      if (t[k] === '$' || t[k] === '`') {
+        x = k
+        break
+      }
     }
+    if (x >= 0) {
+      let lastSep = -1
+      for (let k = 0; k < x; k++) if (isSep(t[k])) lastSep = k
+      if (lastSep <= 0) {
+        over = true
+        continue
+      }
+      t = t.slice(0, lastSep)
+    }
+    t = t.split(LITERAL).join('$')
     let p: string
     if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
       if (!home) {
@@ -2047,7 +2074,7 @@ export function shellPaths(command: string, cwd: string, home?: string): { paths
     // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
     const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
     const name = p.slice(last + 1)
-    const folder = name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
+    const folder = x < 0 && name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
     out.add(folder)
     if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
   }
@@ -2123,6 +2150,25 @@ export function isUnder(path: string, dir: string): boolean {
 
   return r !== '' && (p === r || p.startsWith(`${r}/`))
 }
+
+/**
+ * Node code (run as `node -e <this> <file>`) that prints the person token in `file`, making it
+ * first if there is none: exclusively (`wx`, 0600, its folder 0700), so two runs agree on one.
+ * The mod makes it itself, before any typed /peers command: a fresh install has no `p2p` state yet,
+ * and its first commands (join, accept) widen sharing (packages/p2p/src/projects.ts).
+ */
+export const PERSON_TOKEN_SCRIPT = [
+  'const fs = require("fs"), path = require("path"), crypto = require("crypto");',
+  'const f = process.argv[1], ok = t => /^[A-Za-z0-9_-]{43}$/.test(t);',
+  'const read = () => { try { return fs.readFileSync(f, "utf8").trim(); } catch { return ""; } };',
+  'let t = read();',
+  'if (!ok(t)) {',
+  '  fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });',
+  '  try { fs.writeFileSync(f, crypto.randomBytes(32).toString("base64url"), { mode: 0o600, flag: "wx" }); } catch {}',
+  '  t = read();',
+  '}',
+  'if (ok(t)) process.stdout.write(t);',
+].join("\n")
 
 /** The CLI's one-time notice that sessions follow their project now (projects.ts PROJECT_NOTICE_PREFIX). */
 export const PROJECT_NOTICE_RE = /^project boundaries:/

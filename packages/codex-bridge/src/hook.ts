@@ -110,7 +110,13 @@ export async function runHook(event: string, stdin: string, deps: HookDeps): Pro
     // Paths the call reaches bind their projects before it runs (any that can't be placed: private).
     const t = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
     if (entry && (t.paths.length > 0 || t.over)) {
-      await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true } : {}) } }, 8_000).catch(() => undefined);
+      // The bridge must hear it before the call runs: if it can't be told, the call doesn't run.
+      const told = await ask<{ ok?: boolean }>(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true } : {}) } }, 8_000)
+        .then((r) => r?.ok === true)
+        .catch(() => false);
+      if (!told) {
+        return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Refused by Peer2Peer: this call reaches folders outside the session's, and the Peer2Peer bridge couldn't be told (its project boundary would be wrong). Try again; if it keeps failing, ask your user." } });
+      }
     }
     return "";
   }

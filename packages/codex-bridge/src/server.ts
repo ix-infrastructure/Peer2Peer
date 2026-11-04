@@ -187,7 +187,9 @@ export async function runMcpServer(o: McpOptions): Promise<void> {
   const bridge: Bridge = new Bridge({
     p2p,
     bin,
-    watch: childWatch(env, front),
+    // The long-lived watch never gets it: it needs none, and its environment is readable by others
+    // running as this user (/proc/<pid>/environ on Linux).
+    watch: childWatch(env),
     env,
     transcript: (threadId) => new RolloutReader(eff.codexHome, threadId),
     codexHome: eff.codexHome,

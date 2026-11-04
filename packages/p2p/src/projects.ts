@@ -454,6 +454,13 @@ export async function bindSession(
   if (!o.inbound && !front && agentContext(app.env)) {
     throw new CliError("refused", `session ${sid}: inside an agent's session only its front end speaks for a session (the Claude mod's SendMessage, the Codex bridge's p2p_send), never the shell`);
   }
+  // A session nobody has used yet, without the front end's token: the person confirms it on their own
+  // terminal (a status, a send, an extension send or state alike; a detached process can't).
+  if (!o.inbound && !front && !(await sessionBinding(app, sid))) {
+    if (!(await app.confirmTty(`p2p is about to speak for a new session ${sid}.`))) {
+      throw new CliError("refused", `session ${sid} is new: without your front end's token, confirm it with "yes" on your own terminal (read from the terminal itself, never stdin or a flag)`);
+    }
+  }
   const now = Date.now();
   return app.state.update("sessionProjects", (cur) => {
     const all = { ...((cur as SessionProjectsDoc | undefined) ?? {}) };
