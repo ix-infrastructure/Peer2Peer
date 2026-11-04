@@ -492,11 +492,9 @@ const MUTATING_TWO = new Set([
   "project private",
 ]);
 
+/** Shell words of one simple command (shellTokens: linear, quote-aware, adjacent parts joined). */
 function shellWords(segment: string): string[] {
-  const out: string[] = [];
-  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  for (const m of segment.matchAll(re)) out.push(m[1] ?? m[2] ?? m[3] ?? "");
-  return out;
+  return shellTokens(segment);
 }
 
 /**
@@ -825,20 +823,47 @@ export function shellTokens(command: string): string[] {
   return out;
 }
 
-/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. */
+/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. Linear: no regex over the input. */
 export function resolveLike(cwd: string, p: string): string {
-  const win = /^[A-Za-z]:[\\/]/.test(p) || (!p.startsWith('/') && /^[A-Za-z]:[\\/]/.test(cwd));
-  const sep = win ? '\\' : '/';
-  const abs = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
-  const full = abs ? p : `${cwd.replace(/[\\/]+$/, '')}${sep}${p}`;
-  const m = /^([A-Za-z]:|\\\\[^\\/]+[\\/][^\\/]+|)([\\/]?)(.*)$/.exec(full) ?? ['', '', '/', full];
-  const parts: string[] = [];
-  for (const seg of (m[3] ?? '').split(/[\\/]+/)) {
-    if (seg === '' || seg === '.') continue
-    if (seg === '..') parts.pop()
-    else parts.push(seg)
+  const isSep = (c: string | undefined) => c === "/" || c === "\\";
+  const drive = (s: string) => s.length >= 3 && /[A-Za-z]/.test(s[0] as string) && s[1] === ":" && isSep(s[2]);
+  const unc = (s: string) => s.startsWith("\\\\");
+  const abs = p.startsWith("/") || drive(p) || unc(p);
+  const win = drive(p) || unc(p) || (!p.startsWith("/") && (drive(cwd) || unc(cwd)));
+  const sep = win ? "\\" : "/";
+  let base = cwd;
+  while (base.length > 1 && isSep(base[base.length - 1])) base = base.slice(0, -1)
+  const full = abs ? p : `${base}${sep}${p}`;
+  let prefix = "";
+  let rest = full;
+  if (drive(full)) {
+    prefix = full.slice(0, 2);
+    rest = full.slice(2);
+  } else if (unc(full)) {
+    // \\server\share
+    let i = 2;
+    let parts = 0;
+    while (i < full.length && parts < 2) {
+      if (isSep(full[i])) parts++
+      if (parts < 2) i++
+    }
+    prefix = full.slice(0, i);
+    rest = full.slice(i);
   }
-  return `${m[1] ?? ''}${m[2] || sep}${parts.join(sep)}`;
+  const out: string[] = [];
+  let seg = "";
+  const flush = () => {
+    if (seg === "..") out.pop()
+    else if (seg !== "" && seg !== ".") out.push(seg)
+    seg = "";
+  }
+  for (const c of rest) {
+    if (isSep(c)) flush()
+    else seg += c
+  }
+  flush();
+
+  return `${prefix}${sep}${out.join(sep)}`;
 }
 
 /**

@@ -25864,11 +25864,7 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "project private"
 ]);
 function shellWords(segment) {
-  const out = [];
-  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  for (const m of segment.matchAll(re))
-    out.push(m[1] ?? m[2] ?? m[3] ?? "");
-  return out;
+  return shellTokens(segment);
 }
 function mutatingP2PVerb(command, binNames = [], depth = 0) {
   if (depth > 3)
@@ -26134,21 +26130,50 @@ function shellTokens(command) {
   return out;
 }
 function resolveLike(cwd, p) {
-  const win = /^[A-Za-z]:[\\/]/.test(p) || !p.startsWith("/") && /^[A-Za-z]:[\\/]/.test(cwd);
+  const isSep = (c) => c === "/" || c === "\\";
+  const drive = (s2) => s2.length >= 3 && /[A-Za-z]/.test(s2[0]) && s2[1] === ":" && isSep(s2[2]);
+  const unc = (s2) => s2.startsWith("\\\\");
+  const abs = p.startsWith("/") || drive(p) || unc(p);
+  const win = drive(p) || unc(p) || !p.startsWith("/") && (drive(cwd) || unc(cwd));
   const sep3 = win ? "\\" : "/";
-  const abs = p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
-  const full = abs ? p : `${cwd.replace(/[\\/]+$/, "")}${sep3}${p}`;
-  const m = /^([A-Za-z]:|\\\\[^\\/]+[\\/][^\\/]+|)([\\/]?)(.*)$/.exec(full) ?? ["", "", "/", full];
-  const parts = [];
-  for (const seg of (m[3] ?? "").split(/[\\/]+/)) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..")
-      parts.pop();
-    else
-      parts.push(seg);
+  let base = cwd;
+  while (base.length > 1 && isSep(base[base.length - 1]))
+    base = base.slice(0, -1);
+  const full = abs ? p : `${base}${sep3}${p}`;
+  let prefix = "";
+  let rest = full;
+  if (drive(full)) {
+    prefix = full.slice(0, 2);
+    rest = full.slice(2);
+  } else if (unc(full)) {
+    let i = 2;
+    let parts = 0;
+    while (i < full.length && parts < 2) {
+      if (isSep(full[i]))
+        parts++;
+      if (parts < 2)
+        i++;
+    }
+    prefix = full.slice(0, i);
+    rest = full.slice(i);
   }
-  return `${m[1] ?? ""}${m[2] || sep3}${parts.join(sep3)}`;
+  const out = [];
+  let seg = "";
+  const flush = () => {
+    if (seg === "..")
+      out.pop();
+    else if (seg !== "" && seg !== ".")
+      out.push(seg);
+    seg = "";
+  };
+  for (const c of rest) {
+    if (isSep(c))
+      flush();
+    else
+      seg += c;
+  }
+  flush();
+  return `${prefix}${sep3}${out.join(sep3)}`;
 }
 function shellPaths(command, cwd, home) {
   const out = /* @__PURE__ */ new Set();
