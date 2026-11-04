@@ -4,7 +4,8 @@
 // temporary P2P homes on the built CLI, an in-process relay.
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -89,8 +90,13 @@ export type User = { name: string; home: string; p2p: P2P; exec: Exec; userId: s
 
 export function user(name: string, port: number, extraEnv: Record<string, string> = {}): User {
   const home = mkdtempSync(join(tmpdir(), `p2p-mod-${name}-`))
+  // The person token (packages/p2p/src/projects.ts), as the mod passes it: these runs are the mod's own.
+  const token = randomBytes(32).toString('base64url')
+  mkdirSync(join(home, 'cli'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(home, 'cli', 'person.key'), token, { mode: 0o600 })
   const exec = nodeExec({
     P2P_HOME: home,
+    P2P_PERSON_TOKEN: token,
     P2P_DEFAULT_RELAYS: RELAY,
     P2P_RELAY_TRANSPORT: JSON.stringify({ [RELAY]: `ws://127.0.0.1:${port}/v3` }),
     P2P_DRAIN_QUIET_MS: '250',

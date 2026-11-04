@@ -76,7 +76,6 @@ import {
   PROJECT_NOTICE_RE,
   routableOf,
   toolPaths,
-  isUnder,
   parsePeersArgs,
   pathBasename,
   PEERS_USAGE,
@@ -122,6 +121,8 @@ const DELIVER_DEBOUNCE_MS = 500
 const END_NOTICE_TIMEOUT_MS = 5_000
 /** The board of this machine's live sessions (for messages no session was named for). */
 const BOARD_PREFIX = 'board:'
+/** The folders each engine conversation worked in (projects): a resume of it stays bound. */
+const DIRS_PREFIX = 'dirs:'
 /** Entries are rewritten every 60 s, so one older than this belongs to a session that is gone. */
 const BOARD_STALE_MS = 90_000
 /** A restarted watcher that has stayed up this long counts as healthy again. */
@@ -183,6 +184,8 @@ type Run = {
    * project. A session that touched a private project stays private until it ends.
    */
   projectDirs: Set<string>
+  /** More folders than MAX_RUN_DIRS: the CLI keeps the session private (P2P_PROJECT_DIRS_OVER). */
+  isDirsOver: boolean
   /** The CLI's open-circle notes already shown this run. */
   openCircleNotes: Set<string>
   /** The circle this session's roster shares it with, if any. */
@@ -222,6 +225,8 @@ const freshHealth = (): Health => ({ isCliMissing: false, identity: { state: 'un
 const newSess = () => ({
   /** The engine session (`$.session.id()`) this is; undefined only on an engine that names none. */
   engineSession: undefined as string | undefined,
+  /** The person token (`<P2P_HOME>/cli/person.key`): this mod's p2p runs pass it as P2P_PERSON_TOKEN, the model's shell never has it. */
+  personToken: undefined as string | undefined,
   /** Ended by /clear or a resume: the next new session id that appears is this one's. */
   isAwaitingId: false,
   /** Ended for good (exit, logout): dropped. */
@@ -449,8 +454,19 @@ const p2pEnv = (S: Sess, $: EngineInterface): Record<string, string> => {
   // P2P_MOD_ROOT: lets `p2p doctor` compare itself with the CLI this plugin bundles.
   // P2P_PROJECT_DIRS: the other folders this run worked in (Run.projectDirs): each binds the session to its project.
   const dirs = [...(S.run?.projectDirs ?? [])]
+  const over = S.run?.isDirsOver === true
 
-  return { P2P_EXTENSION_PATH: [ext, ...user].join(sep), P2P_EXTENSIONS: 'config', P2P_MOD_ROOT: $.plugin.root, ...(S.sessionDir ? { P2P_WORKDIR: S.sessionDir, P2P_EXTENSION_EXCLUDE: S.sessionDir } : {}), ...(dirs.length ? { P2P_PROJECT_DIRS: dirs.join(sep) } : {}) }
+  return {
+    P2P_EXTENSION_PATH: [ext, ...user].join(sep),
+    P2P_EXTENSIONS: 'config',
+    P2P_MOD_ROOT: $.plugin.root,
+    ...(S.sessionDir ? { P2P_WORKDIR: S.sessionDir, P2P_EXTENSION_EXCLUDE: S.sessionDir } : {}),
+    ...(dirs.length ? { P2P_PROJECT_DIRS: dirs.join(sep) } : {}),
+    ...(over ? { P2P_PROJECT_DIRS_OVER: '1' } : {}),
+    // This mod speaks for the person (their typed /peers, this session's own status and sends): the CLI
+    // registers the session and lets typed /peers commands widen sharing. The model's shell has no token.
+    ...(S.personToken ? { P2P_PERSON_TOKEN: S.personToken } : {}),
+  }
 }
 
 const execOf = (S: Sess, $: EngineInterface): Exec => ({
@@ -494,7 +510,7 @@ const selfAddress = (S: Sess, $: EngineInterface) => {
 /** `p2p status` for this session: busy/idle, label, repo, branch and mode, plus the working-on line, files and subagents unless opted out. */
 const sendStatus = async (S: Sess, $: EngineInterface, current: Run, state: 'busy' | 'idle', timeoutMs?: number) => {
   // Where the session is now (a `cd` since it started): bound too, before the status goes out.
-  noteDirs(S, current, [await $.session.cwd().catch(() => '')])
+  noteDirs(S, $, current, [await $.session.cwd().catch(() => '')])
   // What the session says, as it stands now (the agents' reconcile below waits on the engine).
   const said = {
     // Everything below is this run's own: its sid never goes out with another run's label, line or files.
@@ -630,21 +646,50 @@ const myAgents = async (S: Sess, $: EngineInterface) => {
 /** The folder a path names: itself when it is one, else its parent (a file, or one not there yet). */
 const dirOf = (path: string): string => path.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, '') || path
 
+/** At most this many folders a run reports; past it the CLI keeps the session private (fails closed). */
+const MAX_RUN_DIRS = 512
+
 /**
- * Notes folders outside this session's own (S.sessionDir) the run worked in: P2P_PROJECT_DIRS binds
- * each one's project. Whether any was new (the next status then goes out at once).
+ * Notes every folder (or path) the run worked in, inside its own folder too (a nested repository,
+ * a symlink out): P2P_PROJECT_DIRS binds each one's project, which the CLI resolves by real path.
+ * Kept per engine conversation, so a resume stays bound. Whether any was new.
  */
-const noteDirs = (S: Sess, current: Run, dirs: readonly string[]): boolean => {
+const noteDirs = (S: Sess, $: EngineInterface, current: Run, dirs: readonly string[]): boolean => {
   let added = false
   for (const dir of dirs) {
-    if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(dir) || current.projectDirs.size >= 64) continue
-    if (S.sessionDir && isUnder(dir, S.sessionDir)) continue
-    if (current.projectDirs.has(dir)) continue
+    if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(dir) || /[\0\n]/.test(dir) || current.projectDirs.has(dir)) continue
+    if (S.sessionDir && dir.replace(/[\\/]+$/, '') === S.sessionDir.replace(/[\\/]+$/, '')) continue
+    if (current.projectDirs.size >= MAX_RUN_DIRS) {
+      if (!current.isDirsOver) added = true
+      current.isDirsOver = true
+      continue
+    }
     current.projectDirs.add(dir)
     added = true
   }
+  if (added && S.engineSession) bg($.store.set(`${DIRS_PREFIX}${S.engineSession}`, { dirs: [...current.projectDirs], over: current.isDirsOver, at: Date.now() }))
 
   return added
+}
+
+/** The folders an earlier run of this engine conversation worked in (a resume carries them on; /clear starts a new conversation). */
+const restoreDirs = async (S: Sess, $: EngineInterface, current: Run) => {
+  if (!S.engineSession) return
+  const saved = (await $.store.get(`${DIRS_PREFIX}${S.engineSession}`).catch(() => undefined)) as { dirs?: unknown; over?: unknown } | undefined
+  if (!saved || typeof saved !== 'object') return
+  if (Array.isArray(saved.dirs)) noteDirs(S, $, current, saved.dirs.filter((x): x is string => typeof x === 'string'))
+  if (saved.over === true) current.isDirsOver = true
+}
+
+/** Reads the person token the CLI keeps in its own folder (made by its first command), once. */
+const readPersonToken = async (S: Sess, $: EngineInterface) => {
+  if (S.personToken) return
+  const home = (await $.env.get('P2P_HOME')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.p2p`
+  const r = await $.process
+    .run(['node', '-e', 'try{process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8").trim())}catch{}', `${home.replace(/[\\/]+$/, '')}/cli/person.key`], { cwd: $.plugin.root, timeoutMs: 10_000 })
+    .catch(() => null)
+  const t = r && r.exitCode === 0 ? r.stdout.trim() : ''
+  if (/^[A-Za-z0-9_-]{43}$/.test(t)) S.personToken = t
 }
 
 /** Shares a run's status now (this session's current one by default); coalesces with one already on its way. */
@@ -1621,8 +1666,10 @@ const startNetwork = async (S: Sess, $: EngineInterface, current: Run) => {
   if (current.isEnded || current.isOnline) return
   current.isOnline = true
   const p = await client(S, $)
-  // The roster: the default circle when one is set, private otherwise (§6).
+  // The roster: what this session's project allows (projects.ts). Reading it makes the person token too.
   const roster = await p.roster(current.sid)
+  await readPersonToken(S, $)
+  await restoreDirs(S, $, current)
   if (roster.ok) {
     current.ref = roster.value.ref
     current.isPrivate = roster.value.vis === 'private'
@@ -1688,7 +1735,7 @@ const startRun = async (S: Sess, $: EngineInterface) => {
   // field is fresh. Kept: which session this is, and its live permission mode (the engine's, not the
   // conversation's; a run still counts as auto-approving until a typed prompt confirms it).
   Object.assign(S, newSess(), { engineSession: S.engineSession, isAwaitingId: S.isAwaitingId, isClosed: S.isClosed, mode: S.mode })
-  const current: Run = { sid: crypto.randomUUID(), label: 'session', files: [], summarySeq: 0, isEnded: false, isOnline: false, timers: [], child: null, announcing: null, isAnnounceQueued: false, stop: new AbortController(), isPrivate: true, projectDirs: new Set(), openCircleNotes: new Set(), codes: new Map(), activeAt: 0, isModeConfirmed: false }
+  const current: Run = { sid: crypto.randomUUID(), label: 'session', files: [], summarySeq: 0, isEnded: false, isOnline: false, timers: [], child: null, announcing: null, isAnnounceQueued: false, stop: new AbortController(), isPrivate: true, projectDirs: new Set(), isDirsOver: false, openCircleNotes: new Set(), codes: new Map(), activeAt: 0, isModeConfirmed: false }
   S.run = current
   S.status = 'idle'
   S.health = freshHealth()
@@ -1924,6 +1971,8 @@ const sendOver = async (S: Sess, $: EngineInterface, to: string, text: string, k
   }
   const slot = S.sends.get(key)
   const isNotifying = slot?.notify.shift() === true
+  // Where the session is right now binds too, before anything leaves.
+  noteDirs(S, $, current, [await $.session.cwd().catch(() => '')])
   const p = await client(S, $)
   const sent = await p.send({ fromSession: current.sid, to: target.to, text, notifyWhenIdle: isNotifying })
   if (!sent.ok) {
@@ -2933,7 +2982,15 @@ export const register: Register = on => {
     if (refused) return refused
     // A file outside this session's folder (any loop, subagents included): its project binds the session
     // before the call runs, so what it reads or changes there never leaves a wider boundary.
-    if (S && isLive(S.run) && next.origin.plugin === 'engine' && noteDirs(S, S.run, toolPaths(e).map(dirOf))) announce(S, $)
+    if (S && isLive(S.run) && next.origin.plugin === 'engine') {
+      const cwd = (await $.session.cwd().catch(() => '')) || S.sessionDir || ''
+      const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || undefined
+      const input = e as Record<string, unknown>
+      // A file's folder; a shell or search path as named (the CLI finds its project, through symlinks too).
+      const files = ['file_path', 'notebook_path'].map(k => input[k]).filter((x): x is string => typeof x === 'string')
+      const paths = toolPaths(e, cwd, home).map(x => (files.includes(x) ? dirOf(x) : x))
+      if (noteDirs(S, $, S.run, [cwd, ...paths])) announce(S, $)
+    }
     if (!S) {
       // The model's share tool needs this session's state (what is shown, who may get it): none, nothing is shared.
       return /(^|__)ix_share$/.test(String(e.tool)) ? { deny: 'Peer2Peer is not running in this session: nothing was shared.' } : next(e)

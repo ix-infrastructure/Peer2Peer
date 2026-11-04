@@ -1791,10 +1791,14 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
       // The CLI by its documented variable is read as the CLI (mutatingP2PVerb checks it).
       if (m && m[2] !== 'P2P_BIN') return 'a command word built at run time on a line that names p2p'
     }
-    if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|-eval|-print)\b/.test(c) && /ix['"\s,)\]]+config|--publish|--names/.test(c)) {
-      return 'interpreter code that runs p2p'
+    if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun|php|lua|osascript|tclsh|awk|gawk)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|r|-eval|-print|-command)\b/.test(c)) {
+      return 'interpreter code on a line that names p2p'
     }
+    // A pseudo-terminal or scripted terminal around anything that names p2p (it could drive a picker or pass as the person).
+    if (/(?:^|[\s;&|(/])(?:script|expect|unbuffer|socat|tmux|screen|pty|ptyspawn|zpty|winpty)(?:\.exe)?(?=$|[\s;&|)])/.test(c)) return 'a pseudo-terminal wrapper on a line that names p2p'
   }
+  // Widening a project's sharing is the person's alone, however it is spelled to the shell.
+  if (/project["'\s,\]]+share/.test(c) && (names(c) || /p2p|peer2peer/i.test(c))) return 'a project share, which only your user runs'
 
   return null
 }
@@ -1874,23 +1878,148 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
 export function p2pSessionArgs(command: string, homes: readonly string[] = []): string[] {
   if (!namesP2P(command, homes)) return []
   const out: string[] = []
-  for (const m of command.matchAll(/--(?:from-)?session(?:=|\s+)["']?([^\s"';&|)]+)/g)) out.push(m[1] ?? '')
+  // Read as the shell reads them (`--from-session=''x1` is x1): never a regex over the raw text.
+  const words = shellTokens(command)
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? ''
+    const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(w)
+    if (!m) continue
+    out.push(m[1] !== undefined ? m[1] : (words[i + 1] ?? ''))
+  }
 
   return out
 }
+
+/**
+ * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
+ * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
+ * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
+ * (`$X`, `$(…)`, backticks) stay as text. Best effort: no aliases, no globbing.
+ */
+export function shellTokens(command: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let has = false
+  let q: '' | "'" | '"' | '$' = ''
+  const push = () => {
+    if (has) out.push(cur)
+    cur = ''
+    has = false
+  }
+  for (let i = 0; i < command.length && out.length < 4096; i++) {
+    const c = command[i] as string
+    if (q === "'") {
+      if (c === "'") q = ''
+      else cur += c
+
+      continue
+    }
+    if (q === '$') {
+      if (c === '\\' && i + 1 < command.length) cur += command[++i]
+      else if (c === "'") q = ''
+      else cur += c
+
+      continue
+    }
+    if (q === '"') {
+      if (c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1] as string)) cur += command[++i]
+      else if (c === '"') q = ''
+      else cur += c
+
+      continue
+    }
+    if (c === '\\') {
+      if (i + 1 < command.length && command[i + 1] !== '\n') {
+        cur += command[++i]
+        has = true
+      } else i++
+
+      continue
+    }
+    if (c === "'" || c === '"') {
+      q = c
+      has = true
+
+      continue
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      q = '$'
+      has = true
+      i++
+
+      continue
+    }
+    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
+      push()
+
+      continue
+    }
+    cur += c
+    has = true
+  }
+  push()
+
+  return out
+}
+
+/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. */
+export function resolveLike(cwd: string, p: string): string {
+  const win = /^[A-Za-z]:[\\/]/.test(p) || (!p.startsWith('/') && /^[A-Za-z]:[\\/]/.test(cwd))
+  const sep = win ? '\\' : '/'
+  const abs = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\')
+  const full = abs ? p : `${cwd.replace(/[\\/]+$/, '')}${sep}${p}`
+  const m = /^([A-Za-z]:|\\\\[^\\/]+[\\/][^\\/]+|)([\\/]?)(.*)$/.exec(full) ?? ['', '', '/', full]
+  const parts: string[] = []
+  for (const seg of (m[3] ?? '').split(/[\\/]+/)) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') parts.pop()
+    else parts.push(seg)
+  }
+
+  return `${m[1] ?? ''}${m[2] || sep}${parts.join(sep)}`
+}
+
+/**
+ * Paths a shell command names that may lie outside its folder: absolute ones, `~` ones, and any
+ * with a `..` segment, each resolved (against `cwd`, `~` against `home`). An option's value
+ * (`--file=/x`) counts. Best effort: a path built at run time (`$X/y`, `$(…)`, an encoded one) is
+ * not seen; the CLI still binds the shell's own folder when that shell runs p2p.
+ */
+export function shellPaths(command: string, cwd: string, home?: string): string[] {
+  const out = new Set<string>()
+  for (const word of shellTokens(command)) {
+    for (const t of [word, word.includes('=') ? word.slice(word.lastIndexOf('=') + 1) : '']) {
+      if (t === '' || t.length > 4096 || /[\0\n$`]/.test(t)) continue
+      if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+        if (home) out.add(resolveLike(home, t.slice(2) || '.'))
+      } else if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')) out.add(resolveLike('/', t))
+      else if (/(^|[\\/])\.\.([\\/]|$)/.test(t)) out.add(resolveLike(cwd, t))
+      if (out.size >= 64) return [...out]
+    }
+  }
+
+  return [...out]
+}
+
 
 /**
  * Absolute paths a tool call works on (file_path, notebook_path, path), as written: the mod binds
  * the session to each one's project (the CLI's --project-dir), so a session that read or changed a
  * private project's files stays private. A relative path is the session's own folder.
  */
-export function toolPaths(input: unknown): string[] {
+export function toolPaths(input: unknown, cwd?: string, home?: string): string[] {
   const e = (input ?? {}) as Record<string, unknown>
   const out: string[] = []
   for (const k of ['file_path', 'notebook_path', 'path']) {
     const v = e[k]
-    if (typeof v === 'string' && v.length <= 4096 && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v) && !/[\0\n]/.test(v)) out.push(v)
+    if (typeof v !== 'string' || v.length > 4096 || /[\0\n]/.test(v) || v === '') continue
+    if (/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v)) out.push(v)
+    // A relative search root (Grep, Glob) is relative to where the session is now.
+    else if (cwd) out.push(v === '~' || v.startsWith('~/') ? (home ? resolveLike(home, v.slice(2) || '.') : v) : resolveLike(cwd, v))
   }
+  // A shell command's paths: absolute, ~ and .. ones (best effort, see shellPaths).
+  const tool = String(e.tool ?? '')
+  if ((tool === 'Bash' || tool === 'PowerShell') && typeof e.command === 'string' && cwd) out.push(...shellPaths(e.command, cwd, home))
 
   return out
 }

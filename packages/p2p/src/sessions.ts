@@ -19,7 +19,7 @@
 
 import { sessionEnded } from "./running.js";
 import { enqueue, flushOutbox, OUTBOX_RETRYABLE, OUTBOX_TTL_MS, retryable } from "./outbox.js";
-import { basename } from "node:path";
+import { basename, dirname, resolve as resolvePath } from "node:path";
 import {
   createRosterV3,
   displayStatus,
@@ -52,6 +52,7 @@ import {
   redactSecrets,
   stripAbsolutePaths,
   type AcceptedMessageV3,
+  type ProjectBound,
   type ExtensionKind,
   type StatusAgent,
   type StatusAgentState,
@@ -70,6 +71,7 @@ import {
   sessionCeiling,
   sessionProjectView,
   sessionDirs,
+  sessionWorkdir,
   shareHint,
   type Ceiling,
   type SessionProjectView,
@@ -77,7 +79,7 @@ import {
 import { renderExtension, type ExtSendResult } from "./extensions.js";
 import { fromOf, makeEvent, type NewEvent } from "./inbound.js";
 import { receiptsEnabled, statusCapsEnabled } from "./config.js";
-import { CLI_CAPS, protoMinor, supportsIn } from "./features.js";
+import { CAP_PROJECTS, CLI_CAPS, protoMinor, supportsIn } from "./features.js";
 import { asksReceipts, newReceiptId, rememberAsked, rememberWanted } from "./receipts.js";
 import { sessKey, type IdleSub, type PeerStatusRec, type SessionDoc } from "./state.js";
 import { isStateEnvelope, liveStates, onStateEnvelope, stateKindCaps, stateSummaries, type StateSummary } from "./xstate.js";
@@ -391,7 +393,10 @@ export async function sessionAudience(app: App, sid: string): Promise<{ vis: "ci
   const c = sess.vis === "circle" && sess.circle ? await loadCircle(app.store, sess.circle).catch(() => undefined) : undefined;
   // A circle that can't be loaded: who it reaches is unknown (an extension then fails closed).
   if (sess.vis === "circle" && sess.circle && !c) return undefined;
-  const members = (await rosterAudience(app, sess).catch(() => [] as string[])).filter((u) => u !== app.userId);
+  let members = (await rosterAudience(app, sess).catch(() => [] as string[])).filter((u) => u !== app.userId);
+  // The stored roster may predate a narrower ceiling (no status since): never wider than the ceiling now.
+  const cap = await ceilingAudience(app, await sessionCeiling(app, sid));
+  if (cap) members = members.filter((u) => cap.has(u));
   return { vis: sess.vis, ...(sess.circle ? { circle: sess.circle } : {}), ...(c && circlePolicy(c.chain.head) === "open" ? { open: true as const } : {}), people: members.length, members };
 }
 
@@ -659,8 +664,13 @@ export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (it
 
 export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult> {
   const sid = checkSid(o.session);
-  await bindSession(app, sid, [...sessionDirs(app.env), ...(o.projectDirs ?? [])]);
+  // The folders of the files it says it changes are folders it works in too (a nested repository,
+  // a path through a symlink): each binds its project.
+  const work = sessionWorkdir(app.env);
+  const fileDirs = (o.files ?? []).filter((f) => typeof f === "string" && f.length <= 200).map((f) => dirname(resolvePath(work, f)));
+  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs]);
   const prev = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
+  const before = (await app.state.get("sessions"))?.[sid];
   const warnings: string[] = [];
   // The loaded extensions' state kinds are advertised as `<kind>.v1` (after the caller's own caps).
   // receipts.v1 is the caller's to claim (it reports the outcomes), and this user's to turn off.
@@ -672,6 +682,9 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   await app.connectAndDrain();
   const sess = await noteOpenCircle(app, await getSession(app, sid, warnings), warnings);
   const audience = await rosterAudience(app, sess);
+  // Narrowed since the last status: whoever could see it and no longer can gets one blank,
+  // private status under the roster they hold, so its last real one doesn't linger in their list.
+  if (before && before.jws !== sess.jws) await retract(app, sid, before, audience).catch(() => undefined);
   if (audience.length === 0) {
     // Nobody but this user's own devices sees it: no summary goes out (the front end skips making one).
     delete status.summary;
@@ -707,6 +720,14 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   const rec: PeerStatusRec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: undefined }));
   return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid) };
+}
+
+/** The blank status a narrowed session leaves with those it no longer reaches (under their roster). */
+async function retract(app: App, sid: string, before: SessionDoc, now: readonly string[]): Promise<void> {
+  const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
+  await mapLimit(gone, STATUS_FANOUT, async (u) => {
+    await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws }).catch(() => undefined);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -936,8 +957,10 @@ async function resolveTarget(app: App, fromSession: string, toArg: string): Prom
 }
 
 /** The roster JWS that rides with a message into (own, sid). */
-async function rosterFor(app: App, target: { own: string; sid: string }): Promise<string | undefined> {
-  return target.own === app.userId ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
+async function rosterFor(app: App, target: { own: string; sid: string; did?: string }): Promise<string | undefined> {
+  // One of ours on another device: its roster as held (that device signs it, never this one).
+  const here = target.own === app.userId && (target.did === undefined || target.did === app.did);
+  return here ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
 }
 
 /**
@@ -969,7 +992,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
   if (Buffer.byteLength(o.text, "utf8") > MAX_TEXT_BYTES) throw new CliError("too_large", `message text is at most ${MAX_TEXT_BYTES} bytes`);
   if (o.text === "" && !o.notifyWhenIdle) throw new CliError("usage", "nothing to send (give text, or --notify-when-idle)");
   // Bound before anything is read or sent: the project ceiling decides who this may reach.
-  await bindSession(app, fromSession, [...sessionDirs(app.env), ...(o.projectDirs ?? [])], { person: o.person === true });
+  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true });
   // This device can't reach any of its relays: the message can still be sealed and kept in the
   // outbox (outbox.ts) for `watch` to send once it can.
   let offline = false;
@@ -990,7 +1013,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
     // Anything this device couldn't send earlier goes first (order, and it may be the same peer).
     if (!offline) await flushOutbox(app).catch(() => undefined);
     const rosterJws = await rosterFor(app, target);
-    const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}) };
+    const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}), ...(o.person ? {} : await ownBound(app, fromSession, target, userId)) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
     d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
     const unsent = d.unsent ?? [];
@@ -1059,12 +1082,12 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   const ext = { v: o.v, body: o.body };
   const bytes = Buffer.byteLength(JSON.stringify(ext) ?? "", "utf8");
   if (bytes > MAX_EXT_PLAINTEXT_BYTES) throw new CliError("too_large", `the extension body is ${bytes} bytes; at most ${MAX_EXT_PLAINTEXT_BYTES}`);
-  await bindSession(app, fromSession, [...sessionDirs(app.env), ...(o.projectDirs ?? [])]);
+  await bindFromEnv(app, fromSession, o.projectDirs ?? []);
   await app.connectAndDrain();
   const { userId, target, to } = await resolveTarget(app, fromSession, o.to);
   await assertMayReach(app, fromSession, userId, { address: to.address });
   const rosterJws = await rosterFor(app, target);
-  const plaintext = { ext, fallback: o.fallback, ...(rosterJws ? { roster: rosterJws } : {}) };
+  const plaintext = { ext, fallback: o.fallback, ...(rosterJws ? { roster: rosterJws } : {}), ...(await ownBound(app, fromSession, target, userId)) };
   const d = await app.deliver(userId, o.kind as ExtensionKind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
   if (d.relays.length === 0) {
     throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
@@ -1093,6 +1116,11 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
   // Into a session of ours from someone its projects don't reach: dropped here, whatever roster came
   // with it (one signed by another device of ours, an older client's, can't widen this one's).
   if (carries && e.own === app.userId && !from.self && !(await mayReach(app, e.sid, e.from))) return [];
+  // From another session of ours: whatever bounded it now bounds the session it went into.
+  const bound = (pt as { bound?: ProjectBound }).bound;
+  if (carries && from.self && bound !== undefined && toSession !== undefined && toSession !== PERSON_SESSION) {
+    await bindSession(app, toSession, [], { constraint: bound });
+  }
   const sess = { own: e.own, sid: e.sid, ref, rule: r.rule, ...(r.viewerRule ? { viewerRule: r.viewerRule } : {}) };
   const extra = { own: e.own, sid: e.sid, ...(toSession ? { toSession } : {}) };
   // Named for no session of ours: which local sessions may hold it (watch shows it only to those).
@@ -1172,6 +1200,49 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
       return [];
     }
   }
+}
+
+/**
+ * Binds `sid` to the folders its front end reports (projects.ts sessionDirs: P2P_WORKDIR,
+ * P2P_PROJECT_DIRS, past its cap private) and any more the caller names.
+ */
+export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean } = {}): Promise<void> {
+  const { dirs, over } = sessionDirs(app.env);
+  await bindSession(app, sid, [...dirs, ...extra], { ...(o.person ? { person: true } : {}), ...(over ? { over: true } : {}) });
+}
+
+/**
+ * What a session of ours may reach, for a message to another session of ours (`bound`, cap
+ * projects.v1): undefined when it has no ceiling (the person's own session, one never bound).
+ */
+async function boundOf(app: App, sid: string): Promise<ProjectBound | undefined> {
+  const c = await sessionCeiling(app, sid);
+  if (c.kind === "none") return undefined;
+  return c.kind === "private" ? "private" : { circles: c.circles, people: c.people };
+}
+
+/**
+ * A message from a bounded session to another session of ours carries its bound (laundering
+ * through your own sessions, projects.ts). One on another device whose client can't honour it
+ * (its live status doesn't advertise projects.v1) is refused here; the field is critical, so an
+ * older client that gets one anyway rejects it.
+ */
+async function ownBound(app: App, fromSession: string, target: { own: string; sid: string; did?: string }, userId: string): Promise<Record<string, unknown>> {
+  if (userId !== app.userId || target.own !== app.userId) return {};
+  const bound = await boundOf(app, fromSession);
+  if (bound === undefined) return {};
+  if (target.did && target.did !== app.did) {
+    const rec = (await app.state.get("peers"))?.[sessKey(target.own, target.sid)];
+    const caps = rec ? (displayStatus(rec.status).caps ?? []) : [];
+    if (!caps.includes(CAP_PROJECTS)) {
+      throw new CliError(
+        "not_shared",
+        `session ${fromSession} works in a project with limits, and your session ${target.sid} runs on another device whose client doesn't keep project boundaries: update Peer2Peer there first (docs/compatibility.md)`,
+        { delivered: false },
+      );
+    }
+  }
+  return { bound, crit: ["bound"] };
 }
 
 /** Whether a session of ours may reach `user` (projects.ts): the same rule its sends follow. */

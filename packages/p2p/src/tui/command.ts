@@ -11,6 +11,8 @@ import type { App, Io } from "../app.js";
 import type { Env } from "../config.js";
 import { CliError, toErrorJson } from "../errors.js";
 import { checkSid } from "../sessions.js";
+import { personHere } from "../projects.js";
+import { resolveHome } from "../config.js";
 import { TtyTerminal, type Terminal } from "./terminal.js";
 import { Tui, TUI_SESSION } from "./tui.js";
 
@@ -27,7 +29,8 @@ export interface TuiCommandDeps {
 
 /** Why `p2p tui` won't start here, or undefined. */
 export function tuiRefusal(env: Env, isTTY: boolean): string | undefined {
-  if (env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.CLAUDECODE) {
+  // An agent's session: its environment, or (scrubbed) a Claude Code or Codex ancestor (projects.ts).
+  if (env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.CLAUDECODE || !personHere(env, resolveHome(env))) {
     return "p2p tui is for you to run in your own terminal, not from an agent's tool call";
   }
   if (!isTTY) return "p2p tui needs an interactive terminal (stdin and stdout); in scripts use `p2p ls`, `p2p held`, `p2p watch`";

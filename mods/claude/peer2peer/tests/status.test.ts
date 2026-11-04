@@ -131,7 +131,7 @@ describe('peer2peer working-on status', () => {
     expect(flags(lastStatus(w), 'file')).toEqual(['src/validate.ts'])
     expect(flag(lastStatus(w), 'state')).toBe('idle')
     // The edit elsewhere isn't a file of this session's, but its folder binds that project (projects.ts).
-    expect([...ran(w, 'status')].reverse()[0]?.env?.P2P_PROJECT_DIRS).toBe('/elsewhere')
+    expect(([...ran(w, 'status')].reverse()[0]?.env?.P2P_PROJECT_DIRS ?? '').split(':')).toContain('/elsewhere')
   })
 
   test('only the main session\'s edits count: not a subagent\'s, not a background worktree\'s, not .git', async ($, on) => {

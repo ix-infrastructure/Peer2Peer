@@ -753,6 +753,141 @@ export function editedFiles(toolName: string, input: unknown): string[] {
   return [...out];
 }
 
+/**
+ * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
+ * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
+ * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
+ * (`$X`, `$(…)`, backticks) stay as text. Best effort: no aliases, no globbing.
+ */
+export function shellTokens(command: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let has = false;
+  let q: '' | "'" | '"' | '$' = '';
+  const push = () => {
+    if (has) out.push(cur)
+    cur = '';
+    has = false;
+  }
+  for (let i = 0; i < command.length && out.length < 4096; i++) {
+    const c = command[i] as string;
+    if (q === "'") {
+      if (c === "'") q = ''
+      else cur += c
+
+      continue;
+    }
+    if (q === '$') {
+      if (c === '\\' && i + 1 < command.length) cur += command[++i]
+      else if (c === "'") q = ''
+      else cur += c
+
+      continue;
+    }
+    if (q === '"') {
+      if (c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1] as string)) cur += command[++i]
+      else if (c === '"') q = ''
+      else cur += c
+
+      continue;
+    }
+    if (c === '\\') {
+      if (i + 1 < command.length && command[i + 1] !== '\n') {
+        cur += command[++i];
+        has = true;
+      } else i++;
+
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      has = true;
+
+      continue;
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      q = '$';
+      has = true;
+      i++;
+
+      continue;
+    }
+    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
+      push()
+
+      continue;
+    }
+    cur += c;
+    has = true;
+  }
+  push()
+
+  return out;
+}
+
+/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. */
+export function resolveLike(cwd: string, p: string): string {
+  const win = /^[A-Za-z]:[\\/]/.test(p) || (!p.startsWith('/') && /^[A-Za-z]:[\\/]/.test(cwd));
+  const sep = win ? '\\' : '/';
+  const abs = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+  const full = abs ? p : `${cwd.replace(/[\\/]+$/, '')}${sep}${p}`;
+  const m = /^([A-Za-z]:|\\\\[^\\/]+[\\/][^\\/]+|)([\\/]?)(.*)$/.exec(full) ?? ['', '', '/', full];
+  const parts: string[] = [];
+  for (const seg of (m[3] ?? '').split(/[\\/]+/)) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') parts.pop()
+    else parts.push(seg)
+  }
+  return `${m[1] ?? ''}${m[2] || sep}${parts.join(sep)}`;
+}
+
+/**
+ * Paths a shell command names that may lie outside its folder: absolute ones, `~` ones, and any
+ * with a `..` segment, each resolved (against `cwd`, `~` against `home`). An option's value
+ * (`--file=/x`) counts. Best effort: a path built at run time (`$X/y`, `$(…)`, an encoded one) is
+ * not seen; the CLI still binds the shell's own folder when that shell runs p2p.
+ */
+export function shellPaths(command: string, cwd: string, home?: string): string[] {
+  const out = new Set<string>();
+  for (const word of shellTokens(command)) {
+    for (const t of [word, word.includes('=') ? word.slice(word.lastIndexOf('=') + 1) : '']) {
+      if (t === '' || t.length > 4096 || /[\0\n$`]/.test(t)) continue
+      if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+        if (home) out.add(resolveLike(home, t.slice(2) || '.'))
+      } else if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')) out.add(resolveLike('/', t))
+      else if (/(^|[\\/])\.\.([\\/]|$)/.test(t)) out.add(resolveLike(cwd, t))
+      if (out.size >= 64) return [...out]
+    }
+  }
+  return [...out];
+}
+
+
+/** Whether a command line names the p2p CLI (as a word, a path ending in it, the bundle or its variables). */
+export function namesP2PCli(command: string): boolean {
+  return /(?:^|[\s;&|(/="'`])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
+}
+
+/**
+ * Why a shell command naming p2p is refused beyond its verb, or null (projects.ts): it speaks for a
+ * session other than this bridge's own (`--from-session`/`--session`, read as the shell reads them),
+ * hides p2p inside interpreter code or a pseudo-terminal, or shares a project.
+ */
+export function boundaryRefusal(command: string, ownSid: string | undefined): string | null {
+  if (/project["'\s,\]]+share/.test(command) && /p2p|peer2peer/i.test(command)) return "`p2p project share` decides who sees your user's projects: only they run it, in their own terminal";
+  if (!namesP2PCli(command)) return null;
+  if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun|php|lua|osascript|tclsh)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|r|-eval|-print|-command)\b/.test(command)) return "interpreter code that runs p2p can't be checked";
+  if (/(?:^|[\s;&|(/])(?:script|expect|unbuffer|socat|tmux|screen|pty|zpty|winpty)(?:\.exe)?(?=$|[\s;&|)])/.test(command)) return "p2p under a pseudo-terminal can't be checked";
+  const words = shellTokens(command);
+  for (let i = 0; i < words.length; i++) {
+    const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");
+    if (!m) continue;
+    const sid = m[1] !== undefined ? m[1] : (words[i + 1] ?? "");
+    if (!ownSid || sid !== ownSid) return "p2p from the model's shell speaks only for this Codex session (use p2p_send)";
+  }
+  return null;
+}
+
 /** A `p2p` session id as the CLI takes it: `[A-Za-z0-9._-]`, at most 128. */
 export function isSid(sid: string): boolean {
   return /^[A-Za-z0-9._-]{1,128}$/.test(sid);

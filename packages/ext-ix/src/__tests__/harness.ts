@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from "@peer2peer/relay";
 import { main } from "@peer2peer/cli";
 
@@ -26,6 +27,14 @@ export function tmp(prefix: string): string {
 }
 export function cleanupTmp(): void {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+}
+
+/** Writes a person token into `home` (as the CLI makes one) and returns it. */
+export function personTokenFor(home: string): string {
+  const t = randomBytes(32).toString("base64url");
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, "cli", "person.key"), t, { mode: 0o600 });
+  return t;
 }
 
 export interface TestRelay {
@@ -111,11 +120,16 @@ export class User {
     readonly extraEnv: Record<string, string> = {},
   ) {
     this.home = tmp(`p2p-${name}-`);
+    this.personToken = personTokenFor(this.home);
   }
+
+  /** The person token (packages/p2p/src/projects.ts): these users act as the person. */
+  readonly personToken: string;
 
   get env(): Record<string, string> {
     return {
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: JSON.stringify(this.transport),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "4000",

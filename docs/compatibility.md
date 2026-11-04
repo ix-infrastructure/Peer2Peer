@@ -117,6 +117,7 @@ Project boundaries (docs/concepts.md "Projects") change no envelope: a private p
 
 - **Older peers still work.** They see a shared project's sessions as before, and never see a private one's: its status isn't sent to them. A message from an older peer into a session outside its audience is refused at the older client (the roster says so) or, failing that, dropped here.
 - **Your own older device can't widen it.** A roster for a session signed by another device of yours is never adopted by the device that runs the session (as before), and that device drops anything coming into the session from outside its projects' audience, whatever roster the message presents.
+- **Messages between your own sessions** carry `bound` (critical) from a session with a ceiling: an older client of yours rejects it rather than ignore it, and a session on a device whose status doesn't advertise `projects.v1` isn't sent to at all (`not_shared`, "update Peer2Peer there"). `p2p doctor` warns when one of your other devices runs a client without project boundaries.
 - **Devices must update.** An older client keeps the old rule for the sessions *it* runs: new sessions follow the default circle. Policies are per device, so share each project on every updated device that works in it.
 
 `scripts/compat/matrix.mjs` checks that a session in an unshared project reaches nobody, an older peer included, and can't send to it, in both directions.

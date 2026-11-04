@@ -18,8 +18,8 @@
 // inert, message bodies are escaped inside a frame that says whose data it
 // is. Held messages' text never reaches the model at all.
 
-import { randomUUID } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
@@ -176,10 +176,39 @@ export type HookReport = {
   mode?: CodexMode;
   /** PostToolUse: files the tool changed, as the model named them. */
   files?: string[];
+  /** PreToolUse: absolute paths the call reaches (a shell command's, an apply_patch's): their projects bind this session. */
+  dirs?: string[];
   stopHookActive?: boolean;
 };
 
 export type HookOutput = Record<string, unknown>;
+
+/** `<P2P_HOME>/codex-threads/<sha256(thread)>.json`: the folders a Codex thread worked in. */
+function threadDirsFile(home: string | undefined, threadId: string): string | undefined {
+  return home ? join(home, "codex-threads", `${createHash("sha256").update(threadId).digest("hex").slice(0, 32)}.json`) : undefined;
+}
+
+export function loadThreadDirs(home: string | undefined, threadId: string): string[] {
+  const f = threadDirsFile(home, threadId);
+  if (!f) return [];
+  try {
+    const v = JSON.parse(readFileSync(f, "utf8")) as { dirs?: unknown };
+    return Array.isArray(v.dirs) ? v.dirs.filter((x): x is string => typeof x === "string" && isAbsolute(x)).slice(0, 512) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveThreadDirs(home: string | undefined, threadId: string, dirs: readonly string[]): void {
+  const f = threadDirsFile(home, threadId);
+  if (!f) return;
+  try {
+    mkdirSync(join(home!, "codex-threads"), { recursive: true, mode: 0o700 });
+    writeFileSync(f, JSON.stringify({ dirs: dirs.slice(0, 512), at: Date.now() }), { mode: 0o600 });
+  } catch {
+    // best effort: the session stays bound for this run either way
+  }
+}
 
 export const INBOX_OPEN = "<peer2peer-inbox>";
 const INBOX_HEADER =
@@ -222,6 +251,8 @@ export class Bridge {
   private overrideRefusal: string | undefined;
   /** Every cwd this session has been in, and each one's repo root: all project. */
   private readonly projectSeen = new Set<string>();
+  /** Paths the session's tool calls reached (hooks): bound to their projects with every send (projects.ts), kept per thread. */
+  private readonly touched = new Set<string>();
   /** Where sandboxed commands may write, per the trusted turn context ("all": no sandbox; undefined: unknown). */
   trustedWritable: string[] | "all" | undefined;
   /** Why this thread's rollout file isn't trusted (planted or malformed), once found. */
@@ -304,7 +335,7 @@ export class Bridge {
 
   /** Every folder this session has worked in: each one's project bounds who it reaches (projects.ts). */
   sessionDirs(): string[] {
-    return [...new Set([...(this.deps.projectDirs ?? []), this.deps.cwd, ...this.projectSeen])];
+    return [...new Set([...(this.deps.projectDirs ?? []), this.deps.cwd, ...this.projectSeen, ...this.touched])].slice(0, 512);
   }
 
   private async goOnline(): Promise<void> {
@@ -371,6 +402,19 @@ export class Bridge {
     return { ...(this.repo ? { repo: this.repo } : {}), ...(this.branch ? { branch: this.branch } : {}) };
   }
 
+  /** Paths the session reached: bound (projects.ts), and kept for this thread so a resume stays bound. */
+  noteTouched(dirs: readonly string[]): void {
+    let added = false;
+    for (const d of dirs) {
+      if (typeof d !== "string" || !isAbsolute(d) || this.touched.has(d) || this.touched.size >= 512) continue;
+      this.touched.add(d);
+      added = true;
+    }
+    if (!added) return;
+    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched]);
+    this.announce();
+  }
+
   /** The repo (the git toplevel's folder name), branch and label for `cwd`. */
   async setCwd(cwd: string, force = false): Promise<void> {
     if (!force && cwd === this.cwd) return;
@@ -378,6 +422,7 @@ export class Bridge {
     const top = await this.deps.git(cwd, ["rev-parse", "--show-toplevel"]);
     this.root = top || undefined;
     this.projectSeen.add(cwd);
+    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched]);
     // Every cwd learned later gets the same project-override scan as startup (cwd up to its repo root).
     if (this.deps.codexHome && !this.overrideRefusal) {
       const found = await projectOverride(projectConfigDirsOf(cwd, this.root), this.deps.codexHome, this.deps.readConfig ?? ((p) => readFile(p, "utf8").catch(() => null)));
@@ -461,6 +506,8 @@ export class Bridge {
     // The only place a bridge learns its thread: Codex builds _meta, a hook can't forge it.
     if (info.threadId && !this.threadId) {
       this.threadId = info.threadId;
+      // A resumed thread stays bound to every folder it worked in before (projects.ts).
+      for (const d of loadThreadDirs(this.deps.p2pHome, info.threadId)) this.touched.add(d);
       this.transcript = this.deps.transcript?.(info.threadId);
       this.deps.onChange?.();
     }
@@ -1052,6 +1099,10 @@ export class Bridge {
             ? "Peer2Peer: when this prompt starts work in a codebase, call p2p_status once with a one-line summary of the task and area (your own words: no secrets, no absolute paths, don't quote the request)."
             : undefined;
         return context("UserPromptSubmit", [items.length > 0 ? this.frame(items) : undefined, this.takeActivityNotes(), this.heldNote(), reminder]);
+      }
+      case "PreToolUse": {
+        this.noteTouched(r.dirs ?? []);
+        return {};
       }
       case "PostToolUse": {
         if (r.files && r.files.length > 0) this.touch(r.files, "edit");

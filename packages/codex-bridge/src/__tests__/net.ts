@@ -4,7 +4,8 @@
 // as temporary P2P homes running the real `p2p` CLI, and a stdio MCP client.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,13 +54,20 @@ export class Person {
   ) {}
   /** Made on first use, so a skipped suite leaves no folder behind. */
   get home(): string {
-    this.madeHome ??= safeTmp(`p2p-codex-${this.name}-`);
+    if (!this.madeHome) {
+      this.madeHome = safeTmp(`p2p-codex-${this.name}-`);
+      // The person token (packages/p2p/src/projects.ts): a person's terminal commands carry it here.
+      mkdirSync(join(this.madeHome, "cli"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(this.madeHome, "cli", "person.key"), this.token, { mode: 0o600 });
+    }
     return this.madeHome;
   }
+  readonly token = randomBytes(32).toString("base64url");
   get env(): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.token,
       P2P_DEFAULT_RELAYS: RELAY,
       P2P_RELAY_TRANSPORT: JSON.stringify({ [RELAY]: `ws://127.0.0.1:${this.port()}/v3` }),
       P2P_DRAIN_QUIET_MS: "250",

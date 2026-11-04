@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRosterV3 } from "@peer2peer/core/v3";
-import { normalizeRemote, projectOf, PRIVATE_MARKER, assertMayReach } from "../projects.js";
+import { assertPersonForWidening, isAgentProcess, normalizeRemote, projectOf, PRIVATE_MARKER, assertMayReach, agentEnv } from "../projects.js";
+import { main } from "../cli.js";
+import { linkJoin, linkStart } from "../identity.js";
+import { receiving } from "../inbound.js";
 import { publishExtensionState } from "../xstate.js";
 import { routableSessions, sendExtension, sessionAudience } from "../sessions.js";
 import { alongside, startRelay, User, type TestRelay } from "./harness.js";
@@ -27,6 +30,7 @@ let eve: User;
 let team: string;
 const ids: Record<string, string> = {};
 let root: string;
+let transport: Record<string, string>;
 /** Repositories: shared (S), private (P), a second clone of S's remote (C), a third (Q). */
 const repo: Record<string, string> = {};
 
@@ -109,6 +113,41 @@ describe("project identity (projects.ts projectOf)", () => {
     expect(JSON.stringify(projectOf(r))).not.toContain("TOPSECRET");
   });
 
+  it("a .git that is a symlink is followed; one that can't be read makes its own folder project, never the parent's", () => {
+    const outer = gitRepo(join(d, "outer"), "git@github.com:acme/outer.git");
+    const real = gitRepo(join(d, "elsewhere-git"), "git@github.com:acme/inner.git");
+    mkdirSync(join(outer, "linked"), { recursive: true });
+    symlinkSync(join(real, ".git"), join(outer, "linked", ".git"));
+    expect(projectOf(join(outer, "linked")).remote).toBe("github.com/acme/inner");
+    expect(projectOf(join(outer, "linked")).id).not.toBe(projectOf(outer).id);
+    // A broken symlink, an unreadable gitdir: line, an empty file: this folder alone, kind dir.
+    for (const [name, make] of [
+      ["broken", (dir: string) => symlinkSync(join(d, "nowhere", ".git"), join(dir, ".git"))],
+      ["no-gitdir", (dir: string) => writeFileSync(join(dir, ".git"), "not a gitdir line\n")],
+      ["huge", (dir: string) => writeFileSync(join(dir, ".git"), `gitdir: ${"x".repeat(300 * 1024)}`)],
+    ] as const) {
+      const dir = join(outer, name);
+      mkdirSync(dir, { recursive: true });
+      make(dir);
+      const r = projectOf(join(dir));
+      expect(r.kind, name).toBe("dir");
+      expect(r.root, name).toBe(dir);
+      expect(r.id, name).not.toBe(projectOf(outer).id);
+    }
+  });
+
+  it("agent detection: its variables and its process names", () => {
+    expect(agentEnv({ CLAUDECODE: "1" })).toBe(true);
+    expect(agentEnv({ CODEX_THREAD_ID: "t" })).toBe(true);
+    expect(agentEnv({ CODEX_SANDBOX: "seatbelt" })).toBe(true);
+    expect(agentEnv({ CODEX_HOME: "/home/x/.codex", PATH: "/bin" })).toBe(false);
+    expect(isAgentProcess("/Users/x/.local/bin/claude --resume abc")).toBe(true);
+    expect(isAgentProcess("node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")).toBe(true);
+    expect(isAgentProcess("/opt/homebrew/bin/codex exec")).toBe(true);
+    expect(isAgentProcess("/bin/zsh -l")).toBe(false);
+    expect(isAgentProcess("vim notes-about-claude.md")).toBe(false);
+  });
+
   it("a committed .p2p-private marks the repository private", () => {
     const r = gitRepo(join(d, "marked"), "https://github.com/acme/marked");
     expect(projectOf(r).repoPrivate).toBeUndefined();
@@ -127,6 +166,7 @@ describe("project boundaries", () => {
     repo.Q = gitRepo(join(root, "other"), "git@github.com:acme/other.git");
     relay = await startRelay(R);
     const t = { [R]: `ws://127.0.0.1:${relay.port}/v3` };
+    transport = t;
     ann = new User("ann", t);
     ben = new User("ben", t);
     cat = new User("cat", t);
@@ -432,12 +472,149 @@ describe("project boundaries", () => {
     expect(s.json.reason).toMatch(/session tui is your own terminal's/);
   });
 
+  it("a private repository nested inside a shared one, or reached through a symlink, binds as itself (H1)", async () => {
+    const nested = gitRepo(join(repo.S, "vendor", "secret-lib"), "git@github.com:acme/secret-lib.git");
+    try {
+      // A folder under the session's own: no longer skipped by anyone.
+      const a = await inDir(ann, repo.S, [join(nested, "src")]).ok(["status", "--session", "n1", "--state", "busy", "--label", "n"]);
+      expect(a.roster.vis).toBe("private");
+      expect(a.project.projects.map((x: { name: string }) => x.name)).toContain("secret-lib");
+      // A status file inside it binds it too.
+      const b = await inDir(ann, repo.S).ok(["status", "--session", "n2", "--state", "busy", "--label", "n", "--file", "vendor/secret-lib/keys.ts"]);
+      expect(b.roster.vis).toBe("private");
+      expect(b.delivered).toEqual([]);
+      // A symlink inside the shared repository to the private one.
+      symlinkSync(repo.P, join(repo.S, "secret-link"));
+      const c = await inDir(ann, repo.S, [join(repo.S, "secret-link")]).ok(["status", "--session", "n3", "--state", "busy", "--label", "n"]);
+      expect(c.roster.vis).toBe("private");
+      expect(c.project.projects.map((x: { name: string }) => x.name)).toContain("secret");
+    } finally {
+      rmSync(join(repo.S, "vendor"), { recursive: true, force: true });
+      rmSync(join(repo.S, "secret-link"), { force: true });
+    }
+  });
+
+  it("more folders than the cap, or a front end that says it dropped some: private, never the first N (M1)", async () => {
+    const many = Array.from({ length: 600 }, (_, i) => join(repo.S, `d${i}`));
+    const a = await inDir(ann, repo.S, many).ok(["status", "--session", "o1", "--state", "busy", "--label", "o"]);
+    expect(a.roster.vis).toBe("private");
+    expect(a.project.why).toMatch(/more than/);
+    const over = Object.create(ann) as User;
+    Object.defineProperty(over, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.S, P2P_PROJECT_DIRS_OVER: "1" }) });
+    expect((await over.ok(["status", "--session", "o2", "--state", "busy", "--label", "o"])).roster.vis).toBe("private");
+  });
+
+  it("inside an agent's session, nothing widens sharing, however p2p is reached (H4)", async () => {
+    // An interpreter wrapper (python -c subprocess.run([...])) reaches the CLI with the agent's
+    // environment (or, scrubbed, its process ancestry): the CLI itself refuses.
+    const agent = Object.create(ann) as User;
+    Object.defineProperty(agent, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.P, P2P_PERSON_TOKEN: "", CLAUDECODE: "1" }) });
+    for (const args of [["project", "share", team], ["circle", "default", team], ["session", "roster", "s1", "--add", ids.cat], ["invite", "x"], ["trust", "add", ids.ben]]) {
+      const r = await agent.run(args);
+      expect(r.code, args.join(" ")).toBe(1);
+      expect(r.json.error, args.join(" ")).toBe("refused");
+    }
+    expect((await inDir(ann, repo.P).ok(["project", "show"])).project.policy).toBe("private");
+    // Reads, and narrowing, still work there.
+    expect((await agent.run(["project", "show"])).code).toBe(0);
+    expect((await agent.run(["project", "private"])).code).toBe(0);
+    // The person's front end (its token) may.
+    expect(() => assertPersonForWidening({ CLAUDECODE: "1", P2P_PERSON_TOKEN: ann.personToken }, ann.home, "project share")).not.toThrow();
+    expect(() => assertPersonForWidening({ CLAUDECODE: "1", P2P_PERSON_TOKEN: "x".repeat(43) }, ann.home, "project share")).toThrow(/only you run it/);
+  });
+
+  it("a session id an agent makes up starts private until a front end registers it (H5)", async () => {
+    const agent = Object.create(ann) as User;
+    Object.defineProperty(agent, "env", { get: () => ({ ...ann.env, P2P_WORKDIR: repo.S, P2P_PERSON_TOKEN: "", CLAUDECODE: "1" }) });
+    // In the shared project, under a fresh id: private, so nothing reaches ben.
+    const st = await agent.ok(["status", "--session", "fake-1", "--state", "busy", "--label", "f", "--summary", "smuggled summary"]);
+    expect(st.roster.vis).toBe("private");
+    expect(st.project.why).toMatch(/no front end of yours has registered it/);
+    const sent = await agent.run(["send", "--from-session", "fake-2", "--to", `${ids.ben}/bs1`, "--stdin"], { stdin: "smuggled" });
+    expect(sent.json).toMatchObject({ error: "not_shared" });
+    // The front end's own session (it holds the token): registered, shared as the project says.
+    const ok = await inDir(ann, repo.S).ok(["status", "--session", "front-1", "--state", "busy", "--label", "f"]);
+    expect(ok.roster.vis).toBe("circle");
+    // And once registered, the agent's shell may speak for it (within the project).
+    expect((await agent.ok(["send", "--from-session", "front-1", "--to", `${ids.ben}/bs1`, "--stdin"], { stdin: "fine" })).delivered).toBe(true);
+  });
+
+  it("a pseudo-terminal inside an agent's session doesn't make it the person (H6)", async () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const env = { ...ann.env, P2P_WORKDIR: repo.P, P2P_PERSON_TOKEN: "", CODEX_THREAD_ID: "thread-x" };
+    // A picker and a prompt, as `script` or `expect` would give it: still refused.
+    const code = await main(["send", "--to", ids.ben, "pty smuggle"], { env, io: { out: (l) => out.push(l), err: (l) => err.push(l), select: async () => [ids.ben], prompt: async () => "pty smuggle" } });
+    process.exitCode = 0;
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/sends as you, from your own terminal/);
+  });
+
+  it("own-device laundering: a message from a private session of yours makes the receiving session private, for good (M3)", async () => {
+    // A second device of ann's (a linked home), as on another machine.
+    const ann2 = new User("ann2", transport);
+    ann2.autoShareProject = false;
+    const a = await ann.app();
+    await a.load();
+    receiving(a);
+    const start = await linkStart(a, {});
+    const b = await ann2.app();
+    const joined = await linkJoin(b, start.code, { label: "desk" });
+    await Promise.all([start.wait(async (req) => req.compareCode === joined.compareCode), joined.wait()]);
+    await a.close();
+    await b.close();
+    try {
+      // s7, on the first device: live, shared with the circle; its status reaches ann2 too.
+      expect((await inDir(ann, repo.S).ok(["status", "--session", "s7", "--state", "idle", "--label", "s7"])).roster.vis).toBe("circle");
+      await ann2.ok(["ls"]);
+      // On ann2, a session in a project nobody shared (private) messages s7.
+      const priv = gitRepo(join(root, "desk-secret"), "git@github.com:acme/desk-secret.git");
+      await inDir(ann2, priv).ok(["status", "--session", "o7", "--state", "busy", "--label", "o7"]);
+      const sent = await inDir(ann2, priv).ok(["send", "--from-session", "o7", "--to", `${ids.ann}/s7`, "--stdin"], { stdin: "the secret, to launder" });
+      expect(sent.delivered).toBe(true);
+      await ann.ok(["ls"]);
+      // s7 got it, and is private from now on: it can't carry it on to ben.
+      const after = await inDir(ann, repo.S).ok(["status", "--session", "s7", "--state", "idle", "--label", "s7"]);
+      expect(after.roster.vis).toBe("private");
+      expect(after.project.why).toMatch(/a private session of yours sent it a message/);
+      const r = await inDir(ann, repo.S).run(["send", "--from-session", "s7", "--to", `${ids.ben}/bs1`, "--stdin"], { stdin: "laundered" });
+      expect(r.json).toMatchObject({ error: "not_shared" });
+    } finally {
+      ann2.cleanup();
+    }
+  });
+
+  it("a bounded session won't message your own session on a device whose client can't honour the bound (M3)", async () => {
+    const app = await ann.app();
+    await app.load();
+    try {
+      // Another device of ann's, an older client: its session's status has no projects.v1.
+      await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [`${app.userId}|old-dev-sess`]: { own: app.userId, sid: "old-dev-sess", did: "d_olderdevice00000000000000", ts: Date.now(), status: { state: "idle", label: "old", caps: ["proto.3.1"] } } }, result: undefined }));
+    } finally {
+      await app.close();
+    }
+    const r = await inDir(ann, repo.P).run(["send", "--from-session", "p1", "--to", `${ids.ann}/old-dev-sess`, "--stdin"], { stdin: "x" });
+    expect(r.json).toMatchObject({ error: "not_shared" });
+    expect(r.json.reason).toMatch(/doesn't keep project boundaries: update Peer2Peer there/);
+  });
+
+  it("a narrowed session leaves a blank private status with those it no longer reaches (LOW)", async () => {
+    await inDir(ann, repo.S).ok(["status", "--session", "r1", "--state", "busy", "--label", "visible", "--summary", "shared work"]);
+    expect((await ben.ok(["ls"])).peers.find((x: { sid: string }) => x.sid === "r1")).toMatchObject({ summary: "shared work" });
+    await inDir(ann, repo.S, [repo.P]).ok(["status", "--session", "r1", "--state", "busy", "--label", "visible", "--summary", "now private"]);
+    const row = (await ben.ok(["ls", "--all"])).peers.find((x: { own: string; sid: string }) => x.own === ids.ann && x.sid === "r1");
+    expect(row).toMatchObject({ label: "private", state: "idle" });
+    expect(row.summary).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain("now private");
+  });
+
   it("project commands: show, ls, share (circles you joined, friends), private", async () => {
     const show = (await inDir(ann, repo.S).ok(["project", "show"])).project;
     expect(show).toMatchObject({ name: "shared", kind: "git", remote: "github.com/acme/shared", policy: "shared", circles: [{ cid: team, joined: true }] });
     const ls = (await ann.ok(["project", "ls"])).projects;
     expect(ls.map((p: { name: string }) => p.name)).toEqual(expect.arrayContaining(["shared", "two", "cat-only"]));
-    expect(ls.map((p: { name: string }) => p.name)).not.toContain("secret");
+    // Listed only as private (the agent test narrowed it), never as shared.
+    expect(ls.find((p: { name: string }) => p.name === "secret")?.policy ?? "private").toBe("private");
     expect((await inDir(ann, repo.P).run(["project", "share", "c_notacircle0000000000000000"])).code).toBe(1);
     const stranger = await inDir(cat, repo.P).run(["project", "share", "--person", ids.ben]);
     expect(stranger.json).toMatchObject({ error: "usage" });

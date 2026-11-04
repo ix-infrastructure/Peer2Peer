@@ -19,8 +19,9 @@
 //  - `p2p tui` and `p2p send` typed at a terminal with no --from-session are the person's own
 //    session: never bound, no ceiling.
 
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
@@ -54,10 +55,15 @@ export function sessionWorkdir(env: Record<string, string | undefined>): string 
  * (sessionWorkdir) and P2P_PROJECT_DIRS (path-delimited: folders it moved to, files it touched
  * elsewhere). Anyone may add to these: a binding only ever narrows who the session reaches.
  */
-export function sessionDirs(env: Record<string, string | undefined>): string[] {
+export function sessionDirs(env: Record<string, string | undefined>): { dirs: string[]; over: boolean } {
   const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter).filter((x) => x.trim() !== "" && isAbsolute(x.trim()));
-  return [sessionWorkdir(env), ...extra.slice(0, 64)];
+  // Past the cap (or when the front end says it dropped some): private, never "the first N".
+  const over = extra.length > MAX_SESSION_DIRS || env.P2P_PROJECT_DIRS_OVER === "1";
+  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over };
 }
+
+/** At most this many folders a front end passes per call; past it the session is private. */
+export const MAX_SESSION_DIRS = 512;
 
 /** At most this many projects per session; past it the session is private. */
 export const MAX_SESSION_PROJECTS = 16;
@@ -99,10 +105,23 @@ export interface ProjectsDoc {
 
 export interface SessionBinding {
   projects: Record<string, { name: string; repoPrivate?: true }>;
-  /** More than MAX_SESSION_PROJECTS: private. */
+  /** More than MAX_SESSION_PROJECTS projects or MAX_SESSION_DIRS folders: private. */
   over?: true;
+  /**
+   * What other sessions of this user that sent to this one could reach (own-device messages carry
+   * their sender's ceiling): intersected in, sticky, so a private session can't launder through a
+   * shared one of yours.
+   */
+  constraints?: ProjectShare[];
+  /** First used by an agent (agentContext) with no front end vouching for it: private until registered. */
+  unregistered?: true;
+  /** A front end holding the person token (personTokenOk) has used it. */
+  registered?: true;
   at: number;
 }
+
+/** At most this many constraints a session keeps; past it, private. */
+export const MAX_SESSION_CONSTRAINTS = 16;
 
 export type SessionProjectsDoc = Record<string, SessionBinding>;
 
@@ -114,13 +133,26 @@ export type Ceiling = { kind: "none" } | { kind: "private"; why: string } | { ki
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 
+/** The real path, with the case the file system stores (realpathSync.native), else as given. */
+function real(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  }
+}
+
 /** The nearest existing directory at or above `p`, as a real path. */
 function existingDir(p: string): string {
   let cur = resolve(p);
   for (let i = 0; i < 4096; i++) {
     try {
       const st = statSync(cur);
-      return realpathSync(st.isDirectory() ? cur : dirname(cur));
+      return real(st.isDirectory() ? cur : dirname(cur));
     } catch {
       const up = dirname(cur);
       if (up === cur) return cur;
@@ -205,28 +237,37 @@ export function projectOf(dir: string): ProjectRef {
   let cur = start;
   for (let i = 0; i < 4096; i++) {
     const dotgit = join(cur, ".git");
-    let st: ReturnType<typeof lstatSync> | undefined;
+    // Anything named .git here (a folder, a file, a symlink, even a broken or unreadable one) ends
+    // the walk: this folder is its own project, never the parent repository's.
+    let present: boolean;
     try {
-      st = lstatSync(dotgit);
+      lstatSync(dotgit);
+      present = true;
     } catch {
-      st = undefined;
+      present = false;
     }
-    if (st && (st.isDirectory() || st.isFile())) {
+    if (present) {
+      let st: ReturnType<typeof statSync> | undefined;
+      try {
+        st = statSync(dotgit);
+      } catch {
+        st = undefined;
+      }
       let gitDir: string | undefined;
-      if (st.isDirectory()) gitDir = dotgit;
-      else {
+      if (st?.isDirectory()) gitDir = dotgit;
+      else if (st?.isFile()) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
         if (m) gitDir = resolve(cur, m[1]);
       }
-      if (gitDir) {
+      if (!gitDir || !existsSync(gitDir)) {
+        // A .git that can't be read as one: a folder project at this level (private until shared).
+        return { id: `pj_${sha(`dir\n${cur}`).slice(0, 24)}`, name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
+      }
+      {
         let common = gitDir;
         const cd = readSmall(join(gitDir, "commondir"))?.trim();
         if (cd) common = resolve(gitDir, cd);
-        try {
-          common = realpathSync(common);
-        } catch {
-          // as written
-        }
+        common = real(common);
         const urls = remotesOf(readSmall(join(common, "config")) ?? "");
         const remote = urls.map(normalizeRemote).find((x): x is string => x !== undefined);
         const main = basename(common) === ".git" ? dirname(common) : common;
@@ -387,9 +428,16 @@ export async function showProject(app: App, dir: string): Promise<ProjectView> {
 
 /**
  * Binds a session to the projects of `dirs` (sticky: a session's projects only ever grow until it
- * ends). The person's own session is never bound; another caller naming it is refused.
+ * ends), plus a constraint an own-device message carried. The person's own session is never
+ * bound; another caller naming it is refused. A session an agent names (agentContext) that no
+ * front end of this user has registered (personTokenOk) starts private.
  */
-export async function bindSession(app: App, sid: string, dirs: readonly string[], o: { person?: boolean } = {}): Promise<SessionBinding | undefined> {
+export async function bindSession(
+  app: App,
+  sid: string,
+  dirs: readonly string[],
+  o: { person?: boolean; over?: boolean; constraint?: ProjectShare } = {},
+): Promise<SessionBinding | undefined> {
   if (sid === PERSON_SESSION) {
     if (o.person) return undefined;
     throw new CliError("usage", `session ${PERSON_SESSION} is your own terminal's (p2p tui, or p2p send typed with no --from-session); an agent sends from its own session`);
@@ -400,13 +448,15 @@ export async function bindSession(app: App, sid: string, dirs: readonly string[]
     const r = projectOf(d);
     refs.set(r.id, r);
   }
+  const front = personTokenOk(app.env, app.home);
+  const agent = !front && agentContext(app.env);
   const now = Date.now();
   return app.state.update("sessionProjects", (cur) => {
     const all = { ...((cur as SessionProjectsDoc | undefined) ?? {}) };
     for (const [k, v] of Object.entries(all)) if (!v || typeof v.at !== "number" || now - v.at > SESSION_BINDING_TTL_MS) delete all[k];
-    const have: SessionBinding = all[sid] ?? { projects: {}, at: now };
-    const projects = { ...have.projects };
-    let over = have.over === true;
+    const have: SessionBinding | undefined = all[sid];
+    const projects = { ...(have?.projects ?? {}) };
+    let over = have?.over === true || o.over === true;
     for (const r of refs.values()) {
       const prev = projects[r.id];
       if (!prev && Object.keys(projects).length >= MAX_SESSION_PROJECTS) {
@@ -416,9 +466,145 @@ export async function bindSession(app: App, sid: string, dirs: readonly string[]
       // Once a repository asked for privacy, it stays asked for this session.
       projects[r.id] = { name: r.name, ...(r.repoPrivate || prev?.repoPrivate ? { repoPrivate: true as const } : {}) };
     }
-    const next: SessionBinding = { projects, ...(over ? { over: true as const } : {}), at: now };
+    const constraints = [...(have?.constraints ?? [])];
+    if (o.constraint !== undefined && !constraints.some((c) => JSON.stringify(c) === JSON.stringify(o.constraint))) {
+      if (constraints.length >= MAX_SESSION_CONSTRAINTS) over = true;
+      else constraints.push(o.constraint);
+    }
+    const registered = front || have?.registered === true;
+    // An agent's first use of a session nobody registered: private (until a front end registers it).
+    const unregistered = !registered && (have?.unregistered === true || (agent && !have));
+    const next: SessionBinding = {
+      projects,
+      ...(over ? { over: true as const } : {}),
+      ...(constraints.length ? { constraints } : {}),
+      ...(unregistered ? { unregistered: true as const } : {}),
+      ...(registered ? { registered: true as const } : {}),
+      at: now,
+    };
     return { next: { ...all, [sid]: next }, result: next };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Who is calling: the person's front end, or an agent
+
+/** Codex variables a person's own shell may carry too (not a sign of an agent's tool call). */
+const PERSON_CODEX_VARS = new Set(["CODEX_HOME"]);
+
+/** Whether the environment says this runs inside an agent's tool call (Claude Code or Codex set these). */
+export function agentEnv(env: Record<string, string | undefined> | undefined): boolean {
+  if (!env) return false;
+  if (env.CLAUDECODE || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID) return true;
+  return Object.keys(env).some((k) => k.startsWith("CODEX_") && !PERSON_CODEX_VARS.has(k) && (env[k] ?? "") !== "");
+}
+
+let ancestryCache: boolean | undefined;
+
+/**
+ * Tests only: what agentAncestor answers in this process (the suites may themselves run inside an
+ * agent's session). In-process state, never an environment variable or a flag: a child `p2p`
+ * process an agent starts still walks its own ancestry.
+ */
+export function setAgentAncestorForTests(v: boolean | undefined): void {
+  ancestryCache = v;
+}
+
+/**
+ * Whether a Claude Code or Codex process is an ancestor of this one (environment variables can be
+ * scrubbed; the process tree can't be, by the agent). Unix: `ps`, walking parent ids. Elsewhere,
+ * or when `ps` can't answer: false (callers that widen sharing also check agentEnv and the token).
+ */
+export function agentAncestor(): boolean {
+  if (ancestryCache !== undefined) return ancestryCache;
+  ancestryCache = false;
+  if (process.platform === "win32") return false;
+  try {
+    let pid = process.ppid;
+    for (let i = 0; i < 64 && pid > 1; i++) {
+      const line = execFileSync("ps", ["-o", "ppid=,args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      const m = /^(\d+)\s+(.*)$/s.exec(line);
+      if (!m) break;
+      if (isAgentProcess(m[2])) {
+        ancestryCache = true;
+        break;
+      }
+      pid = Number(m[1]);
+    }
+  } catch {
+    // ps unavailable: unknown
+  }
+  return ancestryCache;
+}
+
+/** A process command line that is Claude Code or Codex (their binaries, or their npm packages under node). */
+export function isAgentProcess(args: string): boolean {
+  const words = args.split(/\s+/).slice(0, 4);
+  for (const w of words) {
+    const base = (w.split(/[\\/]/).pop() ?? "").toLowerCase();
+    if (base === "claude" || base === "codex" || base === "claude.exe" || base === "codex.exe") return true;
+  }
+  return /@anthropic-ai\/claude-code|@openai\/codex/.test(args);
+}
+
+/** Whether this call runs on an agent's behalf: its environment, or its process ancestry. */
+export function agentContext(env: Record<string, string | undefined> | undefined): boolean {
+  return agentEnv(env) || agentAncestor();
+}
+
+/** `<home>/cli/person.key`: a random secret the person's front ends (the Claude mod, the Codex bridge) pass back as P2P_PERSON_TOKEN. */
+export function personTokenFile(home: string): string {
+  return join(home, "cli", "person.key");
+}
+
+/** The person token, made on first use (0600, in the CLI's own folder, which the mod's guards keep from the model). */
+export function personToken(home: string): string {
+  const f = personTokenFile(home);
+  try {
+    const t = readFileSync(f, "utf8").trim();
+    if (/^[A-Za-z0-9_-]{43}$/.test(t)) return t;
+  } catch {
+    // none yet
+  }
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  const t = randomBytes(32).toString("base64url");
+  writeFileSync(f, t, { mode: 0o600 });
+  return t;
+}
+
+/** Whether P2P_PERSON_TOKEN is this home's person token (read only: a missing file is no match). */
+export function personTokenOk(env: Record<string, string | undefined> | undefined, home: string | undefined): boolean {
+  const given = env?.P2P_PERSON_TOKEN?.trim();
+  if (!given || typeof home !== "string" || home === "") return false;
+  let t: string;
+  try {
+    t = readFileSync(personTokenFile(home), "utf8").trim();
+  } catch {
+    return false;
+  }
+  const a = Buffer.from(given);
+  const b = Buffer.from(t);
+  return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
+}
+
+/**
+ * Refuses a command that widens who reaches this user (sharing a project, a session, a default
+ * circle, invites, joins, trust, friends) when an agent runs it: its environment, or a Claude Code
+ * or Codex ancestor, and no person token from the person's front end. Reads are never refused.
+ */
+export function assertPersonForWidening(env: Record<string, string | undefined> | undefined, home: string | undefined, what: string): void {
+  if (personTokenOk(env, home)) return;
+  if (agentContext(env)) {
+    throw new CliError(
+      "refused",
+      `\`p2p ${what}\` changes who reaches you, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`,
+    );
+  }
+}
+
+/** Whether a person-only path (session `tui`) may run here: the person's front end, or no agent in sight. */
+export function personHere(env: Record<string, string | undefined> | undefined, home: string | undefined): boolean {
+  return personTokenOk(env, home) || !agentContext(env);
 }
 
 export async function sessionBinding(app: App, sid: string): Promise<SessionBinding | undefined> {
@@ -432,24 +618,36 @@ export async function sessionBinding(app: App, sid: string): Promise<SessionBind
 export async function sessionCeiling(app: App, sid: string, binding?: SessionBinding | null): Promise<Ceiling> {
   if (sid === PERSON_SESSION) return { kind: "none" };
   const b = binding === null ? undefined : (binding ?? (await sessionBinding(app, sid)));
-  if (!b || Object.keys(b.projects).length === 0) return { kind: "none" };
-  if (b.over) return { kind: "private", why: `it worked in more than ${MAX_SESSION_PROJECTS} projects` };
+  if (!b || (Object.keys(b.projects).length === 0 && !b.constraints?.length && !b.unregistered && !b.over)) return { kind: "none" };
+  if (b.over) return { kind: "private", why: `it worked in more than ${MAX_SESSION_PROJECTS} projects (or ${MAX_SESSION_DIRS} folders)` };
+  if (b.unregistered) return { kind: "private", why: "an agent named it, and no front end of yours has registered it" };
   const doc = await projectsDoc(app);
   let circles: Set<string> | undefined;
   let people: Set<string> | undefined;
+  const shares: { name: string; share: ProjectShare }[] = [];
   for (const [id, p] of Object.entries(b.projects)) {
     if (p.repoPrivate) return { kind: "private", why: `${p.name} asks to stay private (${PRIVATE_MARKER})` };
     const share = shareOf(doc, id);
     if (share === "private") return { kind: "private", why: doc.projects[id] ? `${p.name} is private` : `${p.name} isn't shared (projects are private until you share them)` };
+    shares.push({ name: p.name, share });
+  }
+  for (const c of b.constraints ?? []) {
+    if (c === "private") return { kind: "private", why: "a private session of yours sent it a message" };
+    shares.push({ name: "a session of yours that sent it a message", share: c });
+  }
+  for (const { share } of shares) {
+    if (share === "private") continue;
     circles = circles ? new Set(share.circles.filter((c) => circles!.has(c))) : new Set(share.circles);
     people = people ? new Set(share.people.filter((u) => people!.has(u))) : new Set(share.people);
   }
   const joined: string[] = [];
   for (const c of circles ?? []) if ((await app.store.getCircle(c))?.joinedByMe === true) joined.push(c);
   const blocks = new Set((await app.store.listBlocks()).map((x) => x.userId));
-  const ppl = [...(people ?? [])].filter((u) => !blocks.has(u) && u !== app.userId);
+  // People only while they are still friends (an unfriend ends a share as it ends everything else).
+  const friends = (people?.size ?? 0) > 0 ? await friendIds(app) : new Set<string>();
+  const ppl = [...(people ?? [])].filter((u) => !blocks.has(u) && u !== app.userId && friends.has(u));
   if (joined.length + ppl.length === 0) {
-    const names = Object.values(b.projects).map((p) => p.name);
+    const names = shares.map((x) => x.name);
     return { kind: "private", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` };
   }
   return { kind: "shared", circles: joined.sort(), people: ppl.sort() };

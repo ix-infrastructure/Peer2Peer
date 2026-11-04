@@ -47,7 +47,7 @@ import {
   type TipsFetcher,
 } from "@peer2peer/core/v3";
 import { App, capPeek, joinCapOf, orderRelays, REPUBLISH_DOC_WITHIN_SEC } from "./app.js";
-import { CLI_CAPS, KNOWN_FEATURES, peerDevices, unavailableBetween, type PeerDevice } from "./features.js";
+import { CAP_PROJECTS, CLI_CAPS, KNOWN_FEATURES, peerDevices, unavailableBetween, type PeerDevice } from "./features.js";
 import { circleMembers, listCircles, type CircleSummary } from "./circle-ops.js";
 import { defaultRelays } from "./config.js";
 import { CliError } from "./errors.js";
@@ -525,6 +525,13 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
   const now = Date.now();
   const mine = ownStatuses(app, peers);
   const live = mine.filter((p) => isLive(p.ts, now));
+  // Your other devices: one on a client from before project boundaries runs its own sessions by the
+  // old rule (new sessions follow the default circle), and can't honour a bounded own-session message.
+  const others = Object.values(peers).filter((p) => p.own === app.userId && p.did !== app.did && isLive(p.ts, now));
+  const older = [...new Set(others.filter((p) => !(Array.isArray(p.status.caps) && p.status.caps.includes(CAP_PROJECTS))).map((p) => p.did))];
+  if (older.length > 0) {
+    c.add("other-devices", "fail", "your other devices", `${older.length} of your other devices run a client without project boundaries: their sessions follow your default circle, whatever the project`, "update Peer2Peer on those devices (docs/compatibility.md, \"Project boundaries\")");
+  } else if (others.length > 0) c.add("other-devices", "ok", "your other devices", "every live session of your other devices keeps project boundaries");
   if (live.length === 0) {
     c.add(
       "shared",

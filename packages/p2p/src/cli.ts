@@ -82,6 +82,25 @@ interface Output {
 }
 
 const collect = (v: string, prev: string[] = []) => [...prev, v];
+
+/**
+ * Commands that widen who reaches this user: refused inside an agent's session unless the
+ * person's front end passes its token (projects.ts assertPersonForWidening). Reads never are.
+ */
+const WIDENING = new Set(["project share", "circle default", "invite", "join", "accept", "trust add", "held approve", "circle invite", "circle join", "circle policy", "unblock", "link start", "link join", "identity follow", "extensions enable"]);
+
+/** The widening command `cmd` is (its path from the program, with `session roster` only when it adds), or undefined. */
+export function wideningOf(cmd: Command): string | undefined {
+  const path: string[] = [];
+  for (let c: Command | null = cmd; c && c.parent; c = c.parent) path.unshift(c.name());
+  const p = path.join(" ");
+  if (WIDENING.has(p)) return p;
+  if (p === "session roster") {
+    const o = cmd.opts() as { add?: string[]; circle?: string };
+    if ((o.add?.length ?? 0) > 0 || o.circle !== undefined) return p;
+  }
+  return undefined;
+}
 const posInt = (name: string) => (v: string) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n < 0) throw new CliError("usage", `${name} must be a non-negative integer`);
@@ -143,7 +162,12 @@ export function buildProgram(deps: ProgramDeps): Command {
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a
         // read-only command, which must leave the home exactly as it found it).
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
+        // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
+        const widening = wideningOf(cmd);
+        if (widening) projects.assertPersonForWidening(app.env, app.home, widening);
         if (opts.requireIdentity !== false) await app.load(true);
+        // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
+        if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
         if (app.keys) receiving(app);
         // The whole command is bounded (P2P_COMMAND_TIMEOUT_SEC, default 60 s, plus any --wait),
         // so it can't hang without a word: on expiry it fails naming the step it was on.
@@ -1246,7 +1270,11 @@ export function buildProgram(deps: ProgramDeps): Command {
         const fromTui = o.fromSession === undefined;
         if (fromTui) o.fromSession = TUI_SESSION;
         // The person's own session (projects.ts): only from a terminal. Named by a script or an agent, it is refused.
-        const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o));
+        // And never from inside an agent's session (its environment, or a Claude Code or Codex ancestor),
+        // even under a pseudo-terminal: only the person's own terminal, or their front end's token.
+        const personOk = projects.personHere(app.env, app.home);
+        if (fromTui && !personOk) throw new CliError("refused", "`p2p send` with no --from-session sends as you, from your own terminal; inside an agent's session, send from that session (--from-session)");
+        const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o)) && personOk;
         if (text.length === 0 && !o.stdin && !o.notifyWhenIdle && io.prompt) {
           text = [(await io.prompt("Message: ")).trim()];
           if (text[0] === "") throw new CliError("cancelled", "no message: nothing was sent");
@@ -1632,7 +1660,7 @@ function codexCommands(program: Command, deps: ProgramDeps, io: Io): void {
       try {
         const stdin = io.readStdin ? await io.readStdin() : "";
         const binNames = [deps.env.P2P_BIN?.trim(), selfScript(deps)].filter((v): v is string => !!v);
-        const answer = await codex.runHook(event, stdin, { home: codex.bridgeHome(deps.env), binNames });
+        const answer = await codex.runHook(event, stdin, { home: codex.bridgeHome(deps.env), binNames, ...((deps.env.HOME ?? deps.env.USERPROFILE) ? { homeDir: deps.env.HOME ?? deps.env.USERPROFILE } : {}) });
         if (answer) io.out(answer);
       } catch {
         // A hook never breaks Codex: no output, exit 0.

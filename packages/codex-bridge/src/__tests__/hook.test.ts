@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { guard, runHook } from "../hook.js";
+import { guard, runHook, touchedPaths } from "../hook.js";
+import { loadThreadDirs, saveThreadDirs } from "../bridge.js";
 import { findEntry, readEntries, serve, socketPath, writeEntry, type Entry } from "../ipc.js";
 import { lineFeeder, McpServer, text } from "../mcp.js";
 
@@ -121,5 +122,38 @@ describe("MCP transport", () => {
     await feeder.end();
     await new Promise((r) => setTimeout(r, 10));
     expect(out.find((m) => m.id === 9)?.result.content[0].text).toBe('{"action":"decline"}');
+  });
+});
+
+describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)", () => {
+  it("the model's shell speaks only for this bridge's session, however it quotes the id (H5)", () => {
+    expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" }, [], "codex-1")).toBeNull();
+    expect(guard("Bash", { command: "p2p send --from-session=fake --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
+    expect(guard("Bash", { command: "p2p send --from-session=''codex-1x --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
+    // No bridge found for this call: no session id at all.
+    expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" })).toContain("speaks only for this Codex session");
+  });
+
+  it("interpreter code, pseudo-terminals and project shares naming p2p are refused (H4)", () => {
+    for (const command of [
+      `python3 -c 'import subprocess; subprocess.run(["p2p","project","share","c_x"])'`,
+      `node -e 'require("child_process").execSync("p2p send --to ben x")'`,
+      "script -q /dev/null p2p send --to ben x",
+      "p2p project share c_x",
+    ]) expect(guard("Bash", { command }, [], "codex-1"), command).not.toBeNull();
+    expect(guard("Bash", { command: "python3 -c 'print(1)'" }, [], "codex-1")).toBeNull();
+  });
+
+  it("paths a call reaches outside its folder are reported (H2)", () => {
+    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual(["/secret/keys.ts", "/w/other/x", "/home/u/notes"]);
+    expect(touchedPaths("apply_patch", { input: "*** Begin Patch\n*** Update File: ../lib/a.ts\n" }, "/w/repo", undefined)).toContain("/w/lib/a.ts");
+  });
+
+  it("a thread's folders survive a resume (H3)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-thread-"));
+    homes.push(home);
+    saveThreadDirs(home, "thread-1", ["/secret", "/w/repo"]);
+    expect(loadThreadDirs(home, "thread-1")).toEqual(["/secret", "/w/repo"]);
+    expect(loadThreadDirs(home, "thread-2")).toEqual([]);
   });
 });

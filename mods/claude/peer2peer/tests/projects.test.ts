@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { isMutating, isUnder, mutatingP2PVerb, p2pSessionArgs, parsePeersArgs, pickHolder, routableOf, toolPaths } from '../hooks/lib'
+import { isMutating, isUnder, mutatingP2PVerb, p2pSessionArgs, parsePeersArgs, pickHolder, routableOf, shellPaths, shellTokens, toolPaths, uncheckableShell } from '../hooks/lib'
 import { BEN_ID, NOW_MS, flag, gather, message, ran, settle, sidOf, slash, start, typed, world } from './world'
 
 const PRIVATE = { sid: 'x', ref: 'ffffff', ver: 1, vis: 'private', parts: [] }
@@ -68,7 +68,7 @@ describe('project boundaries: the mod', () => {
     const w = world(on)
     await start($, w)
     const share = await $.tool.call({ tool: 'Bash', tool_use_id: 'p1', command: 'p2p project share c_team' } as never)
-    expect(JSON.stringify(share)).toContain('only they run it, with the /peers command (/peers project')
+    expect(JSON.stringify(share)).toMatch(/only they run it, with the \/peers command \(\/peers project|a project share, which only your user runs/)
     const other = await $.tool.call({ tool: 'Bash', tool_use_id: 'p2', command: 'cd ../shared && p2p send --from-session=made-up --to ben "the plan"' } as never)
     expect(JSON.stringify(other)).toContain('speaks only for this session')
     const own = await $.tool.call({ tool: 'Bash', tool_use_id: 'p3', command: `p2p send --from-session=${sidOf(w)} --to ben hi` } as never)
@@ -115,12 +115,13 @@ describe('project boundaries: the mod', () => {
     await start($, w)
     await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: '/work/secret/keys.ts' } as never)
     await $.tool.call({ tool: 'Read', tool_use_id: 'r2', file_path: '/work/web/src/a.ts' } as never)
-    await settle(w, () => ran(w, 'status').some(r => r.env?.P2P_PROJECT_DIRS !== undefined))
-    const after = ran(w, 'status').filter(r => r.env?.P2P_PROJECT_DIRS !== undefined)
-    expect(after.at(-1)?.env?.P2P_PROJECT_DIRS).toBe('/work/secret')
+    await settle(w, () => ran(w, 'status').some(r => (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/secret') && (r.env?.P2P_PROJECT_DIRS ?? '').includes('/work/web/src')))
+    const dirs = (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').split(':')
+    // Inside its own folder too (a nested repository is its own project: the CLI decides by real path).
+    expect(dirs).toEqual(expect.arrayContaining(['/work/secret', '/work/web/src']))
     // Every later p2p run of this session carries it: a send included.
     await $.session.send({ to: `${BEN_ID}`, text: 'hi' } as never).catch(() => undefined)
-    for (const r of ran(w, 'send')) expect(r.env?.P2P_PROJECT_DIRS).toBe('/work/secret')
+    for (const r of ran(w, 'send')) expect(r.env?.P2P_PROJECT_DIRS).toContain('/work/secret')
   })
 
   test('a message for no session that the CLI routes elsewhere is not held here', async ($, on) => {
@@ -133,5 +134,63 @@ describe('project boundaries: the mod', () => {
     w.emit(message(w, { id: 'nr-2', toSession: undefined, own: BEN_ID, sid: 'ben-old', ref: 'eeeeee', text: 'for this one', routable: ['tui', sidOf(w)] }))
     await gather(w)
     expect(w.statuses.at(-1)).toContain('1 held')
+  })
+
+  test('a shell command reading a private path binds it (H2): absolute, ~ and .. paths', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web' })
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'cat /work/secret/keys.ts | head -5' } as never)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'b2', command: "grep -r token ../other-repo/src && ls '~/notes'" } as never)
+    await settle(w, () => (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').includes('/work/other-repo/src'))
+    const dirs = (ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS ?? '').split(':')
+    expect(dirs).toEqual(expect.arrayContaining(['/work/secret/keys.ts', '/work/other-repo/src']))
+    // A relative search root (Grep, Glob) resolves against where the session is.
+    expect(toolPaths({ tool: 'Grep', pattern: 'x', path: '../third' }, '/work/web')).toEqual(['/work/third'])
+  })
+
+  test('a resumed conversation stays bound to the folders it worked in (H3)', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web', store: { 'dirs:claude-session-1': { dirs: ['/work/secret'], over: false, at: 1 } } })
+    await start($, w)
+    await settle(w, () => ran(w, 'status').length > 0)
+    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS).toContain('/work/secret')
+  })
+
+  test('past the folder cap the CLI is told to keep it private, never the first N (M1)', async ($, on) => {
+    const many = Array.from({ length: 600 }, (_, i) => `/work/many/d${i}`)
+    const w = world(on, { gitTop: '/work/web', store: { 'dirs:claude-session-1': { dirs: many, over: false, at: 1 } } })
+    await start($, w)
+    await settle(w, () => ran(w, 'status').length > 0)
+    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS_OVER).toBe('1')
+  })
+})
+
+describe('project boundaries: the shell guard (H4, H5)', () => {
+  test('words are read as the shell reads them: quoting can\'t hide a session id', () => {
+    expect(shellTokens("p2p send --from-session=''x1 --to b")).toEqual(['p2p', 'send', '--from-session=x1', '--to', 'b'])
+    expect(shellTokens('a "b c"d $\'e\\\'f\' g\\ h')).toEqual(['a', 'b cd', "e'f", 'g h'])
+    expect(p2pSessionArgs("p2p send --from-session=''x1 --to ben hi")).toEqual(['x1'])
+    expect(p2pSessionArgs('p2p send --from-session "x"1 --to ben hi')).toEqual(['x1'])
+    expect(p2pSessionArgs('p2p send --from-\\session x1')).toEqual(['x1'])
+    expect(shellPaths('cat /a/b ../c ~/d e', '/w/r', '/home/u')).toEqual(['/a/b', '/w/c', '/home/u/d'])
+  })
+
+  test('interpreter code, pseudo-terminals and project shares on a line naming p2p are refused', () => {
+    for (const cmd of [
+      'python3 -c \'import subprocess; subprocess.run(["p2p","project","share","c_team"])\'',
+      'node -e \'require("child_process").execSync("p2p project share")\'',
+      'perl -e \'system("p2p", "send", "--to", "ben", "x")\'',
+      'script -q /dev/null p2p send --to ben x',
+      'expect -c \'spawn p2p send --to ben\'',
+      'unbuffer p2p tui',
+      'echo "project share" | xargs p2p',
+    ]) expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
+    expect(uncheckableShell('python3 -c "print(1)"')).toBe(null)
+  })
+
+  test('the model\'s shell can\'t speak for a made-up session however it quotes it', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'q1', command: "p2p send --from-session=''fake --to ben hi" } as never)
+    expect(JSON.stringify(r)).toContain('speaks only for this session')
   })
 })

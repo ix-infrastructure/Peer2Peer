@@ -20,7 +20,8 @@
 // Every home is a fresh temp directory (P2P_HOME); nothing reads ~/.p2p or talks to a real relay.
 
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -61,10 +62,15 @@ class Peer {
     this.bin = bin;
     this.label = label;
     this.home = mkdtempSync(join(tmpdir(), `p2p-matrix-${name}-`));
+    // The person token (packages/p2p/src/projects.ts): these runs are the person's own (an older CLI ignores it).
+    const token = randomBytes(32).toString("base64url");
+    mkdirSync(join(this.home, "cli"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(this.home, "cli", "person.key"), token, { mode: 0o600 });
     this.env = {
       PATH: process.env.PATH ?? "",
       HOME: this.home,
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: token,
       P2P_RELAY_TRANSPORT: JSON.stringify({ [RELAY_URL]: `ws://127.0.0.1:${port}/v3` }),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "4000",

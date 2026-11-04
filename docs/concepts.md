@@ -68,6 +68,8 @@ Each project has a **policy**, kept only on your device (in `P2P_HOME`, never sy
 
 **Repositories can only ask for more privacy.** Nothing committed in a repository can share it: a cloned repository that carries a file claiming "shared with circle X" changes nothing. A `.p2p-private` file at a repository's top level makes it private whatever your policy says, and `p2p project share` refuses it.
 
+**Who may widen it.** Only the person. `project share`, `circle default`, `session roster --add/--circle`, invites, joins, trust and friend changes are refused inside an agent's session (its environment, or a Claude Code or Codex ancestor), unless the person's front end (the mod's typed `/peers`, the Codex bridge) passes its token from `P2P_HOME/cli/person.key`. A session id an agent makes up starts private until a front end registers it. Between your own sessions, a message carries the sending session's bound, and the receiving session takes it on (so a private session can't hand its secrets to a shared one of yours).
+
 **Your own terminal.** `p2p tui`, and `p2p send` typed at a terminal with no `--from-session`, send as you (session `tui`). They cross no project boundary, and say which one the folder you're in has. A script or an agent naming session `tui` is refused.
 
 **Moving from the default circle.** Before project boundaries, new sessions followed your default circle. They don't any more: the default circle now only says what invites join and what `p2p project share` with no circle shares. The first time a session of yours is private only because its project was never shared, `p2p status` says so once (the mod shows it as a toast) and names the command that shares the project with your default circle. Nothing is ever widened for you.

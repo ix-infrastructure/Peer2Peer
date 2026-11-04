@@ -5,13 +5,22 @@
 // entry point (`main`), so argument parsing, JSON output and exit codes are
 // exercised too.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from "@peer2peer/relay";
 import { App, type Io } from "../app.js";
 import { main } from "../cli.js";
 import type { Env } from "../config.js";
+
+/** Writes a person token into `home` (as the CLI makes one) and returns it. */
+export function personTokenFor(home: string): string {
+  const t = randomBytes(32).toString("base64url");
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, "cli", "person.key"), t, { mode: 0o600 });
+  return t;
+}
 
 export interface TestRelay {
   url: string;
@@ -53,11 +62,19 @@ export class User {
     readonly extraEnv: Env = {},
   ) {
     this.home = mkdtempSync(join(tmpdir(), `p2p-${name}-`));
+    this.personToken = personTokenFor(this.home);
   }
+
+  /**
+   * The person token (projects.ts) the person's front end passes: these users act as the person. A
+   * test about agents builds an env without it (and sets an agent's variables).
+   */
+  readonly personToken: string;
 
   get env(): Env {
     return {
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: JSON.stringify(this.transport),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "4000",
