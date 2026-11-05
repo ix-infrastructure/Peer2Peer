@@ -236,7 +236,17 @@ export interface SessionExtras {
   roster?: string;
   /** A friendship proof for the sender's side only (v2 H1). */
   friendship?: PresentedFriendship;
+  /**
+   * Between one user's own sessions only (cap projects.v1, docs/concepts.md "Projects"): who the
+   * sending session may reach, which the receiving session takes on (the most restrictive wins).
+   * Sent marked critical (`crit`), so a client that can't honour it refuses the message.
+   */
+  bound?: ProjectBound;
 }
+
+/** `bound`: private, or the circles and people the sending session's projects all share. */
+export type ProjectBound = "private" | { circles: string[]; people: string[] };
+export const BOUND_MAX = 32;
 
 export interface StatusBody {
   state: "busy" | "idle";
@@ -383,6 +393,19 @@ function parseAnswerPart(v: unknown): AnswerPart {
  * ignored (the parsers below copy known fields only), unless the plaintext lists it in `crit`.
  * Known fields keep every type and size check; the envelope cap still bounds the whole plaintext.
  */
+/** `bound` as sent: "private", or {circles, people} of short strings, bounded. */
+export function parseBound(v: unknown, what: string): ProjectBound {
+  if (v === "private") return "private";
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return fail("malformed", `${what}.bound must be "private" or {circles, people}`);
+  const b = v as O;
+  checkFields(b, ["circles", "people"], `${what}.bound`);
+  const list = (x: unknown, k: string): string[] => {
+    if (!Array.isArray(x) || x.length > BOUND_MAX || x.some((e) => typeof e !== "string" || e.length === 0 || e.length > 128)) fail("malformed", `${what}.bound.${k} must be at most ${BOUND_MAX} ids`);
+    return [...(x as string[])];
+  };
+  return { circles: list(b.circles, "circles"), people: list(b.people, "people") };
+}
+
 function known(o: O, keys: readonly string[], what: string): void {
   checkFields(o, keys, what);
 }
@@ -412,6 +435,7 @@ function jwsList(o: O, k: string, what: string): string[] {
 function extras(o: O, what: string): SessionExtras {
   const out: SessionExtras = {};
   if (o.roster !== undefined) out.roster = s(o, "roster", what);
+  if (o.bound !== undefined) out.bound = parseBound(o.bound, what);
   if (o.friendship !== undefined) {
     const f = o.friendship as O;
     if (typeof f !== "object" || f === null || typeof f.invite !== "string" || typeof f.accept !== "string") {
@@ -630,7 +654,7 @@ export function parsePlaintextV3(kind: EnvelopeKindV3, bytes: Uint8Array): Plain
   const o = v as O;
   switch (kind) {
     case "msg":
-      known(o, ["text", "roster", "friendship", "rcpt"], "msg");
+      known(o, ["text", "roster", "friendship", "rcpt", "bound"], "msg");
       if (o.rcpt !== undefined && (typeof o.rcpt !== "string" || !RECEIPT_ID_RE.test(o.rcpt))) fail("malformed", "msg.rcpt must be a receipt id");
       return { kind, text: s(o, "text", "msg"), ...(typeof o.rcpt === "string" ? { rcpt: o.rcpt } : {}), ...extras(o, "msg") };
     case "receipt": {
@@ -715,7 +739,7 @@ export function parsePlaintextV3(kind: EnvelopeKindV3, bytes: Uint8Array): Plain
       // x:<ns>.<type>
       // `state` (§4.3 "Extension state kinds", cap xstate.v1): clients from before it reject the field,
       // and a sender only sends it to recipients that advertise xstate.v1.
-      known(o, ["ext", "fallback", "roster", "friendship", "state"], kind);
+      known(o, ["ext", "fallback", "roster", "friendship", "state", "bound"], kind);
       const ext = o.ext as O;
       if (typeof ext !== "object" || ext === null || typeof ext.v !== "number" || !Number.isSafeInteger(ext.v) || !("body" in ext)) {
         fail("malformed", `${kind}.ext must be {v, body}`);

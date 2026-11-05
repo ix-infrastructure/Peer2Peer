@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from "@peer2peer/relay";
 import { main } from "@peer2peer/cli";
 
@@ -26,6 +27,14 @@ export function tmp(prefix: string): string {
 }
 export function cleanupTmp(): void {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+}
+
+/** Writes a person token into `home` (as the CLI makes one) and returns it. Pre-seeded on purpose: it stands in for the person's terminal "yes" (tests have no terminal); a fresh install's own creation is tested apart (mods/claude/peer2peer/integration/first-run.e2e.ts, the bridge's personTokenOf, the CLI's personToken). */
+export function personTokenFor(home: string): string {
+  const t = randomBytes(32).toString("base64url");
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, "cli", "person.key"), t, { mode: 0o600 });
+  return t;
 }
 
 export interface TestRelay {
@@ -111,11 +120,16 @@ export class User {
     readonly extraEnv: Record<string, string> = {},
   ) {
     this.home = tmp(`p2p-${name}-`);
+    this.personToken = personTokenFor(this.home);
   }
+
+  /** The person token (packages/p2p/src/projects.ts): these users act as the person. */
+  readonly personToken: string;
 
   get env(): Record<string, string> {
     return {
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: JSON.stringify(this.transport),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "4000",
@@ -129,7 +143,34 @@ export class User {
   /** Questions asked through the (simulated) terminal, for tests that answer prompts. */
   readonly asked: string[] = [];
 
+  /**
+   * Project boundaries (packages/p2p/src/projects.ts): a session is private until the person shares
+   * its project, and these tests run commands in several folders (a repository, the process's own).
+   * With this on (the default), sharing a session with `session roster <sid> --add|--circle` also
+   * shares, as the person would with `p2p project share --add`, every folder this user runs p2p in.
+   */
+  autoShareProject = true;
+  private shareTargets: string[] = [];
+  private sharedDirs = new Set<string>();
+  private usedDirs = new Set<string>();
+
   async run(args: string[], opts: { stdin?: string; json?: boolean; cwd?: string; answer?: string } = {}): Promise<RunResult> {
+    if (this.autoShareProject && args[0] !== "project") {
+      const dir = opts.cwd ?? process.cwd();
+      this.usedDirs.add(dir);
+      if (args[0] === "session" && args[1] === "roster") {
+        for (let i = 2; i < args.length; i++) {
+          if (args[i] === "--add" && args[i + 1]) this.shareTargets.push("--person", args[++i]);
+          else if (args[i] === "--circle" && args[i + 1]) this.shareTargets.push(args[++i]);
+        }
+        this.sharedDirs.clear();
+      }
+      for (const d of this.shareTargets.length > 0 ? this.usedDirs : []) {
+        if (this.sharedDirs.has(d)) continue;
+        this.sharedDirs.add(d);
+        await this.run(["project", "share", "--add", ...this.shareTargets], { cwd: d });
+      }
+    }
     const lines = { out: [] as string[], err: [] as string[] };
     const argv = opts.json === false ? args : [...args, "--json"];
     const before = process.cwd();

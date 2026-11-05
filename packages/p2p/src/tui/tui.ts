@@ -25,6 +25,7 @@ import { approveJoinRequest, circleMembers, joinFromHeld, listCircles } from "..
 import { doctor } from "../doctor.js";
 import { CliError, toErrorJson } from "../errors.js";
 import { listPeers, sendSharing } from "../sessions.js";
+import { sessionWorkdir, showProject } from "../projects.js";
 import { accept, dropHeld, friends, getHeld, listHeld } from "../social.js";
 import { trustAdd } from "../trust.js";
 import { watch } from "../watch.js";
@@ -547,7 +548,10 @@ export class Tui {
               ...(r.receiptId ? { receiptId: r.receiptId } : {}),
             });
             const note = shared ? ` Shared session ${clean(this.data.session)} with ${clean(shared.address)}.` : "";
-            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}`);
+            // Your own send crosses no project boundary; it says which one this folder has (projects.ts).
+            const here = await showProject(this.app, sessionWorkdir(this.app.env)).catch(() => undefined);
+            const boundary = here ? ` Project ${clean(here.name)} here is ${here.policy}: this send was yours.` : "";
+            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}${boundary}`);
           } catch (err) {
             Object.assign(row, { state: "failed", note: clean(toErrorJson(err).reason) });
             throw err;

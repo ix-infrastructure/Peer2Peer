@@ -138,6 +138,8 @@ describe("offline peers and an offline sender", () => {
     const ctl = new AbortController();
     const cur = app.state.get("events");
     const before = (await cur)?.items.at(-1)?.n ?? 0;
+    // a3 is live in a project shared with Ben (projects.ts): only such a session may hold a message for no session.
+    await ann.ok(["status", "--session", "a3", "--state", "idle", "--label", "a3"]);
     // A watch only shows control events after its cursor starts: start a3 before the next one.
     const running = watch(app, { session: "a3", signal: ctl.signal, log: () => {}, write: async (l) => (lines.push(l), true), pollMs: 50 });
     await new Promise((r) => setTimeout(r, 600));

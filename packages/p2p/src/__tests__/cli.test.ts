@@ -27,6 +27,8 @@ async function run(argv: string[], ops: Partial<Ops>, io: Partial<Io> = {}) {
     io: { out: (s) => out.push(s), err: (s) => err.push(s), ...io },
     ops,
     makeApp: () => stubApp(),
+    // The person's "yes" on their terminal (tty-confirm.ts), for the commands that widen sharing.
+    confirmTty: async () => true,
   });
   process.exitCode = 0;
   let json: any;

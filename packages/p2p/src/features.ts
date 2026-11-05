@@ -21,6 +21,8 @@ export const PROTO_MINOR = 1;
 export const PROTO_CAP = `proto.3.${PROTO_MINOR}`;
 /** This client redeems codes that join several circles (the bundle's `circles`, docs/protocol.md P4). */
 export const CAP_INVITE_CIRCLES = "invite.circles.v1";
+/** This client keeps project boundaries (projects.ts): it honours `bound` on messages between one user's own sessions. */
+export const CAP_PROJECTS = "projects.v1";
 const PROTO_RE = /^proto\.3\.(\d{1,4})$/;
 
 /**
@@ -28,7 +30,7 @@ const PROTO_RE = /^proto\.3\.(\d{1,4})$/;
  * allows, and an exact version would help single out a device (and its unpatched bugs); the version
  * rides only in the opt-in identity document entry (`dinfo.client`). docs/compatibility.md.
  */
-export const CLI_FEATURE_CAPS: readonly string[] = [PROTO_CAP, CAP_INVITE_CIRCLES];
+export const CLI_FEATURE_CAPS: readonly string[] = [PROTO_CAP, CAP_INVITE_CIRCLES, CAP_PROJECTS];
 
 /**
  * Everything this CLI itself understands (§4.3 "Status caps"), as its statuses and its identity

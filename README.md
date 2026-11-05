@@ -267,7 +267,8 @@ More detail: [Getting started](docs/getting-started.md) · [CLI reference](packa
 |---|---|
 | **Account-free identity** | A self-certifying Ed25519 identity key. Device linking with a QR or typed code and a compare code, a 24-word backup phrase, device revocation, and **identity key rotation** for a lost or stolen key-holding device. |
 | **Friends & circles** | One-step short-code invites (`p2p invite` / `p2p join`). Circles (teams or groups) have one owner, with admins who propose changes and members who consent to join. Open circles are optional. There are petnames and blocks, and GitHub/DNS proofs. |
-| **Per-session sharing** | Each agent session has a signed roster: private, a circle, or named people. New sessions follow your default circle. |
+| **Project boundaries** | Each repository is private until you share it (`p2p project share`): only your own devices see its sessions, their files, footprints and summaries, and its agents can't send to anyone else. A session that touched a private project stays private. See [projects](docs/concepts.md#projects-project-boundaries). |
+| **Per-session sharing** | Each agent session has a signed roster: private, a circle, or named people, within what its project shares. |
 | **E2E messaging** | Session-to-session messages, `notify-when-idle`, and delivery via up to 3 relays. |
 | **Working-on status** | Busy/idle, label, repo, branch, a one-line summary and repo-relative files (up to 25), plus what each **subagent** is doing (`agents.v1`). `P2P_SHARE_STATUS=0` drops the summary, files and subagents. Busy/idle, the session label, the repo folder name, the branch and the status caps are still sent. |
 | **Conflict flags** | When a peer's session in the same repo changes a file yours changed, your agent is told and sends one heads-up. |

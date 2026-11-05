@@ -108,6 +108,8 @@ describe("R3-L1: a block survives circle bundles", () => {
     // The owner publishes again (distributing the chain and statements to every member).
     await a.ok(["circle", "propose", circle.cid, "rename", "l1-renamed"]);
     await b.ok(["circle", "ls"]);
+    // b's project is shared with the circle: what stops this is the block, not b's own boundary (projects.ts).
+    await b.share(circle.cid);
     const sent = await b.run(["send", "--from-session", "bs", "--to", `${ids.l1a}/as`, "still?"]);
     expect(sent.code).toBe(1);
     expect(sent.json.error).toBe("undelivered");

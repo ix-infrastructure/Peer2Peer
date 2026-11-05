@@ -40,8 +40,14 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.3
 done
 
-ann() { P2P_HOME="$DEMO_DIR/ann" node "$DEMO_BIN" "$@"; }
-ben() { P2P_HOME="$DEMO_DIR/ben" node "$DEMO_BIN" "$@"; }
+# Each user's person token (packages/p2p/src/projects.ts), as a front end passes it: the demo runs
+# as its two people without asking each of them to type "yes" on the terminal.
+for who in ann ben; do
+  mkdir -p "$DEMO_DIR/$who/cli" && chmod 700 "$DEMO_DIR/$who" "$DEMO_DIR/$who/cli"
+  node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(32).toString("base64url"), { mode: 0o600 })' "$DEMO_DIR/$who/cli/person.key"
+done
+ann() { P2P_HOME="$DEMO_DIR/ann" P2P_PERSON_TOKEN="$(cat "$DEMO_DIR/ann/cli/person.key")" node "$DEMO_BIN" "$@"; }
+ben() { P2P_HOME="$DEMO_DIR/ben" P2P_PERSON_TOKEN="$(cat "$DEMO_DIR/ben/cli/person.key")" node "$DEMO_BIN" "$@"; }
 
 # demo_inbox <who> <session>: what that session's `p2p watch --jsonl` received,
 # as plain lines (a real client keeps the watch running; the demo drains it).

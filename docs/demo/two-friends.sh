@@ -20,10 +20,15 @@ code=$(ann invite ben --json | node -p 'JSON.parse(require("fs").readFileSync(0,
 echo "Join me on Peer2Peer: p2p join $code"
 
 step "ben join <code>      # no setup needed: join creates Ben's identity"
-ben join "$code" --name ben
+ben join "$code" --name ben --yes
 
 step "ann friends      # Ann's client finishes adding Ben to the circle"
 ann friends
+
+step "ann project share && ben project share      # projects are private until shared: both share this repo with the circle"
+ann project share "$cid"
+ben circle ls >/dev/null   # Ben's next command finishes his join
+ben project share          # with his default circle: the one the code joined
 
 step "ben status --session s-ben --state busy --summary … --file src/auth/token.ts"
 ben status --session s-ben --state busy --label api --repo api --branch rate-limit \

@@ -264,9 +264,12 @@ describe("one code, several circles", () => {
     const bobId = (await bob.ok(["whoami"])).userId as string;
     for (const cid of [team, ops]) expect((await alice.ok(["circle", "members", cid])).members.map((m: { userId: string }) => m.userId)).toContain(bobId);
 
-    // The running session stayed private; a new one starts in the default circle.
+    // The running session stayed private, and so does a new one: sessions follow their project, which a
+    // code never shares (projects.ts). `p2p project share` with no circle shares it with the default circle.
     expect((await bob.ok(["session", "roster", "running"])).roster).toMatchObject({ vis: "private" });
-    expect((await bob.ok(["session", "roster", "fresh"])).roster).toMatchObject({ vis: "circle", circle: team });
+    expect((await bob.ok(["status", "--session", "fresh", "--state", "idle"])).roster).toMatchObject({ vis: "private" });
+    expect((await bob.ok(["project", "share"])).project.circles.map((c: { cid: string }) => c.cid)).toEqual([team]);
+    expect((await bob.ok(["status", "--session", "fresh", "--state", "idle"])).roster).toMatchObject({ vis: "circle", circle: team });
 
     // `p2p remove` undoes it: unfriended, and out of both circles.
     const rm = await alice.ok(["remove", bobId]);
@@ -352,6 +355,7 @@ describe("one code, several circles", () => {
   it("a bundle that won't fit fails with a clear message, never dropping a circle", async () => {
     const small = user("alice", { P2P_INVITE_BLOB_MAX: "2000" });
     Object.defineProperty(small, "home", { value: alice.home });
+    Object.defineProperty(small, "personToken", { value: alice.personToken });
     const r = await small.run(["invite", "--circle", team, "--circle", ops]);
     expect(r.json).toMatchObject({ error: "too_large" });
     expect(r.json.reason).toMatch(/joining these 2 circles doesn't fit in a code .*name fewer circles/);

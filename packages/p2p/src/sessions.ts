@@ -3,9 +3,10 @@
 // Agent sessions (docs/protocol.md §3.4, §4.2, §4.3, §6): rosters, `status`
 // envelopes, messages, `ls`, and `watch`.
 //
-//  - A session's roster defaults to `vis: "circle"` for the user's default
-//    circle, and to `private` otherwise (§6). It rides in every status and
-//    message we send into our own session.
+//  - A session's roster follows its project (projects.ts, §6): private until
+//    the person shares the project, and never wider than every project the
+//    session has worked in allows. It rides in every status and message we
+//    send into our own session.
 //  - `status` goes to everyone the roster allows (§4.2, computed with the
 //    core's own rule) and to our other devices. A session is live for 150 s
 //    after the `ts` of its last status (§4.3).
@@ -18,7 +19,7 @@
 
 import { sessionEnded } from "./running.js";
 import { enqueue, flushOutbox, OUTBOX_RETRYABLE, OUTBOX_TTL_MS, retryable } from "./outbox.js";
-import { basename } from "node:path";
+import { basename, dirname, resolve as resolvePath } from "node:path";
 import {
   createRosterV3,
   displayStatus,
@@ -51,6 +52,8 @@ import {
   redactSecrets,
   stripAbsolutePaths,
   type AcceptedMessageV3,
+  type ProjectBound,
+  parseBound,
   type ExtensionKind,
   type StatusAgent,
   type StatusAgentState,
@@ -58,10 +61,28 @@ import {
 } from "@peer2peer/core/v3";
 import type { App, Delivery } from "./app.js";
 import { CliError } from "./errors.js";
+import {
+  assertMayReach,
+  bindSession,
+  ceilingAudience,
+  defaultCircleNotice,
+  friendIds,
+  PERSON_SESSION,
+  sessionBinding,
+  agentContext,
+  sessionCeiling,
+  sessionProjectView,
+  sessionDirs,
+  sessionWorkdir,
+  MAX_SESSION_DIRS,
+  shareHint,
+  type Ceiling,
+  type SessionProjectView,
+} from "./projects.js";
 import { renderExtension, type ExtSendResult } from "./extensions.js";
 import { fromOf, makeEvent, type NewEvent } from "./inbound.js";
 import { receiptsEnabled, statusCapsEnabled } from "./config.js";
-import { CLI_CAPS, protoMinor, supportsIn } from "./features.js";
+import { CAP_PROJECTS, CLI_CAPS, protoMinor, supportsIn } from "./features.js";
 import { asksReceipts, newReceiptId, rememberAsked, rememberWanted } from "./receipts.js";
 import { sessKey, type IdleSub, type PeerStatusRec, type SessionDoc } from "./state.js";
 import { isStateEnvelope, liveStates, onStateEnvelope, stateKindCaps, stateSummaries, type StateSummary } from "./xstate.js";
@@ -114,9 +135,8 @@ type RosterSpec = Pick<SessionDoc, "vis" | "circle" | "parts" | "auto">;
  * take the new version too; a stale or conflicting one stops here, nothing
  * written.
  */
-async function writeRoster(app: App, sid: string, decide: (have: SessionDoc | undefined) => RosterSpec | undefined): Promise<SessionDoc> {
-  // What this device would sign as the default roster now: an adopted one equal to it still follows the default.
-  const want = await defaultRoster(app);
+async function writeRoster(app: App, sid: string, decide: (have: SessionDoc | undefined) => RosterSpec | undefined, want?: { vis: "circle" | "private"; circle?: string }): Promise<SessionDoc> {
+  // What this device would sign as the default roster now (`want`): an adopted one equal to it still follows the project.
   return app.state.updateAsync("sessions", async (cur = {}) => {
     const have = cur[sid];
     // The trust store may hold a newer version than state (written by an older client, a crash
@@ -173,13 +193,45 @@ export function docFromStored(sid: string, r: { ver: number; jws: string }, did:
   return { sid, ver: r.ver, vis: p.vis, ...(circle ? { circle } : {}), parts, jws: r.jws, auto };
 }
 
-/** §6: the default roster now: the default circle when it is set and joined, else private; and whether that circle is open. */
-async function defaultRoster(app: App): Promise<{ vis: "circle" | "private"; circle?: string; open?: boolean }> {
+/**
+ * What a session's roster may be now (projects.ts): its ceiling, everyone the ceiling lets in,
+ * and the roster a session nobody narrowed by hand gets. A shared project's roster names one
+ * circle (the default circle when the project shares it, else the first) and, as participants,
+ * the people it shares and the friends among the members of its other circles (a roster names
+ * one circle, §3.4: a member of a second circle who isn't a friend can't be reached through it).
+ */
+interface RosterCtx {
+  ceiling: Ceiling;
+  /** Undefined for `none`. */
+  audience?: Set<string>;
+  auto: RosterSpec;
+}
+
+async function rosterCtx(app: App, sid: string): Promise<RosterCtx> {
+  const ceiling = await sessionCeiling(app, sid);
+  const audience = await ceilingAudience(app, ceiling);
+  if (ceiling.kind !== "shared" || !audience) return { ceiling, ...(audience ? { audience } : {}), auto: { vis: "private", parts: [], auto: true } };
   const def = app.self?.defaultCircle;
-  const joined = def ? (await app.store.getCircle(def))?.joinedByMe === true : false;
-  if (!joined || !def) return { vis: "private" };
-  const c = await loadCircle(app.store, def).catch(() => undefined);
-  return { vis: "circle", circle: def, ...(c && circlePolicy(c.chain.head) === "open" ? { open: true } : {}) };
+  const circle = def && ceiling.circles.includes(def) ? def : ceiling.circles[0];
+  const inCircle = new Set<string>();
+  if (circle) for (const m of (await loadCircle(app.store, circle).catch(() => undefined))?.chain.head.members ?? []) inCircle.add(m);
+  const friends = await friendIds(app);
+  const parts = [...audience].filter((u) => !inCircle.has(u) && friends.has(u)).sort();
+  return { ceiling, audience, auto: { vis: circle ? "circle" : "private", ...(circle ? { circle } : {}), parts, auto: true } };
+}
+
+/** A roster cut down to what the ceiling allows (never wider than it was). */
+function clip(spec: RosterSpec, ctx: RosterCtx): RosterSpec {
+  if (ctx.ceiling.kind === "none" || !ctx.audience) return spec;
+  if (ctx.ceiling.kind === "private") return { vis: "private", parts: [], auto: spec.auto };
+  const circle = spec.vis === "circle" && spec.circle && ctx.ceiling.circles.includes(spec.circle) ? spec.circle : undefined;
+  return { vis: circle ? "circle" : "private", ...(circle ? { circle } : {}), parts: spec.parts.filter((u) => ctx.audience!.has(u)), auto: spec.auto };
+}
+
+function sameRoster(a: SessionDoc, b: RosterSpec): boolean {
+  const pa = [...new Set(a.parts)].sort();
+  const pb = [...new Set(b.parts)].sort();
+  return a.vis === b.vis && a.circle === b.circle && pa.length === pb.length && pa.every((x, i) => x === pb[i]) && isAutoRoster(a) === (b.auto ?? false);
 }
 
 /**
@@ -212,43 +264,32 @@ async function noteOpenCircle(app: App, sess: SessionDoc, notes: string[]): Prom
   });
 }
 
+/** Kept for clients that match these notes (older mods); this CLI no longer says them: sessions follow their project. */
 export const CODE_JOIN_NO_FOLLOW =
   "kept as it was: a code you redeemed set your default circle, and a session already running doesn't move into a circle by itself; share it with `p2p session roster <sid> --circle <cid>` (or /peers circle <cid>). New sessions start in it";
 export const OPEN_CIRCLE_NO_FOLLOW =
   "kept private: your default circle is open (anyone its owner admits can see what's shared there), so a session already running doesn't move into it by itself; share it with `p2p session roster <sid> --circle <cid>` (or /peers circle <cid>)";
 
 /**
- * The session's roster, made on first use. A roster nobody set explicitly
- * follows the default circle (§6): one made private because the default
- * circle wasn't set or joined yet (the join still waiting for the owner, the
- * default set later or on another device and synced here) is re-signed for
- * the default circle once it is, and back to private when it is unset or
- * left. Without this, such a session's statuses reached only its owner.
- * A session already running never moves into an open circle by itself
- * (review M2): it stays private, and `notes` gets one line saying why.
+ * The session's roster, made on first use, and kept within its project ceiling (projects.ts):
+ * one nobody set by hand follows its projects' policies (private until the person shares the
+ * project); one set by hand is cut down to the ceiling when the ceiling narrows (a session that
+ * worked in a private project stays private until it ends). The person's own session, and one
+ * no project is bound to yet, have no ceiling: their roster is private until set by hand.
  */
 export async function getSession(app: App, sid: string, notes?: string[]): Promise<SessionDoc> {
-  const want = await defaultRoster(app);
-  let held = false;
-  let joinHeld = false;
-  const byJoin = app.self?.defaultFromJoin;
-  const doc = await writeRoster(app, sid, (have) => {
-    if (!have) return { vis: want.vis, ...(want.circle ? { circle: want.circle } : {}), parts: [], auto: true };
-    if (!isAutoRoster(have) || (have.vis === want.vis && have.circle === want.circle)) return undefined;
-    // The default came from a code join: a session that was already running stays as it was.
-    if (want.vis === "circle" && byJoin !== undefined && want.circle === byJoin) {
-      joinHeld = true;
-      return undefined;
-    }
-    if (want.vis === "circle" && want.open) {
-      held = true;
-      return have.vis === "private" && have.circle === undefined ? undefined : { vis: "private", parts: have.parts, auto: true };
-    }
-    return { vis: want.vis, ...(want.circle ? { circle: want.circle } : {}), parts: have.parts, auto: true };
-  });
-  if (held) notes?.push(`session ${sid} ${OPEN_CIRCLE_NO_FOLLOW}`);
-  if (joinHeld) notes?.push(`session ${sid} ${CODE_JOIN_NO_FOLLOW}`);
-  return doc;
+  void notes;
+  const ctx = await rosterCtx(app, sid);
+  return writeRoster(
+    app,
+    sid,
+    (have) => {
+      if (ctx.ceiling.kind === "none") return have ? undefined : { vis: "private", parts: [], auto: true };
+      const spec = !have || isAutoRoster(have) ? ctx.auto : clip({ vis: have.vis, ...(have.circle ? { circle: have.circle } : {}), parts: have.parts, auto: false }, ctx);
+      return have && sameRoster(have, spec) ? undefined : spec;
+    },
+    ctx.auto,
+  );
 }
 
 export interface RosterView {
@@ -285,6 +326,12 @@ export async function roster(
   const cur = await getSession(app, sid);
   const change = opts.circle !== undefined || opts.private || (opts.add?.length ?? 0) > 0 || (opts.remove?.length ?? 0) > 0;
   if (!change) return rosterView(app, cur);
+  // A change (even a narrowing one) only from the session's front end once one registered it, and
+  // never from an agent's own shell (projects.ts bindSession, N2).
+  if (!app.front) {
+    if (agentContext(app.env)) throw new CliError("refused", `session ${sid}: inside an agent's session only its front end changes who sees a session`);
+    if ((await sessionBinding(app, sid))?.registered) throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it changes who sees that session`);
+  }
   if (opts.circle !== undefined && opts.private) throw new CliError("usage", "--circle and --private are exclusive");
   let vis = cur.vis;
   let circle = cur.circle;
@@ -305,16 +352,33 @@ export async function roster(
     if (u !== app.userId) add.push(u);
   }
   const remove = await Promise.all((opts.remove ?? []).map((r) => app.resolveUser(r)));
+  // Never wider than the session's projects allow (projects.ts): sharing beyond them is the
+  // project's policy, which only the person changes (`p2p project share`).
+  const ctx = await rosterCtx(app, sid);
+  if (ctx.ceiling.kind !== "none" && ctx.audience) {
+    const names = Object.values((await sessionBinding(app, sid))?.projects ?? {}).map((p) => p.name);
+    const ceiling = ctx.ceiling;
+    const deny = (what: string): never => {
+      throw new CliError("not_shared", `session ${sid} works in ${names.join(", ")}, which ${ceiling.kind === "private" ? `is private (${ceiling.why}), so it isn't shared` : "isn't shared"} ${what}: ${shareHint(names)}`);
+    };
+    if (opts.circle !== undefined && circle !== undefined && (ceiling.kind !== "shared" || !ceiling.circles.includes(circle))) deny(`with circle ${circle}`);
+    for (const u of add) if (!ctx.audience.has(u)) deny(`with ${await app.addressOf(u)}`);
+  }
   // Applied to the doc as stored when the lock is held, not as read above (review M1).
-  // Set explicitly: it no longer follows the default circle.
-  const next = await writeRoster(app, sid, (have) => {
-    const parts = new Set(have?.parts ?? []);
-    for (const u of add) parts.add(u);
-    for (const u of remove) parts.delete(u);
-    const v = opts.private ? "private" : opts.circle !== undefined ? "circle" : (have?.vis ?? vis);
-    const c = opts.private ? undefined : opts.circle !== undefined ? circle : have?.circle;
-    return { vis: v, ...(c ? { circle: c } : {}), parts: [...parts], auto: false };
-  });
+  // Set explicitly: it no longer follows the project.
+  const next = await writeRoster(
+    app,
+    sid,
+    (have) => {
+      const parts = new Set(have?.parts ?? []);
+      for (const u of add) parts.add(u);
+      for (const u of remove) parts.delete(u);
+      const v = opts.private ? "private" : opts.circle !== undefined ? "circle" : (have?.vis ?? vis);
+      const c = opts.private ? undefined : opts.circle !== undefined ? circle : have?.circle;
+      return clip({ vis: v, ...(c ? { circle: c } : {}), parts: [...parts], auto: false }, ctx);
+    },
+    ctx.auto,
+  );
   const v = await rosterView(app, next);
   if (v.openCircle) {
     app.warn("this session is shared with an open circle: anyone the owner admits can see it");
@@ -338,7 +402,10 @@ export async function sessionAudience(app: App, sid: string): Promise<{ vis: "ci
   const c = sess.vis === "circle" && sess.circle ? await loadCircle(app.store, sess.circle).catch(() => undefined) : undefined;
   // A circle that can't be loaded: who it reaches is unknown (an extension then fails closed).
   if (sess.vis === "circle" && sess.circle && !c) return undefined;
-  const members = (await rosterAudience(app, sess).catch(() => [] as string[])).filter((u) => u !== app.userId);
+  let members = (await rosterAudience(app, sess).catch(() => [] as string[])).filter((u) => u !== app.userId);
+  // The stored roster may predate a narrower ceiling (no status since): never wider than the ceiling now.
+  const cap = await ceilingAudience(app, await sessionCeiling(app, sid));
+  if (cap) members = members.filter((u) => cap.has(u));
   return { vis: sess.vis, ...(sess.circle ? { circle: sess.circle } : {}), ...(c && circlePolicy(c.chain.head) === "open" ? { open: true as const } : {}), people: members.length, members };
 }
 
@@ -378,6 +445,14 @@ export interface StatusOpts {
   /** Whether this status carries `caps` (and `agents`) at all (statusCapsEnabled); on by default. */
   emitCaps?: boolean;
   /**
+   * Directories the session works in besides its working directory (P2P_WORKDIR, else the
+   * process's): a folder it moved to, files it touched elsewhere. Each binds the session to that
+   * project for the rest of its life (projects.ts), which can only narrow who sees it.
+   */
+  projectDirs?: string[];
+  /** The front end dropped folders past its cap (`--project-dirs-over`): private. */
+  projectDirsOver?: boolean;
+  /**
    * The session's subagents (`--agents-json`), as the caller has them: entries
    * are normalized (sanitized, capped, ordered, trimmed), never trusted as is.
    */
@@ -392,6 +467,10 @@ export interface StatusResult {
   failed: { userId: string; address: string; error: string }[];
   /** What was left out rather than failing the post (review L3): caller caps that were off, invalid or over the limit. */
   warnings?: string[];
+  /** The projects this session works in and what they allow (projects.ts). */
+  project?: SessionProjectView;
+  /** The folders it was given are bound for good (a front end may stop passing them). */
+  bound?: true;
 }
 
 /**
@@ -598,7 +677,13 @@ export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (it
 
 export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult> {
   const sid = checkSid(o.session);
+  // The folders of the files it says it changes are folders it works in too (a nested repository,
+  // a path through a symlink): each binds its project.
+  const work = sessionWorkdir(app.env);
+  const fileDirs = (o.files ?? []).filter((f) => typeof f === "string").map((f) => dirname(resolvePath(work, f)));
+  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs], { ...(o.projectDirsOver ? { over: true } : {}) });
   const prev = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
+  const before = (await app.state.get("sessions"))?.[sid];
   const warnings: string[] = [];
   // The loaded extensions' state kinds are advertised as `<kind>.v1` (after the caller's own caps).
   // receipts.v1 is the caller's to claim (it reports the outcomes), and this user's to turn off.
@@ -610,6 +695,16 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   await app.connectAndDrain();
   const sess = await noteOpenCircle(app, await getSession(app, sid, warnings), warnings);
   const audience = await rosterAudience(app, sess);
+  // Narrowed since the last status: whoever could see it and no longer can gets one blank,
+  // private status under the roster they hold, so its last real one doesn't linger in their list.
+  if (before && before.jws !== sess.jws) await retract(app, sid, before, audience).catch(() => undefined);
+  if (audience.length === 0) {
+    // Nobody but this user's own devices sees it: no summary goes out (the front end skips making one).
+    delete status.summary;
+    delete status.summaryAt;
+    const notice = await defaultCircleNotice(app, sid);
+    if (notice) warnings.push(notice);
+  }
   const peers = (await app.state.get("peers")) ?? {};
   const lite = statusWithoutAgents(status);
   const delivered: StatusResult["delivered"] = [];
@@ -637,7 +732,16 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   // This device keeps the full status: its own `ls` and ExtContext.ownStatus see the agents.
   const rec: PeerStatusRec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: undefined }));
-  return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}) };
+  // `bound`: the folders the front end passed are bound for good (it can stop sending them).
+  return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid), bound: true };
+}
+
+/** The blank status a narrowed session leaves with those it no longer reaches (under their roster). */
+async function retract(app: App, sid: string, before: SessionDoc, now: readonly string[]): Promise<void> {
+  const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
+  await mapLimit(gone, STATUS_FANOUT, async (u) => {
+    await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws }).catch(() => undefined);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +843,15 @@ export interface SendOpts {
   to: string;
   text: string;
   notifyWhenIdle?: boolean;
+  /** Directories the sending session works in besides its working directory (see StatusOpts.projectDirs). */
+  projectDirs?: string[];
+  /** See StatusOpts.projectDirsOver. */
+  projectDirsOver?: boolean;
+  /**
+   * The person at their own terminal (`p2p send` typed with no --from-session, `p2p tui`): their
+   * session is theirs, never bound to a project. Set only by those two paths, never from a flag.
+   */
+  person?: boolean;
 }
 
 export interface SendResult {
@@ -765,6 +878,8 @@ export interface SendResult {
    */
   receipts?: "requested" | "unsupported";
   receiptId?: string;
+  /** The folders it was given are bound for good (see StatusResult.bound). */
+  bound?: true;
 }
 
 /** `user`, `user [ref]`, `user/ref` or `user/sid`. */
@@ -860,8 +975,10 @@ async function resolveTarget(app: App, fromSession: string, toArg: string): Prom
 }
 
 /** The roster JWS that rides with a message into (own, sid). */
-async function rosterFor(app: App, target: { own: string; sid: string }): Promise<string | undefined> {
-  return target.own === app.userId ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
+async function rosterFor(app: App, target: { own: string; sid: string; did?: string }): Promise<string | undefined> {
+  // One of ours on another device: its roster as held (that device signs it, never this one).
+  const here = target.own === app.userId && (target.did === undefined || target.did === app.did);
+  return here ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
 }
 
 /**
@@ -879,7 +996,7 @@ export async function sendSharing(app: App, o: SendOpts): Promise<{ result: Send
     added = true;
   }
   try {
-    const result = await sendMessage(app, o);
+    const result = await sendMessage(app, { ...o, person: true });
     return added ? { result, shared: { userId: uid, address: await app.addressOf(uid) } } : { result };
   } catch (e) {
     // Nothing was sent: the session goes back to whom it was shared with before.
@@ -892,6 +1009,8 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
   const fromSession = checkSid(o.fromSession, "--from-session");
   if (Buffer.byteLength(o.text, "utf8") > MAX_TEXT_BYTES) throw new CliError("too_large", `message text is at most ${MAX_TEXT_BYTES} bytes`);
   if (o.text === "" && !o.notifyWhenIdle) throw new CliError("usage", "nothing to send (give text, or --notify-when-idle)");
+  // Bound before anything is read or sent: the project ceiling decides who this may reach.
+  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...(o.projectDirsOver ? { over: true } : {}) });
   // This device can't reach any of its relays: the message can still be sealed and kept in the
   // outbox (outbox.ts) for `watch` to send once it can.
   let offline = false;
@@ -900,6 +1019,8 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
     else throw e;
   });
   const { userId, target, to, offlineSince } = await resolveTarget(app, fromSession, o.to);
+  // The exfiltration barrier (projects.ts): nothing from this session to anyone its projects don't share.
+  if (o.text !== "") await assertMayReach(app, fromSession, userId, { person: o.person === true, address: to.address });
   let d: Delivery | undefined;
   let outboxed: { expiresAt: number } | undefined;
   // Receipts only from a session whose live status says it sends them: an older client rejects the
@@ -910,7 +1031,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
     // Anything this device couldn't send earlier goes first (order, and it may be the same peer).
     if (!offline) await flushOutbox(app).catch(() => undefined);
     const rosterJws = await rosterFor(app, target);
-    const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}) };
+    const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}), ...(o.person ? {} : await ownBound(app, fromSession, target, userId)) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
     d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
     const unsent = d.unsent ?? [];
@@ -937,6 +1058,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
         ? { queued: true as const, state: "offline" as const, lastSeen: offlineSince, expiresAt: Date.now() + OUTBOX_TTL_MS }
         : {};
   return {
+    ...(o.person ? {} : { bound: true as const }),
     // Accepted by a relay (it stores ciphertext for its session for 7 days), or not yet.
     delivered: d !== undefined && relays > 0,
     to,
@@ -959,6 +1081,8 @@ export interface SendExtOpts {
   v: number;
   body: unknown;
   fallback: string;
+  /** Directories the sending session works in besides its working directory (see StatusOpts.projectDirs). */
+  projectDirs?: string[];
 }
 
 /**
@@ -977,10 +1101,12 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   const ext = { v: o.v, body: o.body };
   const bytes = Buffer.byteLength(JSON.stringify(ext) ?? "", "utf8");
   if (bytes > MAX_EXT_PLAINTEXT_BYTES) throw new CliError("too_large", `the extension body is ${bytes} bytes; at most ${MAX_EXT_PLAINTEXT_BYTES}`);
+  await bindFromEnv(app, fromSession, o.projectDirs ?? []);
   await app.connectAndDrain();
   const { userId, target, to } = await resolveTarget(app, fromSession, o.to);
+  await assertMayReach(app, fromSession, userId, { address: to.address });
   const rosterJws = await rosterFor(app, target);
-  const plaintext = { ext, fallback: o.fallback, ...(rosterJws ? { roster: rosterJws } : {}) };
+  const plaintext = { ext, fallback: o.fallback, ...(rosterJws ? { roster: rosterJws } : {}), ...(await ownBound(app, fromSession, target, userId)) };
   const d = await app.deliver(userId, o.kind as ExtensionKind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
   if (d.relays.length === 0) {
     throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
@@ -988,7 +1114,7 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   if (target.own !== app.userId) {
     await app.state.update("spoke", (cur = {}) => ({ next: { ...cur, [sessKey(target.own, target.sid)]: fromSession }, result: undefined }));
   }
-  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes };
+  return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes, bound: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,16 +1126,30 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
   const from = await fromOf(app, r);
   const ref = sessionRef(e.own, e.sid);
   const spoke = (await app.state.get("spoke")) ?? {};
-  const toSession = e.own === app.userId ? e.sid : spoke[sessKey(e.own, e.sid)];
+  let toSession: string | undefined = e.own === app.userId ? e.sid : spoke[sessKey(e.own, e.sid)];
+  const pt = r.plaintext;
+  // A reply into a session of ours that spoke to theirs: only while that session may still reach
+  // the sender (projects.ts). Otherwise it is a message to this user, routed by `routable` below.
+  const carries = pt.kind === "msg" || ("ext" in pt && !isStateEnvelope(app.extensions, pt));
+  if (carries && toSession !== undefined && e.own !== app.userId && !from.self && !(await mayReach(app, toSession, e.from))) toSession = undefined;
+  // Into a session of ours from someone its projects don't reach: dropped here, whatever roster came
+  // with it (one signed by another device of ours, an older client's, can't widen this one's).
+  if (carries && e.own === app.userId && !from.self && !(await mayReach(app, e.sid, e.from))) return [];
+  // From another session of ours: whatever bounded it now bounds the session it went into.
+  const bound = (pt as { bound?: ProjectBound }).bound;
+  if (carries && from.self && bound !== undefined && toSession !== undefined && toSession !== PERSON_SESSION) {
+    await bindSession(app, toSession, [], { constraint: bound, inbound: true });
+  }
   const sess = { own: e.own, sid: e.sid, ref, rule: r.rule, ...(r.viewerRule ? { viewerRule: r.viewerRule } : {}) };
   const extra = { own: e.own, sid: e.sid, ...(toSession ? { toSession } : {}) };
-  const pt = r.plaintext;
+  // Named for no session of ours: which local sessions may hold it (watch shows it only to those).
+  const routable = carries && toSession === undefined && !from.self ? { routable: await routableSessions(app, e.from) } : {};
   switch (pt.kind) {
     case "msg": {
       // §4.3 "Delivery receipts": the sender asked. Remembered for `p2p receipt` (receipts.ts), which
       // decides what goes back; the event says only that one may (`receipt: true`), never the id.
       const asks = typeof pt.rcpt === "string" && receiptsEnabled(app.env, app.home);
-      const main = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, ...(asks ? { receipt: true } : {}) }, extra);
+      const main = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, ...(asks ? { receipt: true } : {}), ...routable }, extra);
       const out = [main];
       if (asks) await rememberAsked(app, main.id, { id: pt.rcpt!, from: e.from, did: e.fdid, ...(toSession !== undefined ? { toSession } : {}) });
       // For a session of this device that has ended (its watch stopped: /exit, or replaced after
@@ -1018,7 +1158,10 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
       // back. Same sender, same text, same hold and screen rules; if the session does resume, it
       // still gets the message itself (and this copy isn't shown there).
       if (toSession !== undefined && sessionEnded(app, toSession)) {
-        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}) }, {}, "unclaimed");
+        // From another session of ours with a bound: only sessions already within it may hold it, and the
+        // one that does takes the bound on (the front end binds it on Deliver: `bound` rides with it).
+        const held = from.self ? (bound !== undefined ? { routable: await sessionsWithin(app, bound), bound } : {}) : { routable: await routableSessions(app, e.from) };
+        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}), ...held }, {}, "unclaimed");
         out.push(copy);
         if (asks) await rememberAsked(app, copy.id, { id: pt.rcpt!, from: e.from, did: e.fdid, unclaimedFor: toSession });
       }
@@ -1069,7 +1212,7 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
           from: { userId: from.userId, address: from.address, self: from.self },
           session: { own: e.own, sid: e.sid, ref },
         });
-        const data: Record<string, unknown> = { from, ...sess, ext: pt.kind, fallback };
+        const data: Record<string, unknown> = { from, ...sess, ext: pt.kind, fallback, ...routable };
         if (r.rendered) data.rendered = r.rendered;
         if (r.extError) data.extError = r.extError;
         // Underscore fields stay in the local log for user-initiated actions; `watch` never prints them.
@@ -1079,6 +1222,106 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
       return [];
     }
   }
+}
+
+/**
+ * Binds `sid` to the folders its front end reports (projects.ts sessionDirs: P2P_WORKDIR,
+ * P2P_PROJECT_DIRS, past its cap private) and any more the caller names.
+ */
+export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean; over?: boolean } = {}): Promise<void> {
+  const { dirs, over } = sessionDirs(app.env);
+  // Past the cap in folders named on the command line too: private, never the first N.
+  const tooMany = extra.length > MAX_SESSION_DIRS;
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over || tooMany || o.over ? { over: true } : {}) });
+}
+
+/** Whether a ceiling is within a bound (narrower or equal): private always is. */
+function within(c: Ceiling, b: ProjectBound): boolean {
+  if (c.kind === "private") return true;
+  if (c.kind === "none" || b === "private") return false;
+  return c.circles.every((x) => b.circles.includes(x)) && c.people.every((x) => b.people.includes(x));
+}
+
+/** This device's live sessions already within a bound (and the person's own terminal session): who may hold an own-session message that carries it. */
+export async function sessionsWithin(app: App, b: ProjectBound, now = Date.now()): Promise<string[]> {
+  const peers = (await app.state.get("peers")) ?? {};
+  const out = new Set<string>([PERSON_SESSION]);
+  for (const p of Object.values(peers)) {
+    if (p.own !== app.userId || p.did !== app.did || !isLive(p.ts, now) || out.has(p.sid)) continue;
+    if (within(await sessionCeiling(app, p.sid), b)) out.add(p.sid);
+  }
+  return [...out].sort();
+}
+
+/** `p2p session bound`: a front end binds the session that took an own-session message to that message's bound (sticky). */
+export async function bindBound(app: App, sid: string, bound: unknown): Promise<SessionProjectView> {
+  checkSid(sid, "sid");
+  let b: ProjectBound;
+  try {
+    b = parseBound(bound, "bound");
+  } catch {
+    throw new CliError("usage", 'bound must be "private" or {circles, people}');
+  }
+  await bindSession(app, sid, [], { constraint: b });
+  return sessionProjectView(app, sid);
+}
+
+/**
+ * What a session of ours may reach, for a message to another session of ours (`bound`, cap
+ * projects.v1): undefined when it has no ceiling (the person's own session, one never bound).
+ */
+async function boundOf(app: App, sid: string): Promise<ProjectBound | undefined> {
+  const c = await sessionCeiling(app, sid);
+  if (c.kind === "none") return undefined;
+  return c.kind === "private" ? "private" : { circles: c.circles, people: c.people };
+}
+
+/**
+ * A message from a bounded session to another session of ours carries its bound (laundering
+ * through your own sessions, projects.ts). One on another device whose client can't honour it
+ * (its live status doesn't advertise projects.v1) is refused here; the field is critical, so an
+ * older client that gets one anyway rejects it.
+ */
+async function ownBound(app: App, fromSession: string, target: { own: string; sid: string; did?: string }, userId: string): Promise<Record<string, unknown>> {
+  if (userId !== app.userId || target.own !== app.userId) return {};
+  const bound = await boundOf(app, fromSession);
+  if (bound === undefined) return {};
+  if (target.did && target.did !== app.did) {
+    const rec = (await app.state.get("peers"))?.[sessKey(target.own, target.sid)];
+    const caps = rec ? (displayStatus(rec.status).caps ?? []) : [];
+    if (!caps.includes(CAP_PROJECTS)) {
+      throw new CliError(
+        "not_shared",
+        `session ${fromSession} works in a project with limits, and your session ${target.sid} runs on another device whose client doesn't keep project boundaries: update Peer2Peer there first (docs/compatibility.md)`,
+        { delivered: false },
+      );
+    }
+  }
+  return { bound, crit: ["bound"] };
+}
+
+/** Whether a session of ours may reach `user` (projects.ts): the same rule its sends follow. */
+export async function mayReach(app: App, sid: string, user: string): Promise<boolean> {
+  return assertMayReach(app, sid, user).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
+ * The local sessions a message for no session may be held in: this device's live sessions whose
+ * projects reach the sender, and the person's own terminal session. Every other session's watch
+ * never shows it (watch.ts eventFor), and the mod picks its holder among these.
+ */
+export async function routableSessions(app: App, sender: string, now = Date.now()): Promise<string[]> {
+  const peers = (await app.state.get("peers")) ?? {};
+  const out = new Set<string>([PERSON_SESSION]);
+  for (const p of Object.values(peers)) {
+    if (p.own !== app.userId || p.did !== app.did || !isLive(p.ts, now) || out.has(p.sid)) continue;
+    if ((await sessionCeiling(app, p.sid)).kind === "none") continue;
+    if (await mayReach(app, p.sid, sender)) out.add(p.sid);
+  }
+  return [...out].sort();
 }
 
 async function takeSubs(app: App, own: string, sid: string): Promise<IdleSub[]> {

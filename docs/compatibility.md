@@ -111,6 +111,17 @@ The matrix checks all of this, both ways.
 
 A code's bundle names its first circle in `circle`, which every client joins, and up to 4 more in `circles` (heads only). A client from before `circles` ignores the field, as it ignores any field it doesn't know, and joins only the first circle; the inviter still adds it to the others, which reach it as ordinary circle invites for its user to approve. That downgrade is acceptable, so `circles` is not listed in `crit`. Clients that join them all advertise `invite.circles.v1`; when the inviter holds a status from the redeemer without it, its notice says the redeemer's client looks older. The matrix checks both directions: an older redeemer joins the first circle and holds the second.
 
+### Project boundaries
+
+Project boundaries (docs/concepts.md "Projects") change no envelope: a private project's session signs an ordinary `vis:"private"` roster with nobody on it, and the rest is local decisions (what this client sends, and what it accepts into its own sessions). So:
+
+- **Older peers still work.** They see a shared project's sessions as before, and never see a private one's: its status isn't sent to them. A message from an older peer into a session outside its audience is refused at the older client (the roster says so) or, failing that, dropped here.
+- **Your own older device can't widen it.** A roster for a session signed by another device of yours is never adopted by the device that runs the session (as before), and that device drops anything coming into the session from outside its projects' audience, whatever roster the message presents.
+- **Messages between your own sessions** carry `bound` (critical) from a session with a ceiling: an older client of yours rejects it rather than ignore it, and a session on a device whose status doesn't advertise `projects.v1` isn't sent to at all (`not_shared`, "update Peer2Peer there"). `p2p doctor` warns when one of your other devices runs a client without project boundaries.
+- **Devices must update.** An older client keeps the old rule for the sessions *it* runs: new sessions follow the default circle. Policies are per device, so share each project on every updated device that works in it.
+
+`scripts/compat/matrix.mjs` checks that a session in an unshared project reaches nobody, an older peer included, and can't send to it, in both directions.
+
 ## Relays
 
 - **What a relay lists.** `/.well-known/p2p-relay.json` now lists:

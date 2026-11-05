@@ -20,6 +20,7 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve as resolvePath } from "node:path";
 import type { ExtCommand, ExtContext, ExtEvent, ExtReceived, ExtReceiveInput, P2PExtension } from "@peer2peer/cli";
 import { ixNeighbourhood, semanticConflicts } from "./conflicts.js";
+import { audienceOf } from "./overlap-command.js";
 import { FOOTPRINT_KIND, FOOTPRINT_TTL, parseFootprintBody } from "./footprint.js";
 import { footprintCommands } from "./footprint-command.js";
 import { buildImpact, IMPACT_KIND, impactFallback, parseImpactBody, renderImpact } from "./impact.js";
@@ -511,7 +512,9 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         if (mine.length === 0) return { json: { conflicts: [], errors: [], checked: 0 }, human: "No files of yours to check (give --file, or --session with a posted status)." };
         const ix = runner(ctx, deps);
         if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
-        const peers = (await ctx.peers()).filter((p) => p.live && !p.thisDevice && !(p.self && p.sid === opts.session));
+        // For a session: only sessions its status reaches (project boundaries), and this user's own.
+        const reach = typeof opts.session === "string" ? await audienceOf(ctx, opts.session, (await ctx.self()).userId) : undefined;
+        const peers = (await ctx.peers()).filter((p) => p.live && !p.thisDevice && !(p.self && p.sid === opts.session) && (!reach || reach.has(p.own)));
         const r = await semanticConflicts({ mine, peers, repo, neighbourhood: ixNeighbourhood(ix) });
         const human = r.conflicts.length ? r.conflicts.map((c) => c.message).join("\n") : `No semantic conflicts with ${peers.length} live session${peers.length === 1 ? "" : "s"}.`;
         return { json: { ...r, checked: peers.length }, human };

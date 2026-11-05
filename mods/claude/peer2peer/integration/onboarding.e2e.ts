@@ -94,8 +94,12 @@ describe.skipIf(!hasSetup)('onboarding: setup, invite, join, and the sessions se
   it('then the two sessions see each other', async () => {
     // What the mod does: the joiner shares its session with the inviter (no circle), and the
     // inviter's session that made the code shares itself with whoever redeemed it.
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ben.p2p.project(['share', `--person=${ann.userId}`])
     const shared = await ben.p2p.roster(SID_B, { add: ann.userId })
     expect(shared.ok).toBe(true)
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ann.p2p.project(['share', `--person=${ben.userId}`])
     const back = await ann.p2p.roster(SID_A, { add: ben.userId })
     expect(back.ok).toBe(true)
     for (const [u, sid] of [[ann, SID_A], [ben, SID_B]] as const) await u.p2p.status({ session: sid, state: 'idle', label: u.name })

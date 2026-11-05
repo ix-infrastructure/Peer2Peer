@@ -3,7 +3,7 @@
 // Shared by the integration tests: node's child_process as the mod's Exec,
 // temporary P2P homes on the built CLI, an in-process relay.
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 import type { Chunk, Exec, RunResult } from '../hooks/backend'
 import { P2P } from '../hooks/backend'
+import { PERSON_TOKEN_SCRIPT } from '../hooks/lib'
 // @ts-ignore: built JS, typed by its own package
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from '../../../../packages/relay/dist/index.js'
 
@@ -87,10 +88,22 @@ export function nodeExec(env: Record<string, string>): Exec {
 
 export type User = { name: string; home: string; p2p: P2P; exec: Exec; userId: string; address: string }
 
-export function user(name: string, port: number, extraEnv: Record<string, string> = {}): User {
-  const home = mkdtempSync(join(tmpdir(), `p2p-mod-${name}-`))
+/** The person token as the mod makes it on a fresh install: its own script (lib PERSON_TOKEN_SCRIPT), nothing pre-seeded. */
+export function modPersonToken(home: string): string {
+  return execFileSync(process.execPath, ['-e', PERSON_TOKEN_SCRIPT, join(home, 'cli', 'person.key')], { encoding: 'utf8' })
+}
+
+/**
+ * A user as the mod runs p2p for them: inside Claude Code (CLAUDECODE=1, as an agent's context
+ * looks to the CLI), with the person token the mod makes itself (`token: false`: none at all).
+ */
+export function user(name: string, port: number, extraEnv: Record<string, string> = {}, o: { token?: boolean; home?: string } = {}): User {
+  const home = o.home ?? mkdtempSync(join(tmpdir(), `p2p-mod-${name}-`))
+  const token = o.token === false ? '' : modPersonToken(home)
   const exec = nodeExec({
     P2P_HOME: home,
+    CLAUDECODE: '1',
+    ...(token ? { P2P_PERSON_TOKEN: token } : {}),
     P2P_DEFAULT_RELAYS: RELAY,
     P2P_RELAY_TRANSPORT: JSON.stringify({ [RELAY]: `ws://127.0.0.1:${port}/v3` }),
     P2P_DRAIN_QUIET_MS: '250',

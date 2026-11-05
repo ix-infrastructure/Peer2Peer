@@ -1,9 +1,12 @@
 // Copyright 2026 Ix Infrastructure Inc.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { childEnv } from "../knobs.js";
+import { personTokenOf } from "../server.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { guard, runHook } from "../hook.js";
+import { guard, runHook, touchedPaths } from "../hook.js";
+import { loadThread, loadThreadDirs, saveThreadDirs } from "../bridge.js";
 import { findEntry, readEntries, serve, socketPath, writeEntry, type Entry } from "../ipc.js";
 import { lineFeeder, McpServer, text } from "../mcp.js";
 
@@ -121,5 +124,96 @@ describe("MCP transport", () => {
     await feeder.end();
     await new Promise((r) => setTimeout(r, 10));
     expect(out.find((m) => m.id === 9)?.result.content[0].text).toBe('{"action":"decline"}');
+  });
+});
+
+describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)", () => {
+  it("the model's shell speaks only for this bridge's session, however it quotes the id (H5)", () => {
+    expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" }, [], "codex-1")).toBeNull();
+    expect(guard("Bash", { command: "p2p send --from-session=fake --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
+    expect(guard("Bash", { command: "p2p send --from-session=''codex-1x --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
+    // No bridge found for this call: no session id at all.
+    expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" })).toContain("speaks only for this Codex session");
+  });
+
+  it("interpreter code, pseudo-terminals and project shares naming p2p are refused (H4)", () => {
+    for (const command of [
+      `python3 -c 'import subprocess; subprocess.run(["p2p","project","share","c_x"])'`,
+      `node -e 'require("child_process").execSync("p2p send --to ben x")'`,
+      "script -q /dev/null p2p send --to ben x",
+      "p2p project share c_x",
+    ]) expect(guard("Bash", { command }, [], "codex-1"), command).not.toBeNull();
+    expect(guard("Bash", { command: "python3 -c 'print(1)'" }, [], "codex-1")).toBeNull();
+  });
+
+  it("paths a call reaches outside its folder are reported (H2)", () => {
+    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual({ paths: ["/secret", "/w/other/x", "/home/u/notes"], over: false });
+    expect(touchedPaths("apply_patch", { input: "*** Begin Patch\n*** Update File: ../lib/a.ts\n" }, "/w/repo", undefined).paths).toContain("/w/lib/a.ts");
+  });
+
+  it("a thread's folders survive a resume (H3)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-thread-"));
+    homes.push(home);
+    saveThreadDirs(home, "thread-1", ["/secret", "/w/repo"]);
+    expect(loadThreadDirs(home, "thread-1")).toEqual(["/secret", "/w/repo"]);
+    expect(loadThreadDirs(home, "thread-2")).toEqual([]);
+  });
+});
+
+describe("project boundaries in the Codex guard: caps and residuals (PR #30 re-review)", () => {
+  it("padding can't push a session id past what is read (N3), and a long command naming p2p is refused unread", () => {
+    expect(guard("Bash", { command: `p2p ${"x ".repeat(6000)} --from-session fake --to ben hi` }, [], "codex-1")).not.toBeNull();
+    expect(guard("Bash", { command: `p2p ls ${"y".repeat(20 * 1024)}` }, [], "codex-1")).toContain("too long");
+  });
+
+  it("paths built at run time, or too many, make the session private; $HOME and $PWD resolve (M1, H2)", () => {
+    expect(touchedPaths("Bash", { command: "cat $HOME/notes/a.md" }, "/w/repo", "/home/u")).toEqual({ paths: ["/home/u/notes"], over: false });
+    expect(touchedPaths("Bash", { command: "cat $SECRET/x" }, "/w/repo", "/home/u").over).toBe(true);
+    expect(touchedPaths("Bash", { command: Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(" ") }, "/w/repo", "/home/u").over).toBe(true);
+    expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).over).toBe(true);
+  });
+
+  it("a thread saved as over stays over; a file it can't read fails closed (H3)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-thread-over-"));
+    homes.push(home);
+    saveThreadDirs(home, "t-over", ["/a"], true);
+    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true });
+    saveThreadDirs(home, "t-bad", ["/a"]);
+    const f = readdirSync(join(home, "codex-threads")).map((n) => join(home, "codex-threads", n));
+    for (const x of f) writeFileSync(x, "{not json");
+    expect(loadThread(home, "t-bad").over).toBe(true);
+  });
+});
+
+describe("PR #30 third review: quoting, a bridge that can't be told, the token's reach", () => {
+  it("quoted $ is text; $PWD inside a word expands; an expansion in the first segment is private (M2)", () => {
+    expect(touchedPaths("Bash", { command: "sed 's/$/;/' notes.txt" }, "/w/repo", "/home/u").over).toBe(false);
+    expect(touchedPaths("Bash", { command: "docker run -v $PWD:/app img" }, "/w/repo", "/home/u").over).toBe(false);
+    expect(touchedPaths("Bash", { command: "cat src/$NAME.ts" }, "/w/repo", "/home/u")).toEqual({ paths: ["/w/repo/src"], over: false });
+    expect(touchedPaths("Bash", { command: "tsc --outDir=$OUT/dist" }, "/w/repo", "/home/u").over).toBe(true);
+  });
+
+  it("a call that reaches folders is refused when the bridge can't be told (M6)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-hook-told-"));
+    homes.push(home);
+    writeEntry(home, entry({ pid: process.pid, threadId: "thread-x", sock: join(home, "no-such.sock"), sid: "codex-1" }));
+    const out = await runHook("PreToolUse", JSON.stringify({ hook_event_name: "PreToolUse", session_id: "thread-x", cwd: "/w/repo", tool_name: "Bash", tool_input: { command: "cat /secret/keys.ts" } }), { home });
+    expect(JSON.parse(out).hookSpecificOutput.permissionDecision).toBe("deny");
+    // Nothing outside to report: allowed, as before.
+    expect(await runHook("PreToolUse", JSON.stringify({ hook_event_name: "PreToolUse", session_id: "thread-x", cwd: "/w/repo", tool_name: "Bash", tool_input: { command: "ls" } }), { home })).toBe("");
+  });
+
+  it("the person token reaches only p2p's short runs: never another child, never the watch (N1, M3)", () => {
+    expect(childEnv({ P2P_PERSON_TOKEN: "x".repeat(43), P2P_HOME: "/h" }).P2P_PERSON_TOKEN).toBeUndefined();
+    expect(childEnv({ P2P_HOME: "/h" }, { P2P_PERSON_TOKEN: "t" }).P2P_PERSON_TOKEN).toBe("t");
+  });
+
+  it("the bridge makes the person token itself on a fresh install, exclusively (R1)", () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-tok-"));
+    homes.push(home);
+    const t = personTokenOf(home);
+    expect(t).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(personTokenOf(home)).toBe(t);
+    expect(statSync(join(home, "cli", "person.key")).mode & 0o777).toBe(0o600);
   });
 });

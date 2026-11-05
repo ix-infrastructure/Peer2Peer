@@ -106,6 +106,8 @@ describe('the plugin\'s ext-ix with the bundled p2p', () => {
   })
 
   it('a subgraph reference from Ann\'s repo reaches Ben\'s watcher rendered; the mod frames it', async () => {
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ben.p2p.project(['share', `--person=${ann.userId}`])
     await ben.p2p.roster(SID_B, { add: ann.userId })
     await ben.p2p.status({ session: SID_B, state: 'idle', label: 'api', mode: 'default' })
     benWatch = watchLoop(ben.exec, BIN, SID_B, { isEnded: () => isWatchEnded, onEvent: async e => void benEvents.push(e), sleep })
@@ -114,6 +116,8 @@ describe('the plugin\'s ext-ix with the bundled p2p', () => {
 
       return ls.ok && ls.value.some(p => p.own === ben.userId && p.sid === SID_B) ? true : undefined
     })
+    // Ann's project is shared with ben too: a session sends only within its project (projects.ts).
+    await ann.p2p.project(['share', `--person=${ben.userId}`])
     const sent = await ann.p2p.ixSend({ kind: 'subgraph', fromSession: SID_A, to: ben.userId, pattern: 'src/auth/*', why: 'token refresh' })
     expect(sent.ok).toBe(true)
     // P2P_WORKDIR: the repo Ann's session is in, not the plugin folder p2p runs from.
@@ -129,6 +133,8 @@ describe('the plugin\'s ext-ix with the bundled p2p', () => {
     expect(shown.ok && shown.value.body).toMatchObject({ selector: { type: 'path', pattern: 'src/auth/*' }, why: 'token refresh' })
   })
   it('Ann\'s footprint is kept as her session\'s state at Ben\'s, and never reaches his watcher or the mod\'s rows', async () => {
+    // Projects are private until shared (projects.ts): the person shares this one first.
+    await ann.p2p.project(['share', `--person=${ben.userId}`])
     await ann.p2p.roster(SID_A, { add: ben.userId })
     await ann.p2p.status({ session: SID_A, state: 'busy', label: 'web', mode: 'default', files: ['src/auth/token.ts'] })
     await ben.p2p.status({ session: SID_B, state: 'busy', label: 'api', mode: 'default' })

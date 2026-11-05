@@ -223,6 +223,8 @@ describe("hooks: delivery, turn caps, status", () => {
   it("UserPromptSubmit: busy and a summary reminder, but mode-dependent messages wait for PostToolUse (M3)", async () => {
     const { bridge, feed, world, asking } = await makeBridge();
     await asking();
+    // A session whose project is shared (the reminder is only for those: a private one makes no summary).
+    bridge.isPrivate = false;
     await bridge.onHook({ event: "SessionStart", sessionId: "thread-1" });
     await feed(message({ text: "rebase please" }));
     const atPrompt = (await bridge.onHook({ event: "UserPromptSubmit" })) as { hookSpecificOutput?: { additionalContext?: string } };
@@ -233,6 +235,30 @@ describe("hooks: delivery, turn caps, status", () => {
     expect(atTool.hookSpecificOutput?.additionalContext).toContain("rebase please");
     await bridge.settled();
     expect(world.statuses().at(-1)?.argv).toContain("--state=busy");
+  });
+
+  it("UserPromptSubmit: a private session (its project isn't shared) gets no summary reminder: nobody would see it", async () => {
+    const { bridge } = await makeBridge();
+    expect(bridge.isPrivate).toBe(true);
+    const atPrompt = (await bridge.onHook({ event: "UserPromptSubmit" })) as { hookSpecificOutput?: { additionalContext?: string } };
+    expect(atPrompt.hookSpecificOutput?.additionalContext ?? "").not.toContain("p2p_status");
+  });
+
+  it("past the bridge's folder cap the CLI is told the session is private, never the first 512 (M1)", async () => {
+    const { bridge, world } = await makeBridge();
+    bridge.noteTouched(Array.from({ length: 600 }, (_, i) => `/many/d${i}`));
+    await bridge.settled();
+    expect(bridge.isDirsOver).toBe(true);
+    expect(world.statuses().at(-1)?.argv).toContain("--project-dirs-over");
+  });
+
+  it("status and p2p_send carry every folder the session has worked in (projects.ts binds each one's project)", async () => {
+    const { bridge, world } = await makeBridge();
+    await bridge.setCwd("/elsewhere/secret");
+    await bridge.settled();
+    const st = world.statuses().at(-1)?.argv ?? [];
+    expect(st).toContain("--project-dir=/elsewhere/secret");
+    expect(bridge.sessionDirs()).toContain("/elsewhere/secret");
   });
 
   it("UserPromptSubmit still delivers what doesn't depend on the mode (own devices)", async () => {
