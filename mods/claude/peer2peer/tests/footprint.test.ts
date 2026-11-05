@@ -261,10 +261,12 @@ describe('peer2peer: the Ix footprint', () => {
     expect(uncheckableShell(`echo ${'x'.repeat(17000)}`)).toBeNull()
     expect(uncheckableShell(`p2p ls # ${'x'.repeat(17000)}`)).toMatch(/too long/)
     // No quadratic rescans: the cost from n to 4n, against this machine itself (about 4 when linear).
-    expect(growth((n) => {
+    const g = growth((n) => {
       uncheckableShell(`p2p ls; ${'a=1 '.repeat(n / 4)}`)
       uncheckableShell(`p2p ls; ${'$('.repeat(n / 2)}`)
-    }, 2000)).toBeLessThan(9)
+    }, 2000)
+    expect(g.ratio).toBeLessThan(9)
+    expect(g.totalMs).toBeLessThan(10_000)
     const w = world(on)
     await loaded($, w)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'echo "p2p ix config names=plain" | sh' } as never)

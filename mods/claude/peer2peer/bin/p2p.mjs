@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.0 63c8318de2399fe5
+// @peer2peer/core 0.1.0 d77b0829507b4e3c
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -10217,7 +10217,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
         const p = decodeJws(j).payload;
         if (p.iss !== userId || before && p.ik !== before.ik)
           return void 0;
-        if (seen.has(jwsHash(j)))
+        const h = jwsHash(j);
+        if (seen.has(h) || walk && chain.has(h))
           return void 0;
         if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId)
           return void 0;
@@ -10225,7 +10226,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       } catch {
         return void 0;
       }
-    }).filter((x) => x !== void 0).sort((a, b) => b.ver - a.ver).slice(0, MAX_EXAMINED_PER_RELAY);
+    }).filter((x) => x !== void 0).sort((a, b) => walk ? a.ver - b.ver : b.ver - a.ver).slice(0, MAX_EXAMINED_PER_RELAY);
     const out = [];
     let used = 0;
     let cut = false;
@@ -10276,9 +10277,15 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const answeredRelays = /* @__PURE__ */ new Set();
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
-  const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / relays.length]));
+  const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / 2 / relays.length]));
+  let walkCut = false;
   const fetchEach = async (f, keep, walk = false) => {
-    const answers = await Promise.all(relays.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
+    const asked = walk ? relays.filter((r) => walkTimeLeft.get(r) > 0 && walkLeft.get(r) > 0) : relays;
+    if (walk && asked.length === 0) {
+      walkCut = true;
+      return [];
+    }
+    const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) {
       for (const { r, res } of answers)
         if (res !== void 0)
@@ -10289,7 +10296,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       docsCapped = true;
       return [];
     }
-    const share = checkMs / relays.length;
+    const share = checkMs / 2 / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r) : quota;
       const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r) : share);
@@ -10303,6 +10310,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const docs = results.flatMap((x) => x.docs);
     if (answered2.length > 0 && answered2.every((x) => x.cut) && (!walk || docs.length === 0))
       docsCapped = true;
+    if (walk && docs.length > 0 && results.some((x) => x.cut))
+      walkCut = true;
     return docs;
   };
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);
@@ -10311,7 +10320,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   begin2();
   place(tips);
   end();
-  for (let req = 0; chainOf && gaps.length > 0 && !exhausted && req < CHAIN_WALK_MAX_REQUESTS; req++) {
+  let requests = 0;
+  for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     const lowestGap = gaps.reduce((a, b) => b.d.ver < a.d.ver ? b : a);
     const page = await fetchEach((r) => chainOf(userId, [r], lowestGap.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
     if (page.length === 0)
@@ -10320,6 +10330,10 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     place(page);
     end();
   }
+  if (requests >= CHAIN_WALK_MAX_REQUESTS)
+    walkCut = true;
+  if (gaps.length > 0 && walkCut)
+    docsCapped = true;
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;

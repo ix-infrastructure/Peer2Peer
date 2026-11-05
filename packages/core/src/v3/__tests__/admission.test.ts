@@ -68,12 +68,31 @@ describe("T1: hostile relays can't starve an honest one", () => {
     void head;
   });
 
+  /** u's whole history as a relay serves the §5.6 walk: from `to` back, newest first, at most n. */
+  const walkFrom = (docs: readonly { hash: string; jws: string }[]) => async (_u: string, _r: readonly string[], to: string, n: number) => {
+    const at = docs.findIndex((d) => d.hash === to);
+    return at < 0 ? [] : docs.slice(Math.max(0, at - n + 1), at + 1).reverse().map((d) => d.jws);
+  };
+
+  /** Refreshes until complete: each one incomplete or complete (never chain-broken or a jump), the head never going back. */
+  async function catchUp(refresh: () => Promise<{ incomplete?: boolean; head: { ver: number; hash: string } }>, max: number) {
+    let last = 0;
+    for (let i = 1; i <= max; i++) {
+      const v = await refresh();
+      expect(v.head.ver).toBeGreaterThanOrEqual(last);
+      last = v.head.ver;
+      if (!v.incomplete) return { view: v, refreshes: i };
+    }
+    throw new Error(`still incomplete after ${max} refreshes (head ver ${last})`);
+  }
+
   it("the chain walk too: the junk relays' pages use up only their own share of the time", async () => {
     // A client 19 versions behind (more than the 8 tips a relay gives) fills the gap with the chain walk.
     // The 4 hostile relays answer every chain request with 256 junk documents; the honest one with the
-    // real history. Each relay's share of the walk's checking time is its own: complete, current head,
-    // on any checking budget (a smaller one stands in for slower hardware), the honest relay first or last.
-    // (The chain work, placing the 19 real versions, keeps its own budget: checkMs bounds only the checks.)
+    // real history. Each relay's share of the walk's checking time is its own, the honest relay first or
+    // last: with room for its checks, one refresh is complete; on a checking budget too small for even
+    // that (1 ms, standing in for very slow hardware) each refresh is incomplete, commits what it
+    // checked, and the next goes on: never chain-broken, never a jump, never stuck behind the junk.
     for (const checkMs of [400, 50, 1]) {
       for (const honest of [4, 0]) {
         const u = makeUser("alice");
@@ -82,20 +101,35 @@ describe("T1: hostile relays can't starve an honest one", () => {
         const head = u.docs[u.docs.length - 1];
         const p = decodeJws(head.jws).payload;
         const junk = Array.from({ length: 256 }, (_, i) => sameKeyJunk(p, i));
+        const real = walkFrom(u.docs);
         const fetcher: IdentityFetcher = {
           tips: async () => [head.jws],
-          // As a relay walks (§5.6): from `to` back, newest first, at most n.
-          chain: async (_u, relays, to, n) => {
-            if (relays[0] !== RELAYS[honest]) return junk;
-            const at = u.docs.findIndex((d) => d.hash === to);
-            return at < 0 ? [] : u.docs.slice(Math.max(0, at - n + 1), at + 1).reverse().map((d) => d.jws);
-          },
+          chain: async (uid, relays, to, n) => (relays[0] === RELAYS[honest] ? real(uid, relays, to, n) : junk),
         };
-        const view = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: RELAYS, checkMs });
-        expect([checkMs, honest, view.incomplete]).toEqual([checkMs, honest, undefined]);
+        const { view, refreshes } = await catchUp(() => refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: RELAYS, checkMs }), 40);
         expect(view.head.hash).toBe(head.hash);
+        if (checkMs >= 50) expect([checkMs, honest, refreshes]).toEqual([checkMs, honest, 1]);
       }
     }
+  });
+
+  it("a walk cut short with a gap left is incomplete, and the head moves forward refresh by refresh (60 versions behind)", async () => {
+    // A slow machine's walk can't check 60 versions in one refresh: before, that ended chain-broken
+    // (anchored history) or in a jump over the gap; now each refresh is incomplete, commits the oldest
+    // versions it checked, and repeated refreshes catch up.
+    const u = makeUser("alice");
+    const store = await storeKnowing(u);
+    for (let i = 0; i < 60; i++) u.publish({ iat: NOW - 100 + i });
+    const head = u.docs[u.docs.length - 1];
+    const fetcher: IdentityFetcher = { tips: async () => [head.jws], chain: walkFrom(u.docs) };
+    const first = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAYS[0]], checkMs: 1 });
+    expect(first.incomplete).toBe(true);
+    expect(first.head.ver).toBeGreaterThan(1);
+    expect(first.head.ver).toBeLessThan(head.ver);
+    expect(await lastRefreshed(store, u.userId)).toBeUndefined();
+    const { view } = await catchUp(() => refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAYS[0]], checkMs: 1 }), 80);
+    expect(view.head.hash).toBe(head.hash);
+    expect(await lastRefreshed(store, u.userId)).toBe(NOW);
   });
 
   it("an incomplete refresh doesn't count as a refresh", async () => {

@@ -569,7 +569,10 @@ describe('pre-release review: the home folder as a last word, globs at its name,
       uncheckableShell(big('a;', n))
       uncheckableShell(big('/x/y ', n))
     }
-    expect(growth(over, 25_000)).toBeLessThan(9)
+    const o = growth(over, 25_000)
+    expect(o.ratio).toBeLessThan(9)
+    // And not linear but slow: one round at 100 KB well under 10 s, even on a slow runner.
+    expect(o.totalMs).toBeLessThan(10_000)
     // Under the 16 KiB cap, the worst cases are linear too (4,000 to 16,000 characters).
     const under = (n: number) => {
       p2pHomeAccess({ tool: 'Bash', command: 'a;'.repeat(n / 2) }, [home])
@@ -577,7 +580,9 @@ describe('pre-release review: the home folder as a last word, globs at its name,
       uncheckableShell('p2p ' + ';'.repeat(n))
       uncheckableShell('=x'.repeat(n / 2))
     }
-    expect(growth(under, 4000)).toBeLessThan(9)
+    const u = growth(under, 4000)
+    expect(u.ratio).toBeLessThan(9)
+    expect(u.totalMs).toBeLessThan(10_000)
   })
 })
 
