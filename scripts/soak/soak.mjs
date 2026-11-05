@@ -453,6 +453,12 @@ async function setupSteps() {
 
   // Every device handles what is queued for it (second devices learn the friendships and the circle by sync).
   for (let round = 0; round < 2; round++) await Promise.all(world.devices.map((d) => d.run(["circle", "ls", "--json"], { op: "circle ls" })));
+  // Project boundaries: each device's sessions work in its own folder (its cwd), private until shared. Each
+  // shares it with the circle and every friend, as each person would (`p2p project share`).
+  for (const d of world.devices) {
+    const people = world.users.filter((x) => x !== d.user).flatMap((x) => ["--person", x.userId]);
+    await must(d.run(["project", "share", world.cid, ...people, "--json"], { op: "project share" }), "project share");
+  }
   // Sessions: d1 runs "fp" (the circle; publishes footprints) and "dm" (private, every friend); d2 runs "c2" (the circle).
   for (const u of world.users) {
     await newSession(u.devices[0], "fp", "circle", { footprint: true, required: true });

@@ -131,6 +131,8 @@ export const BACKUP_FILE = '/home/sam/.p2p/cli/backup-phrase.txt'
 export const CODE = 'relay.example/K7QM-3XPD-9TWA-HF2N'
 
 export type WorldOptions = {
+  /** The person token the mod's token script prints (none: an empty answer). */
+  personToken?: string
   /** What `$.store` holds at the start (other sessions' board entries). */
   store?: Record<string, unknown>
   /** `p2p profile show <name>` answers, by name. */
@@ -317,6 +319,8 @@ export function world(on: On, options: WorldOptions = {}): World {
 
       return ok('main\n')
     }
+    // The mod's person-token script (lib PERSON_TOKEN_SCRIPT): the token it would print.
+    if (bin === 'node' && e.argv[1] === '-e' && String(e.argv.at(-1)).endsWith('person.key')) return ok(options.personToken ?? '')
     if (bin === 'node' && e.argv[1] === '-e') return ok(json(options.repoProbe ?? {}))
     if (bin === 'node' && e.argv[1] === '--version') {
       if (options.nodeVersion === null) throw new Error('spawn node ENOENT')
@@ -343,14 +347,14 @@ export function world(on: On, options: WorldOptions = {}): World {
       case 'ls':
         return ok(json({ peers: w.peers, relays: ALL_RELAYS_UP }))
       case 'status':
-        return ok(json({ status: {}, roster: options.statusRoster ?? {}, delivered: [], failed: [], ...(options.statusWarnings ? { warnings: options.statusWarnings } : {}) }))
+        return ok(json({ status: {}, roster: options.statusRoster ?? {}, delivered: [], failed: [], ...(options.statusWarnings ? { warnings: options.statusWarnings } : {}), bound: true }))
       case 'session roster':
         return ok(json({ roster: { sid: e.argv.at(-1), ref: 'ffffff', ver: 1, vis: e.argv.includes('--private') ? 'private' : 'circle', circle: 'c_team', circleName: 'team', parts: flags(e.argv, 'add').map(u => ({ userId: u, address: u })) } }))
       case 'send': {
         const to = flag(e.argv, 'to') ?? ''
         const peer = w.peers.find(p => to.startsWith(p.own))
 
-        return ok(json({ delivered: true, to: { userId: peer?.own ?? BEN_ID, address: peer?.address ?? BEN_ADDR, own: peer?.own ?? BEN_ID, sid: peer?.sid ?? BEN.sid, ref: peer?.ref ?? BEN.ref }, relays: 2, devices: 1, messageId: 'm1' }))
+        return ok(json({ delivered: true, to: { userId: peer?.own ?? BEN_ID, address: peer?.address ?? BEN_ADDR, own: peer?.own ?? BEN_ID, sid: peer?.sid ?? BEN.sid, ref: peer?.ref ?? BEN.ref }, relays: 2, devices: 1, messageId: 'm1', bound: true }))
       }
       case 'trust ls':
         return ok(json({ users: w.trust.users.map(u => ({ userId: u, address: u === BEN_ID ? BEN_ADDR : u, blocked: false })), circles: w.trust.circleMembers.length ? [{ cid: 'c_team', name: 'team', joined: true, members: w.trust.circleMembers }] : [], trusted: [...w.trust.users, ...w.trust.circleMembers] }))

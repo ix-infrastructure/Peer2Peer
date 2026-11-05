@@ -92,7 +92,8 @@ describe("p2p end to end", () => {
     const ls = await alice.ok(["ls"]);
     const row = ls.peers.find((p: any) => p.own === ids.bob);
     expect(row).toMatchObject({ sid: "bs1", state: "busy", label: "api", summary: "fixing auth b", files: ["src/auth.ts"], live: true });
-    // alice → bob's live session.
+    // alice → bob's live session (alice's project is shared with him: projects.ts).
+    await alice.share(ids.bob);
     const sent = await alice.ok(["send", "--from-session", "as1", "--to", "bobby", "hello", "bob"]);
     expect(sent.delivered).toBe(true);
     expect(sent.relays).toBe(2);
@@ -238,6 +239,7 @@ describe("p2p end to end", () => {
     // carol shares a session with bob; bob can see and message it while they're friends.
     await carol.ok(["session", "roster", "cs3", "--add", ids.bob]);
     await carol.ok(["status", "--session", "cs3", "--state", "busy"]);
+    await bob.share(ids.carol);
     const ok1 = await bob.ok(["send", "--from-session", "bs1", "--to", `${ids.carol}/cs3`, "before"]);
     expect(ok1.relays).toBe(1);
     const uf = await carol.ok(["unfriend", ids.bob]);

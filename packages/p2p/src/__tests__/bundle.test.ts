@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startRelay, type TestRelay } from "./harness.js";
+import { personTokenFor, startRelay, type TestRelay } from "./harness.js";
 
 const run = promisify(execFile);
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -59,9 +59,13 @@ describe("the bundled CLI", () => {
     const bin = tmp("p2p-bin-");
     copyFileSync(BUNDLE, join(bin, "p2p.mjs"));
     writeFileSync(join(bin, "defaults.json"), JSON.stringify({ defaultRelays: [R] }));
+    // The person token (projects.ts): this bundle runs in a child process, whose ancestry may hold an agent.
+    const tokens = new Map<string, string>();
+    const tokenOf = (home: string) => tokens.get(home) ?? (tokens.set(home, personTokenFor(home)), tokens.get(home)!);
     const env = (home: string) => ({
       PATH: process.env.PATH ?? "",
       P2P_HOME: home,
+      P2P_PERSON_TOKEN: tokenOf(home),
       P2P_RELAY_TRANSPORT: JSON.stringify({ [R]: `ws://127.0.0.1:${relay.port}/v3` }),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "3000",

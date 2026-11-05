@@ -74,7 +74,7 @@ describe("bounded, announced steps", () => {
   it("the whole command has a deadline that names the step it was on", async () => {
     const setup = user("deadline-setup", { P2P_CONNECT_TIMEOUT_MS: "1000" });
     await setup.ok(["init", "--name", "dl", "--relay", BH, "--yes"]);
-    const u = user("deadline", { P2P_HOME: setup.home, P2P_CONNECT_TIMEOUT_MS: "20000", P2P_COMMAND_TIMEOUT_SEC: "1" });
+    const u = user("deadline", { P2P_HOME: setup.home, P2P_PERSON_TOKEN: setup.personToken, P2P_CONNECT_TIMEOUT_MS: "20000", P2P_COMMAND_TIMEOUT_SEC: "1" });
     const t0 = Date.now();
     const r = await u.run(["invite", "--no-circle"]);
     // 1 s deadline, then at most SETTLE_MS (5 s) for what is in flight to settle.
@@ -272,7 +272,7 @@ describe("review L1: the deadline cancels the work", () => {
     const { app, abort } = deadlineApp(seconds);
     const out: string[] = [];
     const t0 = Date.now();
-    const code = await main(argv, { env: {}, io: { out: (x) => out.push(x), err: () => {} }, ops: ops as never, makeApp: () => app });
+    const code = await main(argv, { env: {}, confirmTty: async () => true, io: { out: (x) => out.push(x), err: () => {} }, ops: ops as never, makeApp: () => app });
     process.exitCode = 0;
     return { code, json: JSON.parse(out.at(-1) ?? "null"), ms: Date.now() - t0, abort };
   }

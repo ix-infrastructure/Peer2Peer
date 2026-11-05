@@ -59,6 +59,14 @@ Type "clear"
 Enter
 Wait
 
+Type "# Projects are private until shared: both share this repo with the circle"
+Enter
+Wait
+Type "ann project share --no-input >/dev/null && ben circle ls >/dev/null && ben project share --no-input >/dev/null"
+Enter
+Wait
+Sleep 1s
+
 Type "# Both agent sessions share what they're working on"
 Enter
 Wait

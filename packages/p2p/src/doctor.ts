@@ -47,7 +47,7 @@ import {
   type TipsFetcher,
 } from "@peer2peer/core/v3";
 import { App, capPeek, joinCapOf, orderRelays, REPUBLISH_DOC_WITHIN_SEC } from "./app.js";
-import { CLI_CAPS, KNOWN_FEATURES, peerDevices, unavailableBetween, type PeerDevice } from "./features.js";
+import { CAP_PROJECTS, CLI_CAPS, KNOWN_FEATURES, peerDevices, unavailableBetween, type PeerDevice } from "./features.js";
 import { circleMembers, listCircles, type CircleSummary } from "./circle-ops.js";
 import { defaultRelays } from "./config.js";
 import { CliError } from "./errors.js";
@@ -504,7 +504,7 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
   // The default circle and our standing in it.
   const def = app.self?.defaultCircle;
   if (!def) {
-    c.add("default-circle", "fail", "default circle", "none: your sessions are private (new ones, and running ones nobody shared by hand), so nobody sees them unless you add people one by one", "pick one: `/peers circle default <cid>` or `p2p circle default <cid>` (`p2p circle ls` lists them); or share a session with `/peers circle <cid>` or `/peers add <user>`");
+    c.add("default-circle", "fail", "default circle", "none: invites join no circle by default (sessions follow their project either way: private until you share it)", "pick one: `/peers circle default <cid>` or `p2p circle default <cid>` (`p2p circle ls` lists them); share a project with `p2p project share <cid>` in it (or /peers project share)");
   } else {
     const m = await bounded(circleMembers(app, def), ms);
     if (!m.value) {
@@ -525,6 +525,13 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
   const now = Date.now();
   const mine = ownStatuses(app, peers);
   const live = mine.filter((p) => isLive(p.ts, now));
+  // Your other devices: one on a client from before project boundaries runs its own sessions by the
+  // old rule (new sessions follow the default circle), and can't honour a bounded own-session message.
+  const others = Object.values(peers).filter((p) => p.own === app.userId && p.did !== app.did && isLive(p.ts, now));
+  const older = [...new Set(others.filter((p) => !(Array.isArray(p.status.caps) && p.status.caps.includes(CAP_PROJECTS))).map((p) => p.did))];
+  if (older.length > 0) {
+    c.add("other-devices", "fail", "your other devices", `${older.length} of your other devices run a client without project boundaries: their sessions follow your default circle, whatever the project`, "update Peer2Peer on those devices (docs/compatibility.md, \"Project boundaries\")");
+  } else if (others.length > 0) c.add("other-devices", "ok", "your other devices", "every live session of your other devices keeps project boundaries");
   if (live.length === 0) {
     c.add(
       "shared",
@@ -547,7 +554,7 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
       const where = s.vis === "circle" && s.circle ? `circle "${peer(circles.find((x) => x.cid === s.circle)?.name ?? s.circle)}"${s.parts.length ? ` plus ${s.parts.length} added` : ""}` : s.parts.length ? `${s.parts.length} added people (private)` : "nobody (private)";
       if (aud === undefined) c.add(`shared:${safeSid(p.sid)}`, "unknown", `session "${label}" [${ref}]`, `live, shared with ${where}; couldn't work out who stands in it in time`, "run `p2p doctor` again");
       else if (aud.length === 0)
-        c.add(`shared:${safeSid(p.sid)}`, "fail", `session "${label}" [${ref}]`, `live, but shared with ${where}: nobody else can see it`, "in that session run `/peers circle <cid>` (a circle you joined) or `/peers add <user>`; or `p2p session roster <sid> --circle <cid>`");
+        c.add(`shared:${safeSid(p.sid)}`, "fail", `session "${label}" [${ref}]`, `live, but shared with ${where}: nobody else can see it`, "its project is private until you share it: `p2p project share <cid>` in it (or /peers project share in that session); `p2p project show` says why");
       else {
         const names = await Promise.all(aud.slice(0, 5).map((u) => app.addressOf(u)));
         c.add(`shared:${safeSid(p.sid)}`, "ok", `session "${label}" [${ref}]`, `live, shared with ${where}: ${aud.length} can see it (${names.join(", ")}${aud.length > 5 ? ", …" : ""})`);
@@ -734,8 +741,8 @@ async function userChecks(c: Checks, app: App, userId: string, ms: number, mine:
   // Their sessions: shared with an audience we're in?
   const myCircle = app.self?.defaultCircle ? standing.find((s) => s.cid === app.self?.defaultCircle) ?? standing[0] : standing[0];
   const askShare = myCircle
-    ? `they haven't shared any session with "${myCircle.name}": ask them to run \`/peers circle ${myCircle.cid}\` in their session (or \`/peers add ${displayAddress(me, app.self?.name ?? "?")}\`)`
-    : `ask them to share a session with you: \`/peers add ${displayAddress(me, app.self?.name ?? "?")}\` in their session (or \`p2p session roster <sid> --add <you>\`)`;
+    ? `they haven't shared any session with "${myCircle.name}": ask them to share their project with it, \`/peers project share ${myCircle.cid}\` in their session (or \`p2p project share ${myCircle.cid}\` in the repository)`
+    : `ask them to share their project with you: \`/peers project share --person ${displayAddress(me, app.self?.name ?? "?")}\` in their session (or \`p2p project share --person <you>\` in the repository)`;
   if (recs.length === 0) {
     c.add("their-sessions", "fail", "their sessions", `no status from any of their sessions has reached you.${queuedNote}`, queued > 0 ? "run `p2p ls`, then `p2p doctor <user>` again" : askShare);
   } else {

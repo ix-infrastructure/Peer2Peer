@@ -10,6 +10,8 @@
 // §5.8), finding caps, resolving addresses and petnames, and syncing state to
 // the user's other devices.
 
+import { personTokenOk } from "./projects.js";
+import { confirmOnTty } from "./tty-confirm.js";
 import { hostname, userInfo } from "node:os";
 import {
   addIdentityVersion,
@@ -155,6 +157,10 @@ export interface Delivery {
 const CAP_PRIORITY = (c: { kinds: string[] }) => (c.kinds[0] === "*" ? 0 : 1);
 
 export class App {
+  /** The person's front end vouched for this command (P2P_PERSON_TOKEN, checked once and removed: projects.ts). */
+  front = false;
+  /** The person's "yes" on their controlling terminal (tty-confirm.ts); cli.ts may stand another in (tests). */
+  confirmTty: (question: string) => Promise<boolean> = confirmOnTty;
   readonly env: Env;
   readonly io: Io;
   readonly home: string;
@@ -205,6 +211,9 @@ export class App {
     this.env = opts.env;
     this.io = opts.io;
     this.home = resolveHome(opts.env);
+    // An embedder holding the person token is a front end (the CLI's main() checks and removes it first,
+    // then sets this from its own check).
+    this.front = personTokenOk(this.env, this.home);
     // Progress and P2P_DEBUG lines go to stderr (never secrets: see progress.ts).
     this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
     this.readOnly = opts.readOnly === true;

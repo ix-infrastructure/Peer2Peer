@@ -127,9 +127,12 @@ describe('peer2peer working-on status', () => {
     await $.tool.call(edit('/work/web/src/validate.ts'))
     await $.tool.call(edit('/elsewhere/secret.ts', 'e2'))
     await $.turn.complete(done)
-    await settle(w, () => flags(lastStatus(w), 'file').length > 0)
+    await settle(w, () => flags(lastStatus(w), 'file').length > 0 && flag(lastStatus(w), 'state') === 'idle')
     expect(flags(lastStatus(w), 'file')).toEqual(['src/validate.ts'])
     expect(flag(lastStatus(w), 'state')).toBe('idle')
+    // The edit elsewhere isn't a file of this session's, but its folder binds that project (projects.ts).
+    // Each folder goes to the CLI once (it keeps it bound): across this run's statuses.
+    expect(ran(w, 'status').flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':'))).toContain('/elsewhere')
   })
 
   test('only the main session\'s edits count: not a subagent\'s, not a background worktree\'s, not .git', async ($, on) => {

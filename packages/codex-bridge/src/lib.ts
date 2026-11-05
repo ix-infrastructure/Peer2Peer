@@ -487,13 +487,14 @@ const MUTATING_TWO = new Set([
   "codex release",
   "codex decline",
   "codex install",
+  // Who sees a project's sessions (projects.ts): the person's alone.
+  "project share",
+  "project private",
 ]);
 
+/** Shell words of one simple command (shellTokens: linear, quote-aware, adjacent parts joined). */
 function shellWords(segment: string): string[] {
-  const out: string[] = [];
-  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  for (const m of segment.matchAll(re)) out.push(m[1] ?? m[2] ?? m[3] ?? "");
-  return out;
+  return shellTokens(segment);
 }
 
 /**
@@ -748,6 +749,257 @@ export function editedFiles(toolName: string, input: unknown): string[] {
     for (const key of ["file_path", "path", "notebook_path"]) if (typeof o[key] === "string") out.add(o[key] as string);
   }
   return [...out];
+}
+
+/** Stands for a `$` or backtick that was quoted text (shellTokens' markLiteral): never an expansion. */
+export const LITERAL = '\uE000'
+
+/**
+ * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
+ * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
+ * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
+ * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
+ */
+export function shellTokens(command: string, markLiteral = false): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let has = false;
+  let q: '' | "'" | '"' | '$' = '';
+  const push = () => {
+    if (has) out.push(cur)
+    cur = '';
+    has = false;
+  }
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] as string;
+    if (q === "'") {
+      if (c === "'") q = ''
+      // A `$` or backtick inside single quotes is text, never an expansion (marked when asked).
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
+
+      continue;
+    }
+    if (q === '$') {
+      if (c === '\\' && i + 1 < command.length) cur += command[++i]
+      else if (c === "'") q = ''
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
+
+      continue;
+    }
+    if (q === '"') {
+      if (c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1] as string)) cur += command[++i]
+      else if (c === '"') q = ''
+      else cur += c
+
+      continue;
+    }
+    if (c === '\\') {
+      if (i + 1 < command.length && command[i + 1] !== '\n') {
+        cur += command[++i];
+        has = true;
+      } else i++
+
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      has = true;
+
+      continue;
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      q = '$';
+      has = true;
+      i++;
+
+      continue;
+    }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
+      push();
+
+      continue;
+    }
+    cur += c;
+    has = true;
+  }
+  push();
+
+  return out;
+}
+
+/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. Linear: no regex over the input. */
+export function resolveLike(cwd: string, p: string): string {
+  const isSep = (c: string | undefined) => c === '/' || c === '\\';
+  const drive = (s: string) => s.length >= 3 && /[A-Za-z]/.test(s[0] as string) && s[1] === ':' && isSep(s[2]);
+  const unc = (s: string) => s.startsWith('\\\\');
+  const abs = p.startsWith('/') || drive(p) || unc(p);
+  const win = drive(p) || unc(p) || (!p.startsWith('/') && (drive(cwd) || unc(cwd)));
+  const sep = win ? '\\' : '/';
+  let base = cwd;
+  while (base.length > 1 && isSep(base[base.length - 1])) base = base.slice(0, -1)
+  const full = abs ? p : `${base}${sep}${p}`;
+  let prefix = '';
+  let rest = full;
+  if (drive(full)) {
+    prefix = full.slice(0, 2);
+    rest = full.slice(2);
+  } else if (unc(full)) {
+    let i = 2;
+    let parts = 0;
+    while (i < full.length && parts < 2) {
+      if (isSep(full[i])) parts++
+      if (parts < 2) i++
+    }
+    prefix = full.slice(0, i);
+    rest = full.slice(i);
+  }
+  const out: string[] = [];
+  let seg = '';
+  const flush = () => {
+    if (seg === '..') out.pop()
+    else if (seg !== '' && seg !== '.') out.push(seg)
+    seg = '';
+  }
+  for (const c of rest) {
+    if (isSep(c)) flush()
+    else seg += c
+  }
+  flush();
+
+  return `${prefix}${sep}${out.join(sep)}`;
+}
+
+/** At most this many folders one command may name; past it the session is private (`over`). */
+export const MAX_COMMAND_PATHS = 256;
+
+/**
+ * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
+ * against `cwd`, a file to its folder, `$HOME`/`${HOME}` and `$PWD`/`${PWD}` expanded). A path
+ * built any other way (`$X/y`, `$(…)`, backticks) can't be resolved, so the session is `over`
+ * (private), and so it is past MAX_COMMAND_PATHS. URLs are not paths.
+ */
+export function shellPaths(command: string, cwd: string, home?: string): { paths: string[]; over: boolean } {
+  const out = new Set<string>()
+  let over = false
+  const isSep = (c: string | undefined) => c === '/' || c === '\\'
+  for (const word of shellTokens(command, true)) {
+    const eq = word.startsWith('-') ? word.indexOf('=') : -1
+    let t = eq >= 0 ? word.slice(eq + 1) : word
+    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
+    // $HOME, ${HOME}, $PWD and ${PWD} anywhere in the word (only real expansions: quoted ones are LITERAL).
+    for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
+      let k = t.indexOf(v)
+      while (k >= 0) {
+        const after = t[k + v.length]
+        // `$HOMEDIR` is another variable: only the whole name.
+        if (v.startsWith('$') && !v.startsWith('${') && after !== undefined && /[A-Za-z0-9_]/.test(after)) {
+          k = t.indexOf(v, k + 1)
+          continue
+        }
+        if (val === undefined) over = true
+        t = `${t.slice(0, k)}${val ?? ''}${t.slice(k + v.length)}`
+        k = t.indexOf(v, k + (val ?? '').length)
+      }
+    }
+    const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
+    if (!pathLike) continue
+    // Any other expansion: where it sits decides. In the path's first segment, the location itself
+    // is unknown: private. Further in, the folder before it is known: that one binds.
+    let x = -1
+    for (let k = 0; k < t.length; k++) {
+      if (t[k] === '$' || t[k] === '`') {
+        x = k
+        break
+      }
+    }
+    if (x >= 0) {
+      let lastSep = -1
+      for (let k = 0; k < x; k++) if (isSep(t[k])) lastSep = k
+      if (lastSep <= 0) {
+        over = true
+        continue
+      }
+      t = t.slice(0, lastSep)
+    }
+    t = t.split(LITERAL).join('$')
+    let p: string
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) {
+        over = true
+        continue
+      }
+      p = resolveLike(home, t.slice(2) || '.')
+    } else p = resolveLike(cwd, t)
+    // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
+    const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    const name = p.slice(last + 1)
+    const folder = x < 0 && name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
+    out.add(folder)
+    if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
+  }
+
+  return { paths: [...out], over }
+}
+
+/** Interpreters that run code given as an argument, and terminals that run a command under a pseudo-terminal. */
+const INTERPRETERS = new Set(['python', 'python2', 'python3', 'node', 'nodejs', 'perl', 'ruby', 'deno', 'bun', 'php', 'lua', 'osascript', 'tclsh', 'pwsh', 'powershell']);
+const CODE_FLAGS = new Set(['-c', '-e', '-E', '-p', '-r', '--eval', '--print', '-command', '-Command']);
+const PTY_WRAPPERS = new Set(['script', 'expect', 'unbuffer', 'socat', 'tmux', 'screen', 'pty', 'zpty', 'winpty']);
+
+/** Whether a command runs interpreter code given inline, or anything under a pseudo-terminal wrapper (by its words: linear). */
+export function hidesCommand(command: string): 'interpreter' | 'pty' | null {
+  const words = shellTokens(command);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string;
+    let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase();
+    if (base.endsWith('.exe')) base = base.slice(0, -4)
+    // python3.12, node22: the name without its version (a loop, not a regex over the word).
+    let end = base.length;
+    while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+    const bare = base.slice(0, end);
+    if (PTY_WRAPPERS.has(base) || PTY_WRAPPERS.has(bare)) return 'pty'
+    if (INTERPRETERS.has(base) || INTERPRETERS.has(bare)) {
+      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) if (CODE_FLAGS.has(words[j] as string)) return 'interpreter'
+    }
+  }
+
+  return null;
+}
+
+
+
+
+/** Commands naming p2p longer than this are refused unread. */
+export const MAX_GUARDED_COMMAND = 16 * 1024;
+
+/** Whether a command line names the p2p CLI (as a word, a path ending in it, the bundle or its variables). */
+export function namesP2PCli(command: string): boolean {
+  return /(?:^|[\s;&|(/="'`])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
+}
+
+/**
+ * Why a shell command naming p2p is refused beyond its verb, or null (projects.ts): it speaks for a
+ * session other than this bridge's own (`--from-session`/`--session`, read as the shell reads them),
+ * hides p2p inside interpreter code or a pseudo-terminal, or shares a project.
+ */
+export function boundaryRefusal(command: string, ownSid: string | undefined): string | null {
+  if (/project["'\s,\]]+share/.test(command) && /p2p|peer2peer/i.test(command)) return "`p2p project share` decides who sees your user's projects: only they run it, in their own terminal";
+  if (!namesP2PCli(command)) return null;
+  // Too long to check quickly: refused when it names p2p (the hook must never stall or guess).
+  if (command.length > MAX_GUARDED_COMMAND) return "a command too long to check names p2p";
+  const hidden = hidesCommand(command);
+  if (hidden === "interpreter") return "interpreter code that runs p2p can't be checked";
+  if (hidden === "pty") return "p2p under a pseudo-terminal can't be checked";
+  const words = shellTokens(command);
+  for (let i = 0; i < words.length; i++) {
+    const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");
+    if (!m) continue;
+    const sid = m[1] !== undefined ? m[1] : (words[i + 1] ?? "");
+    if (!ownSid || sid !== ownSid) return "p2p from the model's shell speaks only for this Codex session (use p2p_send)";
+  }
+  return null;
 }
 
 /** A `p2p` session id as the CLI takes it: `[A-Za-z0-9._-]`, at most 128. */

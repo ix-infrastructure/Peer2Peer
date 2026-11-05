@@ -74,14 +74,27 @@ export function parseRepo(v: unknown, what: string): RepoRef {
 export function gitOut(cwd: string, args: string[], env?: NodeJS.ProcessEnv, opts: { timeoutMs?: number; maxBuffer?: number; trim?: boolean } = {}): Promise<string | undefined> {
   const bin = whichAbsolute("git", env ?? process.env);
   if (!bin) return Promise.resolve(undefined);
+  // The repository is the agent's to write: none of its config may run anything (an fsmonitor or
+  // hook program, an external diff), and git gets only what it needs from the environment, never
+  // a secret of p2p's (packages/p2p/src/projects.ts: the person token).
+  const safeArgs = ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`, "-c", "diff.external=", "-c", "core.sshCommand=false", ...args];
   return new Promise((resolve) => {
-    execFile(bin, args, { cwd, timeout: opts.timeoutMs ?? 5000, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer ?? 1 << 20, env, windowsHide: true }, (err, stdout) =>
+    execFile(bin, safeArgs, { cwd, timeout: opts.timeoutMs ?? 5000, killSignal: "SIGKILL", maxBuffer: opts.maxBuffer ?? 1 << 20, env: gitEnv(env ?? process.env), windowsHide: true }, (err, stdout) =>
       resolve(err ? undefined : opts.trim === false ? stdout : stdout.trim()),
     );
   });
 }
 
 const git = (cwd: string, args: string[], env?: NodeJS.ProcessEnv) => gitOut(cwd, args, env);
+
+/** What git may see of the environment: where it lives, its home and temp, the locale and the user's own git config choice. */
+const GIT_ENV_KEYS = ["PATH", "HOME", "USERPROFILE", "SystemRoot", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"];
+
+export function gitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const k of GIT_ENV_KEYS) if (typeof env[k] === "string") out[k] = env[k];
+  return out;
+}
 
 export interface LocalRepo {
   /** The working tree's root (absolute: local use only, never sent). */

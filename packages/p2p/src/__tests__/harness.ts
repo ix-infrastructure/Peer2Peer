@@ -5,13 +5,22 @@
 // entry point (`main`), so argument parsing, JSON output and exit codes are
 // exercised too.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from "@peer2peer/relay";
 import { App, type Io } from "../app.js";
 import { main } from "../cli.js";
 import type { Env } from "../config.js";
+
+/** Writes a person token into `home` (as the CLI makes one) and returns it. Pre-seeded on purpose: it stands in for the person's terminal "yes" (tests have no terminal); a fresh install's own creation is tested apart (mods/claude/peer2peer/integration/first-run.e2e.ts, the bridge's personTokenOf, the CLI's personToken). */
+export function personTokenFor(home: string): string {
+  const t = randomBytes(32).toString("base64url");
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, "cli", "person.key"), t, { mode: 0o600 });
+  return t;
+}
 
 export interface TestRelay {
   url: string;
@@ -53,11 +62,19 @@ export class User {
     readonly extraEnv: Env = {},
   ) {
     this.home = mkdtempSync(join(tmpdir(), `p2p-${name}-`));
+    this.personToken = personTokenFor(this.home);
   }
+
+  /**
+   * The person token (projects.ts) the person's front end passes: these users act as the person. A
+   * test about agents builds an env without it (and sets an agent's variables).
+   */
+  readonly personToken: string;
 
   get env(): Env {
     return {
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: JSON.stringify(this.transport),
       P2P_DRAIN_QUIET_MS: "250",
       P2P_DRAIN_MAX_MS: "4000",
@@ -76,8 +93,30 @@ export class User {
     };
   }
 
+  /**
+   * Project boundaries (projects.ts): a session is private until the person shares its project.
+   * Tests about something else share a session with `session roster <sid> --add|--circle`, or by
+   * setting a default circle (which shared new sessions before project boundaries); with this on
+   * (the default), the harness first shares the test's project (this process's folder) with the
+   * same people or circle, as the person would with `p2p project share`. The project boundary
+   * tests turn it off.
+   */
+  autoShareProject = true;
+
   /** Runs `p2p <args> --json` and parses the single JSON object. */
   async run(args: string[], opts: { stdin?: string; json?: boolean } = {}): Promise<RunResult> {
+    if (this.autoShareProject && args[0] === "session" && args[1] === "roster") {
+      const share: string[] = [];
+      for (let i = 2; i < args.length; i++) {
+        if (args[i] === "--add" && args[i + 1]) share.push("--person", args[++i]);
+        else if (args[i].startsWith("--add=")) share.push("--person", args[i].slice("--add=".length));
+        else if (args[i] === "--circle" && args[i + 1]) share.push(args[++i]);
+      }
+      if (share.length > 0) await this.run(["project", "share", "--add", ...share]);
+    }
+    if (this.autoShareProject && args[0] === "circle" && args[1] === "default" && args[2] && !args[2].startsWith("-")) {
+      await this.run(["project", "share", "--add", args[2]]);
+    }
     const lines = { out: [] as string[], err: [] as string[] };
     const argv = opts.json === false ? args : [...args, "--json"];
     const code = await main(argv, { env: this.env, io: this.io(lines, opts.stdin) });
@@ -92,6 +131,11 @@ export class User {
       }
     }
     return { code, out, err: lines.err.join("\n"), json };
+  }
+
+  /** Shares this test's project (this process's folder) with circles (`c_…`) and friends, as the person would. */
+  async share(...targets: string[]): Promise<void> {
+    await this.ok(["project", "share", "--add", ...targets.flatMap((t) => (t.startsWith("c_") ? [t] : ["--person", t]))]);
   }
 
   /** Runs and expects success. */
@@ -145,7 +189,10 @@ export class User {
   /** An App on this home (for flows driven programmatically, e.g. linking). */
   async app(): Promise<App> {
     const lines = { out: [] as string[], err: [] as string[] };
-    return new App({ env: this.env, io: this.io(lines) });
+    const app = new App({ env: this.env, io: this.io(lines) });
+    // These users are their own front end (their token): an App made here speaks for their sessions.
+    app.front = true;
+    return app;
   }
 
   cleanup(): void {

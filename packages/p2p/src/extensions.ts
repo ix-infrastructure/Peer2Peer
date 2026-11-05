@@ -162,6 +162,8 @@ export interface ExtSendOptions {
 }
 
 export interface ExtSendResult {
+  /** The folders it was given are bound for good (sessions.ts). */
+  bound?: true;
   delivered: boolean;
   to: { userId: string; address: string; own: string; sid: string; ref: string };
   relays: number;

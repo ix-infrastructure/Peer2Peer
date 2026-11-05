@@ -130,7 +130,7 @@ describe("p2p doctor", () => {
     const s = byId(r.checks, "their-sessions");
     expect(s).toMatchObject({ status: "fail" });
     expect(s?.fix).toContain(`they haven't shared any session with "ix-team"`);
-    expect(s?.fix).toContain(`/peers circle ${cid}`);
+    expect(s?.fix).toContain(`/peers project share ${cid}`);
     // By name too, and in words.
     const human = await ann.run(["doctor", "ben"], { json: false });
     expect(human.code).toBe(0);
@@ -142,6 +142,8 @@ describe("p2p doctor", () => {
   }, 30_000);
 
   it("once the friend shares a live session, it shows as ✓ (and their doctor sees the publisher)", async () => {
+    // Ben's code join made the circle his default; his project is his to share (projects.ts).
+    await ben.share(cid);
     await ben.ok(["status", "--session", "bs1", "--state", "busy", "--label", "api"]);
     await ann.ok(["ls"]);
     const r = await ann.ok(["doctor", "ben"]);

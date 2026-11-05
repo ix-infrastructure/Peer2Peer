@@ -49,6 +49,8 @@ describe("ext-ix end to end", () => {
       await u.ok(["session", "roster", sid, "--add", ids.alice]);
       await u.ok(["status", "--session", sid, "--state", "busy", "--repo", "acme/widgets", "--file", "src/api/handler.ts"]);
     }
+    // Alice's project (the repository she sends from, and this folder) is shared with both (projects.ts).
+    for (const cwd of [repo.root, process.cwd()]) await alice.ok(["project", "share", "--person", ids.bob, "--person", ids.carol], { cwd });
     await alice.ok(["ls"]);
   });
 
@@ -69,6 +71,25 @@ describe("ext-ix end to end", () => {
     expect(r.code).toBe(1);
     expect(r.json).toMatchObject({ error: "extension_missing", extension: "@peer2peer/ext-ix" });
     expect(r.json.reason).toMatch(/npm i -g @peer2peer\/ext-ix/);
+  });
+
+  it("project boundaries: ix note, subgraph and impact from a session in a private project reach nobody", async () => {
+    // A repository alice never shared: the session working in it is private (packages/p2p/src/projects.ts).
+    const secret = gitRepo("git@github.com:acme/secret.git");
+    const sends = [
+      ["ix", "note", "--from-session", "ap1", "--to", "bob", "the secret plan"],
+      ["ix", "subgraph", "src/auth/*", "--from-session", "ap1", "--to", "bob", "--why", "secret"],
+      // A report built earlier and shown to the person (`--body -`, as the mod sends one).
+      ["ix", "impact", "src/auth/token.ts", "--from-session", "ap1", "--to", "bob", "--body", "-"],
+    ];
+    for (const args of sends) {
+      const r = await alice.run(args, { cwd: secret.root, stdin: JSON.stringify({ target: { name: "src/auth/token.ts", kind: "file" }, riskLevel: "low", riskSummary: "secret", atRisk: [], files: [], symbols: [], components: [] }) });
+      expect(r.code, `${args.join(" ")}: ${r.out} ${r.err}`).toBe(1);
+      expect(r.json.error, `${args.join(" ")}: ${JSON.stringify(r.json)}`).toBe("not_shared");
+      expect(r.json.reason).toMatch(/Only the person can widen this, by sharing the project secret themselves/);
+    }
+    const { events } = await bob.watch("bs1", 1500);
+    expect(JSON.stringify(events)).not.toContain("secret plan");
   });
 
   it("x:ix.note: bob previews it; carol sees the fallback; nothing is written without consent", async () => {

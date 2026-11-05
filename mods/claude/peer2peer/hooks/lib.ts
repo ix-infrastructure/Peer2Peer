@@ -307,14 +307,25 @@ export function pickHolder(
   board: readonly { sid: string; isPrivate: boolean; activeAt: number; seenAt: number }[],
   now: number,
   staleMs: number,
+  /**
+   * The sessions the CLI says may hold it (the event's `routable`: those whose projects reach the
+   * sender). When given, no other session holds it, private or not.
+   */
+  routable?: readonly string[],
 ): { holder: string; noticeBy?: undefined } | { holder?: undefined; noticeBy: string | undefined } {
   const live = board.filter(one => now - one.seenAt <= staleMs)
+  const allowed = routable ? live.filter(one => routable.includes(one.sid)) : live
   const bySid = (a: { sid: string }, b: { sid: string }) => (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0)
-  const open = live.filter(one => !one.isPrivate).sort((a, b) => b.activeAt - a.activeAt || bySid(a, b))
+  const open = allowed.filter(one => !one.isPrivate).sort((a, b) => b.activeAt - a.activeAt || bySid(a, b))
   const holder = open[0]?.sid
   if (holder) return { holder }
 
-  return { noticeBy: [...live].sort(bySid)[0]?.sid }
+  return { noticeBy: [...allowed].sort(bySid)[0]?.sid }
+}
+
+/** The routable list a `p2p.message` event carries (sessions.ts routableSessions), or undefined from an older CLI. */
+export function routableOf(event: { routable?: unknown }): string[] | undefined {
+  return Array.isArray(event.routable) ? event.routable.filter((x): x is string => typeof x === 'string') : undefined
 }
 
 // ── framing ─────────────────────────────────────────────────────────────────
@@ -984,6 +995,9 @@ export const PEERS_USAGE = [
   '  /peers remove <user>        take them off this session',
   '  /peers private              only the people you added see this session',
   '  /peers circle <cid>         share this session with a circle you joined',
+  '  /peers project [show|ls]    who sees sessions in this project (private until you share it)',
+  '  /peers project share [<circle>…] [--person <user>]…  share this project (bare: your default circle)',
+  '  /peers project private      only your own devices see this project\'s sessions',
   '  /peers approve <id>         act on a held item (friend invite, circle invite, join request, moved key)',
   '  /peers decline <id>         drop a held item',
   '  /peers dismiss [n|all]      clear a notice above the prompt (bare: the only one, or a numbered list)',
@@ -1026,6 +1040,7 @@ export type PeersCommand =
   | { verb: 'share-circle'; cid: string }
   | { verb: 'add' | 'remove'; user: string }
   | { verb: 'private' }
+  | { verb: 'project'; args: string[] }
   | { verb: 'approve' | 'decline'; id: string }
   | { verb: 'rotate'; resume?: boolean }
   | { verb: 'doctor'; user?: string }
@@ -1100,6 +1115,28 @@ export function parsePeersArgs(args: string): PeersCommand {
       return first && rest.length === 1 ? { verb: verb.toLowerCase() as 'add' | 'remove', user: first } : { verb: 'usage', error: `${verb} needs one user` }
     case 'private':
       return rest.length === 0 ? { verb: 'private' } : { verb: 'usage', error: 'private takes no arguments' }
+    case 'project': {
+      // `/peers project [show|ls|share [<circle>…] [--person <user>]…|private]`: as `p2p project`, in this session's folder.
+      const sub = (first ?? 'show').toLowerCase()
+      if (sub === 'show' || sub === 'ls' || sub === 'private') return rest.length <= 1 ? { verb: 'project', args: [sub] } : { verb: 'usage', error: `project ${sub} takes no arguments` }
+      if (sub === 'share') {
+        const args = ['share']
+        for (let i = 1; i < rest.length; i++) {
+          const w = rest[i] as string
+          if (w === '--person') {
+            const u = rest[++i]
+            if (!u) return { verb: 'usage', error: '--person needs a friend (p2p:… or name@fingerprint)' }
+            args.push(`--person=${u}`)
+          } else if (w === '--add') args.push('--add')
+          else if (w.startsWith('-')) return { verb: 'usage', error: `project share: unknown option ${w}` }
+          else args.push(w)
+        }
+
+        return { verb: 'project', args }
+      }
+
+      return { verb: 'usage', error: 'project takes show, ls, share [<circle>…] [--person <user>]… or private' }
+    }
     case 'approve':
     case 'decline':
       return first && !second ? { verb: verb.toLowerCase() as 'approve' | 'decline', id: first } : { verb: 'usage', error: `${verb} needs one held id` }
@@ -1190,6 +1227,8 @@ export function parseIxArgs(rest: readonly string[]): PeersCommand {
  */
 export function isMutating(command: PeersCommand): boolean {
   if (command.verb === 'circle-cmd') return command.args[0] !== 'ls' && command.args[0] !== 'members'
+  // Who sees this project's sessions is the person's decision alone: share and private are typed only.
+  if (command.verb === 'project') return command.args[0] === 'share' || command.args[0] === 'private'
   // Sharing sends this user's data (a stored note, graph-derived reports): typed only. The model's own
   // path is the ix_share tool, which waits for the person's Send.
   if (command.verb === 'ix-list' || command.verb === 'ix-show') return false
@@ -1460,7 +1499,7 @@ const MUTATING_FIRST = new Set(['status'])
 // `ix import` writes a peer's note into the local Ix graph and `ix resolve` runs Ix for a peer's reference:
 // the user's decisions (ext-ix SPEC §2), never the model's. `extensions enable` makes p2p load and run
 // an extension's code with the user's identity: the user's call too.
-const MUTATING_TWO = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config'])
+const MUTATING_TWO = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config', 'project share', 'project private'])
 
 /** Shell words of one simple command, quotes removed (no expansion). */
 function shellWords(segment: string): string[] {
@@ -1752,10 +1791,14 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
       // The CLI by its documented variable is read as the CLI (mutatingP2PVerb checks it).
       if (m && m[2] !== 'P2P_BIN') return 'a command word built at run time on a line that names p2p'
     }
-    if (/(?:^|[\s;&|(/])(?:python[0-9.]*|node|nodejs|perl|ruby|deno|bun)(?:\.exe)?\s(?:[^\n]*?\s)?-(?:c|e|E|p|-eval|-print)\b/.test(c) && /ix['"\s,)\]]+config|--publish|--names/.test(c)) {
-      return 'interpreter code that runs p2p'
-    }
+    // Read by words (linear): interpreter code given inline, or a pseudo-terminal wrapper (it could
+    // drive a picker or pass as the person), on a line that names p2p.
+    const hidden = hidesCommand(c)
+    if (hidden === 'interpreter') return 'interpreter code on a line that names p2p'
+    if (hidden === 'pty') return 'a pseudo-terminal wrapper on a line that names p2p'
   }
+  // Widening a project's sharing is the person's alone, however it is spelled to the shell.
+  if (/project["'\s,\]]+share/.test(c) && (names(c) || /p2p|peer2peer/i.test(c))) return 'a project share, which only your user runs'
 
   return null
 }
@@ -1824,6 +1867,311 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
 
   return null
 }
+
+/**
+ * The session ids a shell command hands the p2p CLI (`--from-session`, `--session`), on a command
+ * that names p2p. The model's shell may only speak for its own session: one it makes up (or another
+ * session's) would start a session of its own, bound only to wherever the command runs, and slip
+ * past this session's project boundary. Best effort, like every guard here; the CLI's own barrier
+ * binds the shell's directory either way.
+ */
+export function p2pSessionArgs(command: string, homes: readonly string[] = []): string[] {
+  if (!namesP2P(command, homes)) return []
+  const out: string[] = []
+  // Read as the shell reads them (`--from-session=''x1` is x1): never a regex over the raw text.
+  const words = shellTokens(command)
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? ''
+    const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(w)
+    if (!m) continue
+    out.push(m[1] !== undefined ? m[1] : (words[i + 1] ?? ''))
+  }
+
+  return out
+}
+
+/** Stands for a `$` or backtick that was quoted text (shellTokens' markLiteral): never an expansion. */
+export const LITERAL = '\uE000'
+
+/**
+ * A shell command line as words, the way a POSIX shell reads them: adjacent quoted and unquoted
+ * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
+ * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
+ * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
+ */
+export function shellTokens(command: string, markLiteral = false): string[] {
+  const out: string[] = []
+  let cur = ''
+  let has = false
+  let q: '' | "'" | '"' | '$' = ''
+  const push = () => {
+    if (has) out.push(cur)
+    cur = ''
+    has = false
+  }
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] as string
+    if (q === "'") {
+      if (c === "'") q = ''
+      // A `$` or backtick inside single quotes is text, never an expansion (marked when asked).
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
+
+      continue
+    }
+    if (q === '$') {
+      if (c === '\\' && i + 1 < command.length) cur += command[++i]
+      else if (c === "'") q = ''
+      else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
+
+      continue
+    }
+    if (q === '"') {
+      if (c === '\\' && i + 1 < command.length && '"\\$`'.includes(command[i + 1] as string)) cur += command[++i]
+      else if (c === '"') q = ''
+      else cur += c
+
+      continue
+    }
+    if (c === '\\') {
+      if (i + 1 < command.length && command[i + 1] !== '\n') {
+        cur += command[++i]
+        has = true
+      } else i++
+
+      continue
+    }
+    if (c === "'" || c === '"') {
+      q = c
+      has = true
+
+      continue
+    }
+    if (c === '$' && command[i + 1] === "'") {
+      q = '$'
+      has = true
+      i++
+
+      continue
+    }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
+      push()
+
+      continue
+    }
+    cur += c
+    has = true
+  }
+  push()
+
+  return out
+}
+
+/** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. Linear: no regex over the input. */
+export function resolveLike(cwd: string, p: string): string {
+  const isSep = (c: string | undefined) => c === '/' || c === '\\'
+  const drive = (s: string) => s.length >= 3 && /[A-Za-z]/.test(s[0] as string) && s[1] === ':' && isSep(s[2])
+  const unc = (s: string) => s.startsWith('\\\\')
+  const abs = p.startsWith('/') || drive(p) || unc(p)
+  const win = drive(p) || unc(p) || (!p.startsWith('/') && (drive(cwd) || unc(cwd)))
+  const sep = win ? '\\' : '/'
+  let base = cwd
+  while (base.length > 1 && isSep(base[base.length - 1])) base = base.slice(0, -1)
+  const full = abs ? p : `${base}${sep}${p}`
+  let prefix = ''
+  let rest = full
+  if (drive(full)) {
+    prefix = full.slice(0, 2)
+    rest = full.slice(2)
+  } else if (unc(full)) {
+    let i = 2
+    let parts = 0
+    while (i < full.length && parts < 2) {
+      if (isSep(full[i])) parts++
+      if (parts < 2) i++
+    }
+    prefix = full.slice(0, i)
+    rest = full.slice(i)
+  }
+  const out: string[] = []
+  let seg = ''
+  const flush = () => {
+    if (seg === '..') out.pop()
+    else if (seg !== '' && seg !== '.') out.push(seg)
+    seg = ''
+  }
+  for (const c of rest) {
+    if (isSep(c)) flush()
+    else seg += c
+  }
+  flush()
+
+  return `${prefix}${sep}${out.join(sep)}`
+}
+
+/** At most this many folders one command may name; past it the session is private (`over`). */
+export const MAX_COMMAND_PATHS = 256
+
+/**
+ * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
+ * against `cwd`, a file to its folder, `$HOME`/`${HOME}` and `$PWD`/`${PWD}` expanded). A path
+ * built any other way (`$X/y`, `$(…)`, backticks) can't be resolved, so the session is `over`
+ * (private), and so it is past MAX_COMMAND_PATHS. URLs are not paths.
+ */
+export function shellPaths(command: string, cwd: string, home?: string): { paths: string[]; over: boolean } {
+  const out = new Set<string>()
+  let over = false
+  const isSep = (c: string | undefined) => c === '/' || c === '\\'
+  for (const word of shellTokens(command, true)) {
+    const eq = word.startsWith('-') ? word.indexOf('=') : -1
+    let t = eq >= 0 ? word.slice(eq + 1) : word
+    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
+    // $HOME, ${HOME}, $PWD and ${PWD} anywhere in the word (only real expansions: quoted ones are LITERAL).
+    for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
+      let k = t.indexOf(v)
+      while (k >= 0) {
+        const after = t[k + v.length]
+        // `$HOMEDIR` is another variable: only the whole name.
+        if (v.startsWith('$') && !v.startsWith('${') && after !== undefined && /[A-Za-z0-9_]/.test(after)) {
+          k = t.indexOf(v, k + 1)
+          continue
+        }
+        if (val === undefined) over = true
+        t = `${t.slice(0, k)}${val ?? ''}${t.slice(k + v.length)}`
+        k = t.indexOf(v, k + (val ?? '').length)
+      }
+    }
+    const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
+    if (!pathLike) continue
+    // Any other expansion: where it sits decides. In the path's first segment, the location itself
+    // is unknown: private. Further in, the folder before it is known: that one binds.
+    let x = -1
+    for (let k = 0; k < t.length; k++) {
+      if (t[k] === '$' || t[k] === '`') {
+        x = k
+        break
+      }
+    }
+    if (x >= 0) {
+      let lastSep = -1
+      for (let k = 0; k < x; k++) if (isSep(t[k])) lastSep = k
+      if (lastSep <= 0) {
+        over = true
+        continue
+      }
+      t = t.slice(0, lastSep)
+    }
+    t = t.split(LITERAL).join('$')
+    let p: string
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) {
+        over = true
+        continue
+      }
+      p = resolveLike(home, t.slice(2) || '.')
+    } else p = resolveLike(cwd, t)
+    // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
+    const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    const name = p.slice(last + 1)
+    const folder = x < 0 && name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
+    out.add(folder)
+    if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
+  }
+
+  return { paths: [...out], over }
+}
+
+/** Interpreters that run code given as an argument, and terminals that run a command under a pseudo-terminal. */
+const INTERPRETERS = new Set(['python', 'python2', 'python3', 'node', 'nodejs', 'perl', 'ruby', 'deno', 'bun', 'php', 'lua', 'osascript', 'tclsh', 'pwsh', 'powershell'])
+const CODE_FLAGS = new Set(['-c', '-e', '-E', '-p', '-r', '--eval', '--print', '-command', '-Command'])
+const PTY_WRAPPERS = new Set(['script', 'expect', 'unbuffer', 'socat', 'tmux', 'screen', 'pty', 'zpty', 'winpty'])
+
+/** Whether a command runs interpreter code given inline, or anything under a pseudo-terminal wrapper (by its words: linear). */
+export function hidesCommand(command: string): 'interpreter' | 'pty' | null {
+  const words = shellTokens(command)
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string
+    let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase()
+    if (base.endsWith('.exe')) base = base.slice(0, -4)
+    // python3.12, node22: the name without its version (a loop, not a regex over the word).
+    let end = base.length
+    while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+    const bare = base.slice(0, end)
+    if (PTY_WRAPPERS.has(base) || PTY_WRAPPERS.has(bare)) return 'pty'
+    if (INTERPRETERS.has(base) || INTERPRETERS.has(bare)) {
+      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) if (CODE_FLAGS.has(words[j] as string)) return 'interpreter'
+    }
+  }
+
+  return null
+}
+
+
+
+/**
+ * Absolute paths a tool call works on (file_path, notebook_path, path), as written: the mod binds
+ * the session to each one's project (the CLI's --project-dir), so a session that read or changed a
+ * private project's files stays private. A relative path is the session's own folder.
+ */
+export function toolPaths(input: unknown, cwd?: string, home?: string): string[] {
+  const e = (input ?? {}) as Record<string, unknown>
+  const out: string[] = []
+  for (const k of ['file_path', 'notebook_path', 'path']) {
+    const v = e[k]
+    if (typeof v !== 'string' || v.length > 4096 || /[\0\n]/.test(v) || v === '') continue
+    if (/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v)) out.push(v)
+    // A relative search root (Grep, Glob) is relative to where the session is now.
+    else if (cwd) out.push(v === '~' || v.startsWith('~/') ? (home ? resolveLike(home, v.slice(2) || '.') : v) : resolveLike(cwd, v))
+  }
+  return out
+}
+
+/** toolPaths, plus a shell command's folders (shellPaths) and whether any couldn't be resolved or were too many (`over`: private). */
+export function toolPathsAll(input: unknown, cwd?: string, home?: string): { paths: string[]; over: boolean } {
+  const e = (input ?? {}) as Record<string, unknown>
+  const paths = toolPaths(input, cwd, home)
+  const tool = String(e.tool ?? '')
+  if ((tool === 'Bash' || tool === 'PowerShell') && typeof e.command === 'string') {
+    if (!cwd) return { paths, over: true }
+    const r = shellPaths(e.command, cwd, home)
+
+    return { paths: [...paths, ...r.paths], over: r.over }
+  }
+
+  return { paths, over: false }
+}
+
+/** Whether `path` is `dir` or under it (either separator, case-insensitive on a drive path). */
+export function isUnder(path: string, dir: string): boolean {
+  const norm = (x: string) => x.replace(/\\/g, '/').replace(/\/+$/, '')
+  const p = norm(path)
+  const r = norm(dir)
+
+  return r !== '' && (p === r || p.startsWith(`${r}/`))
+}
+
+/**
+ * Node code (run as `node -e <this> <file>`) that prints the person token in `file`, making it
+ * first if there is none: exclusively (`wx`, 0600, its folder 0700), so two runs agree on one.
+ * The mod makes it itself, before any typed /peers command: a fresh install has no `p2p` state yet,
+ * and its first commands (join, accept) widen sharing (packages/p2p/src/projects.ts).
+ */
+export const PERSON_TOKEN_SCRIPT = [
+  'const fs = require("fs"), path = require("path"), crypto = require("crypto");',
+  'const f = process.argv[1], ok = t => /^[A-Za-z0-9_-]{43}$/.test(t);',
+  'const read = () => { try { return fs.readFileSync(f, "utf8").trim(); } catch { return ""; } };',
+  'let t = read();',
+  'if (!ok(t)) {',
+  '  fs.mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });',
+  '  try { fs.writeFileSync(f, crypto.randomBytes(32).toString("base64url"), { mode: 0o600, flag: "wx" }); } catch {}',
+  '  t = read();',
+  '}',
+  'if (ok(t)) process.stdout.write(t);',
+].join("\n")
+
+/** The CLI's one-time notice that sessions follow their project now (projects.ts PROJECT_NOTICE_PREFIX). */
+export const PROJECT_NOTICE_RE = /^project boundaries:/
 
 /** Tools whose whole input can read or list files (a shell, a search). */
 const READING_TOOLS = new Set(['Read', 'Bash', 'PowerShell', 'Glob', 'Grep', 'LS', 'NotebookRead', 'WebFetch'])

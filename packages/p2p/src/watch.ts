@@ -83,6 +83,8 @@ export function eventFor(e: EventRec, sid: string, self: string, cursor: Cursor)
   // The copy of a message for a session that wasn't running (onSessionEnvelope): every other
   // session shows it, never the one it was for (that one has the message itself, if it resumes).
   if (e.data.unclaimedFor === sid) return false;
+  // A message for no session: only the sessions whose projects reach its sender (sessions.ts routableSessions).
+  if (Array.isArray(e.data.routable) && !e.data.routable.includes(sid)) return false;
   if (e.n <= cursor.start) return false;
   if (e.own !== undefined) return e.own !== self;
   return true;

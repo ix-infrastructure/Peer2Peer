@@ -115,22 +115,24 @@ describe("footprint overlap end to end", () => {
     expect(human.out).toMatch(/your change affects src\/api\/login\.ts#handleLogin they're editing \(it calls it\)/);
   });
 
-  it("L1: a peer outside my session's audience (in my peers() because they share with me) sees no status file of mine", async () => {
+  it("L1, project boundaries: a peer outside my session's audience (in my peers() because they share with me) isn't compared at all", async () => {
     await new Promise((res) => setTimeout(res, 200));
     const c = await carol.ok(["ix", "footprint", "--session", "cs1", "--publish"], { cwd: cRoot });
     expect(c.delivered.map((d: any) => d.userId)).toEqual([ids.alice]);
+    // peers() does include her (she shares her session with alice, and her footprint reached alice), but
+    // as1 isn't shared with her: overlap is only between sessions that see each other.
+    expect((await alice.ok(["ls"])).peers.some((p: any) => p.own === ids.carol && p.sid === "cs1")).toBe(true);
     const ao = await alice.ok(["ix", "overlaps", "--session", "as1"], { cwd: aRoot });
-    const forCarol = ao.overlaps.filter((o: any) => o.peer.own === ids.carol);
-    // peers() does include her: she shares her session with alice.
-    expect(forCarol).toEqual([expect.objectContaining({ tier: "same-symbol", severity: "high" })]);
-    // alice's status names src/auth/session.ts, but carol isn't in its audience: the line doesn't.
-    expect(forCarol[0].message).toMatch(/you both change a symbol you are changing \(hashed: names stay private\)$/);
-    expect(forCarol[0].message).not.toContain("src/");
+    expect(ao.overlaps.filter((o: any) => o.peer.own === ids.carol)).toEqual([]);
+    expect(ao.skipped.filter((x: any) => x.peer.own === ids.carol)).toEqual([]);
+    expect(JSON.stringify(ao)).not.toContain(ids.carol);
   });
 
   it("a peer in another repository isn't compared", async () => {
     await bob.ok(["status", "--session", "bs1", "--state", "busy", "--label", "api", "--file", "src/api/login.ts"]);
     git(bRoot, "remote", "set-url", "origin", "https://github.com/Acme/Other.git");
+    // The remote is part of a project's identity (projects.ts): this is a new project, private until bob shares it.
+    await bob.ok(["project", "share", "--add", "--person", ids.alice], { cwd: bRoot });
     await new Promise((res) => setTimeout(res, 5_200));
     await bob.ok(["ix", "footprint", "--session", "bs1", "--publish", "--force"], { cwd: bRoot });
     const ao = await alice.ok(["ix", "overlaps", "--session", "as1"], { cwd: aRoot });

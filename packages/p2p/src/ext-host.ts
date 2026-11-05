@@ -8,8 +8,8 @@
 // table. It never sees keys or the trust store.
 
 import { createHash, createHmac } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Command } from "commander";
 import { displayStatus, sanitizePeerText, type ExtensionKind } from "@peer2peer/core/v3";
 import type { App, Io } from "./app.js";
@@ -27,6 +27,7 @@ import {
   type ExtStateValue,
   type P2PExtension,
 } from "./extensions.js";
+import { sessionWorkdir } from "./projects.js";
 import { listPeers, sendExtension, sessionAudience, sessionRef } from "./sessions.js";
 import { sessKey, type EventRec, type XStateRec } from "./state.js";
 import { declaredState, expiresAt, keptCopy, liveStates, publishExtensionState } from "./xstate.js";
@@ -172,15 +173,7 @@ function extStore(home: string, ns: string): ExtContext["kv"] {
  * Claude mod runs it from the plugin folder) passes the session's directory here.
  */
 export function extWorkdir(env: Record<string, string | undefined>): string {
-  const w = env.P2P_WORKDIR?.trim();
-  if (w && isAbsolute(w)) {
-    try {
-      if (statSync(w).isDirectory()) return w;
-    } catch {
-      // not there: the process's own
-    }
-  }
-  return process.cwd();
+  return sessionWorkdir(env);
 }
 
 type RunFn = <A extends unknown[]>(fn: (app: App, ...args: A) => Promise<{ json: unknown; human: string }>, opts?: { requireIdentity?: boolean }) => (...args: A) => Promise<void>;

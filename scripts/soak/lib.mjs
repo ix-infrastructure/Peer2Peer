@@ -13,6 +13,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { join, resolve, dirname, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { startProxy } from "../../packages/p2p/bench/proxy.mjs";
@@ -381,12 +382,23 @@ export class Device {
     return JSON.stringify(Object.fromEntries(this.relays.map((r) => [r.url, `ws://127.0.0.1:${this.proxies[r.url].port}/v3`])));
   }
 
+  /** The person token (packages/p2p/src/projects.ts): these devices act as their person, with no terminal to confirm on. */
+  get personToken() {
+    if (!this._token) {
+      this._token = randomBytes(32).toString("base64url");
+      mkdirSync(join(this.home, "cli"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(this.home, "cli", "person.key"), this._token, { mode: 0o600 });
+    }
+    return this._token;
+  }
+
   env(extra = {}) {
     // From scratch: nothing of the caller's environment but PATH, so no P2P_* setting leaks in.
     return {
       PATH: `${this.fakeIxBin}:${process.env.PATH ?? ""}`,
       HOME: this.homeDir,
       P2P_HOME: this.home,
+      P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: this.transport,
       P2P_EXTENSIONS: "ix",
       P2P_EXTENSION_PATH: this.ext,

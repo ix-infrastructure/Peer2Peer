@@ -34,6 +34,12 @@ export interface OverlapsResult {
   note?: string;
 }
 
+/** The users a session's status reaches, and this user: whose sessions it may be compared with. */
+export async function audienceOf(ctx: ExtContext, sid: string, self: string): Promise<Set<string>> {
+  const aud = ctx.audience ? await ctx.audience(sid).catch(() => undefined) : undefined;
+  return new Set([self, ...(aud?.members ?? [])]);
+}
+
 export async function overlapsFor(
   ctx: ExtContext,
   sid: string,
@@ -51,7 +57,12 @@ export async function overlapsFor(
   // (Own sessions still live on this device: the readable bodies of ended ones are pruned.)
   const live = rows.filter((r) => r.own === self.userId && r.thisDevice && r.live).map((r) => r.sid);
   const mine = parsed(await h.readMine(live.includes(sid) ? live : [...live, sid])) ?? parsed(me?.xstate?.[FOOTPRINT_KIND]?.body);
-  const others = rows.filter((r) => r.live && !isThis(r));
+  // Project boundaries (the CLI's projects.ts): only sessions this one's status reaches, and this
+  // user's own. A session in a private project compares with nobody else's; one in a shared project
+  // only with those its project shares (who see this session too). An audience that can't be read
+  // fails closed: own sessions only.
+  const reach = await audienceOf(ctx, sid, self.userId);
+  const others = rows.filter((r) => r.live && !isThis(r) && reach.has(r.own));
   const withFp: OverlapPeer[] = [];
   const withoutFootprint: ExtPeer[] = [];
   for (const r of others) {

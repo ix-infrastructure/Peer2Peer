@@ -28,6 +28,8 @@ import * as identity from "./identity.js";
 import { receiving } from "./inbound.js";
 import * as rotation from "./rotation.js";
 import * as sessions from "./sessions.js";
+import * as projects from "./projects.js";
+import { confirmOnTty } from "./tty-confirm.js";
 import * as social from "./social.js";
 import { watch } from "./watch.js";
 import * as doctorOps from "./doctor.js";
@@ -44,7 +46,7 @@ export { VERSION };
 export const SETTLE_MS = 5000;
 
 /** The operations the commands call: real modules by default, fakes in parser tests. */
-export const realOps = { ...identity, ...social, ...circles, ...sessions, ...codes, ...rotation, watch, doctor: doctorOps.doctor };
+export const realOps = { ...identity, ...social, ...circles, ...sessions, ...codes, ...rotation, ...projects, watch, doctor: doctorOps.doctor };
 export type Ops = typeof realOps;
 
 export interface ProgramDeps {
@@ -71,6 +73,10 @@ export interface ProgramDeps {
   isTTY?: boolean;
   /** `--no-input` (anywhere on the command line): no pickers and no questions, as in a script. */
   noInput?: boolean;
+  /** The person token was valid (main() checks it once and removes it from the environment: projects.ts). */
+  front?: boolean;
+  /** The person's "yes" on their controlling terminal (tty-confirm.ts; tests stand in). */
+  confirmTty?: projects.ConfirmTty;
 }
 
 interface Output {
@@ -81,6 +87,25 @@ interface Output {
 }
 
 const collect = (v: string, prev: string[] = []) => [...prev, v];
+
+/**
+ * Commands that widen who reaches this user: refused inside an agent's session unless the
+ * person's front end passes its token (projects.ts assertPersonForWidening). Reads never are.
+ */
+const WIDENING = new Set(["project share", "circle default", "invite", "join", "accept", "trust add", "held approve", "circle invite", "circle join", "circle policy", "unblock", "link start", "link join", "identity follow", "extensions enable"]);
+
+/** The widening command `cmd` is (its path from the program, with `session roster` only when it adds), or undefined. */
+export function wideningOf(cmd: Command): string | undefined {
+  const path: string[] = [];
+  for (let c: Command | null = cmd; c && c.parent; c = c.parent) path.unshift(c.name());
+  const p = path.join(" ");
+  if (WIDENING.has(p)) return p;
+  if (p === "session roster") {
+    const o = cmd.opts() as { add?: string[]; circle?: string };
+    if ((o.add?.length ?? 0) > 0 || o.circle !== undefined) return p;
+  }
+  return undefined;
+}
 const posInt = (name: string) => (v: string) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n < 0) throw new CliError("usage", `${name} must be a non-negative integer`);
@@ -89,6 +114,7 @@ const posInt = (name: string) => (v: string) => {
 
 export function buildProgram(deps: ProgramDeps): Command {
   const ops: Ops = { ...realOps, ...deps.ops } as Ops;
+  const confirmTty: projects.ConfirmTty = deps.confirmTty ?? confirmOnTty;
   // review M2: every diagnostic goes through safeTerminal; human stdout too (below); JSON through safeJson.
   // Time spent waiting on the user (prompts, stdin) doesn't count against the command deadline.
   let waitingOnUser = 0;
@@ -120,6 +146,8 @@ export function buildProgram(deps: ProgramDeps): Command {
   const makeApp = (env: Env, i: Io, o?: { readOnly?: boolean }): App => {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
+    app.front = deps.front === true;
+    app.confirmTty = confirmTty;
     return app;
   };
   const program = new Command("p2p")
@@ -142,7 +170,12 @@ export function buildProgram(deps: ProgramDeps): Command {
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a
         // read-only command, which must leave the home exactly as it found it).
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
+        // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
+        const widening = wideningOf(cmd);
+        if (widening) await projects.assertPersonForWidening(app, widening, confirmTty);
         if (opts.requireIdentity !== false) await app.load(true);
+        // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
+        if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
         if (app.keys) receiving(app);
         // The whole command is bounded (P2P_COMMAND_TIMEOUT_SEC, default 60 s, plus any --wait),
         // so it can't hang without a word: on expiry it fails naming the step it was on.
@@ -1175,16 +1208,16 @@ export function buildProgram(deps: ProgramDeps): Command {
     );
   circle
     .command("default [cid]")
-    .description("The circle new sessions, and running ones nobody shared by hand, are shared with (§6); --none for private")
-    .option("--none", "No default: those sessions are private")
+    .description("Your default circle: what invites join, and what `p2p project share` with no circle shares a project with (sessions follow their project, never this); --none for none")
+    .option("--none", "No default circle")
     .option("--json", "JSON output")
     .action(
       run(async (app, picked: string | undefined, o: { none?: boolean }) => {
         let cid = picked;
         if (!cid && !o.none && canAsk(cmdOf(o))) {
           const v = await pickOne(
-            "Which circle should new sessions be shared with?",
-            [...(await circleChoices(app, (c) => c.joined)).map((c) => ({ ...c, ...(c.detail?.includes("open") ? { detail: `${c.detail} · anyone its owner admits sees them` } : {}) })), { value: "", label: "None: new sessions are private" }],
+            "Which circle is your default (for invites, and for `p2p project share` with no circle)?",
+            [...(await circleChoices(app, (c) => c.joined)).map((c) => ({ ...c, ...(c.detail?.includes("open") ? { detail: `${c.detail} · anyone its owner admits sees them` } : {}) })), { value: "", label: "None" }],
             "",
           );
           if (v === "") o.none = true;
@@ -1195,8 +1228,8 @@ export function buildProgram(deps: ProgramDeps): Command {
         return {
           json: r,
           human: r.defaultCircle
-            ? `New sessions, and running ones nobody shared by hand, are shared with ${r.defaultCircle} (a running one stays private if that circle is open).`
-            : "New sessions, and running ones nobody shared by hand, are private.",
+            ? `Default circle: ${r.defaultCircle} (invites join it; \`p2p project share\` with no circle shares a project with it). Sessions follow their project: \`p2p project share\` in a repository shares its sessions.`
+            : "No default circle. Sessions follow their project: `p2p project share` in a repository shares its sessions.",
         };
       }),
     );
@@ -1222,8 +1255,10 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--to <address>", "name@fingerprint, userId or petname, optionally \"[ref]\" or /sid (on a terminal: picked from a list)")
     .option("--notify-when-idle", "Tell this session when the target next goes idle")
     .option("--stdin", "Read the text from stdin (also: a single `-` as the text)")
+    .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect)
+    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
     .option("--json", "JSON output")
-    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean }, cmd: Command) => {
+    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }, cmd: Command) => {
       // Without a picker these stay required, with commander's own error (as before they were requiredOption).
       if (!canAsk(cmd)) {
         if (o.fromSession === undefined) cmd.error("error: required option '--from-session <sid>' not specified", { code: "commander.missingMandatoryOptionValue" });
@@ -1231,7 +1266,7 @@ export function buildProgram(deps: ProgramDeps): Command {
       }
       return (sendAction as (...a: unknown[]) => Promise<void>)(text, o, cmd);
     });
-  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean }) => {
+  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }) => {
         if (o.to === undefined) {
           await app.connectAndDrain().catch(() => undefined);
           const peers = await ops.listPeers(app, { all: true });
@@ -1243,6 +1278,20 @@ export function buildProgram(deps: ProgramDeps): Command {
         // On a terminal with no --from-session: sent as `p2p tui` sends, and said so.
         const fromTui = o.fromSession === undefined;
         if (fromTui) o.fromSession = TUI_SESSION;
+        // The person's own session (projects.ts): only from a terminal. Named by a script or an agent, it is refused.
+        // And never from inside an agent's session (its environment, or a Claude Code or Codex ancestor),
+        // even under a pseudo-terminal: only the person's own terminal, or their front end's token.
+        const personOk = projects.personHere(app);
+        if (fromTui && !personOk) throw new CliError("refused", "`p2p send` with no --from-session sends as you, from your own terminal; inside an agent's session, send from that session (--from-session)");
+        const person = o.fromSession === TUI_SESSION && canAsk(cmdOf(o)) && personOk;
+        // Without the front end's token, the person confirms on their own terminal: a send as them, or the
+        // first send from a session nobody has used yet (a process detached from every terminal can't).
+        // (A first send from a new session is confirmed where every new session is: projects.ts bindSession.)
+        if (!app.front && (person || fromTui)) {
+          if (!(await confirmTty(`p2p send from session ${o.fromSession} to ${o.to}.`))) {
+            throw new CliError("refused", "this send needs your \"yes\" on your own terminal (read from the terminal itself, never stdin or a flag)");
+          }
+        }
         if (text.length === 0 && !o.stdin && !o.notifyWhenIdle && io.prompt) {
           text = [(await io.prompt("Message: ")).trim()];
           if (text[0] === "") throw new CliError("cancelled", "no message: nothing was sent");
@@ -1267,7 +1316,7 @@ export function buildProgram(deps: ProgramDeps): Command {
           const s = await ops.sendSharing(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle });
           r = s.result;
           if (s.shared) shared = `shared session tui with ${s.shared.address}\n`;
-        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle });
+        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}), ...(person ? { person: true } : {}) });
         const tail = r.notifyWhenIdle ? `; will notify when ${r.to.address} [${r.to.ref}] is idle` : "";
         const where = r.to.own === r.to.userId ? `${r.to.address} [${r.to.ref}]` : `${r.to.address} (in your session ${r.to.sid})`;
         const ago = (ms: number) => {
@@ -1275,7 +1324,10 @@ export function buildProgram(deps: ProgramDeps): Command {
           return m < 1 ? "just now" : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
         };
         const until = (ms: number) => `expires in ${Math.max(1, Math.round((ms - Date.now()) / 86_400_000))} days`;
-        const from = fromTui ? "\nsent from session tui; replies show in `p2p tui`" : "";
+        // The person's own sends cross no project boundary, but say which one this folder has (projects.ts).
+        const here = person ? await ops.showProject(app, projects.sessionWorkdir(app.env)).catch(() => undefined) : undefined;
+        const boundary = here ? `\nproject ${here.name} here is ${here.policy === "private" ? "private (agent sessions in it reach only your own devices)" : "shared"}; this send was yours, from your terminal` : "";
+        const from = fromTui ? `\nsent from session tui; replies show in \`p2p tui\`${boundary}` : "";
         if (r.queued && r.state === "outbox") {
           return { json: r, human: `${shared}Queued for ${where}: this device can't reach a relay right now; it goes out when one is back (${until(r.expiresAt!)})${tail}.${from}` };
         }
@@ -1325,9 +1377,11 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--mode <mode>", "Permission mode")
     .option("--cap <cap>", "Something this session's client understands, e.g. agents.v1 (repeatable)", collect)
     .option("--agents-json <json>", "The session's subagents as a JSON array (`-` reads it from stdin); sent only to peers that understand agents.v1")
+    .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who sees it", collect)
+    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
     .option("--json", "JSON output")
     .action(
-      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string }) => {
+      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string; projectDir?: string[]; projectDirsOver?: boolean }) => {
         let agents: unknown;
         if (o.agentsJson !== undefined) {
           const text = o.agentsJson === "-" ? (io.readStdin ? await io.readStdin() : "") : o.agentsJson;
@@ -1338,7 +1392,7 @@ export function buildProgram(deps: ProgramDeps): Command {
             throw new CliError("usage", "--agents-json must be a JSON array of agents");
           }
         }
-        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents });
+        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}) });
         for (const w of r.warnings ?? []) io.err(`p2p: ${w}`);
         const n = r.delivered.length;
         return {
@@ -1351,7 +1405,7 @@ export function buildProgram(deps: ProgramDeps): Command {
   const session = program.command("session").description("Session settings");
   session
     .command("roster <sid>")
-    .description("Who may see and message this session (default: your default circle, else private)")
+    .description("Who may see and message this session: within what its project allows (`p2p project`), private until shared")
     .option("--circle <cid>", "Share with a circle you joined")
     .option("--private", "Only the listed people")
     .option("--add <user>", "Add a participant (repeatable)", collect)
@@ -1361,6 +1415,115 @@ export function buildProgram(deps: ProgramDeps): Command {
       run(async (app, sid: string, o: { circle?: string; private?: boolean; add?: string[]; remove?: string[] }) => {
         const r = await ops.roster(app, sid, o);
         return { json: { roster: r }, human: fmt.formatRoster(r) };
+      }),
+    );
+
+  // ── projects (projects.ts): who sees sessions working in a repository ──────
+  const project = program
+    .command("project")
+    .description("Who sees sessions working in this project (a git repository, or a folder): private until you share it")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "A project is private until you share it: only your own devices see its sessions, their files,",
+        "footprints and summaries, and none of its sessions can send to anyone else. A session that works",
+        "in several projects reaches only who all of them share. Policies live only on this device;",
+        `nothing in a repository can widen them (a committed ${projects.PRIVATE_MARKER} can only make it private).`,
+      ].join("\n"),
+    );
+  const projectView = (v: projects.ProjectView) => {
+    const lines = [`${v.name}  ${v.policy === "private" ? "private" : "shared"}${v.kind === "git" ? (v.remote ? `  (${v.remote})` : "  (git, no remote)") : "  (folder)"}`, `  ${v.root}`];
+    if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
+    for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
+    for (const p of v.people) lines.push(`  ${p.address}`);
+    return lines.join("\n");
+  };
+  project
+    .command("share [circles...]")
+    .description("Share the project here with circles you joined (and friends with --person); on a terminal with none named, pick them")
+    .option("--person <user>", "A friend to share it with too (repeatable)", collect)
+    .option("--add", "Keep what it is shared with already (default: replace it)")
+    .option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)")
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, named: string[], o: { person?: string[]; add?: boolean; dir?: string }) => {
+        const dir = o.dir ?? projects.sessionWorkdir(app.env);
+        let circlesIn = [...named];
+        let people = [...(o.person ?? [])];
+        if (circlesIn.length + people.length === 0 && canAsk(cmdOf(o))) {
+          const here = await ops.showProject(app, dir);
+          const cs = await circleChoices(app, (c) => c.joined);
+          const fs = (await friendChoices(app)).map((f) => ({ ...f, value: `person:${f.value}` }));
+          const picked = await ask({
+            intro: [`Project ${here.name} (${here.root}) is ${here.policy}.`, "Everyone you pick sees its sessions: status, summary, files and footprints, and its agents may message them."],
+            message: `Share ${here.name} with:`,
+            choices: [...cs.map((c) => ({ ...c, checked: c.value === app.self?.defaultCircle || here.circles.some((x) => x.cid === c.value) })), ...fs],
+            multi: true,
+            max: projects.MAX_PROJECT_SHARES,
+          });
+          circlesIn = picked.filter((v) => !v.startsWith("person:"));
+          people = picked.filter((v) => v.startsWith("person:")).map((v) => v.slice("person:".length));
+          if (circlesIn.length + people.length === 0) throw new CliError("cancelled", "nothing picked: nothing was shared");
+        } else if (circlesIn.length + people.length === 0) {
+          // The quick way for someone who relied on the default circle: share this project with it.
+          const def = app.self?.defaultCircle;
+          if (!def) throw new CliError("usage", "name a circle (or --person <friend>) to share this project with");
+          circlesIn = [def];
+        }
+        const r = await ops.shareProject(app, dir, { circles: circlesIn, people, ...(o.add ? { add: true } : {}) });
+        for (const w of r.warnings) io.err(`p2p: warning: ${w}`);
+        return { json: { project: r.project, ...(r.warnings.length ? { warnings: r.warnings } : {}) }, human: `Shared. Sessions in ${r.project.name} are seen by:\n${projectView(r.project)}` };
+      }),
+    );
+  project
+    .command("private")
+    .description("Make the project here private: only your own devices see its sessions (the default)")
+    .option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)")
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, o: { dir?: string }) => {
+        const v = await ops.makeProjectPrivate(app, o.dir ?? projects.sessionWorkdir(app.env));
+        return { json: { project: v }, human: `${v.name} is private: sessions in it reach only your own devices, from their next status on (a session that worked in it stays private until it ends).` };
+      }),
+    );
+  project
+    .command("ls")
+    .description("Projects with a policy on this device, and who sees each")
+    .option("--json", "JSON output")
+    .action(
+      run(async (app) => {
+        const all = await ops.listProjects(app);
+        return { json: { projects: all }, human: all.length === 0 ? "No project is shared: every session is seen only by your own devices. `p2p project share <circle>` in a repository shares it." : all.map(projectView).join("\n\n") };
+      }),
+    );
+  project
+    .command("show")
+    .description("The project here (its id, root, remote) and who sees its sessions")
+    .option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)")
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, o: { dir?: string }) => {
+        const v = await ops.showProject(app, o.dir ?? projects.sessionWorkdir(app.env));
+        return { json: { project: v }, human: projectView(v) };
+      }),
+    );
+
+  session
+    .command("bound <sid>")
+    .description("Bind a session to the bound an own-session message it took carried (front ends call it on Deliver; narrowing only)")
+    .requiredOption("--bound <json>", '"private" or {"circles": [...], "people": [...]}, as the message carried it')
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, sid: string, o: { bound: string }) => {
+        let v: unknown;
+        try {
+          v = JSON.parse(o.bound);
+        } catch {
+          throw new CliError("usage", "--bound must be JSON");
+        }
+        const r = await ops.bindBound(app, sid, v);
+        return { json: { project: r }, human: `session ${sid}: ${r.policy}${r.why ? ` (${r.why})` : ""}` };
       }),
     );
 
@@ -1434,7 +1597,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--session <sid>", "This TUI's session id (default: tui)")
     .action(async (o: { session?: string }) => {
       process.exitCode = await tuiCommand(
-        { env: deps.env, io, version: VERSION, makeApp: (env, i) => makeApp(env, i), ...(deps.isTTY !== undefined ? { isTTY: deps.isTTY } : {}), ...(deps.terminal ? { terminal: deps.terminal } : {}), ...(deps.signal ? { signal: deps.signal } : {}) },
+        { env: deps.env, io, version: VERSION, makeApp: (env, i) => makeApp(env, i), front: deps.front === true, ...(deps.isTTY !== undefined ? { isTTY: deps.isTTY } : {}), ...(deps.terminal ? { terminal: deps.terminal } : {}), ...(deps.signal ? { signal: deps.signal } : {}) },
         o,
       );
     });
@@ -1533,7 +1696,7 @@ function codexCommands(program: Command, deps: ProgramDeps, io: Io): void {
       try {
         const stdin = io.readStdin ? await io.readStdin() : "";
         const binNames = [deps.env.P2P_BIN?.trim(), selfScript(deps)].filter((v): v is string => !!v);
-        const answer = await codex.runHook(event, stdin, { home: codex.bridgeHome(deps.env), binNames });
+        const answer = await codex.runHook(event, stdin, { home: codex.bridgeHome(deps.env), binNames, ...((deps.env.HOME ?? deps.env.USERPROFILE) ? { homeDir: deps.env.HOME ?? deps.env.USERPROFILE } : {}) });
         if (answer) io.out(answer);
       } catch {
         // A hook never breaks Codex: no output, exit 0.
@@ -1608,6 +1771,15 @@ async function loadInstalled(deps: ProgramDeps): Promise<ExtensionRegistry> {
 
 /** Parses and runs; returns the exit code. */
 export async function main(argvIn: string[], deps: ProgramDeps): Promise<number> {
+  // The person token: checked once, then taken out of the environment before anything runs, so no
+  // child process (git, ix, an extension's tool) can read it (projects.ts).
+  {
+    // A copy without it (an embedder's object is left as it was); the process's own environment loses it too.
+    const env = { ...deps.env };
+    const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
+    if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
+    deps = { ...deps, front, env };
+  }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
   const end = argvIn.indexOf("--");
   const head = end < 0 ? argvIn : argvIn.slice(0, end);

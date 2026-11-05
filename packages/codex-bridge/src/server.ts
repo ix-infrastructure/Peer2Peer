@@ -6,7 +6,8 @@
 // tools. stdout carries MCP only; diagnostics go to stderr (Codex logs it).
 
 import { execFile, spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { childEnv, codexBinDirs, cwdPolicy, effectiveEnv, gitBinary, isHomeFolder, parentCwd, projectConfigDirsOf, safeBinary, safeExecEnv, userHome } from "./knobs.js";
@@ -30,10 +31,10 @@ export function resolveHome(env: Env): string {
 }
 
 /** `p2p watch` as a child: stdout lines as they come; killed when `signal` aborts. */
-export function childWatch(env: Env): WatchRunner {
+export function childWatch(env: Env, extra: Env = {}): WatchRunner {
   return (argv, onLine, signal) =>
     new Promise((resolve, reject) => {
-      const child = spawn(argv[0] as string, argv.slice(1), { env: childEnv(env), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      const child = spawn(argv[0] as string, argv.slice(1), { env: childEnv(env, extra), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
       let buf = "";
       let stderr = "";
       const kill = () => child.kill("SIGTERM");
@@ -94,6 +95,35 @@ export function codexQueue(env: Env, log?: (line: string) => void) {
 }
 
 /** A hook report off the socket, reduced to the fields and types the bridge reads. */
+/**
+ * The person token in `<P2P_HOME>/cli/person.key` (made here if the CLI hasn't yet): what lets the
+ * CLI tell this bridge's runs from the model's own shell (packages/p2p/src/projects.ts). Codex's
+ * sandbox may let a model's command read P2P_HOME: the token is then defence in depth only.
+ */
+export function personTokenOf(home: string | undefined): string | undefined {
+  if (!home) return undefined;
+  const f = join(home, "cli", "person.key");
+  try {
+    const t = readFileSync(f, "utf8").trim();
+    if (/^[A-Za-z0-9_-]{43}$/.test(t)) return t;
+  } catch {
+    // none yet
+  }
+  try {
+    mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+    const t = randomBytes(32).toString("base64url");
+    writeFileSync(f, t, { mode: 0o600, flag: "wx" });
+    return t;
+  } catch {
+    try {
+      const t = readFileSync(f, "utf8").trim();
+      return /^[A-Za-z0-9_-]{43}$/.test(t) ? t : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 export function sanitizeReport(raw: unknown): HookReport {
   const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   const m = (typeof r.mode === "object" && r.mode !== null ? r.mode : {}) as Record<string, unknown>;
@@ -104,6 +134,9 @@ export function sanitizeReport(raw: unknown): HookReport {
     ...(typeof r.cwd === "string" && isAbsolute(r.cwd) ? { cwd: r.cwd } : {}),
     mode,
     ...(Array.isArray(r.files) ? { files: r.files.filter((f): f is string => typeof f === "string").slice(0, 50) } : {}),
+    ...(Array.isArray(r.dirs) ? { dirs: r.dirs.filter((f): f is string => typeof f === "string" && isAbsolute(f) && f.length <= 4096).slice(0, 256) } : {}),
+    // Only narrows: a report can make the session private, never the reverse.
+    ...(r.over === true || (Array.isArray(r.dirs) && r.dirs.length > 256) ? { over: true } : {}),
   };
 }
 
@@ -142,12 +175,20 @@ export async function runMcpServer(o: McpOptions): Promise<void> {
   const p2pBin = env.P2P_BIN?.trim();
   if (p2pBin && !isAbsolute(p2pBin)) log(`ignored P2P_BIN=${p2pBin}: it must be an absolute path (never looked up through PATH)`);
   const bin = p2pBin && isAbsolute(p2pBin) ? [p2pBin] : o.bin;
+  // The person token (projects.ts): this bridge speaks for the person's session, so its p2p runs pass it
+  // (the session is registered, its sends are its own). The model's shell never has it.
+  // Only `p2p` and `p2p watch` get it (`extra`); childEnv never passes one through (CHILD_P2P_DENY), so
+  // `codex queue` and anything else this bridge runs can't.
+  const token = personTokenOf(home);
+  const front = token ? { P2P_PERSON_TOKEN: token } : {};
   // Every `p2p` child runs without project-settable node/loader variables (NODE_OPTIONS, DYLD_*, ...).
-  const p2p = new P2P(nodeExec(childEnv(env)), bin);
+  const p2p = new P2P(nodeExec(childEnv(env, front)), bin);
   let entry: Entry | null = null;
   const bridge: Bridge = new Bridge({
     p2p,
     bin,
+    // The long-lived watch never gets it: it needs none, and its environment is readable by others
+    // running as this user (/proc/<pid>/environ on Linux).
     watch: childWatch(env),
     env,
     transcript: (threadId) => new RolloutReader(eff.codexHome, threadId),
