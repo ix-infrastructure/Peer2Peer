@@ -29,6 +29,14 @@ export interface TestRelay {
   close(): Promise<void>;
 }
 
+/**
+ * Every test user connects from one address (127.0.0.1), where in use each would have their own. The
+ * relay's per-address connection limit (120 a minute) is sized for one machine, so a suite of several
+ * users crossed it on a fast runner and a refused connection looked like a stale result (release dry
+ * runs). Raised here for every test relay; a test of that limit sets its own (`limits`).
+ */
+const ONE_ADDRESS_LIMITS = { connectsPerIpPerMinute: 100_000 };
+
 export async function startRelay(
   url: string,
   opts: { powBits?: number; limits?: Record<string, number>; now?: () => number; config?: { allow?: string[]; allowCircle?: string; inviteAdmitSec?: number } } = {},
@@ -36,7 +44,7 @@ export async function startRelay(
   const crypto = createRelayCrypto();
   const relay = new Relay({
     ...(opts.now ? { now: opts.now } : {}),
-    config: makeConfig(crypto, { relayUrl: url, logLevel: "error", powBits: opts.powBits ?? 0, ...opts.config, ...(opts.limits ? { limits: opts.limits } : {}) }),
+    config: makeConfig(crypto, { relayUrl: url, logLevel: "error", powBits: opts.powBits ?? 0, ...opts.config, limits: { ...ONE_ADDRESS_LIMITS, ...opts.limits } }),
     store: new MemoryStore(),
     crypto,
     logger: createLogger({ level: "error", sink: () => {} }),

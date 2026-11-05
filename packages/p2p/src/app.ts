@@ -495,7 +495,8 @@ export class App {
         // back uncounted, so the next command or the watch applies those envelopes in full.
         if (pool.busy) {
           pool.stopHandling();
-          await this.onAbandon?.().catch(() => undefined);
+          // Bounded too: giving claims back waits on the store's lock, and an exit never hangs on it.
+          if (this.onAbandon) await Promise.race([this.onAbandon().catch(() => undefined), new Promise((r) => setTimeout(r, CLOSE_GRACE_MS).unref())]);
         }
       } finally {
         this.pool = undefined;
