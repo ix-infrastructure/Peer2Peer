@@ -13813,7 +13813,11 @@ async function sendStatus(app, o) {
   await app.connectAndDrain();
   const sess = await noteOpenCircle(app, await getSession(app, sid, warnings), warnings);
   const audience = await rosterAudience(app, sess);
-  if (before && before.jws !== sess.jws) await retract(app, sid, before, audience).catch(() => void 0);
+  if (before && before.jws !== sess.jws) {
+    for (const miss of await retract(app, sid, before, audience)) {
+      warnings.push(`the blank private status didn't reach ${miss.address} (${miss.error}): they still see its last status until it is no longer live`);
+    }
+  }
   if (audience.length === 0) {
     delete status.summary;
     delete status.summaryAt;
@@ -13848,9 +13852,17 @@ async function sendStatus(app, o) {
 }
 async function retract(app, sid, before, now) {
   const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
-  await mapLimit(gone, STATUS_FANOUT, async (u) => {
-    await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws }).catch(() => void 0);
+  const out = await mapLimit(gone, STATUS_FANOUT, async (u) => {
+    let error;
+    try {
+      const d = await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws });
+      if (d.relays.length === 0) error = `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`;
+    } catch (e) {
+      error = e.message;
+    }
+    return error === void 0 ? void 0 : { userId: u, address: await app.addressOf(u).catch(() => u), error };
   });
+  return out.filter((x) => x !== void 0);
 }
 async function listPeers(app, opts = {}) {
   const peers = await app.state.get("peers") ?? {};

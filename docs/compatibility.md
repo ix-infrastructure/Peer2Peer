@@ -77,7 +77,7 @@ Security comes first: none of these relaxes authorisation, signatures, replay or
 
 ### Two-step rollout for `dinfo`
 
-Clients before this change (up to main at 73e547d) refuse an identity document with a field they don't know. A document with `dinfo` would make its user unreachable to them: the matrix shows this, and their `join` fails with "identity document: unknown field dinfo". So in this release:
+Pre-release clients from before protocol 3.1 refuse an identity document with a field they don't know. A document with `dinfo` would make its user unreachable to them: the matrix shows this, and their `join` fails with "identity document: unknown field dinfo". So in this release:
 
 - **Step 1 (this release).** Every client accepts and reads `dinfo`. It's **emitted only when opted in** (`P2P_DEVICE_INFO=1`, or `"deviceInfo": true` in config.json), and only to relays whose `/.well-known/p2p-relay.json` lists `identity.lenient`. Opting out removes the entry at the next publish.
 - **Step 2 (a later release, once the previous two releases are 3.1).** Emitted by default. Run the matrix with `--new-env P2P_DEVICE_INFO=1` against the refs that release supports before flipping it.
@@ -98,7 +98,7 @@ The outbox-downgrade edge of delivery receipts (a message sealed with `rcpt` and
 
 ### What this client never sends to an older one
 
-The lenient client still interoperates with main as it stands (73e547d) and with the earlier 60b4d61, e3a07d4 and c1bda28 for everything they support, because it never *sends* them anything new:
+The lenient client still interoperates with older clients for everything they support, because it never *sends* them anything new:
 
 - **Status caps:** the new caps are status caps, which every client since the status amendment accepts (the charset is unchanged, and there are at most 16).
 - **Identity documents:** no `dinfo` unless opted in (step 2 above).
@@ -163,9 +163,9 @@ Every run asserts that no side rejected an envelope.
 
 ```sh
 (cd packages/core && npm run build) && (cd packages/relay && npm run build)
-node scripts/compat/matrix.mjs                       # default refs: c1bda28 (offline delivery), e3a07d4 (receipts), 60b4d61 (members-only relays, web links), 73e547d (trust), 082e7e0 (protocol 3.1 and the TUI)
+node scripts/compat/matrix.mjs                       # default ref: 70b86c7 (the initial public release)
 node scripts/compat/matrix.mjs --refs v0.2.0,v0.3.0  # once there are release tags: the previous two
 P2P_COMPAT=1 packages/p2p/node_modules/.bin/vitest run packages/p2p/src/__tests__/compat-matrix.test.ts
 ```
 
-The default refs are four chosen main commits until releases are tagged. After that they are the previous two release tags (`P2P_COMPAT_REFS` or `--refs`). In CI, dispatch `ci` manually with `compat_matrix: true`. The release checklist ([docs/releasing.md](releasing.md)) requires a green matrix against the previous two releases.
+The default ref is the initial public release (70b86c7) until releases are tagged. After that they are the previous two release tags (`P2P_COMPAT_REFS` or `--refs`). In CI, dispatch `ci` manually with `compat_matrix: true`. The release checklist ([docs/releasing.md](releasing.md)) requires a green matrix against the previous two releases.

@@ -697,7 +697,12 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   const audience = await rosterAudience(app, sess);
   // Narrowed since the last status: whoever could see it and no longer can gets one blank,
   // private status under the roster they hold, so its last real one doesn't linger in their list.
-  if (before && before.jws !== sess.jws) await retract(app, sid, before, audience).catch(() => undefined);
+  if (before && before.jws !== sess.jws) {
+    // Never silently: whoever didn't get the blank status still lists the last real one until it expires.
+    for (const miss of await retract(app, sid, before, audience)) {
+      warnings.push(`the blank private status didn't reach ${miss.address} (${miss.error}): they still see its last status until it is no longer live`);
+    }
+  }
   if (audience.length === 0) {
     // Nobody but this user's own devices sees it: no summary goes out (the front end skips making one).
     delete status.summary;
@@ -736,12 +741,23 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid), bound: true };
 }
 
-/** The blank status a narrowed session leaves with those it no longer reaches (under their roster). */
-async function retract(app: App, sid: string, before: SessionDoc, now: readonly string[]): Promise<void> {
+/**
+ * The blank status a narrowed session leaves with those it no longer reaches (under their roster).
+ * Returns whom it didn't reach (an error, or no relay took it), for the caller to say so.
+ */
+async function retract(app: App, sid: string, before: SessionDoc, now: readonly string[]): Promise<{ userId: string; address: string; error: string }[]> {
   const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
-  await mapLimit(gone, STATUS_FANOUT, async (u) => {
-    await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws }).catch(() => undefined);
+  const out = await mapLimit(gone, STATUS_FANOUT, async (u) => {
+    let error: string | undefined;
+    try {
+      const d = await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws });
+      if (d.relays.length === 0) error = `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`;
+    } catch (e) {
+      error = (e as Error).message;
+    }
+    return error === undefined ? undefined : { userId: u, address: await app.addressOf(u).catch(() => u), error };
   });
+  return out.filter((x): x is { userId: string; address: string; error: string } => x !== undefined);
 }
 
 // ---------------------------------------------------------------------------

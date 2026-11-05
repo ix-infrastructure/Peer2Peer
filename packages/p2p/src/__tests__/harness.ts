@@ -142,6 +142,9 @@ export class User {
   async ok(args: string[], opts: { stdin?: string } = {}): Promise<any> {
     const r = await this.run(args, opts);
     if (r.code !== 0) throw new Error(`${this.name}: p2p ${args.join(" ")} failed (${r.code}): ${r.out}\n${r.err}`);
+    // A relay that refused the connection (a per-address limit) leaves the command working from what it
+    // held: in a test that expects success, that is the fixture's limits, never the code under test.
+    if (/\bHTTP 429\b/.test(r.err)) throw new Error(`${this.name}: p2p ${args.join(" ")}: the test relay refused a connection (HTTP 429): raise its limits for this suite\n${r.err}`);
     return r.json;
   }
 
