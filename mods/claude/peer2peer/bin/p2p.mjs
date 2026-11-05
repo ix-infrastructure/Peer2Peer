@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.0 c70308b482590868
+// @peer2peer/core 0.1.0 17f1f12f2f753fc9
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -10196,7 +10196,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const overDocs = () => {
     if (examined >= maxDocs)
       docsCapped = true;
-    return docsCapped || overBudget();
+    return docsCapped;
   };
   const stored2 = await store2.getIdentity(userId);
   begin2();
@@ -10209,7 +10209,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   if (relays.length === 0)
     fail("identity-unknown", `no relays to refresh ${userId} from`);
   const seen = /* @__PURE__ */ new Set();
-  const admit = (list, keep, quota, walk = false) => {
+  const admit = (list, keep, quota, walk = false, shareMs = Infinity) => {
+    const t0 = performance.now();
     const claimed = list.filter((j) => typeof j === "string").slice(0, MAX_EXAMINED_PER_RELAY * 4).map((j) => {
       try {
         const p = decodeJws(j).payload;
@@ -10228,7 +10229,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     for (const { j } of claimed) {
       if (out.length >= keep)
         break;
-      if (used >= quota || (walk ? overBudget() : overDocs())) {
+      if (used >= quota || (walk ? overBudget() : overDocs() || used > 0 && performance.now() - t0 > shareMs)) {
         cut = true;
         break;
       }
@@ -10284,10 +10285,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       docsCapped = true;
       return [];
     }
-    begin2();
+    if (walk)
+      begin2();
+    const share = budgetMs / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r) : quota;
-      const a = admit(forRelay(res, r), keep, q, walk);
+      const a = admit(forRelay(res, r), keep, q, walk, walk ? Infinity : share);
       if (walk)
         walkLeft.set(r, q - a.used);
       return { answered: res !== void 0, ...a };
@@ -10296,7 +10299,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     if (answered2.length > 0 && answered2.every((x) => x.cut))
       docsCapped = true;
     const out = results.flatMap((x) => x.docs);
-    end();
+    if (walk)
+      end();
     return out;
   };
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);

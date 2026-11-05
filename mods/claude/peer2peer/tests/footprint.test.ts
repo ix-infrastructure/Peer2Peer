@@ -263,7 +263,8 @@ describe('peer2peer: the Ix footprint', () => {
     const t0 = Date.now()
     uncheckableShell(`p2p ls; ${'a=1 '.repeat(2000)}`)
     uncheckableShell(`p2p ls; ${'$('.repeat(4000)}`)
-    expect(Date.now() - t0).toBeLessThan(500)
+    // No quadratic rescans: those would take minutes; the bound leaves room for a slow runner.
+    expect(Date.now() - t0).toBeLessThan(3000)
     const w = world(on)
     await loaded($, w)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'echo "p2p ix config names=plain" | sh' } as never)

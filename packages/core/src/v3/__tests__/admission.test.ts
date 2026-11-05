@@ -38,6 +38,36 @@ describe("T1: hostile relays can't starve an honest one", () => {
     expect(await lastRefreshed(store, u.userId)).toBe(NOW);
   });
 
+  it("on slower hardware too: the junk relays use up only their own share of the checking time", async () => {
+    // A smaller CPU budget stands in for a slower machine (a Raspberry Pi, a loaded CI runner): with one
+    // shared budget, the 4 junk relays spent it all before the honest 5th was checked, and the refresh
+    // stayed incomplete (the honest head never adopted). Each relay's share is its own now, and every
+    // relay gets at least one check, however slow the machine. Deterministic: no timing is asserted.
+    for (const budgetMs of [400, 50, 1]) {
+      const { u, store, head } = await behindByOne();
+      const p = decodeJws(head.jws).payload;
+      const junk = Array.from({ length: 256 }, (_, i) => sameKeyJunk(p, i));
+      // The honest relay last (the order a hostile majority would want), and first.
+      for (const honest of [4, 0]) {
+        const fetcher: IdentityFetcher = async (_u, relays) => (relays[0] === RELAYS[honest] ? [head.jws] : junk);
+        const view = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: RELAYS, budgetMs });
+        expect([budgetMs, honest, view.incomplete]).toEqual([budgetMs, honest, undefined]);
+        expect(view.head.hash).toBe(head.hash);
+      }
+    }
+  });
+
+  it("only junk answers, cut short by their share of the time: incomplete, not a refresh", async () => {
+    const { u, store, head } = await behindByOne();
+    const p = decodeJws(head.jws).payload;
+    const junk = Array.from({ length: 256 }, (_, i) => sameKeyJunk(p, i));
+    const view = await refreshIdentity(store, u.userId, async () => junk, { now: NOW, relays: RELAYS.slice(0, 2), budgetMs: 1 }).catch((e: Error) => e);
+    // Either nothing usable came back (identity-unknown), or what came back is incomplete: never a fresh refresh.
+    if (!(view instanceof Error)) expect(view.incomplete).toBe(true);
+    expect(await lastRefreshed(store, u.userId)).toBeUndefined();
+    void head;
+  });
+
   it("an incomplete refresh doesn't count as a refresh", async () => {
     const { u, store, head } = await behindByOne();
     const p = decodeJws(head.jws).payload;
@@ -62,10 +92,9 @@ describe("T2: foreign-key junk costs only a decode", () => {
     const foreign = Array.from({ length: 300 }, (_, i) =>
       signJws("p2p-identity+jws", "ik", { ...p, ver: 900 + i, ...(i % 2 ? { iss: other.userId } : { ik: b64uEncode(other.publicKey) }) }, sk),
     );
-    // A quota of a single signature check is enough: the junk never reaches one.
-    const t0 = performance.now();
+    // A quota of a single signature check is enough: the junk never reaches one. (That is the proof;
+    // no wall-clock bound is asserted, which a slower runner could miss.)
     const view = await refreshIdentity(store, u.userId, async () => [...foreign, head.jws], { now: NOW, relays: [RELAYS[0]], maxDocs: 1 });
-    expect(performance.now() - t0).toBeLessThan(500);
     expect(view.incomplete).toBeUndefined();
     expect(view.head.hash).toBe(head.hash);
   });

@@ -232,7 +232,8 @@ describe("FileTrustStore on disk", () => {
       // And the next one gets the lock at once.
       const t0 = Date.now();
       await new FileDocBackend(dir, { timeoutMs: 1000 }).withLock(async () => {});
-      expect(Date.now() - t0).toBeLessThan(500);
+      // At once, not after waiting out the 1 s timeout (room for a slow runner below it).
+      expect(Date.now() - t0).toBeLessThan(800);
     });
 
     it("an empty lock (an older client's) is judged by LOCK_STALE_MS: a stalled creator a few seconds in keeps it (review M-B)", async () => {
@@ -296,7 +297,7 @@ describe("FileTrustStore on disk", () => {
           ran = true;
         });
         expect(ran).toBe(true);
-        expect(Date.now() - t0).toBeLessThan(500);
+        expect(Date.now() - t0).toBeLessThan(800);
       } finally {
         fsp.link = realLink;
       }
