@@ -20,7 +20,8 @@
 //    deletes everything, the key included, and the messages in the event log (events.json).
 //    A record's `at` is when it arrived here (`sentAt`: the sender's clock), so a sender can't
 //    backdate one. A document that can't be opened is set aside (history.bad-*), never swept
-//    silently or overwritten; the index carries each segment's hash, so an older copy put back is too.
+//    silently or overwritten. Writes are copy-on-write (see "Writing"), so a crash loses at most
+//    what was being written, and an older segment put back is never taken back in.
 //  - Who reads it (assertHistoryReader):
 //      the person's own view (no --session, or session `tui`: messages to the person, to no
 //      session, or from `p2p tui` / a terminal send): only the person, by the same gate as the
@@ -198,32 +199,60 @@ function open<T>(key: Buffer, name: string, doc: unknown): T | undefined {
 
 // ---------------------------------------------------------------------------
 // Writing
+//
+// Copy-on-write, so a crash at any point leaves a history that opens with nothing lost but what was
+// being written: a segment's new version goes under a fresh name (`history-<next>`, numbers never
+// reused), then the index, then its copy (MARK), then the old version is removed.
+//
+//  - The index names each live segment with a hash of the sealed document, and `next`, the lowest
+//    number never used. A segment the index doesn't name is adopted only when its number is at or
+//    above `next` (written after the index: a crash before the index was) and it opens; if it says
+//    it `replaces` a listed segment, that one is dropped. Below `next` it is an old version (pruned,
+//    or superseded) put back or left behind: removed, never adopted. So a restored segment brings no
+//    older copy back.
+//  - The index can't be opened: its copy (MARK, sealed under its own name) stands in. Neither can:
+//    nothing older is trusted, and every segment is set aside. History starts again.
 
 const recBytes = (r: HistoryRec) => Buffer.byteLength(JSON.stringify(r), "utf8");
 const docHash = (doc: unknown) => createHash("sha256").update(JSON.stringify(doc), "utf8").digest("base64url").slice(0, 22);
+const segNum = (name: string) => Number(name.slice("history-".length));
+
+/** The index's copy: what stands in when the index itself can't be opened. */
+const MARK = "history-mark";
 
 /** At most this many set-aside files are kept (each also goes once it is past retention). */
 export const MAX_QUARANTINED = 16;
 const QUARANTINE_RE = /^history\.bad-(\d{13})-[\w.-]{1,40}\.json$/;
 
-/** Segment documents on disk (`<home>/cli/history-<n>.json`), whatever the index says. */
+/** A segment's sealed content: its records, and the segment it is the new version of. */
+interface SegDoc {
+  v: 2;
+  recs: HistoryRec[];
+  replaces?: string;
+}
+
+/** Segment documents on disk (`<home>/cli/history-<n>.json`), whatever the index says, oldest first. */
 function segmentNames(app: App): string[] {
   try {
     return readdirSync(join(app.state.dir, "cli"))
       .map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1])
       .filter((x): x is string => x !== undefined)
-      .sort((a, b) => Number(a.slice(8)) - Number(b.slice(8)));
+      .sort((a, b) => segNum(a) - segNum(b));
   } catch {
     return [];
   }
 }
 
 /**
- * A history document that can't be read or opened (altered, rolled back, sealed under another key,
- * not JSON): moved aside to `history.bad-<ms>-<name>.json`, never silently deleted or overwritten,
- * and said once on stderr. Set-aside files go once past retention, or past MAX_QUARANTINED.
+ * A history document that can't be read or opened (altered, sealed under another key, not JSON):
+ * moved aside to `history.bad-<ms>-<name>.json`, never silently deleted or overwritten, and said
+ * once on stderr. Set-aside files go once past retention, or past MAX_QUARANTINED.
  */
+/** Documents set aside by this process (readAll reports the ones its read set aside). */
+let setAside = 0;
+
 function quarantine(app: App, name: string, why: string): void {
+  setAside++;
   const dir = join(app.state.dir, "cli");
   const to = `history.bad-${Date.now()}-${name}.json`;
   try {
@@ -249,7 +278,7 @@ function pruneQuarantine(app: App, cutoff: number): void {
   for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync(join(dir, x.f), { force: true });
 }
 
-type Opened<T> = { ok: true; value: T } | { ok: false; missing: boolean; why: string };
+type Opened<T> = { ok: true; value: T; doc: unknown } | { ok: false; missing: boolean; why: string };
 
 /** One document read and opened; never throws (each document's failure is its own). */
 async function readSealed<T>(app: App, key: Buffer, name: string, hash?: string): Promise<Opened<T>> {
@@ -262,11 +291,20 @@ async function readSealed<T>(app: App, key: Buffer, name: string, hash?: string)
   if (doc === undefined || doc === null) return { ok: false, missing: true, why: "missing" };
   if (hash !== undefined && docHash(doc) !== hash) return { ok: false, missing: false, why: "not the copy the index names" };
   const v = open<T>(key, name, doc);
-  return v === undefined ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v };
+  return v === undefined ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v, doc };
+}
+
+/** A segment's records (and what it replaces), or why not. */
+async function readSeg(app: App, key: Buffer, name: string, hash?: string): Promise<{ ok: true; seg: SegDoc; doc: unknown } | { ok: false; missing: boolean; why: string }> {
+  const got = await readSealed<SegDoc>(app, key, name, hash);
+  if (!got.ok) return got;
+  const v = got.value;
+  if (!v || v.v !== 2 || !Array.isArray(v.recs)) return { ok: false, missing: false, why: "not a history segment" };
+  return { ok: true, seg: v, doc: got.doc };
 }
 
 /** A segment's place in the index, from its records. */
-function segEntry(name: string, items: readonly HistoryRec[], sealed: Sealed): IndexDoc["segs"][number] {
+function segEntry(name: string, items: readonly HistoryRec[], sealed: unknown): IndexDoc["segs"][number] {
   return {
     name,
     first: items.length ? Math.min(...items.map((r) => r.at)) : 0,
@@ -277,37 +315,57 @@ function segEntry(name: string, items: readonly HistoryRec[], sealed: Sealed): I
   };
 }
 
-/**
- * The index, or one rebuilt from the segments on disk when it can't be opened (the one that didn't
- * is set aside): segments that open are kept, the others set aside. Under the lock.
- */
-async function loadIndex(app: App, key: Buffer): Promise<IndexDoc> {
-  const got = await readSealed<IndexDoc>(app, key, INDEX);
-  if (got.ok && got.value?.v === 1 && Array.isArray(got.value.segs)) {
-    // Segments it doesn't list: adopted if they open, else set aside.
-    const listed = new Set(got.value.segs.map((s) => s.name));
-    const extra = segmentNames(app).filter((n) => !listed.has(n));
-    if (extra.length === 0) return got.value;
-    const idx = { ...got.value, segs: [...got.value.segs] };
-    for (const name of extra) await adopt(app, key, idx, name);
-    idx.segs.sort((a, b) => a.first - b.first);
-    return idx;
-  }
-  if (!got.ok && !got.missing) quarantine(app, INDEX, got.why);
-  const names = segmentNames(app);
-  const idx: IndexDoc = { v: 1, segs: [], next: Math.max(0, ...names.map((n) => Number(n.slice(8)))) + 1 };
-  for (const name of names) await adopt(app, key, idx, name);
-  idx.segs.sort((a, b) => a.first - b.first);
-  return idx;
-}
+const okIndex = (v: unknown): v is IndexDoc => {
+  const i = v as IndexDoc | undefined;
+  return !!i && i.v === 1 && Array.isArray(i.segs) && Number.isSafeInteger(i.next);
+};
 
-async function adopt(app: App, key: Buffer, idx: IndexDoc, name: string): Promise<void> {
-  const seg = await readSealed<HistoryRec[]>(app, key, name);
-  if (seg.ok && Array.isArray(seg.value)) {
-    const doc = (await app.state.backend.read(name)) as Sealed;
-    idx.segs.push(segEntry(name, seg.value, doc));
-    idx.next = Math.max(idx.next, Number(name.slice(8)) + 1);
-  } else if (!seg.ok && !seg.missing) quarantine(app, name, seg.why);
+/**
+ * The index as the last write left it (see "Writing" above), with segments a crash left unlisted
+ * adopted or removed. Under the lock. `changed`: it differs from what is on disk.
+ */
+async function loadIndex(app: App, key: Buffer): Promise<{ idx: IndexDoc; changed: boolean }> {
+  const b = app.state.backend;
+  const main = await readSealed<IndexDoc>(app, key, INDEX);
+  let idx: IndexDoc | undefined = main.ok && okIndex(main.value) ? main.value : undefined;
+  let changed = false;
+  if (!idx) {
+    if (!main.ok && !main.missing) quarantine(app, INDEX, main.why);
+    const copy = await readSealed<IndexDoc>(app, key, MARK);
+    if (copy.ok && okIndex(copy.value)) idx = copy.value;
+    else {
+      if (!copy.ok && !copy.missing) quarantine(app, MARK, copy.why);
+      // Nothing says which segments are current: none is trusted (an older copy could be any of them).
+      const names = segmentNames(app);
+      for (const name of names) quarantine(app, name, "no index names it");
+      idx = { v: 1, segs: [], next: Math.max(0, ...names.map(segNum)) + 1 };
+    }
+    changed = true;
+  }
+  idx = { ...idx, segs: [...idx.segs] };
+  const listed = new Set(idx.segs.map((s) => s.name));
+  for (const name of segmentNames(app)) {
+    if (listed.has(name)) continue;
+    if (segNum(name) < idx.next) {
+      // An old version: pruned, superseded (a crash before its removal), or put back. Never adopted.
+      if (b.remove) await b.remove(name);
+      else await b.write(name, null);
+      continue;
+    }
+    // Written after the index (a crash before the index write): kept if it opens.
+    const seg = await readSeg(app, key, name);
+    if (!seg.ok) {
+      if (!seg.missing) quarantine(app, name, seg.why);
+      continue;
+    }
+    if (seg.seg.replaces) idx.segs = idx.segs.filter((s) => s.name !== seg.seg.replaces);
+    idx.segs.push(segEntry(name, seg.seg.recs, seg.doc));
+    idx.next = Math.max(idx.next, segNum(name) + 1);
+    changed = true;
+  }
+  // Oldest first, by their records (a trimmed oldest segment keeps its place under its new number).
+  idx.segs.sort((a, b) => a.first - b.first || segNum(a.name) - segNum(b.name));
+  return { idx, changed };
 }
 
 /**
@@ -321,96 +379,110 @@ export async function recordHistory(app: App, recs: readonly HistoryRec[], now =
   try {
     const key = historyKey(app.home, true);
     if (!key) return;
-    const b = app.state.backend;
     await app.state.withLock(async () => {
-      const idx = await loadIndex(app, key);
-      let last = idx.segs.at(-1);
+      const { idx } = await loadIndex(app, key);
+      const old: string[] = [];
+      const last = idx.segs.at(-1);
       let items: HistoryRec[] = [];
-      if (last) {
-        const seg = await readSealed<HistoryRec[]>(app, key, last.name, last.h);
-        if (seg.ok && Array.isArray(seg.value)) items = seg.value;
-        else {
-          // Never appended to (and so never overwritten): set aside, and a new segment begins.
-          if (!seg.ok && !seg.missing) quarantine(app, last.name, seg.why);
-          idx.segs.pop();
-          last = undefined;
-        }
+      let replaces: string | undefined;
+      if (last && last.bytes < SEGMENT_BYTES) {
+        const seg = await readSeg(app, key, last.name, last.h);
+        if (seg.ok) {
+          items = seg.seg.recs;
+          replaces = last.name;
+        } else if (!seg.missing) quarantine(app, last.name, seg.why);
+        // Either way, a new version of it (or a new segment) takes its place; it goes once the index no longer names it.
+        if (seg.ok) old.push(last.name);
+        idx.segs.pop();
       }
       const have = new Set(items.map((r) => r.id));
-      const write = async () => {
-        if (!last) return;
-        const sealed = seal(key, last.name, items);
-        await b.write(last.name, sealed);
-        Object.assign(last, segEntry(last.name, items, sealed));
-      };
       for (const r0 of recs) {
         const r: HistoryRec = { ...r0, text: r0.text.length > MAX_RECORD_TEXT ? r0.text.slice(0, MAX_RECORD_TEXT) : r0.text };
         if (have.has(r.id)) continue;
-        if (!last || last.bytes >= SEGMENT_BYTES) {
-          await write();
-          last = { name: `history-${idx.next++}`, first: r.at, last: r.at, bytes: 0, count: 0 };
-          idx.segs.push(last);
+        if (recBytesOf(items) >= SEGMENT_BYTES) {
+          await writeSeg(app, key, idx, items, replaces);
           items = [];
+          replaces = undefined;
         }
         items.push(r);
         have.add(r.id);
-        last.bytes += recBytes(r);
       }
-      await write();
-      await prune(app, key, idx, settings, now);
-      await b.write(INDEX, seal(key, INDEX, idx));
+      if (items.length > 0) await writeSeg(app, key, idx, items, replaces);
+      old.push(...(await prune(app, key, idx, settings, now)));
+      await commitIndex(app, key, idx, old);
     });
   } catch (e) {
     app.io.err(`p2p: message history not written: ${sanitizePeerText((e as Error).message, 200)}`);
   }
 }
 
-/** Drops what is past retention or the size cap, oldest first (the lock is held). */
-async function prune(app: App, key: Buffer, idx: IndexDoc, s: HistorySettings, now: number): Promise<void> {
+const recBytesOf = (items: readonly HistoryRec[]) => items.reduce((n, r) => n + recBytes(r), 0);
+
+/** Writes `items` as a new segment (a fresh name) and lists it in `idx` (not yet written). */
+async function writeSeg(app: App, key: Buffer, idx: IndexDoc, items: readonly HistoryRec[], replaces?: string): Promise<void> {
+  const name = `history-${idx.next++}`;
+  const sealed = seal(key, name, { v: 2, recs: [...items], ...(replaces ? { replaces } : {}) } satisfies SegDoc);
+  await app.state.backend.write(name, sealed);
+  idx.segs.push(segEntry(name, items, sealed));
+}
+
+/** The index, then its copy, then the segments they no longer name are removed. */
+async function commitIndex(app: App, key: Buffer, idx: IndexDoc, old: readonly string[]): Promise<void> {
   const b = app.state.backend;
-  const cutoff = now - s.retentionDays * 86_400_000;
-  const drop = async (name: string) => {
+  await b.write(INDEX, seal(key, INDEX, idx));
+  await b.write(MARK, seal(key, MARK, idx));
+  const listed = new Set(idx.segs.map((s) => s.name));
+  for (const name of old) {
+    if (listed.has(name)) continue;
     if (b.remove) await b.remove(name);
     else await b.write(name, null);
-  };
-  pruneQuarantine(app, cutoff);
-  // Whole segments past retention.
-  while (idx.segs.length > 0 && idx.segs[0].last < cutoff) await drop(idx.segs.shift()!.name);
-  // Past the size cap: whole segments, oldest first, but never the newest one.
-  let total = idx.segs.reduce((n, x) => n + x.bytes, 0);
-  while (idx.segs.length > 1 && total > s.maxBytes) {
-    const gone = idx.segs.shift()!;
-    total -= gone.bytes;
-    await drop(gone.name);
-  }
-  // The oldest segment still holding records past retention, or the only one over the cap: trimmed.
-  const first = idx.segs[0];
-  if (first && (first.first < cutoff || total > s.maxBytes)) {
-    const seg = await readSealed<HistoryRec[]>(app, key, first.name, first.h);
-    if (!seg.ok || !Array.isArray(seg.value)) {
-      if (!seg.ok && !seg.missing) quarantine(app, first.name, seg.why);
-      idx.segs.shift();
-      return;
-    }
-    const items = seg.value.filter((r) => r.at >= cutoff);
-    let bytes = items.reduce((n, r) => n + recBytes(r), 0);
-    const others = total - first.bytes;
-    while (items.length > 0 && others + bytes > s.maxBytes) bytes -= recBytes(items.shift()!);
-    if (items.length === 0) {
-      idx.segs.shift();
-      await drop(first.name);
-    } else {
-      const sealed = seal(key, first.name, items);
-      await b.write(first.name, sealed);
-      Object.assign(first, segEntry(first.name, items, sealed));
-    }
   }
 }
 
 /**
- * `p2p history --clear`: every segment, the index, set-aside files and the key, and the messages and
- * extension notices in the event log `p2p watch` reads (events.json), so no copy of their text is
- * left in P2P_HOME. A message a session's watch hasn't printed yet is gone with it.
+ * Drops what is past retention or the size cap, oldest first (the lock is held). Returns the
+ * segments to remove once the index no longer names them.
+ */
+async function prune(app: App, key: Buffer, idx: IndexDoc, s: HistorySettings, now: number): Promise<string[]> {
+  const cutoff = now - s.retentionDays * 86_400_000;
+  const gone: string[] = [];
+  pruneQuarantine(app, cutoff);
+  // Whole segments past retention.
+  while (idx.segs.length > 0 && idx.segs[0].last < cutoff) gone.push(idx.segs.shift()!.name);
+  // Past the size cap: whole segments, oldest first, but never the newest one.
+  let total = idx.segs.reduce((n, x) => n + x.bytes, 0);
+  while (idx.segs.length > 1 && total > s.maxBytes) {
+    const g = idx.segs.shift()!;
+    total -= g.bytes;
+    gone.push(g.name);
+  }
+  // The oldest segment still holding records past retention, or the only one over the cap: trimmed
+  // (copy-on-write, like every segment write).
+  const first = idx.segs[0];
+  if (first && (first.first < cutoff || total > s.maxBytes)) {
+    const seg = await readSeg(app, key, first.name, first.h);
+    idx.segs.shift();
+    if (!seg.ok) {
+      if (!seg.missing) quarantine(app, first.name, seg.why);
+      return gone;
+    }
+    gone.push(first.name);
+    const items = seg.seg.recs.filter((r) => r.at >= cutoff);
+    let bytes = recBytesOf(items);
+    const others = total - first.bytes;
+    while (items.length > 0 && others + bytes > s.maxBytes) bytes -= recBytes(items.shift()!);
+    if (items.length > 0) {
+      await writeSeg(app, key, idx, items, first.name);
+      idx.segs.sort((a, b) => a.first - b.first || segNum(a.name) - segNum(b.name));
+    }
+  }
+  return gone;
+}
+
+/**
+ * `p2p history --clear`: every segment, the index and its copy, set-aside files and the key, and the
+ * messages and extension notices in the event log `p2p watch` reads (events.json), so no copy of
+ * their text is left in P2P_HOME. A message a session's watch hasn't printed yet is gone with it.
  */
 export async function clearHistory(app: App): Promise<{ cleared: number; events: number }> {
   const key = historyKey(app.home, false);
@@ -418,14 +490,12 @@ export async function clearHistory(app: App): Promise<{ cleared: number; events:
   const cleared = await app.state.withLock(async () => {
     let n = 0;
     const idx = key ? await readSealed<IndexDoc>(app, key, INDEX) : undefined;
-    const segs = idx?.ok ? idx.value.segs : [];
+    const segs = idx?.ok && okIndex(idx.value) ? idx.value.segs : [];
     for (const s of segs) n += s.count;
-    for (const name of new Set([...segs.map((s) => s.name), ...segmentNames(app)])) {
+    for (const name of new Set([...segs.map((s) => s.name), ...segmentNames(app), INDEX, MARK])) {
       if (b.remove) await b.remove(name);
       else await b.write(name, null);
     }
-    if (b.remove) await b.remove(INDEX);
-    else await b.write(INDEX, null);
     pruneQuarantine(app, Number.MAX_SAFE_INTEGER);
     rmSync(historyKeyFile(app.home), { force: true });
     return n;
@@ -542,26 +612,32 @@ export function isPersonRecord(r: HistoryRec): boolean {
 
 /**
  * Every record held (decrypted), oldest first, without the ones past retention, and how many
- * documents couldn't be opened (they are set aside at the next write, never shown).
+ * documents couldn't be opened (set aside, never shown). Under the state lock, so a write in
+ * another process (copy-on-write: a segment's old version is removed once the index moved on)
+ * never shows as a document that couldn't be opened; a crash's newest segment is adopted here too.
  */
 async function readAll(app: App, now: number): Promise<{ recs: HistoryRec[]; unreadable: number }> {
   const key = historyKey(app.home, false);
   if (!key) return { recs: [], unreadable: 0 };
-  const idx = await readSealed<IndexDoc>(app, key, INDEX);
-  if (!idx.ok || !Array.isArray(idx.value?.segs)) return { recs: [], unreadable: idx.ok || !idx.missing ? 1 : 0 };
   const cutoff = now - historySettings(app).retentionDays * 86_400_000;
-  const out: HistoryRec[] = [];
-  let unreadable = 0;
-  for (const s of idx.value.segs) {
-    if (s.last < cutoff) continue;
-    const seg = await readSealed<HistoryRec[]>(app, key, s.name, s.h);
-    if (!seg.ok || !Array.isArray(seg.value)) {
-      unreadable++;
-      continue;
+  return app.state.withLock(async () => {
+    const before = setAside;
+    let unreadable = 0;
+    {
+      const { idx } = await loadIndex(app, key);
+      const out: HistoryRec[] = [];
+      for (const s of idx.segs) {
+        if (s.last < cutoff) continue;
+        const seg = await readSeg(app, key, s.name, s.h);
+        if (!seg.ok) {
+          unreadable++;
+          continue;
+        }
+        for (const r of seg.seg.recs) if (r && typeof r.at === "number" && r.at >= cutoff && typeof r.text === "string") out.push(r);
+      }
+      return { recs: out.sort((a, b) => a.at - b.at), unreadable: unreadable + setAside - before };
     }
-    for (const r of seg.value) if (r && typeof r.at === "number" && r.at >= cutoff && typeof r.text === "string") out.push(r);
-  }
-  return { recs: out.sort((a, b) => a.at - b.at), unreadable };
+  });
 }
 
 export type HistoryReader = { person: true } | { person: false; sid: string; projects: Set<string>; since: number };

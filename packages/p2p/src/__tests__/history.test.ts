@@ -364,8 +364,7 @@ describe("message history", () => {
         await recordHistory(app, [rec("old-5d", now - 5 * day), rec("old-3d", now - 3 * day), rec("new-1d", now - day), rec("now", now)], now);
         expect(texts(await readHistory(app, { person: true }))).toEqual(["new-1d", "now"]);
         // On disk too: what is past retention was removed, not only hidden.
-        const disk = (await app.state.backend.read("history-1")) as { c: string };
-        expect(disk).toBeTruthy();
+        expect(filesUnder(join(u.home, "cli")).filter((f) => /\/history-\d+\.json$/.test(f.path))).toHaveLength(1);
         // A day later, a write prunes "new-1d" as well (now 2 days old).
         await recordHistory(app, [rec("later", now + day + 1000)], now + day + 1000);
         expect(texts(await readHistory(app, { person: true }, {}, now + day + 1000))).toEqual(["now", "later"]);
@@ -387,8 +386,9 @@ describe("message history", () => {
         const after = filesUnder(join(u.home, "cli")).filter((f) => /\/history-\d+\.json$/.test(f.path)).map((f) => f.path);
         expect(after, JSON.stringify({ before, after })).toHaveLength(1);
         expect(before).not.toContain(after[0]);
-        const aside = filesUnder(join(u.home, "cli")).filter((f) => /history\.bad-\d{13}-history(-\d+)?\.json$/.test(f.path));
-        expect(aside.length).toBe(before.length + 1);
+        // Neither the index nor its copy opens: no segment is trusted, every one is set aside (with both).
+        const aside = filesUnder(join(u.home, "cli")).filter((f) => /history\.bad-\d{13}-history(-\d+|-mark)?\.json$/.test(f.path));
+        expect(aside.length).toBe(before.length + 2);
         expect(texts(await readHistory(app, { person: true }, { limit: 1000 }, now + day + 3500))).toEqual(["after-new-key"]);
         await recordHistory(app, [rec("way-later", now + 40 * day)], now + 40 * day);
         expect(filesUnder(join(u.home, "cli")).some((f) => /history\.bad-/.test(f.path))).toBe(false);
@@ -428,43 +428,112 @@ describe("message history", () => {
     }
   });
 
-  it("a document that can't be opened is set aside, never silently swept or overwritten; an older copy put back is refused (L6)", async () => {
+  it("copy-on-write: a crash between the segment and the index write keeps the newest records; reads under the lock see no false damage (N2)", async () => {
+    const u = new User("crash", transport);
+    try {
+      await u.ok(["init", "--name", "crash", "--relay", R, "--yes"]);
+      const app = await u.app();
+      await app.load();
+      const errs: string[] = [];
+      (app.io as { err: (s: string) => void }).err = (m) => errs.push(m);
+      const rec = (id: string): HistoryRec => ({ id, at: Date.now(), dir: "in", type: "message", session: "x", peer: { userId: app.userId, address: "me" }, text: id });
+      const dir = join(u.home, "cli");
+      const snap = () => new Map(readdirSync(dir).filter((x) => x.startsWith("history")).map((x) => [x, readFileSync(join(dir, x))] as const));
+      try {
+        await recordHistory(app, [rec("a")]);
+        const before = snap();
+        await recordHistory(app, [rec("b")]);
+        const after = snap();
+        // The crash: the new segment was written, the index (and its copy) never was, the old version wasn't removed.
+        const fresh = [...after.keys()].filter((x) => !before.has(x));
+        expect(fresh).toHaveLength(1);
+        for (const [x, data] of before) writeFileSync(join(dir, x), data);
+        for (const x of fresh) writeFileSync(join(dir, x), after.get(x)!);
+        const r = await readHistory(app, { person: true });
+        expect(texts(r)).toEqual(["a", "b"]);
+        expect(r.unreadable).toBeUndefined();
+        await recordHistory(app, [rec("c")]);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["a", "b", "c"]);
+        // The superseded versions are gone from disk: one segment, the index and its copy, the key.
+        expect(readdirSync(dir).filter((x) => /^history-\d+\.json$/.test(x))).toHaveLength(1);
+        // A reader racing writers in another process (another App on this home) never sees a removed old version as damage.
+        const other = await u.app();
+        await other.load();
+        try {
+          const writes = (async () => {
+            for (let i = 0; i < 25; i++) await recordHistory(other, [rec(`w${i}`)]);
+          })();
+          const reads: number[] = [];
+          for (let i = 0; i < 25; i++) reads.push((await readHistory(app, { person: true }, { limit: 1000 })).unreadable ?? 0);
+          await writes;
+          expect(reads.every((n) => n === 0)).toBe(true);
+          expect(texts(await readHistory(app, { person: true }, { limit: 1000 }))).toHaveLength(28);
+        } finally {
+          await other.close();
+        }
+        expect(errs.join("\n")).not.toMatch(/couldn't be opened/);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      u.cleanup();
+    }
+  });
+
+  it("no older copy comes back: a restored pruned or superseded segment, a damaged index, both index and its copy (N1, L6)", async () => {
     const u = new User("damage", transport);
     try {
       await u.ok(["init", "--name", "damage", "--relay", R, "--yes"]);
       const app = await u.app();
       await app.load();
       const errs: string[] = [];
-      (app.io as { err: (s: string) => void }).err = (s) => errs.push(s);
+      (app.io as { err: (s: string) => void }).err = (m) => errs.push(m);
       const rec = (id: string): HistoryRec => ({ id, at: Date.now(), dir: "in", type: "message", session: "x", peer: { userId: app.userId, address: "me" }, text: id });
       const dir = join(u.home, "cli");
+      const segs = () => readdirSync(dir).filter((x) => /^history-\d+\.json$/.test(x));
       try {
         await recordHistory(app, [rec("one")]);
-        const v1 = readFileSync(join(dir, "history-1.json"), "utf8");
+        const [v1] = segs();
+        const v1data = readFileSync(join(dir, v1));
         await recordHistory(app, [rec("two")]);
-        // An older sealed copy of the segment put back: it opens, but it isn't the one the index names.
-        writeFileSync(join(dir, "history-1.json"), v1);
-        const rolled = await readHistory(app, { person: true });
-        expect(texts(rolled)).toEqual([]);
-        expect(rolled.unreadable).toBe(1);
-        // The next write sets it aside (with a word on stderr) and starts a new segment; nothing is overwritten.
+        expect(segs()).not.toContain(v1);
+        // The superseded version put back (as a backup restore or a rollback would): never adopted, removed.
+        writeFileSync(join(dir, v1), v1data);
+        const r1 = await readHistory(app, { person: true });
+        expect(texts(r1)).toEqual(["one", "two"]);
+        expect(segs()).not.toContain(v1);
+        // A segment past retention, pruned, then put back: the same.
+        // (Its number is below `next` whatever it holds.)
+        writeFileSync(join(dir, v1), v1data);
         await recordHistory(app, [rec("three")]);
-        expect(errs.join("\n")).toMatch(/history-1 couldn't be opened \(not the copy the index names\); set aside as history\.bad-/);
-        const aside = readdirSync(dir).filter((f) => f.startsWith("history.bad-"));
-        expect(aside).toHaveLength(1);
-        expect(readFileSync(join(dir, aside[0]), "utf8")).toBe(v1);
-        expect(texts(await readHistory(app, { person: true }))).toEqual(["three"]);
-        // A document that isn't even JSON: the read survives it, the next write sets it aside.
-        writeFileSync(join(dir, "history-2.json"), "{not json");
-        expect((await readHistory(app, { person: true })).unreadable).toBe(1);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["one", "two", "three"]);
+        expect(segs()).not.toContain(v1);
+        // A listed segment damaged on disk: not shown (counted), set aside at the next write, never overwritten.
+        const [cur] = segs();
+        const curData = readFileSync(join(dir, cur));
+        writeFileSync(join(dir, cur), "{not json");
+        const damaged = await readHistory(app, { person: true });
+        expect(texts(damaged)).toEqual([]);
+        expect(damaged.unreadable).toBe(1);
         await recordHistory(app, [rec("four")]);
-        expect(readdirSync(dir).filter((f) => f.startsWith("history.bad-"))).toHaveLength(2);
+        expect(errs.join("\n")).toMatch(new RegExp(`${cur.replace(".json", "")} couldn't be opened \\(not readable\\); set aside as history\\.bad-`));
         expect(texts(await readHistory(app, { person: true }))).toEqual(["four"]);
-        // An index that can't be opened: rebuilt from the segments that do (set aside itself).
-        writeFileSync(join(dir, "history.json"), "{}");
+        // That older copy put back, now unlisted below `next`: not adopted either.
+        writeFileSync(join(dir, cur), curData);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["four"]);
+        // A damaged index: its copy stands in, and still nothing older comes back.
         await recordHistory(app, [rec("five")]);
-        expect(texts(await readHistory(app, { person: true }))).toEqual(["four", "five"]);
-        expect(readdirSync(dir).some((f) => /^history\.bad-\d+-history\.json$/.test(f))).toBe(true);
+        writeFileSync(join(dir, "history.json"), "{}");
+        writeFileSync(join(dir, v1), v1data);
+        await recordHistory(app, [rec("six")]);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["four", "five", "six"]);
+        // Both the index and its copy damaged: no segment is trusted (any could be an older copy): all set aside.
+        writeFileSync(join(dir, "history.json"), "{}");
+        writeFileSync(join(dir, "history-mark.json"), "{}");
+        writeFileSync(join(dir, v1), v1data);
+        await recordHistory(app, [rec("seven")]);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["seven"]);
+        expect(readdirSync(dir).filter((x) => x.startsWith("history.bad-")).length).toBeGreaterThanOrEqual(4);
       } finally {
         await app.close();
       }

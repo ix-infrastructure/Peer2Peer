@@ -13200,12 +13200,13 @@ function open2(key, name2, doc) {
 }
 function segmentNames(app) {
   try {
-    return readdirSync2(join15(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => Number(a.slice(8)) - Number(b.slice(8)));
+    return readdirSync2(join15(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
   } catch {
     return [];
   }
 }
 function quarantine(app, name2, why) {
+  setAside++;
   const dir = join15(app.state.dir, "cli");
   const to = `history.bad-${Date.now()}-${name2}.json`;
   try {
@@ -13234,7 +13235,14 @@ async function readSealed(app, key, name2, hash) {
   if (doc === void 0 || doc === null) return { ok: false, missing: true, why: "missing" };
   if (hash !== void 0 && docHash(doc) !== hash) return { ok: false, missing: false, why: "not the copy the index names" };
   const v = open2(key, name2, doc);
-  return v === void 0 ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v };
+  return v === void 0 ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v, doc };
+}
+async function readSeg(app, key, name2, hash) {
+  const got = await readSealed(app, key, name2, hash);
+  if (!got.ok) return got;
+  const v = got.value;
+  if (!v || v.v !== 2 || !Array.isArray(v.recs)) return { ok: false, missing: false, why: "not a history segment" };
+  return { ok: true, seg: v, doc: got.doc };
 }
 function segEntry(name2, items, sealed) {
   return {
@@ -13247,30 +13255,43 @@ function segEntry(name2, items, sealed) {
   };
 }
 async function loadIndex(app, key) {
-  const got = await readSealed(app, key, INDEX);
-  if (got.ok && got.value?.v === 1 && Array.isArray(got.value.segs)) {
-    const listed = new Set(got.value.segs.map((s2) => s2.name));
-    const extra = segmentNames(app).filter((n) => !listed.has(n));
-    if (extra.length === 0) return got.value;
-    const idx2 = { ...got.value, segs: [...got.value.segs] };
-    for (const name2 of extra) await adopt(app, key, idx2, name2);
-    idx2.segs.sort((a, b) => a.first - b.first);
-    return idx2;
+  const b = app.state.backend;
+  const main2 = await readSealed(app, key, INDEX);
+  let idx = main2.ok && okIndex(main2.value) ? main2.value : void 0;
+  let changed2 = false;
+  if (!idx) {
+    if (!main2.ok && !main2.missing) quarantine(app, INDEX, main2.why);
+    const copy = await readSealed(app, key, MARK);
+    if (copy.ok && okIndex(copy.value)) idx = copy.value;
+    else {
+      if (!copy.ok && !copy.missing) quarantine(app, MARK, copy.why);
+      const names = segmentNames(app);
+      for (const name2 of names) quarantine(app, name2, "no index names it");
+      idx = { v: 1, segs: [], next: Math.max(0, ...names.map(segNum)) + 1 };
+    }
+    changed2 = true;
   }
-  if (!got.ok && !got.missing) quarantine(app, INDEX, got.why);
-  const names = segmentNames(app);
-  const idx = { v: 1, segs: [], next: Math.max(0, ...names.map((n) => Number(n.slice(8)))) + 1 };
-  for (const name2 of names) await adopt(app, key, idx, name2);
-  idx.segs.sort((a, b) => a.first - b.first);
-  return idx;
-}
-async function adopt(app, key, idx, name2) {
-  const seg = await readSealed(app, key, name2);
-  if (seg.ok && Array.isArray(seg.value)) {
-    const doc = await app.state.backend.read(name2);
-    idx.segs.push(segEntry(name2, seg.value, doc));
-    idx.next = Math.max(idx.next, Number(name2.slice(8)) + 1);
-  } else if (!seg.ok && !seg.missing) quarantine(app, name2, seg.why);
+  idx = { ...idx, segs: [...idx.segs] };
+  const listed = new Set(idx.segs.map((s2) => s2.name));
+  for (const name2 of segmentNames(app)) {
+    if (listed.has(name2)) continue;
+    if (segNum(name2) < idx.next) {
+      if (b.remove) await b.remove(name2);
+      else await b.write(name2, null);
+      continue;
+    }
+    const seg = await readSeg(app, key, name2);
+    if (!seg.ok) {
+      if (!seg.missing) quarantine(app, name2, seg.why);
+      continue;
+    }
+    if (seg.seg.replaces) idx.segs = idx.segs.filter((s2) => s2.name !== seg.seg.replaces);
+    idx.segs.push(segEntry(name2, seg.seg.recs, seg.doc));
+    idx.next = Math.max(idx.next, segNum(name2) + 1);
+    changed2 = true;
+  }
+  idx.segs.sort((a, b2) => a.first - b2.first || segNum(a.name) - segNum(b2.name));
+  return { idx, changed: changed2 };
 }
 async function recordHistory(app, recs, now = Date.now()) {
   if (recs.length === 0 || app.readOnly || typeof app.home !== "string") return;
@@ -13279,84 +13300,88 @@ async function recordHistory(app, recs, now = Date.now()) {
   try {
     const key = historyKey(app.home, true);
     if (!key) return;
-    const b = app.state.backend;
     await app.state.withLock(async () => {
-      const idx = await loadIndex(app, key);
-      let last = idx.segs.at(-1);
+      const { idx } = await loadIndex(app, key);
+      const old = [];
+      const last = idx.segs.at(-1);
       let items = [];
-      if (last) {
-        const seg = await readSealed(app, key, last.name, last.h);
-        if (seg.ok && Array.isArray(seg.value)) items = seg.value;
-        else {
-          if (!seg.ok && !seg.missing) quarantine(app, last.name, seg.why);
-          idx.segs.pop();
-          last = void 0;
-        }
+      let replaces;
+      if (last && last.bytes < SEGMENT_BYTES) {
+        const seg = await readSeg(app, key, last.name, last.h);
+        if (seg.ok) {
+          items = seg.seg.recs;
+          replaces = last.name;
+        } else if (!seg.missing) quarantine(app, last.name, seg.why);
+        if (seg.ok) old.push(last.name);
+        idx.segs.pop();
       }
       const have = new Set(items.map((r) => r.id));
-      const write = async () => {
-        if (!last) return;
-        const sealed = seal(key, last.name, items);
-        await b.write(last.name, sealed);
-        Object.assign(last, segEntry(last.name, items, sealed));
-      };
       for (const r0 of recs) {
         const r = { ...r0, text: r0.text.length > MAX_RECORD_TEXT ? r0.text.slice(0, MAX_RECORD_TEXT) : r0.text };
         if (have.has(r.id)) continue;
-        if (!last || last.bytes >= SEGMENT_BYTES) {
-          await write();
-          last = { name: `history-${idx.next++}`, first: r.at, last: r.at, bytes: 0, count: 0 };
-          idx.segs.push(last);
+        if (recBytesOf(items) >= SEGMENT_BYTES) {
+          await writeSeg(app, key, idx, items, replaces);
           items = [];
+          replaces = void 0;
         }
         items.push(r);
         have.add(r.id);
-        last.bytes += recBytes(r);
       }
-      await write();
-      await prune2(app, key, idx, settings, now);
-      await b.write(INDEX, seal(key, INDEX, idx));
+      if (items.length > 0) await writeSeg(app, key, idx, items, replaces);
+      old.push(...await prune2(app, key, idx, settings, now));
+      await commitIndex(app, key, idx, old);
     });
   } catch (e) {
     app.io.err(`p2p: message history not written: ${sanitizePeerText(e.message, 200)}`);
   }
 }
-async function prune2(app, key, idx, s2, now) {
+async function writeSeg(app, key, idx, items, replaces) {
+  const name2 = `history-${idx.next++}`;
+  const sealed = seal(key, name2, { v: 2, recs: [...items], ...replaces ? { replaces } : {} });
+  await app.state.backend.write(name2, sealed);
+  idx.segs.push(segEntry(name2, items, sealed));
+}
+async function commitIndex(app, key, idx, old) {
   const b = app.state.backend;
-  const cutoff = now - s2.retentionDays * 864e5;
-  const drop = async (name2) => {
+  await b.write(INDEX, seal(key, INDEX, idx));
+  await b.write(MARK, seal(key, MARK, idx));
+  const listed = new Set(idx.segs.map((s2) => s2.name));
+  for (const name2 of old) {
+    if (listed.has(name2)) continue;
     if (b.remove) await b.remove(name2);
     else await b.write(name2, null);
-  };
+  }
+}
+async function prune2(app, key, idx, s2, now) {
+  const cutoff = now - s2.retentionDays * 864e5;
+  const gone = [];
   pruneQuarantine(app, cutoff);
-  while (idx.segs.length > 0 && idx.segs[0].last < cutoff) await drop(idx.segs.shift().name);
+  while (idx.segs.length > 0 && idx.segs[0].last < cutoff) gone.push(idx.segs.shift().name);
   let total = idx.segs.reduce((n, x) => n + x.bytes, 0);
   while (idx.segs.length > 1 && total > s2.maxBytes) {
-    const gone = idx.segs.shift();
-    total -= gone.bytes;
-    await drop(gone.name);
+    const g = idx.segs.shift();
+    total -= g.bytes;
+    gone.push(g.name);
   }
   const first = idx.segs[0];
   if (first && (first.first < cutoff || total > s2.maxBytes)) {
-    const seg = await readSealed(app, key, first.name, first.h);
-    if (!seg.ok || !Array.isArray(seg.value)) {
-      if (!seg.ok && !seg.missing) quarantine(app, first.name, seg.why);
-      idx.segs.shift();
-      return;
+    const seg = await readSeg(app, key, first.name, first.h);
+    idx.segs.shift();
+    if (!seg.ok) {
+      if (!seg.missing) quarantine(app, first.name, seg.why);
+      return gone;
     }
-    const items = seg.value.filter((r) => r.at >= cutoff);
-    let bytes2 = items.reduce((n, r) => n + recBytes(r), 0);
+    gone.push(first.name);
+    const items = seg.seg.recs.filter((r) => r.at >= cutoff);
+    let bytes2 = recBytesOf(items);
     const others = total - first.bytes;
     while (items.length > 0 && others + bytes2 > s2.maxBytes) bytes2 -= recBytes(items.shift());
-    if (items.length === 0) {
-      idx.segs.shift();
-      await drop(first.name);
-    } else {
-      const sealed = seal(key, first.name, items);
-      await b.write(first.name, sealed);
-      Object.assign(first, segEntry(first.name, items, sealed));
+    if (items.length > 0) {
+      await writeSeg(app, key, idx, items, first.name);
+      idx.segs.sort((a, b) => a.first - b.first || segNum(a.name) - segNum(b.name));
     }
   }
+  return gone;
 }
 async function clearHistory(app) {
   const key = historyKey(app.home, false);
@@ -13364,14 +13389,12 @@ async function clearHistory(app) {
   const cleared = await app.state.withLock(async () => {
     let n = 0;
     const idx = key ? await readSealed(app, key, INDEX) : void 0;
-    const segs = idx?.ok ? idx.value.segs : [];
+    const segs = idx?.ok && okIndex(idx.value) ? idx.value.segs : [];
     for (const s2 of segs) n += s2.count;
-    for (const name2 of /* @__PURE__ */ new Set([...segs.map((s2) => s2.name), ...segmentNames(app)])) {
+    for (const name2 of /* @__PURE__ */ new Set([...segs.map((s2) => s2.name), ...segmentNames(app), INDEX, MARK])) {
       if (b.remove) await b.remove(name2);
       else await b.write(name2, null);
     }
-    if (b.remove) await b.remove(INDEX);
-    else await b.write(INDEX, null);
     pruneQuarantine(app, Number.MAX_SAFE_INTEGER);
     rmSync3(historyKeyFile(app.home), { force: true });
     return n;
@@ -13464,21 +13487,25 @@ function isPersonRecord(r) {
 async function readAll(app, now) {
   const key = historyKey(app.home, false);
   if (!key) return { recs: [], unreadable: 0 };
-  const idx = await readSealed(app, key, INDEX);
-  if (!idx.ok || !Array.isArray(idx.value?.segs)) return { recs: [], unreadable: idx.ok || !idx.missing ? 1 : 0 };
   const cutoff = now - historySettings(app).retentionDays * 864e5;
-  const out = [];
-  let unreadable = 0;
-  for (const s2 of idx.value.segs) {
-    if (s2.last < cutoff) continue;
-    const seg = await readSealed(app, key, s2.name, s2.h);
-    if (!seg.ok || !Array.isArray(seg.value)) {
-      unreadable++;
-      continue;
+  return app.state.withLock(async () => {
+    const before = setAside;
+    let unreadable = 0;
+    {
+      const { idx } = await loadIndex(app, key);
+      const out = [];
+      for (const s2 of idx.segs) {
+        if (s2.last < cutoff) continue;
+        const seg = await readSeg(app, key, s2.name, s2.h);
+        if (!seg.ok) {
+          unreadable++;
+          continue;
+        }
+        for (const r of seg.seg.recs) if (r && typeof r.at === "number" && r.at >= cutoff && typeof r.text === "string") out.push(r);
+      }
+      return { recs: out.sort((a, b) => a.at - b.at), unreadable: unreadable + setAside - before };
     }
-    for (const r of seg.value) if (r && typeof r.at === "number" && r.at >= cutoff && typeof r.text === "string") out.push(r);
-  }
-  return { recs: out.sort((a, b) => a.at - b.at), unreadable };
+  });
 }
 async function assertHistoryReader(app, sid) {
   if (sid === void 0 || sid === PERSON_SESSION) {
@@ -13557,7 +13584,7 @@ function capText(s2, max = HISTORY_SHOW_MAX2) {
   const cps = [...s2];
   return cps.length > max ? `${cps.slice(0, max).join("")}… (truncated)` : s2;
 }
-var HISTORY_RETENTION_DAYS, HISTORY_RETENTION_MIN_DAYS, HISTORY_RETENTION_MAX_DAYS, HISTORY_MAX_BYTES, HISTORY_MIN_BYTES, HISTORY_MAX_BYTES_CAP, SEGMENT_BYTES, MAX_RECORD_TEXT, HISTORY_LIST_DEFAULT, HISTORY_LIST_MAX, INDEX, KEY_INFO, AAD_PREFIX, KEY_RE, recBytes, docHash, MAX_QUARANTINED, QUARANTINE_RE, UNBOUND, HISTORY_SHOW_MAX2;
+var HISTORY_RETENTION_DAYS, HISTORY_RETENTION_MIN_DAYS, HISTORY_RETENTION_MAX_DAYS, HISTORY_MAX_BYTES, HISTORY_MIN_BYTES, HISTORY_MAX_BYTES_CAP, SEGMENT_BYTES, MAX_RECORD_TEXT, HISTORY_LIST_DEFAULT, HISTORY_LIST_MAX, INDEX, KEY_INFO, AAD_PREFIX, KEY_RE, recBytes, docHash, segNum, MARK, MAX_QUARANTINED, QUARANTINE_RE, setAside, okIndex, recBytesOf, UNBOUND, HISTORY_SHOW_MAX2;
 var init_history = __esm({
   "packages/p2p/src/history.ts"() {
     "use strict";
@@ -13581,8 +13608,16 @@ var init_history = __esm({
     KEY_RE = /^[A-Za-z0-9_-]{43}$/;
     recBytes = (r) => Buffer.byteLength(JSON.stringify(r), "utf8");
     docHash = (doc) => createHash4("sha256").update(JSON.stringify(doc), "utf8").digest("base64url").slice(0, 22);
+    segNum = (name2) => Number(name2.slice("history-".length));
+    MARK = "history-mark";
     MAX_QUARANTINED = 16;
     QUARANTINE_RE = /^history\.bad-(\d{13})-[\w.-]{1,40}\.json$/;
+    setAside = 0;
+    okIndex = (v) => {
+      const i = v;
+      return !!i && i.v === 1 && Array.isArray(i.segs) && Number.isSafeInteger(i.next);
+    };
+    recBytesOf = (items) => items.reduce((n, r) => n + recBytes(r), 0);
     UNBOUND = "!unbound";
     HISTORY_SHOW_MAX2 = 4e3;
   }
@@ -35380,7 +35415,7 @@ import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SKEW_OK_SEC = 30;
 var SKEW_FAIL_SEC = DEFAULT_SKEW_SEC;
 var DAY2 = 86400;
-var MARK = { ok: "✓", fail: "✗", unknown: "?" };
+var MARK2 = { ok: "✓", fail: "✗", unknown: "?" };
 async function bounded(p, ms) {
   let timer;
   try {
@@ -36012,7 +36047,7 @@ function formatDoctor(r) {
   const head = r.scope === "user" && r.user ? `p2p doctor: can you see ${r.user.address ?? r.user.input}?` : "p2p doctor: this device";
   const lines = [head, ""];
   for (const x of r.checks) {
-    lines.push(`${MARK[x.status]} ${x.title}: ${x.detail}`);
+    lines.push(`${MARK2[x.status]} ${x.title}: ${x.detail}`);
     if (x.fix) lines.push(`    ${x.status === "unknown" ? "to tell" : "fix"}: ${x.fix}`);
   }
   lines.push("", `${r.summary.ok} ✓  ${r.summary.fail} ✗  ${r.summary.unknown} ?`);
@@ -36314,10 +36349,10 @@ var ESCAPES = /(?:\u001b\[|\u009b)[ -?]*[@-~]?|(?:\u001b[\]P^_X]|[\u009d\u0090\u
 var BREAKS2 = /[\t\n\v\f\r\u0085\u2028\u2029]/g;
 var STRIP2 = new RegExp("[\\u0000-\\u001f\\u007f-\\u009fᅟᅠㅤﾠ￹-￻﷐-﷯￾￿]|͏|឴|឵|\\p{Cf}|\\p{Cs}", "gu");
 var UNKNOWN = /[\p{Co}\p{Cn}]/gu;
-var MARK2 = new RegExp("\\p{M}", "u");
+var MARK3 = new RegExp("\\p{M}", "u");
 function cpWidth(cp) {
   if (cp === 8205) return 0;
-  if (MARK2.test(String.fromCodePoint(cp))) return 0;
+  if (MARK3.test(String.fromCodePoint(cp))) return 0;
   if (cp >= 4352 && cp <= 4447 || cp >= 11904 && cp <= 12350 || cp >= 12353 && cp <= 13311 || cp >= 13312 && cp <= 19903 || cp >= 19968 && cp <= 40959 || cp >= 40960 && cp <= 42191 || cp >= 44032 && cp <= 55203 || cp >= 63744 && cp <= 64255 || cp >= 65072 && cp <= 65103 || cp >= 65280 && cp <= 65376 || cp >= 65504 && cp <= 65510 || cp >= 127744 && cp <= 128591 || cp >= 129280 && cp <= 129535 || cp >= 128640 && cp <= 128767 || cp >= 131072 && cp <= 262141) {
     return 2;
   }
@@ -36337,7 +36372,7 @@ function cleanKeep(s2) {
   let marks = 0;
   let kept = "";
   for (const ch of out) {
-    if (MARK2.test(ch)) {
+    if (MARK3.test(ch)) {
       if (++marks > 2) continue;
     } else marks = 0;
     kept += ch;
@@ -36879,7 +36914,7 @@ function send(ui, d, cols, h, out) {
     out.push(i === ui.sel.send ? l.selected() : l);
   }
 }
-var MARK3 = { ok: "✓", fail: "✗", unknown: "?" };
+var MARK4 = { ok: "✓", fail: "✗", unknown: "?" };
 function health(ui, d, cols, h, out, now) {
   out.push(new Line(cols).add("Relays", HEAD));
   for (const r of d.health.relays) {
@@ -36902,7 +36937,7 @@ function health(ui, d, cols, h, out, now) {
     return;
   }
   const groups = doc.checks.map((c) => {
-    const g = [new Line(cols).gap(2).add(MARK3[c.status], c.status === "ok" ? OK : c.status === "fail" ? BAD : WARN).gap().add(c.title, HEAD, 28).add(": ", DIM).add(c.detail)];
+    const g = [new Line(cols).gap(2).add(MARK4[c.status], c.status === "ok" ? OK : c.status === "fail" ? BAD : WARN).gap().add(c.title, HEAD, 28).add(": ", DIM).add(c.detail)];
     if (c.fix && c.status !== "ok") g.push(new Line(cols).gap(6).add(`${c.status === "unknown" ? "to tell" : "fix"}: `, DIM).add(c.fix, DIM));
     return { status: c.status, lines: g };
   });
