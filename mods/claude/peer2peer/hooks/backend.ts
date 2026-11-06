@@ -300,6 +300,15 @@ export class P2P {
     return this.call(['trust', 'check', '--', userId])
   }
 
+  /**
+   * `p2p own-agents check <did>`: whether a message from one of this user's agent sessions on device
+   * `did` skips the hold right now (`p2p own-agents deliver`, or `--devices` naming that device).
+   * Read at delivery time, never from the event.
+   */
+  ownAgentsCheck(did: string): Promise<Outcome<{ did: string; deliver: boolean }>> {
+    return this.call(['own-agents', 'check', '--', did])
+  }
+
   /** `p2p trust add|remove <user|circle:cid>`: only ever on the person's own command or button press. */
   trustChange(verb: 'add' | 'remove', target: string): Promise<Outcome<{ added?: string; removed?: string | null; kind: 'user' | 'circle'; address?: string; name?: string }>> {
     return this.call(['trust', verb, '--', target])

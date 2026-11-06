@@ -107,7 +107,9 @@ describe("same-device sends", () => {
     expect(inS2).toHaveLength(1);
     expect(inS2[0].data.from).toMatchObject({ userId: ids.ann, self: true });
     // Where it came from, from this device's own record (nothing on the wire): an agent session, s1.
-    expect(inS2[0].data).toMatchObject({ own: ids.ann, sid: "s2", via: "agent", fromSid: "s1", fromRef: sessionRef(ids.ann, "s1") });
+    expect(inS2[0].data).toMatchObject({ own: ids.ann, sid: "s2", via: "agent", fromRef: sessionRef(ids.ann, "s1") });
+    // Only the ref: never the sending session's id, never a stamp of the own-agents setting.
+    expect(inS2[0].data.fromSid).toBeUndefined();
     expect(inS2[0].data.ownTrusted).toBeUndefined();
     const b = await inDir(ann, repo.S).ok(["send", "--from-session", "s2", "--to", `${ids.ann} [${sessionRef(ids.ann, "s1")}]`, "--stdin"], { stdin: "s2 back to s1" });
     expect(b).toMatchObject({ delivered: true, to: { sid: "s1" } });
@@ -127,7 +129,7 @@ describe("same-device sends", () => {
     expect(out.join("\n")).toMatch(new RegExp(`Sent to .*\\[${sessionRef(ids.ann, "s2")}\\]: delivered via 1 relay`));
     const [ev] = await got(ann, "s2", "from the terminal");
     // The person's own terminal: `via: "person"`, the one own-session origin an auto-approving session delivers.
-    expect(ev?.data).toMatchObject({ via: "person", fromSid: "tui", fromRef: sessionRef(ids.ann, "tui") });
+    expect(ev?.data).toMatchObject({ via: "person", fromRef: sessionRef(ids.ann, "tui") });
   });
 
   it("a bare --to <you> never fans out to this device's sessions: it goes where it went before", async () => {
@@ -236,17 +238,41 @@ describe("same-device sends", () => {
     expect(await inDir(ann, repo.S).ok(["receipt", "p2p.message:whatever", "--from-session", "s2", "--outcome", "shown"])).toMatchObject({ sent: false, reason: "not-asked" });
   });
 
-  it("H1: `p2p own-agents deliver` is the person's alone; once on, own-session messages say so", async () => {
+  it("H1/M2: `p2p own-agents` is the person's alone, and front ends ask it at delivery time (`check <did>`)", async () => {
     const agent = inDir(ann, repo.S, { P2P_PERSON_TOKEN: "", CLAUDECODE: "1" });
-    expect((await agent.run(["own-agents", "deliver"])).json).toMatchObject({ error: "refused" });
-    expect((await ann.ok(["own-agents"])).ownAgents).toBe("hold");
-    expect((await ann.ok(["own-agents", "deliver"])).ownAgents).toBe("deliver");
+    const app = await ann.app();
+    await app.load();
+    const here = app.did;
+    await app.close();
+    const laptop = "d_" + "l".repeat(26);
+    const desk = "d_" + "k".repeat(26);
+    const check = async (did: string) => (await ann.ok(["own-agents", "check", did])).deliver as boolean;
+    for (const args of [["own-agents", "deliver"], ["own-agents", "deliver", "--devices", "all-other"]]) {
+      expect((await agent.run(args)).json, args.join(" ")).toMatchObject({ error: "refused" });
+    }
+    expect(await ann.ok(["own-agents"])).toMatchObject({ ownAgents: "hold", devices: [] });
+    expect(await check(here)).toBe(false);
     try {
+      // Only some other devices: their sessions get through, this device's agent sessions stay held.
+      expect(await ann.ok(["own-agents", "deliver", "--devices", laptop])).toMatchObject({ ownAgents: "hold", devices: [laptop] });
+      expect(await check(laptop)).toBe(true);
+      expect(await check(desk)).toBe(false);
+      expect(await check(here)).toBe(false);
+      expect((await ann.run(["own-agents", "deliver", "--devices", here])).json).toMatchObject({ error: "usage" });
+      expect(await ann.ok(["own-agents", "deliver", "--devices", "all-other"])).toMatchObject({ devices: "all-other" });
+      expect(await check(desk)).toBe(true);
+      expect(await check(here)).toBe(false);
+      // Everything, this device included.
+      await ann.ok(["own-agents", "deliver"]);
+      expect(await check(here)).toBe(true);
+      // Nothing is stamped on the events themselves.
       await inDir(ann, repo.S).ok(["send", "--from-session", "s1", "--to", `${ids.ann}/s2`, "--stdin"], { stdin: "trusted agent" });
       const [ev] = await got(ann, "s2", "trusted agent");
-      expect(ev?.data).toMatchObject({ via: "agent", ownTrusted: true });
-      // Turning it back off never needs the person.
-      expect((await agent.run(["own-agents", "hold"])).json).toMatchObject({ ownAgents: "hold" });
+      expect(ev?.data.via).toBe("agent");
+      expect(ev?.data.ownTrusted).toBeUndefined();
+      // Turning it back off never needs the person, and clears both.
+      expect((await agent.run(["own-agents", "hold"])).json).toMatchObject({ ownAgents: "hold", devices: [] });
+      expect(await check(desk)).toBe(false);
     } finally {
       await ann.ok(["own-agents", "hold"]);
     }

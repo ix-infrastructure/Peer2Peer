@@ -12747,6 +12747,21 @@ function ownAgentsDeliver(home) {
     return false;
   }
 }
+function ownDevicesDeliver(home) {
+  try {
+    const v = readFileConfig(home).ownDevicesDeliver;
+    if (v === "all-other") return v;
+    return Array.isArray(v) ? v.filter((d) => typeof d === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function ownAgentsDeliverFrom(home, did, thisDevice) {
+  if (ownAgentsDeliver(home)) return true;
+  if (did === thisDevice) return false;
+  const devices2 = ownDevicesDeliver(home);
+  return devices2 === "all-other" || devices2.includes(did);
+}
 function deviceInfoEnabled(env, home) {
   const v = env.P2P_DEVICE_INFO?.trim().toLowerCase();
   if (v === "1" || v === "true") return true;
@@ -13999,11 +14014,7 @@ function localSend(app, target, fromSession, person) {
 }
 async function ownOrigin(app, e) {
   const local = e.fdid === app.did ? (await app.state.get("localSends"))?.[`${e.sid}|${e.seq}`] : void 0;
-  return {
-    via: local?.via ?? "agent",
-    ...local ? { fromSid: local.from, fromRef: sessionRef(app.userId, local.from) } : {},
-    ...ownAgentsDeliver(app.home) ? { ownTrusted: true } : {}
-  };
+  return { via: local?.via ?? "agent", ...local ? { fromRef: sessionRef(app.userId, local.from) } : {} };
 }
 async function tuiTaintNote(app, toUserId, now = Date.now()) {
   if (toUserId === app.userId) return void 0;
@@ -26266,9 +26277,14 @@ function screenMessage(o) {
   if (o.ownAgent === true) {
     if (o.mode === "asking")
       return { deliver: true };
-    if (o.mode === "auto")
-      return { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
-    return { deliver: false, reason: "unknown", why: "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet" };
+    if (o.mode === "auto") {
+      return o.elsewhere ? { deliver: false, reason: "auto", why: "another device of yours sent it, which can't say whether your user typed it, and this Codex session runs actions without asking (`p2p own-agents deliver --devices all-other` in your user's own terminal lets those through)" } : { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
+    }
+    return {
+      deliver: false,
+      reason: "unknown",
+      why: o.elsewhere ? "another device of yours sent it, which can't say whether your user typed it, and this Codex session's approval mode isn't confirmed yet" : "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet"
+    };
   }
   if (o.fromSelf || isAutoDeliver(o.autoDeliver, o.fromUserId) || o.mode === "asking")
     return { deliver: true };
@@ -26813,6 +26829,13 @@ var P2P = class {
   send(o) {
     const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...o.projectDirsOver ? ["--project-dirs-over"] : []];
     return this.call(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...o.notifyWhenIdle ? ["--notify-when-idle"] : [], ...dirs, "--stdin"], { stdin: o.text });
+  }
+  /**
+   * `p2p own-agents`, read only: whether this user's agent sessions' messages skip the hold
+   * (`deliver`), or only those from some other devices (`devices`). Setting it is the person's, in a terminal.
+   */
+  ownAgents() {
+    return this.call(["own-agents"]);
   }
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */
   async roster(sid) {
@@ -27717,6 +27740,8 @@ var Bridge = class {
   selfTurns = [];
   /** Turns your own sessions started since the person last typed a prompt here. */
   ownSinceTyped = 0;
+  /** Prompts the person typed, as the trusted rollout counts them (TrustedMode.typed). */
+  trustedTyped = 0;
   threadId;
   hooksSeen = false;
   activeAt = 0;
@@ -28001,6 +28026,10 @@ var Bridge = class {
     }
     this.transcriptMode = t2.mode;
     this.trustedSeq = t2.seq;
+    if (typeof t2.typed === "number" && t2.typed > this.trustedTyped) {
+      this.trustedTyped = t2.typed;
+      this.ownSinceTyped = 0;
+    }
     this.trustedWritable = t2.writable;
     if (t2.cwd) {
       this.trustedCwd = t2.cwd;
@@ -28311,6 +28340,8 @@ var Bridge = class {
         }
         this.inbox.push(item);
         await this.refreshTrusted();
+        if (item.fromSelf)
+          await this.refreshOwnAgents();
         this.screenNow(item);
         this.scheduleQueue();
         return;
@@ -28362,16 +28393,32 @@ var Bridge = class {
     const ref = typeof e.fromRef === "string" && /^[0-9a-f]{6}$/.test(e.fromRef) ? e.fromRef : "elsewhere";
     return {
       fromSelf: true,
-      ownAgent: e.via !== "person" && e.ownTrusted !== true,
+      ownAgent: e.via !== "person",
       local: this.who !== null && e.from.did === this.who.did,
-      bucket: `${e.from.userId}/${ref}`
+      bucket: `${e.from.userId}/${ref}`,
+      ...typeof e.from.did === "string" ? { did: e.from.did } : {}
     };
+  }
+  /** `p2p own-agents` as it stands now, read before each screening (never stamped on an event). Unknown: hold. */
+  ownAgentsSetting = { ownAgents: "hold", devices: [] };
+  async refreshOwnAgents() {
+    const r = await this.deps.p2p.ownAgents().catch(() => void 0);
+    this.ownAgentsSetting = r?.ok ? r.value : { ownAgents: "hold", devices: [] };
+  }
+  /** Whether the person's `p2p own-agents` lets this own agent session's message through (the CLI's ownAgentsDeliverFrom). */
+  ownAgentDelivers(item) {
+    const s2 = this.ownAgentsSetting;
+    if (s2.ownAgents === "deliver")
+      return true;
+    if (item.local || item.did === void 0)
+      return false;
+    return s2.devices === "all-other" || Array.isArray(s2.devices) && s2.devices.includes(item.did);
   }
   /** Applies the hold rule to one new item, by this session's own mode as it stands now. */
   screenNow(item) {
     if (item.state !== "pending")
       return;
-    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
+    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
     if (!verdict.deliver)
       this.hold(item, verdict.why, verdict.reason);
   }
@@ -28434,7 +28481,7 @@ var Bridge = class {
       const isRescreen = item.state === "held" && item.holdKind === "unknown";
       if (item.state !== "pending" && !isRescreen)
         continue;
-      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
+      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
       if (verdict.deliver)
         ready.push(item);
       else if (verdict.reason === "unknown" && o.confirmed === false && item.state === "pending")
@@ -28558,6 +28605,9 @@ var Bridge = class {
   async flushQueue() {
     if (!this.deps.queue || !this.threadId || this.status !== "idle")
       return;
+    await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && one.state === "pending"))
+      await this.refreshOwnAgents();
     const before = new Map(this.inbox.map((one) => [one.id, one.state]));
     const items = this.takeDeliverable({ startsTurn: true });
     if (items.length === 0)
@@ -28577,6 +28627,8 @@ var Bridge = class {
   async onHook(r) {
     this.hooksSeen = true;
     await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && (one.state === "pending" || one.state === "held")))
+      await this.refreshOwnAgents();
     if (r.mode && isExplicitlyAuto(r.mode))
       this.reportedAutoSeq = this.trustedSeq;
     const context = (event, parts) => {
@@ -28590,7 +28642,6 @@ var Bridge = class {
       }
       case "UserPromptSubmit": {
         this.activeAt = this.clock.now();
-        this.ownSinceTyped = 0;
         this.deps.onChange?.();
         this.setStatus("busy");
         const items = this.takeDeliverable({ startsTurn: false, confirmed: false });
@@ -29344,6 +29395,31 @@ async function findRollouts(sessionsDir, threadId, depth = 4) {
   await walk(sessionsDir, depth);
   return out.sort();
 }
+function typedPromptOf(line) {
+  if (!line.includes('"user_message"') && !line.includes('"UserMessage"'))
+    return false;
+  try {
+    const v = JSON.parse(line);
+    if (v.type !== "event_msg" || typeof v.payload !== "object" || v.payload === null)
+      return false;
+    const p = v.payload;
+    let text2;
+    if (p.type === "user_message")
+      text2 = p.message;
+    else if (p.type === "item_completed" && typeof p.item === "object" && p.item !== null && p.item.type === "UserMessage") {
+      const content = p.item.content;
+      const first = Array.isArray(content) ? content[0] : void 0;
+      text2 = first?.text;
+    } else
+      return false;
+    if (typeof text2 !== "string")
+      return false;
+    const t2 = text2.trimStart();
+    return t2 !== "" && !t2.startsWith("<") && !t2.startsWith("[Peer2Peer]");
+  } catch {
+    return false;
+  }
+}
 var RolloutReader = class {
   codexHome;
   threadId;
@@ -29358,6 +29434,7 @@ var RolloutReader = class {
   lastAt = 0;
   untrusted;
   ever = /* @__PURE__ */ new Set();
+  typed = 0;
   constructor(codexHome, threadId, now = Date.now) {
     this.codexHome = codexHome;
     this.threadId = threadId;
@@ -29409,6 +29486,11 @@ var RolloutReader = class {
           const bad = this.check(line);
           if (bad)
             return this.distrust(bad);
+          if (typedPromptOf(line)) {
+            this.typed += 1;
+            if (this.last)
+              this.last = { ...this.last, typed: this.typed };
+          }
           const ctx = turnContextOf(line);
           if (ctx) {
             this.seq += 1;
@@ -29426,7 +29508,8 @@ var RolloutReader = class {
               seq: this.seq,
               ...ctx.cwd ? { cwd: ctx.cwd } : {},
               ...ctx.writable !== void 0 ? { writable: ctx.writable } : {},
-              writableEver: this.ever instanceof Set ? [...this.ever] : this.ever
+              writableEver: this.ever instanceof Set ? [...this.ever] : this.ever,
+              ...this.typed > 0 ? { typed: this.typed } : {}
             };
           }
         }
@@ -34697,6 +34780,7 @@ init_inbound();
 init_rotation();
 init_sessions();
 init_projects();
+init_v3();
 init_tty_confirm();
 init_social();
 
@@ -38388,19 +38472,41 @@ note: ${taint}` : ""}` : "";
       return { json: r, human: r.sent ? `Receipt sent: ${r.outcome}.` : `No receipt sent (${r.reason}).` };
     })
   );
-  program2.command("own-agents [state]").description("Whether messages from your own agent sessions skip the hold in a session that approves its own tool calls: `hold` (the default) or `deliver` (you only)").option("--json", "JSON output").action(
+  program2.command("own-agents [state] [did]").description(
+    "Whether messages from your own agent sessions skip the hold in a session that approves its own tool calls: `hold` (the default), `deliver` (you only; `--devices <did…|all-other>` for only your other devices' sessions), or `check <did>` (a front end, at delivery)"
+  ).option("--devices <devices...>", "With deliver: only messages from these other devices of yours (their device ids, or all-other); this device's agent sessions stay held").option("--json", "JSON output").action(
     run(
-      async (app, state) => {
-        if (state !== void 0 && state !== "hold" && state !== "deliver") throw new CliError("usage", "p2p own-agents [hold|deliver]");
-        if (state === "deliver") await assertPersonForWidening(app, "own-agents deliver", app.confirmTty);
-        if (state !== void 0) await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: state === "deliver", result: void 0 }));
+      async (app, state, did, o) => {
+        if (state !== void 0 && state !== "hold" && state !== "deliver" && state !== "check") throw new CliError("usage", "p2p own-agents [hold|deliver [--devices <did…|all-other>]|check <did>]");
+        if (state === "check") {
+          if (!did || !isDid(did)) throw new CliError("usage", "p2p own-agents check <did>: a v3 device id");
+          return { json: { did, deliver: ownAgentsDeliverFrom(app.home, did, app.did) }, human: ownAgentsDeliverFrom(app.home, did, app.did) ? "deliver" : "hold" };
+        }
+        if (did !== void 0) throw new CliError("usage", "p2p own-agents [hold|deliver [--devices <did…|all-other>]]");
+        const devices3 = o.devices?.flatMap((d) => d.split(",")).map((d) => d.trim()).filter(Boolean);
+        if (devices3 !== void 0 && state !== "deliver") throw new CliError("usage", "--devices goes with deliver");
+        if (devices3 !== void 0 && !(devices3.length === 1 && devices3[0] === "all-other") && !devices3.every((d) => isDid(d) && d !== app.did)) {
+          throw new CliError("usage", "--devices takes your other devices' ids (p2p devices) or all-other, never this device");
+        }
+        if (state === "deliver") await assertPersonForWidening(app, devices3 ? "own-agents deliver --devices" : "own-agents deliver", app.confirmTty);
+        if (state === "hold") {
+          await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: false, result: void 0 }));
+          await updateFileConfigField(app, "ownDevicesDeliver", () => ({ next: [], result: void 0 }));
+        } else if (state === "deliver" && devices3) {
+          await updateFileConfigField(app, "ownDevicesDeliver", () => ({ next: devices3.length === 1 && devices3[0] === "all-other" ? "all-other" : devices3, result: void 0 }));
+        } else if (state === "deliver") {
+          await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: true, result: void 0 }));
+        }
         const on = ownAgentsDeliver(app.home);
+        const list = ownDevicesDeliver(app.home);
+        const some = list === "all-other" ? "all your other devices" : list.length > 0 ? `your devices ${list.join(", ")}` : void 0;
         return {
-          json: { ownAgents: on ? "deliver" : "hold" },
-          human: on ? "Messages from your own agent sessions reach a session that approves its own tool calls without the hold." : "Messages from your own agent sessions wait for Deliver in a session that approves its own tool calls (your own terminal's are delivered)."
+          json: { ownAgents: on ? "deliver" : "hold", devices: list },
+          human: on ? "Messages from your own agent sessions reach a session that approves its own tool calls without the hold." : `Messages from your own agent sessions wait for Deliver in a session that approves its own tool calls (your own terminal's here are delivered)${some ? `, except those from ${some}` : ""}.`
         };
       },
-      { requireIdentity: false }
+      // `check` and `--devices` need this device's id.
+      {}
     )
   );
   program2.command("receipts [state]").description("Whether this user sends delivery receipts: `on` or `off` sets it (config.json; P2P_RECEIPTS overrides)").option("--json", "JSON output").action(

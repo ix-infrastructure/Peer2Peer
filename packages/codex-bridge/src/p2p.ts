@@ -126,6 +126,14 @@ export class P2P {
     return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
   }
 
+  /**
+   * `p2p own-agents`, read only: whether this user's agent sessions' messages skip the hold
+   * (`deliver`), or only those from some other devices (`devices`). Setting it is the person's, in a terminal.
+   */
+  ownAgents(): Promise<Outcome<{ ownAgents: "hold" | "deliver"; devices: string[] | "all-other" }>> {
+    return this.call(["own-agents"]);
+  }
+
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */
   async roster(sid: string): Promise<Outcome<RosterView>> {
     const r = await this.call<{ roster: RosterView }>(["session", "roster", "--", sid]);

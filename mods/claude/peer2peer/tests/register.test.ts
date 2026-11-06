@@ -739,18 +739,26 @@ describe('peer2peer: H1, an auto-approving session holds every other person\'s m
     expect(ownSubmits(w)).toEqual([])
     expect(w.statuses.at(-1)).toContain('1 held')
     await settle(w, () => ran(w, 'receipt').some(r => flag(r.argv, 'outcome') === 'held'))
-    // No `via` (another device of mine, or an older client): the same.
+    // No `via` (another device of mine, or an older client): the same, with a one-time notice why.
     w.emit(message(w, { id: 'novia', text: 'own 2', from: from(ME_ID, ME_ADDR, true), own: ME_ID, sid: sidOf(w), ref: 'abcdef' }))
     await gather(w)
     expect(ownSubmits(w)).toEqual([])
     expect(w.statuses.at(-1)).toContain('2 held')
+    expect(w.toasts.filter(t => t.includes('messages from your other devices now wait for Deliver')).length).toBe(1)
     // The person at their own terminal (session tui): delivered.
     w.emit(own(w, { id: 'person', text: 'own 3', via: 'person' }))
     await gather(w)
     expect(ownSubmits(w).length).toBe(1)
     expect(ownSubmits(w)[0]).toContain('own 3')
-    // After `p2p own-agents deliver` (the person's own choice, in config): delivered too.
-    w.emit(own(w, { id: 'trusted', text: 'own 4', ownTrusted: true }))
+    // After `p2p own-agents deliver` (the person's own choice), asked at delivery time: delivered too.
+    w.cli['own-agents check'] = { body: { did: 'd_OTHER', deliver: true } }
+    w.emit(own(w, { id: 'trusted', text: 'own 4' }))
+    await gather(w)
+    expect(ownSubmits(w).length).toBe(2)
+    expect(ran(w, 'own-agents', 'check').at(-1)?.argv.at(-1)).toBe('d_OTHER')
+    // A stamp on the event counts for nothing: once the setting is off again, held.
+    w.cli['own-agents check'] = { body: { did: 'd_OTHER', deliver: false } }
+    w.emit(own(w, { id: 'stamped', text: 'own 5', ownTrusted: true }))
     await gather(w)
     expect(ownSubmits(w).length).toBe(2)
   })

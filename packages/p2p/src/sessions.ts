@@ -81,7 +81,7 @@ import {
 } from "./projects.js";
 import { renderExtension, type ExtSendResult } from "./extensions.js";
 import { fromOf, makeEvent, type NewEvent } from "./inbound.js";
-import { ownAgentsDeliver, receiptsEnabled, statusCapsEnabled } from "./config.js";
+import { receiptsEnabled, statusCapsEnabled } from "./config.js";
 import { CAP_PROJECTS, CLI_CAPS, protoMinor, supportsIn } from "./features.js";
 import { asksReceipts, newReceiptId, rememberAsked, rememberWanted } from "./receipts.js";
 import { sessKey, type IdleSub, type LocalSend, type PeerStatusRec, type SessionDoc } from "./state.js";
@@ -1033,16 +1033,13 @@ function localSend(app: App, target: { own: string; sid: string; did?: string },
 /**
  * What an own-session message's event says about where it came from (sessions on this device only):
  * `via` "person" for the person's own terminal session, else "agent" (also for every other device
- * of yours, which this device can't tell apart: fail closed); `fromSid`/`fromRef` name the sending
- * session here. `ownTrusted`: the person turned on `p2p own-agents deliver`.
+ * of yours, which this device can't tell apart: fail closed); `fromRef` names the sending session
+ * here. Whether `p2p own-agents` lets it through is never stamped here: the front end asks at
+ * delivery time (`p2p own-agents check <did>`).
  */
 async function ownOrigin(app: App, e: { fdid: string; sid: string; seq: number }): Promise<Record<string, unknown>> {
   const local = e.fdid === app.did ? (await app.state.get("localSends"))?.[`${e.sid}|${e.seq}`] : undefined;
-  return {
-    via: local?.via ?? "agent",
-    ...(local ? { fromSid: local.from, fromRef: sessionRef(app.userId, local.from) } : {}),
-    ...(ownAgentsDeliver(app.home) ? { ownTrusted: true } : {}),
-  };
+  return { via: local?.via ?? "agent", ...(local ? { fromRef: sessionRef(app.userId, local.from) } : {}) };
 }
 
 /** How long after a bounded session's text reached `tui` a send from there to someone else is warned about. */

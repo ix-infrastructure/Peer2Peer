@@ -726,15 +726,25 @@ export type Screen = { deliver: true } | { deliver: false; reason: "auto" | "unk
  * auto-approving one holds for the person; an unknown one holds until the
  * mode is known (and then delivers only if it asks).
  */
-export function screenMessage(o: { fromSelf: boolean; fromUserId: string; mode: ModeClass; autoDeliver: AutoDeliver; refused?: string | undefined; ownAgent?: boolean }): Screen {
+export function screenMessage(o: { fromSelf: boolean; fromUserId: string; mode: ModeClass; autoDeliver: AutoDeliver; refused?: string | undefined; ownAgent?: boolean; elsewhere?: boolean }): Screen {
   // The bridge's settings or trusted files sit where a project could plant them: nothing goes out by itself.
   if (o.refused) return { deliver: false, reason: "auto", why: `held: ${o.refused}` };
   // One of your own agent sessions (a peer may have told it what to send): held like a peer's where a
   // peer's would be, so an injected instruction can't drive this session unattended. P2P_AUTO_DELIVER doesn't apply.
   if (o.ownAgent === true) {
     if (o.mode === "asking") return { deliver: true };
-    if (o.mode === "auto") return { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
-    return { deliver: false, reason: "unknown", why: "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet" };
+    if (o.mode === "auto") {
+      return o.elsewhere
+        ? { deliver: false, reason: "auto", why: "another device of yours sent it, which can't say whether your user typed it, and this Codex session runs actions without asking (`p2p own-agents deliver --devices all-other` in your user's own terminal lets those through)" }
+        : { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
+    }
+    return {
+      deliver: false,
+      reason: "unknown",
+      why: o.elsewhere
+        ? "another device of yours sent it, which can't say whether your user typed it, and this Codex session's approval mode isn't confirmed yet"
+        : "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet",
+    };
   }
   if (o.fromSelf || isAutoDeliver(o.autoDeliver, o.fromUserId) || o.mode === "asking") return { deliver: true };
   if (o.mode === "auto") return { deliver: false, reason: "auto", why: "this Codex session runs actions without asking you" };

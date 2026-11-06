@@ -321,6 +321,8 @@ const newSess = () => ({
   peerTurns: [] as { at: number; sender: string }[],
   // Turns this user's own sessions started here since the person last typed a prompt (OWN_TURNS_UNATTENDED).
   ownSinceTyped: 0,
+  // The one-time notice that messages from this user's other devices are held (RFC #48).
+  isOtherDeviceHoldNoted: false,
   // Turns the mod submitted for peers, by their text, until the engine raises them.
   peerSubmissions: new Map<string, PendingItem[]>(),
   // Turns the person approved with Deliver, by their text: the UserPromptSubmit gate lets them pass.
@@ -1015,8 +1017,18 @@ const refreshTrust = async (S: Sess, $: EngineInterface) => {
  * circle state and blocks as they are now, so someone removed from a trusted circle (or blocked)
  * since is held. Trust only skips the hold: the message is still framed as the peer's data.
  */
-const verdictOf = async (S: Sess, $: EngineInterface, o: { fromSelf: boolean; fromUserId: string; mode: string | null; ownAgent?: boolean }): Promise<HoldVerdict> => {
+const verdictOf = async (S: Sess, $: EngineInterface, o: { fromSelf: boolean; fromUserId: string; mode: string | null; ownAgent?: boolean; fromDid?: string; isElsewhere?: boolean }): Promise<HoldVerdict> => {
   const verdict = holdVerdict({ ...o, autoDeliver: S.autoDeliver })
+  if (verdict.isHeld && o.ownAgent === true) {
+    // The person's `p2p own-agents deliver` (or `--devices` naming that device), as it stands now: asked
+    // at delivery time, never read off the event.
+    const r = o.fromDid ? await (await client(S, $)).ownAgentsCheck(o.fromDid) : undefined
+    if (r?.ok && r.value.deliver) return { isHeld: false }
+    // From another device: it can't say whether the person typed it (that needs RFC #48's wire field).
+    return o.isElsewhere
+      ? { isHeld: true, why: `from another device of yours, which can't say whether you typed it, and this session approves tool calls by itself (${o.mode ?? 'mode unknown'}): Deliver, or \`p2p own-agents deliver --devices all-other\` in your own terminal` }
+      : verdict
+  }
   if (!verdict.isHeld || o.ownAgent === true || !S.trusted.has(o.fromUserId)) return verdict
   const r = await (await client(S, $)).trustCheck(o.fromUserId)
 
@@ -1095,7 +1107,7 @@ const screen = async (S: Sess, $: EngineInterface, items: readonly PendingItem[]
     const verdict = item.from
       ? await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: effectiveMode(S, $) })
       : item.fromOwn?.isAgent === true
-        ? await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: effectiveMode(S, $) })
+        ? await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: effectiveMode(S, $), ...(item.fromOwn.did ? { fromDid: item.fromOwn.did } : {}) })
         : { isHeld: false as const }
     if (!verdict.isHeld) {
       ok.push(item)
@@ -1507,7 +1519,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       const replyTo = replyToOf(event)
       // From one of your own sessions that isn't the person at their own terminal: held like a peer's
       // where a peer's would be (an injected instruction must not drive this session unattended).
-      const ownAgent = event.from.self && event.via !== 'person' && event.ownTrusted !== true
+      const ownAgent = event.from.self && event.via !== 'person'
       const message: HeldMessage = {
         id: event.id,
         kind: 'message',
@@ -1544,8 +1556,14 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
         return
       }
       $.ui.toast(`${address}: ${firstLine(event.text, 80)}`)
-      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
+      const isElsewhere = event.from.self && typeof event.fromRef !== 'string'
+      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromDid: event.from.did, isElsewhere, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
       if (verdict.isHeld) {
+        // Once a session: messages from your other devices are held now, and why (RFC #48 would let them through).
+        if (ownAgent && isElsewhere && !S.isOtherDeviceHoldNoted) {
+          S.isOtherDeviceHoldNoted = true
+          $.ui.toast('Peer2Peer: messages from your other devices now wait for Deliver in a session that approves its own tool calls: another device can\'t say whether you typed them. `p2p own-agents deliver --devices all-other` in your own terminal lets them through.')
+        }
         await hold(S, $, { ...message, why: verdict.why })
 
         return
@@ -1554,7 +1572,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       const receiptEvent = event.receipt === true ? { receiptEvent: event.id } : {}
       await deliver(
         S, $,
-        event.from.self ? { text, fromOwn: { userId: event.from.userId, address, ...(ownAgent ? { isAgent: true } : {}) }, message, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent },
+        event.from.self ? { text, fromOwn: { userId: event.from.userId, address, did: event.from.did, ...(ownAgent ? { isAgent: true } : {}) }, message, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent },
         `${address} sent a message: ${firstLine(event.text, 100)}`,
       )
 
@@ -1684,16 +1702,17 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       // With it: like a message, under the same hold rule and turn caps; framed as the peer's data.
       const address = eventAddress(event, S.peers)
       const text = extMessage(address, event.ext, event.id, digest)
-      const ownAgent = event.from.self && event.via !== 'person' && event.ownTrusted !== true
+      const ownAgent = event.from.self && event.via !== 'person'
       const message: HeldMessage = { id: event.id, kind: 'message', from: { userId: event.from.userId, address }, text, heldAt: await $.clock.now(), why: '', isFramed: true, isExt: true }
       $.ui.toast(inert(event.fallback))
-      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
+      const isElsewhere = event.from.self && typeof event.fromRef !== 'string'
+      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromDid: event.from.did, isElsewhere, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
       if (verdict.isHeld) {
         await hold(S, $, { ...message, why: verdict.why })
 
         return
       }
-      await deliver(S, $, event.from.self ? { text, fromOwn: { userId: event.from.userId, address, ...(ownAgent ? { isAgent: true } : {}) }, message } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
+      await deliver(S, $, event.from.self ? { text, fromOwn: { userId: event.from.userId, address, did: event.from.did, ...(ownAgent ? { isAgent: true } : {}) }, message } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
 
       return
     }
@@ -3008,7 +3027,7 @@ export const register: Register = on => {
     const blocked: PendingItem[] = []
     for (const item of items ?? []) {
       if (item.from && (await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: live })).isHeld) blocked.push(item)
-      else if (item.fromOwn?.isAgent === true && (await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: live })).isHeld) blocked.push(item)
+      else if (item.fromOwn?.isAgent === true && (await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: live, ...(item.fromOwn.did ? { fromDid: item.fromOwn.did } : {}) })).isHeld) blocked.push(item)
     }
     if (items !== undefined && blocked.length === 0) {
       shown()
@@ -3288,7 +3307,9 @@ export const register: Register = on => {
     const S = await bindSess($, 'hook')
     if (!S) return next(e)
     const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
-    // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again.
+    // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again. Only the engine's own
+    // stamps for the person (PromptOrigin: `composer`, Enter at the prompt; `bridge`, Remote Control); this
+    // mod's `$.prompt.submit` arrives as `plugin`, another session's message as `peer`/`peer-send-message`.
     if (typed && !e.isMeta && !e.command) S.ownSinceTyped = 0
     const current = S.run
     if (!isLive(current) || !current.isOnline || e.isMeta || e.command || !typed) return next(e)

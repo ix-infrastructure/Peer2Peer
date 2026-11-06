@@ -95,6 +95,8 @@ export type InboxItem = {
   ownAgent?: boolean;
   /** From another session on this device (not another device). */
   local?: boolean;
+  /** The sending device (own sessions only). */
+  did?: string;
   /** The held-queue bucket (capHeld) for your own sessions: one per sending session. */
   bucket?: string;
   /** The sender's text (message), or the bridge's own notice line. */
@@ -295,6 +297,8 @@ export class Bridge {
   private selfTurns: { at: number; local: boolean }[] = [];
   /** Turns your own sessions started since the person last typed a prompt here. */
   private ownSinceTyped = 0;
+  /** Prompts the person typed, as the trusted rollout counts them (TrustedMode.typed). */
+  private trustedTyped = 0;
   threadId: string | undefined;
   hooksSeen = false;
   activeAt = 0;
@@ -582,6 +586,12 @@ export class Bridge {
     }
     this.transcriptMode = t.mode;
     this.trustedSeq = t.seq;
+    // The person typed a prompt (the trusted rollout says so, never a hook report or our own queued
+    // pointer): own sessions may start their OWN_TURNS_UNATTENDED again.
+    if (typeof t.typed === "number" && t.typed > this.trustedTyped) {
+      this.trustedTyped = t.typed;
+      this.ownSinceTyped = 0;
+    }
     this.trustedWritable = t.writable;
     if (t.cwd) {
       this.trustedCwd = t.cwd;
@@ -875,8 +885,9 @@ export class Bridge {
           return;
         }
         this.inbox.push(item);
-        // Screened by the mode Codex recorded last, not a stale copy of it.
+        // Screened by the mode Codex recorded last, and the person's `p2p own-agents` now: not stale copies.
         await this.refreshTrusted();
+        if (item.fromSelf) await this.refreshOwnAgents();
         this.screenNow(item);
         this.scheduleQueue();
         return;
@@ -921,21 +932,38 @@ export class Bridge {
    * "person" for the person's own terminal session, anything else (or nothing: another device, an
    * older client) counts as an agent session's. `ownTrusted`: the person ran `p2p own-agents deliver`.
    */
-  private ownOf(e: Record<string, any>): Pick<InboxItem, "fromSelf" | "ownAgent" | "local" | "bucket"> {
+  private ownOf(e: Record<string, any>): Pick<InboxItem, "fromSelf" | "ownAgent" | "local" | "bucket" | "did"> {
     if (e.from?.self !== true) return { fromSelf: false };
     const ref = typeof e.fromRef === "string" && /^[0-9a-f]{6}$/.test(e.fromRef) ? e.fromRef : "elsewhere";
     return {
       fromSelf: true,
-      ownAgent: e.via !== "person" && e.ownTrusted !== true,
+      ownAgent: e.via !== "person",
       local: this.who !== null && e.from.did === this.who.did,
       bucket: `${e.from.userId}/${ref}`,
+      ...(typeof e.from.did === "string" ? { did: e.from.did } : {}),
     };
+  }
+
+  /** `p2p own-agents` as it stands now, read before each screening (never stamped on an event). Unknown: hold. */
+  private ownAgentsSetting: { ownAgents: "hold" | "deliver"; devices: string[] | "all-other" } = { ownAgents: "hold", devices: [] };
+
+  async refreshOwnAgents(): Promise<void> {
+    const r = await this.deps.p2p.ownAgents().catch(() => undefined);
+    this.ownAgentsSetting = r?.ok ? r.value : { ownAgents: "hold", devices: [] };
+  }
+
+  /** Whether the person's `p2p own-agents` lets this own agent session's message through (the CLI's ownAgentsDeliverFrom). */
+  private ownAgentDelivers(item: InboxItem): boolean {
+    const s = this.ownAgentsSetting;
+    if (s.ownAgents === "deliver") return true;
+    if (item.local || item.did === undefined) return false;
+    return s.devices === "all-other" || (Array.isArray(s.devices) && s.devices.includes(item.did));
   }
 
   /** Applies the hold rule to one new item, by this session's own mode as it stands now. */
   private screenNow(item: InboxItem): void {
     if (item.state !== "pending") return;
-    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
+    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
     if (!verdict.deliver) this.hold(item, verdict.why, verdict.reason);
   }
 
@@ -999,7 +1027,7 @@ export class Bridge {
       }
       const isRescreen = item.state === "held" && item.holdKind === "unknown";
       if (item.state !== "pending" && !isRescreen) continue;
-      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
+      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
       if (verdict.deliver) ready.push(item);
       // Unconfirmed at UserPromptSubmit: wait for PostToolUse or Stop rather than hold.
       else if (verdict.reason === "unknown" && o.confirmed === false && item.state === "pending") continue;
@@ -1133,6 +1161,8 @@ export class Bridge {
 
   private async flushQueue(): Promise<void> {
     if (!this.deps.queue || !this.threadId || this.status !== "idle") return;
+    await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && one.state === "pending")) await this.refreshOwnAgents();
     const before = new Map(this.inbox.map((one) => [one.id, one.state]));
     const items = this.takeDeliverable({ startsTurn: true });
     if (items.length === 0) return;
@@ -1153,6 +1183,7 @@ export class Bridge {
   async onHook(r: HookReport): Promise<HookOutput> {
     this.hooksSeen = true;
     await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && (one.state === "pending" || one.state === "held"))) await this.refreshOwnAgents();
     if (r.mode && isExplicitlyAuto(r.mode)) this.reportedAutoSeq = this.trustedSeq;
     // The cwd comes from where Codex started this server and from the trusted turn context, never from a report.
     const context = (event: string, parts: (string | undefined)[]): HookOutput => {
@@ -1168,8 +1199,9 @@ export class Bridge {
       }
       case "UserPromptSubmit": {
         this.activeAt = this.clock.now();
-        // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again.
-        this.ownSinceTyped = 0;
+        // Not a reset of OWN_TURNS_UNATTENDED: a hook report is untrusted (a sandboxed command can send
+        // one), and this hook also runs for the bridge's own `codex queue` turns. Only the rollout's
+        // typed prompts reset it (refreshTrusted).
         this.deps.onChange?.();
         this.setStatus("busy");
         // Codex may run this hook before it records this turn's context: the mode isn't confirmed yet.

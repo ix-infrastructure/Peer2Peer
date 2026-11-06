@@ -106,7 +106,7 @@ None of these can stop an agent that runs as you and wants past them. A pseudo-t
 
 ### The hard barrier: sandbox your agents
 
-Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), with no way to step outside the sandbox. The token, the keys, the policies and the CLI's state are then out of the agent's reach, and Peer2Peer's checks hold. The configurations below were checked against the vendors' documentation on 2026-11-04. The Codex one was also run with codex-cli 0.156.1 on macOS (a read and a write under the denied folder failed with "Operation not permitted"; the workspace stayed readable).
+Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), with no way to step outside the sandbox. The token, the keys, the policies and the CLI's state are then out of the agent's reach, and Peer2Peer's checks hold. That state includes three things the hold rule rests on: `config.json` (`trust`, and `ownAgentsDeliver`/`ownDevicesDeliver` from `p2p own-agents`), the person token, and the CLI's `localSends` record (which session on this device sent each same-device message, and whether the person did). An agent that can write any of them can make its own messages look like the person's. The configurations below were checked against the vendors' documentation on 2026-11-04. The Codex one was also run with codex-cli 0.156.1 on macOS (a read and a write under the denied folder failed with "Operation not permitted"; the workspace stayed readable).
 
 **Claude Code** (`settings.json`). Sources: [sandboxing](https://code.claude.com/docs/en/sandboxing) and [permissions](https://code.claude.com/docs/en/permissions).
 
