@@ -4,7 +4,7 @@ Claude Code's cross-session messaging, between your sessions and your friends' a
 
 On one machine, Claude sessions already reach each other: `ListAgents` lists them and `SendMessage` delivers to them. With this mod, the same two tools reach live sessions on other machines:
 
-- **ListAgents** gains a "Peer2Peer" section, in three groups:
+- **ListAgents** (the tool, and the `/list-agents` command) gains a "Peer2Peer" section, in three groups:
   - "Your other sessions" (your other devices);
   - one group per circle you are in;
   - "Friends".
