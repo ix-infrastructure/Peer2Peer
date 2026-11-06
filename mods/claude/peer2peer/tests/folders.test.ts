@@ -217,6 +217,19 @@ describe('shell paths after the #49 review: command position, folders moved to, 
     expect(parsePeersArgs('project share c_team')).toEqual({ verb: 'project', args: ['share', 'c_team'] })
   })
 
+  test('linear on hostile input (CodeQL js/polynomial-redos): many newlines, and a brace with many commas', () => {
+    let t = performance.now()
+    expect(sp('\n'.repeat(50_000))).toEqual({ paths: [], over: false })
+    expect(performance.now() - t).toBeLessThan(100)
+    t = performance.now()
+    expect(sp(`rm -rf {{,${','.repeat(50_000)}`).paths).toEqual([])
+    expect(performance.now() - t).toBeLessThan(100)
+    // Still read as before: eval after a newline or a keyword, and a brace with a choice.
+    expect(sp('\n\n  eval "$x"; cat $HOME/k').over).toBe(true)
+    expect(sp('if x; then eval y; fi; cat $HOME/k').over).toBe(true)
+    expect(sp('rm -rf {.git,a}; cat /work/old/f').paths).toContain('/work/old/f/.git')
+  })
+
   test('markerExtras: the probe\'s markers and the maybe paths that exist; no answer fails closed', () => {
     expect(markerExtras(['/a/b'], ['/w/.x'], { exists: ['/w/.x'], markers: ['/a/.git'] })).toEqual(['/a/.git', '/w/.x'])
     expect(markerExtras(['/a/b'], ['/w/.x'], { exists: [], markers: [] })).toEqual([])

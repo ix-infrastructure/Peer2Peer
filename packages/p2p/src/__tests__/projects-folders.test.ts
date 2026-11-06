@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { broadRoot, dirProjectId, MAX_SESSION_PROJECTS, NESTED_SCAN_ENTRIES, nestedBoundaries, PRIVATE_MARKER, projectOf, pseudoPath, type ProjectsDoc } from "../projects.js";
+import { braceChoice, broadRoot, dirProjectId, MAX_SESSION_PROJECTS, NESTED_SCAN_ENTRIES, nestedBoundaries, PRIVATE_MARKER, projectOf, pseudoPath, type ProjectsDoc } from "../projects.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-projects-folders.test/v3";
@@ -197,6 +197,15 @@ describe("folder projects after the #49 review: gone folders, opt-in coverage, b
     expect(broadRoot(src)).toBeUndefined();
     expect(broadRoot(join(homedir(), "src"))).toBeUndefined();
     expect(broadRoot("/tmp/project")).toBeUndefined();
+  });
+
+  it("linear on hostile input (CodeQL js/polynomial-redos): a brace with many commas", () => {
+    const t = performance.now();
+    expect(braceChoice(`{{,${",".repeat(50_000)}`)).toBe(false);
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(projectOf(join(src, "team", `{{,${",".repeat(50_000)}`), docOf([src])).root).toBe(src);
+    // Same answers as before: a choice inside one pair of braces, nothing across braces.
+    for (const [c, want] of [["{.git,a}", true], ["{a..z}", true], ["x{a,b}y", true], ["{a}", false], ["{a,{b}", false], ["{,", false], ["a,b}", false], ["{a,}", true]] as const) expect([c, braceChoice(c)]).toEqual([c, want]);
   });
 
   it("H3: the nested repositories and .p2p-private folders below a covering share are listed, bounded", () => {

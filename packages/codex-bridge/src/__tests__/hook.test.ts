@@ -271,6 +271,19 @@ describe("shell paths after the #49 review (same rules as the mod): command posi
     expect(tp("ls /src/secret.repo").paths).toEqual(["/src/secret.repo"]);
   });
 
+  it("linear on hostile input (CodeQL js/polynomial-redos): many newlines, and a brace with many commas", () => {
+    let t = performance.now();
+    expect(tp("\n".repeat(50_000))).toEqual({ paths: [], over: false });
+    expect(performance.now() - t).toBeLessThan(100);
+    t = performance.now();
+    expect(tp(`rm -rf {{,${",".repeat(50_000)}`).paths).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(100);
+    // Still read as before: eval after a newline or a keyword, and a brace with a choice.
+    expect(tp('\n\n  eval "$x"; cat $HOME/k').over).toBe(true);
+    expect(tp("if x; then eval y; fi; cat $HOME/k").over).toBe(true);
+    expect(tp("rm -rf {.git,a}; cat /work/old/f").paths).toContain("/work/old/f/.git");
+  });
+
   it("H2: the repository (or .p2p-private, or bare repository) a path is in binds its marker too", () => {
     const d = realpathSync(mkdtempSync(join(tmpdir(), "p2p-markers-")));
     dirs.push(d);

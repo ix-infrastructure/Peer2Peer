@@ -249,6 +249,26 @@ export function pseudoPath(p: string): boolean {
 }
 
 /**
+ * Whether a path component holds a brace expansion with a choice: a `{`, then `,` or `..` with no
+ * brace between, then `}` (`{.git,x}`, `{a..z}`). One pass, so it stays linear on any input.
+ */
+export function braceChoice(c: string): boolean {
+  let open = false;
+  let choice = false;
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (ch === "{") {
+      open = true;
+      choice = false;
+    } else if (ch === "}") {
+      if (open && choice) return true;
+      open = false;
+    } else if (open && (ch === "," || (ch === "." && c[i + 1] === "."))) choice = true;
+  }
+  return false;
+}
+
+/**
  * The folder holding the first path component that names a repository's marker (`.git`,
  * PRIVATE_MARKER) or could match one (a glob or brace pattern a dotfile can match: `.g*`,
  * `[.]git`, `{.git,x}`): a command naming it may remove it, so a shared folder above never
@@ -258,7 +278,7 @@ function namedStop(p: string): string | undefined {
   const parts = p.split(/[\\/]/);
   for (let i = 1; i < parts.length; i++) {
     const c = parts[i];
-    const glob = ((c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c)) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c);
+    const glob = ((c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c)) || braceChoice(c);
     if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep) || sep;
   }
   return undefined;

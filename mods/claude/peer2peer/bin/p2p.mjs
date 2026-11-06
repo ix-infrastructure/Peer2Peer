@@ -24111,6 +24111,7 @@ __export(projects_exports, {
   assertMayReach: () => assertMayReach,
   assertPersonForWidening: () => assertPersonForWidening,
   bindSession: () => bindSession,
+  braceChoice: () => braceChoice2,
   broadRoot: () => broadRoot,
   ceilingAudience: () => ceilingAudience,
   defaultCircleNotice: () => defaultCircleNotice,
@@ -24213,11 +24214,26 @@ function pseudoPath(p) {
   if (under("/dev")) return !st.isFile();
   return PSEUDO_ROOTS.slice(1).some(under);
 }
+function braceChoice2(c) {
+  let open2 = false;
+  let choice = false;
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (ch === "{") {
+      open2 = true;
+      choice = false;
+    } else if (ch === "}") {
+      if (open2 && choice) return true;
+      open2 = false;
+    } else if (open2 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
+  }
+  return false;
+}
 function namedStop(p) {
   const parts = p.split(/[\\/]/);
   for (let i = 1; i < parts.length; i++) {
     const c = parts[i];
-    const glob = (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c);
+    const glob = (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || braceChoice2(c);
     if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep3) || sep3;
   }
   return void 0;
@@ -26710,8 +26726,59 @@ var SUBST = "";
 var DEVICES = /* @__PURE__ */ new Set(["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/full"]);
 var isDevice = (p) => DEVICES.has(p) || /^\/dev\/fd\/\d+$/.test(p);
 var ENV_FILES = /CLAUDE_ENV_FILE|session-env|shell-snapshots/i;
-var EVAL_LIKE = /(^|[;&|(){}`\n!'"]|\b(then|do|else|elif|exec|command|builtin|xargs)\b)\s*(eval|source|\.)\s/;
-var namesMarker = (c) => c === ".git" || c === ".p2p-private" || (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c);
+var EVAL_BOUNDARY = ";&|(){}`\n!'\"";
+var EVAL_KEYWORDS = /* @__PURE__ */ new Set(["then", "do", "else", "elif", "exec", "command", "builtin", "xargs"]);
+var isSpace = (c) => c !== void 0 && /\s/.test(c);
+var isWordChar = (c) => c !== void 0 && /\w/.test(c);
+function evalLike(s2) {
+  let boundary = true;
+  for (let i = 0; i < s2.length; ) {
+    const c = s2[i];
+    if (EVAL_BOUNDARY.includes(c)) {
+      boundary = true;
+      i++;
+      continue;
+    }
+    if (isSpace(c)) {
+      i++;
+      continue;
+    }
+    if (boundary) {
+      for (const w of ["eval", "source", "."])
+        if (s2.startsWith(w, i) && isSpace(s2[i + w.length]))
+          return true;
+    }
+    if (isWordChar(c)) {
+      let j = i;
+      while (j < s2.length && isWordChar(s2[j]))
+        j++;
+      boundary = EVAL_KEYWORDS.has(s2.slice(i, j));
+      i = j;
+      continue;
+    }
+    boundary = false;
+    i++;
+  }
+  return false;
+}
+function braceChoice(c) {
+  let open2 = false;
+  let choice = false;
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (ch === "{") {
+      open2 = true;
+      choice = false;
+    } else if (ch === "}") {
+      if (open2 && choice)
+        return true;
+      open2 = false;
+    } else if (open2 && (ch === "," || ch === "." && c[i + 1] === "."))
+      choice = true;
+  }
+  return false;
+}
+var namesMarker = (c) => c === ".git" || c === ".p2p-private" || (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || braceChoice(c);
 function commandName(w) {
   let base = (w.split(/[\\/]/).pop() ?? "").toLowerCase();
   if (base.endsWith(".exe"))
@@ -26973,7 +27040,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
   const segs = segmentsOf(words.length, starts);
   const changesDir = words.some((w) => w === "cd" || w === "pushd" || w === "popd" || w === "chdir");
   const known2 = /* @__PURE__ */ new Map();
-  const trusted = !ctx.untrusted && !sticky && !EVAL_LIKE.test(command);
+  const trusted = !ctx.untrusted && !sticky && !evalLike(command);
   for (const [name2, val] of [["HOME", home], ["PWD", cwd], ...Object.entries(ctx.vars ?? {})]) {
     if (!trusted || !val || !/^[A-Za-z_]\w*$/.test(name2) || /[\0\n]/.test(val) || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(val) || mentions(command, name2))
       continue;

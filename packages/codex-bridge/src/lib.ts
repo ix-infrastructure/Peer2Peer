@@ -945,11 +945,66 @@ const isDevice = (p: string) => DEVICES.has(p) || /^\/dev\/fd\/\d+$/.test(p)
 
 /** The files Claude Code runs ahead of each Bash command (CLAUDE_ENV_FILE, its session-env and shell-snapshots folders): they can set any variable. */
 const ENV_FILES = /CLAUDE_ENV_FILE|session-env|shell-snapshots/i
-/** A command that may set variables in ways no word shows: eval, source, `.`. */
-const EVAL_LIKE = /(^|[;&|(){}`\n!'"]|\b(then|do|else|elif|exec|command|builtin|xargs)\b)\s*(eval|source|\.)\s/
+/** Characters after which a word starts a command, for evalLike. */
+const EVAL_BOUNDARY = ';&|(){}`\n!\'"'
+/** Words after which the next word starts a command, for evalLike. */
+const EVAL_KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'exec', 'command', 'builtin', 'xargs'])
+const isSpace = (c: string | undefined) => c !== undefined && /\s/.test(c)
+const isWordChar = (c: string | undefined) => c !== undefined && /\w/.test(c)
+
+/**
+ * A command that may set variables in ways no word shows: eval, source or `.` at the start, after
+ * `;`, `&`, `|`, a bracket, a quote, a newline or `!`, or after then/do/else/elif/exec/command/
+ * builtin/xargs, each followed by a space. One pass over the text, so it stays linear.
+ */
+function evalLike(s: string): boolean {
+  let boundary = true
+  for (let i = 0; i < s.length; ) {
+    const c = s[i] as string
+    if (EVAL_BOUNDARY.includes(c)) {
+      boundary = true
+      i++
+      continue
+    }
+    if (isSpace(c)) {
+      i++
+      continue
+    }
+    if (boundary) for (const w of ['eval', 'source', '.']) if (s.startsWith(w, i) && isSpace(s[i + w.length])) return true
+    if (isWordChar(c)) {
+      let j = i
+      while (j < s.length && isWordChar(s[j])) j++
+      boundary = EVAL_KEYWORDS.has(s.slice(i, j))
+      i = j
+      continue
+    }
+    boundary = false
+    i++
+  }
+
+  return false
+}
+
+/** Whether `c` holds a brace expansion with a choice: a `{`, then `,` or `..` with no brace between, then `}`. Linear. */
+function braceChoice(c: string): boolean {
+  let open = false
+  let choice = false
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]
+    if (ch === '{') {
+      open = true
+      choice = false
+    } else if (ch === '}') {
+      if (open && choice) return true
+      open = false
+    } else if (open && (ch === ',' || (ch === '.' && c[i + 1] === '.'))) choice = true
+  }
+
+  return false
+}
 
 /** A path component that names a repository marker or could match one (`.git`, `.p2p-private`, `.g*`, `[.]git`, `{.git,x}`). */
-const namesMarker = (c: string) => c === '.git' || c === '.p2p-private' || ((c.startsWith('.') || c.startsWith('[')) && /[*?[]/.test(c)) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c)
+const namesMarker = (c: string) => c === '.git' || c === '.p2p-private' || ((c.startsWith('.') || c.startsWith('[')) && /[*?[]/.test(c)) || braceChoice(c)
 
 /** A command word's name: its last path segment, lower-cased, `.exe` and a version (python3.12) dropped. */
 function commandName(w: string): { base: string; bare: string } {
@@ -1270,7 +1325,7 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
   const changesDir = words.some(w => w === 'cd' || w === 'pushd' || w === 'popd' || w === 'chdir')
   // The variables known here, as this command's shell sees them.
   const known = new Map<string, string>()
-  const trusted = !ctx.untrusted && !sticky && !EVAL_LIKE.test(command)
+  const trusted = !ctx.untrusted && !sticky && !evalLike(command)
   for (const [name, val] of [['HOME', home], ['PWD', cwd], ...Object.entries(ctx.vars ?? {})] as [string, string | undefined][]) {
     if (!trusted || !val || !/^[A-Za-z_]\w*$/.test(name) || /[\0\n]/.test(val) || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(val) || mentions(command, name)) continue
     // After a cd, $PWD is where the command went: resolved as a relative path below (against each folder it cds to).
