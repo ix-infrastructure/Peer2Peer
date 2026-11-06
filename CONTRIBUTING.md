@@ -81,11 +81,13 @@ The integration tests start real relays on `127.0.0.1` with ephemeral ports and 
 
 ### CI
 
-**CI** (`.github/workflows/ci-public.yml`) runs only when a maintainer starts it (manual dispatch), on a pull request's branch before it merges, on GitHub-hosted runners: Linux and macOS, Node 22 and 24. Run the same checks locally first (see [Develop](README.md#develop)). Each run installs every package with `npm ci --ignore-scripts`, builds them in order (core, relay, codex-bridge, p2p, ext-ix), runs each package's typecheck, lint, tests and build, then `scripts/check-boundaries.mjs`, `scripts/check-bundle.sh` (plus the ext-ix bundle check), and the Claude mod's tests (`claude plugin validate`, `claude plugin test`, with the public Claude CLI and no account) and integration tests. It has a read-only token and no secrets, and only runs on `main` save the cache that other runs read.
+**CI** (`.github/workflows/ci-public.yml`): its full gate runs only when a maintainer starts it (manual dispatch), on a pull request's branch before it merges, on GitHub-hosted runners: Linux and macOS, Node 22 and 24. Run the same checks locally first (see [Develop](README.md#develop)). Each run installs every package with `npm ci --ignore-scripts`, builds them in order (core, relay, codex-bridge, p2p, ext-ix), runs each package's typecheck, lint, tests and build, then `scripts/check-boundaries.mjs`, `scripts/check-bundle.sh` (plus the ext-ix bundle check), and the Claude mod's tests (`claude plugin validate`, `claude plugin test`, with the public Claude CLI and no account) and integration tests. It has a read-only token and no secrets, and only runs on `main` save the cache that other runs read. The same workflow's cross-version matrix (`scripts/compat/matrix.mjs`, against the previous two releases) runs by itself on every pull request, in about a minute.
 
-The **DCO check** (`.github/workflows/dco.yml`) is the only workflow that runs on every pull request. It never checks out or runs your code: it reads the PR's commit metadata to confirm each commit is signed off.
+Two workflows run on every pull request by themselves:
+- the **DCO check** (`.github/workflows/dco.yml`), which never checks out or runs your code: it reads the PR's commit metadata to confirm each commit is signed off;
+- the **cross-version matrix** (the `compat` job of `ci-public.yml`, on the `pull_request` event, never `pull_request_target`). It does run your PR's code, on a GitHub-hosted runner, with a read-only token and no secrets. For a first-time contributor's fork, GitHub asks a maintainer to approve the run first.
 
-CI runs untrusted code: your PR's tests. That's why a maintainer starts it by hand after reading the change, and why PR code never runs on self-hosted runners. It isn't a judgement of you.
+The full gate runs untrusted code too: your PR's tests. That's why a maintainer starts it by hand after reading the change, and why PR code never runs on self-hosted runners. It isn't a judgement of you.
 
 ## Security-review culture
 
