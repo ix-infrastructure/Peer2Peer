@@ -4076,9 +4076,9 @@ function isPathLike(run) {
 function redactSecrets(text2) {
   let out = text2.replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, "$1[redacted]@");
   out = out.replace(BEARER, (m) => `${m.slice(0, 6)} [redacted]`);
-  out = out.replace(KEYWORD_SECRET, (_m, key, sep3, value) => {
+  out = out.replace(KEYWORD_SECRET, (_m, key, sep4, value) => {
     const q = value[0] === '"' || value[0] === "'" ? value[0] : "";
-    return `${key}${sep3}${q}[redacted]${q}`;
+    return `${key}${sep4}${q}[redacted]${q}`;
   });
   for (const re of SECRET_PATTERNS)
     out = out.replace(re, "[redacted]");
@@ -13605,7 +13605,10 @@ async function roster(app, sid, opts) {
     const names = Object.values((await sessionBinding(app, sid))?.projects ?? {}).map((p) => p.name);
     const ceiling = ctx.ceiling;
     const deny = (what) => {
-      throw new CliError("not_shared", `session ${sid} works in ${names.join(", ")}, which ${ceiling.kind === "private" ? `is private (${ceiling.why}), so it isn't shared` : "isn't shared"} ${what}: ${shareHint(names)}`);
+      const remedy = ceiling.kind === "private" ? privateRemedy(ceiling.causes, ceiling.blocking?.length ? ceiling.blocking : names) : shareHint(names);
+      throw new CliError("not_shared", `session ${sid} works in ${names.join(", ")}, which ${ceiling.kind === "private" ? `is private (${ceiling.why}), so it isn't shared` : "isn't shared"} ${what}: ${remedy}`, {
+        project: { names, policy: ceiling.kind, ...ceiling.kind === "private" ? { causes: ceiling.causes } : {} }
+      });
     };
     if (opts.circle !== void 0 && circle !== void 0 && (ceiling.kind !== "shared" || !ceiling.circles.includes(circle))) deny(`with circle ${circle}`);
     for (const u of add2) if (!ctx.audience.has(u)) deny(`with ${await app.addressOf(u)}`);
@@ -13803,7 +13806,7 @@ async function sendStatus(app, o) {
   const sid = checkSid(o.session);
   const work = sessionWorkdir(app.env);
   const fileDirs = (o.files ?? []).filter((f) => typeof f === "string").map((f) => dirname4(resolvePath2(work, f)));
-  await bindFromEnv(app, sid, [...o.projectDirs ?? [], ...fileDirs], { ...o.projectDirsOver ? { over: true } : {} });
+  await bindFromEnv(app, sid, [...o.projectDirs ?? [], ...fileDirs], { ...o.projectDirsOver !== void 0 && o.projectDirsOver !== false ? { over: overOf(o.projectDirsOver) } : {} });
   const prev = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
   const before = (await app.state.get("sessions"))?.[sid];
   const warnings = [];
@@ -13991,7 +13994,7 @@ async function sendMessage(app, o) {
   const fromSession = checkSid(o.fromSession, "--from-session");
   if (Buffer.byteLength(o.text, "utf8") > MAX_TEXT_BYTES) throw new CliError("too_large", `message text is at most ${MAX_TEXT_BYTES} bytes`);
   if (o.text === "" && !o.notifyWhenIdle) throw new CliError("usage", "nothing to send (give text, or --notify-when-idle)");
-  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...o.projectDirsOver ? { over: true } : {} });
+  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...o.projectDirsOver !== void 0 && o.projectDirsOver !== false ? { over: overOf(o.projectDirsOver) } : {} });
   let offline2 = false;
   await app.connectAndDrain().catch((e) => {
     if (e instanceof CliError && e.code === "no_relay") offline2 = true;
@@ -14146,9 +14149,14 @@ async function onSessionEnvelope(app, env, r) {
   }
 }
 async function bindFromEnv(app, sid, extra = [], o = {}) {
-  const { dirs, over } = sessionDirs(app.env);
-  const tooMany = extra.length > MAX_SESSION_DIRS;
-  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...o.person ? { person: true } : {}, ...over || tooMany || o.over ? { over: true } : {} });
+  const { dirs, why } = sessionDirs(app.env);
+  const over = /* @__PURE__ */ new Set([...why, ...o.over ?? []]);
+  if (extra.length > MAX_SESSION_DIRS) over.add("folders");
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...o.person ? { person: true } : {}, ...over.size > 0 ? { over: [...over] } : {} });
+}
+function overOf(v) {
+  const out = v === true ? ["front"] : overWhys(Array.isArray(v) ? v.flatMap((x) => String(x).split(",")) : []);
+  return out.length > 0 ? out : ["front"];
 }
 function within(c, b) {
   if (c.kind === "private") return true;
@@ -24091,6 +24099,7 @@ __export(projects_exports, {
   MAX_SESSION_CONSTRAINTS: () => MAX_SESSION_CONSTRAINTS,
   MAX_SESSION_DIRS: () => MAX_SESSION_DIRS,
   MAX_SESSION_PROJECTS: () => MAX_SESSION_PROJECTS,
+  MAX_UNDER: () => MAX_UNDER,
   PERSON_SESSION: () => PERSON_SESSION,
   PRIVATE_MARKER: () => PRIVATE_MARKER,
   PROJECT_NOTICE_PREFIX: () => PROJECT_NOTICE_PREFIX,
@@ -24102,18 +24111,23 @@ __export(projects_exports, {
   bindSession: () => bindSession,
   ceilingAudience: () => ceilingAudience,
   defaultCircleNotice: () => defaultCircleNotice,
+  dirProjectId: () => dirProjectId,
   friendIds: () => friendIds,
   isAgentProcess: () => isAgentProcess,
   listProjects: () => listProjects,
   makeProjectPrivate: () => makeProjectPrivate,
   normalizeRemote: () => normalizeRemote,
+  overWhys: () => overWhys,
   personHere: () => personHere,
   personToken: () => personToken,
   personTokenFile: () => personTokenFile,
   personTokenOk: () => personTokenOk,
+  privateReasons: () => privateReasons,
+  privateRemedy: () => privateRemedy,
   projectOf: () => projectOf,
   projectView: () => projectView,
   projectsDoc: () => projectsDoc,
+  pseudoPath: () => pseudoPath,
   sessionBinding: () => sessionBinding,
   sessionCeiling: () => sessionCeiling,
   sessionDirs: () => sessionDirs,
@@ -24123,11 +24137,13 @@ __export(projects_exports, {
   shareOf: () => shareOf,
   shareProject: () => shareProject,
   showProject: () => showProject,
+  showSession: () => showSession,
+  stickyPrivate: () => stickyPrivate,
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash7, randomBytes as randomBytes13, timingSafeEqual } from "node:crypto";
 import { existsSync as existsSync3, lstatSync as lstatSync5, mkdirSync as mkdirSync9, readFileSync as readFileSync11, realpathSync as realpathSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
-import { basename as basename4, delimiter as delimiter3, dirname as dirname5, isAbsolute as isAbsolute8, join as join17, resolve as resolve2 } from "node:path";
+import { basename as basename4, delimiter as delimiter3, dirname as dirname5, isAbsolute as isAbsolute8, join as join17, resolve as resolve2, sep as sep3 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
   if (w && isAbsolute8(w)) {
@@ -24140,8 +24156,16 @@ function sessionWorkdir(env) {
 }
 function sessionDirs(env) {
   const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter3).filter((x) => x.trim() !== "" && isAbsolute8(x.trim()));
-  const over = extra.length > MAX_SESSION_DIRS || env.P2P_PROJECT_DIRS_OVER === "1";
-  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over };
+  const why = extra.length > MAX_SESSION_DIRS ? ["folders"] : [];
+  const said = env.P2P_PROJECT_DIRS_OVER?.trim() ?? "";
+  if (said !== "" && said !== "0") why.push(...overWhys(said));
+  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over: why.length > 0, why: [...new Set(why)] };
+}
+function overWhys(v) {
+  const words = Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.split(/[\s,]+/) : v === true ? ["front"] : [];
+  const out = /* @__PURE__ */ new Set();
+  for (const w of words.map((x) => x.trim().toLowerCase()).filter((x) => x !== "")) out.add(OVER_WHYS.has(w) ? w : "front");
+  return [...out];
 }
 function real(p) {
   try {
@@ -24167,6 +24191,40 @@ function existingDir(p) {
     }
   }
   return cur;
+}
+function pseudoPath(p) {
+  if (process.platform === "win32" || typeof p !== "string" || !isAbsolute8(p)) return false;
+  const at = resolve2(p);
+  if (!PSEUDO_ROOTS.some((root) => at === root || at.startsWith(`${root}/`))) return false;
+  let st;
+  try {
+    st = statSync2(p);
+  } catch {
+    return false;
+  }
+  if (st.isDirectory()) return false;
+  const r = real(p);
+  const under = (root) => r === root || r.startsWith(`${root}/`);
+  if (under("/dev")) return !st.isFile();
+  return PSEUDO_ROOTS.slice(1).some(under);
+}
+function namedStop(p) {
+  const parts = p.split(/[\\/]/);
+  for (let i = 1; i < parts.length; i++) {
+    const c = parts[i];
+    const glob = (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c);
+    if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep3) || sep3;
+  }
+  return void 0;
+}
+function within2(p, dir) {
+  if (p === dir) return true;
+  const d = dir.endsWith(sep3) ? dir : `${dir}${sep3}`;
+  return p.startsWith(d);
+}
+function dirProjectId(root) {
+  return `pj_${sha(`dir
+${root}`).slice(0, 24)}`;
 }
 function normalizeRemote(url) {
   let u = url.trim();
@@ -24224,8 +24282,9 @@ function readSmall(file) {
     return void 0;
   }
 }
-function projectOf(dir) {
-  const start = existingDir(isAbsolute8(dir) ? dir : resolve2(dir));
+function projectOf(dir, doc) {
+  const given = resolve2(dir);
+  const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
     const dotgit = join17(cur, ".git");
@@ -24250,8 +24309,7 @@ function projectOf(dir) {
         if (m) gitDir = resolve2(cur, m[1]);
       }
       if (!gitDir || !existsSync3(gitDir)) {
-        return { id: `pj_${sha(`dir
-${cur}`).slice(0, 24)}`, name: clean3(basename4(cur)) || "folder", kind: "dir", root: cur };
+        return { id: dirProjectId(cur), name: clean3(basename4(cur)) || "folder", kind: "dir", root: cur };
       }
       {
         let common = gitDir;
@@ -24278,8 +24336,29 @@ ${common}`).slice(0, 24)}`,
     if (up === cur) break;
     cur = up;
   }
-  return { id: `pj_${sha(`dir
-${start}`).slice(0, 24)}`, name: clean3(basename4(start)) || "folder", kind: "dir", root: start };
+  const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename4(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
+  let marked = false;
+  for (let c = start, i = 0; i < 4096; i++) {
+    if (existsSync3(join17(c, PRIVATE_MARKER))) {
+      marked = true;
+      break;
+    }
+    const up = dirname5(c);
+    if (up === c) break;
+    c = up;
+  }
+  if (!doc || marked) return dirRef(start, marked);
+  const named = namedStop(given);
+  const ns = named === void 0 ? void 0 : existingDir(named);
+  const stop = ns === void 0 ? void 0 : within2(start, ns) ? ns : start;
+  for (let c = start, i = 0; i < 4096; i++) {
+    if (doc.projects[dirProjectId(c)]) return dirRef(c, false);
+    if (c === stop) break;
+    const up = dirname5(c);
+    if (up === c) break;
+    c = up;
+  }
+  return dirRef(start, false);
 }
 async function projectsDoc(app) {
   const d = await app.state.get("projects");
@@ -24376,18 +24455,26 @@ async function listProjects(app) {
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 async function showProject(app, dir) {
-  return projectView(app, projectOf(dir));
+  const doc = await projectsDoc(app);
+  return projectView(app, projectOf(dir, doc), doc);
 }
 async function bindSession(app, sid, dirs, o = {}) {
   if (sid === PERSON_SESSION) {
     if (o.person) return void 0;
     throw new CliError("usage", `session ${PERSON_SESSION} is your own terminal's (p2p tui, or p2p send typed with no --from-session); an agent sends from its own session`);
   }
+  const doc = dirs.length > 0 ? await projectsDoc(app) : void 0;
   const refs = /* @__PURE__ */ new Map();
   for (const d of dirs) {
     if (typeof d !== "string" || d.trim() === "") continue;
-    const r = projectOf(d);
-    refs.set(r.id, r);
+    if (pseudoPath(d)) continue;
+    const r = projectOf(d, doc);
+    const one = refs.get(r.id) ?? { ref: r, under: /* @__PURE__ */ new Set() };
+    if (r.kind === "dir") {
+      const at = existingDir(d);
+      if (at !== r.root && within2(at, r.root)) one.under.add(at);
+    }
+    refs.set(r.id, one);
   }
   const front = app.front === true;
   if (!o.inbound && !front && agentContext(app.env)) {
@@ -24407,25 +24494,40 @@ async function bindSession(app, sid, dirs, o = {}) {
       throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
     }
     const projects = { ...have?.projects ?? {} };
-    let over = have?.over === true || o.over === true;
-    for (const r of refs.values()) {
+    const why = new Set(have?.overWhy ?? []);
+    if (o.over === true) why.add("front");
+    else if (Array.isArray(o.over)) for (const w of overWhys(o.over)) why.add(w);
+    let over = have?.over === true || why.size > 0;
+    for (const { ref: r, under } of refs.values()) {
       const prev = projects[r.id];
       if (!prev && Object.keys(projects).length >= MAX_SESSION_PROJECTS) {
         over = true;
+        why.add("projects");
         continue;
       }
-      projects[r.id] = { name: r.name, ...r.repoPrivate || prev?.repoPrivate ? { repoPrivate: true } : {} };
+      const all2 = /* @__PURE__ */ new Set([...prev?.under ?? [], ...under]);
+      const underOver = prev?.underOver === true || all2.size > MAX_UNDER;
+      projects[r.id] = {
+        name: r.name,
+        root: prev?.root ?? r.root,
+        ...r.repoPrivate || prev?.repoPrivate ? { repoPrivate: true } : {},
+        ...!underOver && all2.size > 0 ? { under: [...all2].sort() } : {},
+        ...underOver ? { underOver: true } : {}
+      };
     }
     const constraints = [...have?.constraints ?? []];
     if (o.constraint !== void 0 && !constraints.some((c) => JSON.stringify(c) === JSON.stringify(o.constraint))) {
-      if (constraints.length >= MAX_SESSION_CONSTRAINTS) over = true;
-      else constraints.push(o.constraint);
+      if (constraints.length >= MAX_SESSION_CONSTRAINTS) {
+        over = true;
+        why.add("constraints");
+      } else constraints.push(o.constraint);
     }
     const registered = front || have?.registered === true;
     const unregistered = !registered && have?.unregistered === true;
     const next = {
       projects,
       ...over ? { over: true } : {},
+      ...why.size > 0 ? { overWhy: [...why] } : {},
       ...constraints.length ? { constraints } : {},
       ...unregistered ? { unregistered: true } : {},
       ...registered ? { registered: true } : {},
@@ -24504,26 +24606,74 @@ function personHere(app) {
 async function sessionBinding(app, sid) {
   return (await app.state.get("sessionProjects"))?.[sid];
 }
+function boundShares(doc, id2, p) {
+  const out = [{ share: shareOf(doc, id2), mapped: doc.projects[id2] !== void 0, name: p.name }];
+  const root = p.root;
+  if (typeof root !== "string" || root === "") return out;
+  const seen = /* @__PURE__ */ new Set([id2]);
+  const add2 = (pid) => {
+    const r = doc.projects[pid];
+    if (seen.has(pid) || !r) return;
+    seen.add(pid);
+    out.push({ share: shareOf(doc, pid), mapped: true, name: clean3(String(r.name ?? "")) || p.name });
+  };
+  if (p.underOver) {
+    for (const [pid, r] of Object.entries(doc.projects)) if (typeof r?.root === "string" && r.root !== root && within2(r.root, root) && pid === dirProjectId(r.root)) add2(pid);
+    return out;
+  }
+  for (const f of p.under ?? []) {
+    if (typeof f !== "string") continue;
+    for (let c = f, i = 0; i < 4096 && c !== root && within2(c, root); i++) {
+      add2(dirProjectId(c));
+      const up = dirname5(c);
+      if (up === c) break;
+      c = up;
+    }
+  }
+  return out;
+}
+function privateReasons(doc, b) {
+  const out = [];
+  if (b.over) for (const w of b.overWhy?.length ? overWhys(b.overWhy) : ["legacy-over"]) out.push({ cause: w, why: OVER_TEXT[w] });
+  if (b.unregistered) out.push({ cause: "unregistered", why: "an agent named it, and no front end of yours has registered it" });
+  for (const [id2, p] of Object.entries(b.projects)) {
+    if (p.repoPrivate) {
+      out.push({ cause: "repo-private", why: `${p.name} asks to stay private (${PRIVATE_MARKER})`, project: p.name });
+      continue;
+    }
+    for (const s2 of boundShares(doc, id2, p)) {
+      if (s2.share !== "private") continue;
+      out.push(s2.mapped ? { cause: "private", why: `${s2.name} is private`, project: s2.name } : { cause: "unshared", why: `${s2.name} isn't shared (projects are private until you share them)`, project: s2.name });
+      break;
+    }
+  }
+  if ((b.constraints ?? []).includes("private")) out.push({ cause: "sent-private", why: "a private session of yours sent it a message" });
+  return out;
+}
+function privateRemedy(causes, names) {
+  if (causes.some((c) => STICKY.has(c))) {
+    return "sharing a project can't change that, and it lasts until the session ends: start a new session for the work you want to share (`p2p session show <session>` in your own terminal, or /peers session in Claude Code, lists what it is bound to and why)";
+  }
+  const parts = [];
+  if (causes.includes("unregistered")) parts.push("send from the session's own front end (SendMessage in Claude Code, p2p_send in Codex), which registers it");
+  if (causes.some((c) => c === "private" || c === "unshared" || c === "disjoint") || parts.length === 0) parts.push(shareHint(names));
+  return parts.join("; and ");
+}
+function stickyPrivate(c) {
+  return c.kind === "private" && c.causes.some((x) => STICKY.has(x));
+}
 async function sessionCeiling(app, sid, binding) {
   if (sid === PERSON_SESSION) return { kind: "none" };
   const b = binding === null ? void 0 : binding ?? await sessionBinding(app, sid);
   if (!b || Object.keys(b.projects).length === 0 && !b.constraints?.length && !b.unregistered && !b.over) return { kind: "none" };
-  if (b.over) return { kind: "private", why: `it worked in more than ${MAX_SESSION_PROJECTS} projects (or ${MAX_SESSION_DIRS} folders)` };
-  if (b.unregistered) return { kind: "private", why: "an agent named it, and no front end of yours has registered it" };
   const doc = await projectsDoc(app);
+  const reasons = privateReasons(doc, b);
+  if (reasons.length > 0) return privateOf(reasons);
   let circles;
   let people2;
   const shares = [];
-  for (const [id2, p] of Object.entries(b.projects)) {
-    if (p.repoPrivate) return { kind: "private", why: `${p.name} asks to stay private (${PRIVATE_MARKER})` };
-    const share = shareOf(doc, id2);
-    if (share === "private") return { kind: "private", why: doc.projects[id2] ? `${p.name} is private` : `${p.name} isn't shared (projects are private until you share them)` };
-    shares.push({ name: p.name, share });
-  }
-  for (const c of b.constraints ?? []) {
-    if (c === "private") return { kind: "private", why: "a private session of yours sent it a message" };
-    shares.push({ name: "a session of yours that sent it a message", share: c });
-  }
+  for (const [id2, p] of Object.entries(b.projects)) for (const s2 of boundShares(doc, id2, p)) shares.push({ name: s2.name, share: s2.share });
+  for (const c of b.constraints ?? []) shares.push({ name: "a session of yours that sent it a message", share: c });
   for (const { share } of shares) {
     if (share === "private") continue;
     circles = circles ? new Set(share.circles.filter((c) => circles.has(c))) : new Set(share.circles);
@@ -24535,10 +24685,20 @@ async function sessionCeiling(app, sid, binding) {
   const friends2 = (people2?.size ?? 0) > 0 ? await friendIds(app) : /* @__PURE__ */ new Set();
   const ppl = [...people2 ?? []].filter((u) => !blocks.has(u) && u !== app.userId && friends2.has(u));
   if (joined.length + ppl.length === 0) {
-    const names = shares.map((x) => x.name);
-    return { kind: "private", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` };
+    const names = [...new Set(shares.map((x) => x.name))];
+    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
   }
   return { kind: "shared", circles: joined.sort(), people: ppl.sort() };
+}
+function privateOf(reasons, names) {
+  const more = reasons.length - 1;
+  const blocking = names ?? [...new Set(reasons.map((r) => r.project).filter((x) => x !== void 0))];
+  return {
+    kind: "private",
+    why: `${reasons[0].why}${more > 0 ? ` (and ${more} more reason${more === 1 ? "" : "s"})` : ""}`,
+    causes: [...new Set(reasons.map((r) => r.cause))],
+    ...blocking.length ? { blocking } : {}
+  };
 }
 async function ceilingAudience(app, c) {
   if (c.kind === "none") return void 0;
@@ -24569,9 +24729,10 @@ async function assertMayReach(app, sid, userId, o = {}) {
   const names = Object.values(b?.projects ?? {}).map((p) => p.name);
   const who2 = o.address ?? await app.addressOf(userId);
   const why = c.kind === "private" ? c.why : `${who2} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
-  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why}. ${shareHint(names).replace(/^o/, "O")}`, {
+  const remedy = c.kind === "private" ? privateRemedy(c.causes, c.blocking?.length ? c.blocking : names) : shareHint(names);
+  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
     delivered: false,
-    project: { names, policy: c.kind }
+    project: { names, policy: c.kind, ...c.kind === "private" ? { causes: c.causes, ...stickyPrivate(c) ? { sticky: true } : {} } : {} }
   });
 }
 async function friendIds(app) {
@@ -24583,9 +24744,39 @@ async function sessionProjectView(app, sid) {
   const b = await sessionBinding(app, sid);
   const c = await sessionCeiling(app, sid, b ?? null);
   const projects = Object.entries(b?.projects ?? {}).map(([id2, p]) => ({ id: id2, name: p.name, ...p.repoPrivate ? { repoPrivate: true } : {} }));
-  if (c.kind === "private") return { projects, policy: "private", why: c.why };
+  if (c.kind === "private") return { projects, policy: "private", why: c.why, causes: c.causes };
   if (c.kind === "shared") return { projects, policy: "shared", circles: c.circles, people: c.people };
   return { projects, policy: "none" };
+}
+async function showSession(app, sid) {
+  if (app.front !== true && agentContext(app.env)) {
+    throw new CliError(
+      "refused",
+      "`p2p session show` lists a session's projects and why it is private, which is for you to read: run it in your own terminal (not inside Claude Code or Codex), or type /peers session in Claude Code"
+    );
+  }
+  if (sid === PERSON_SESSION) return { sid, policy: "none", reasons: [], projects: [], constraints: 0 };
+  const b = await sessionBinding(app, sid);
+  const c = await sessionCeiling(app, sid, b ?? null);
+  const doc = await projectsDoc(app);
+  const reasons = b ? privateReasons(doc, b) : [];
+  if (c.kind === "private" && reasons.length === 0) reasons.push({ cause: c.causes[0] ?? "disjoint", why: c.why });
+  const projects = [];
+  for (const [id2, p] of Object.entries(b?.projects ?? {})) {
+    const root = typeof p.root === "string" && p.root !== "" ? p.root : doc.projects[id2]?.root ?? "";
+    const kind = root !== "" && dirProjectId(root) === id2 ? "dir" : "git";
+    const v = await projectView(app, { id: id2, name: p.name, kind, root, ...doc.projects[id2]?.remote ? { remote: doc.projects[id2].remote } : {}, ...p.repoPrivate ? { repoPrivate: true } : {} }, doc);
+    projects.push({ ...v, ...p.under?.length ? { under: [...p.under] } : {}, ...p.underOver ? { underOver: true } : {} });
+  }
+  return {
+    sid,
+    policy: c.kind,
+    reasons,
+    ...c.kind === "private" ? { remedy: privateRemedy(c.causes, c.blocking?.length ? c.blocking : projects.map((x) => x.name)) } : {},
+    ...c.kind === "shared" ? { circles: c.circles, people: c.people } : {},
+    projects,
+    constraints: b?.constraints?.length ?? 0
+  };
 }
 async function defaultCircleNotice(app, sid) {
   const def = app.self?.defaultCircle;
@@ -24605,7 +24796,7 @@ async function defaultCircleNotice(app, sid) {
   const name2 = unmapped[0][1].name;
   return `project boundaries: sessions no longer follow your default circle (${def}). Each project is private until you share it, so this session in ${name2} is seen only by your own devices. To share ${name2} with that circle, run \`p2p project share ${def}\` in it (or /peers project share in Claude Code); \`p2p project ls\` lists what you shared`;
 }
-var PERSON_SESSION, PRIVATE_MARKER, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, sha, clean3, AGENT_ENV_VARS, TOKEN_RE, PROJECT_NOTICE_PREFIX;
+var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, AGENT_ENV_VARS, TOKEN_RE, OVER_TEXT, PROJECT_NOTICE_PREFIX;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -24614,12 +24805,16 @@ var init_projects = __esm({
     init_errors2();
     PERSON_SESSION = "tui";
     PRIVATE_MARKER = ".p2p-private";
+    OVER_WHYS = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints"]);
     MAX_SESSION_DIRS = 512;
     MAX_SESSION_PROJECTS = 16;
     SESSION_BINDING_TTL_MS = 30 * 24 * 3600 * 1e3;
     MAX_PROJECT_SHARES = 32;
     MAX_SESSION_CONSTRAINTS = 16;
+    MAX_UNDER = 64;
+    STICKY = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints", "legacy-over", "repo-private", "sent-private"]);
     sha = (s2) => createHash7("sha256").update(s2, "utf8").digest("hex");
+    PSEUDO_ROOTS = ["/dev", "/proc", "/sys"];
     clean3 = (s2) => sanitizePeerText(s2, 64).replace(/[^\w.@+-]/g, "").slice(0, 64);
     AGENT_ENV_VARS = [
       // Claude Code (code.claude.com/docs/en/env-vars): its Bash, PowerShell and Monitor tools, hooks.
@@ -24635,6 +24830,14 @@ var init_projects = __esm({
       "CODEX_SESSION_ID"
     ];
     TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+    OVER_TEXT = {
+      projects: `it worked in more than ${MAX_SESSION_PROJECTS} projects`,
+      folders: "it worked in more folders than Peer2Peer keeps track of for one session",
+      unresolved: "a command it ran named a path Peer2Peer couldn't resolve (one that starts with a variable or a command substitution its front end doesn't know the value of, like $X/… or $(…)/…), so which project that path is in can't be told",
+      front: "its front end couldn't keep track of every folder it worked in (a forked conversation, or a record it couldn't read)",
+      constraints: `more than ${MAX_SESSION_CONSTRAINTS} sessions of yours sent it messages`,
+      "legacy-over": "it worked in more projects or folders than Peer2Peer keeps track of, or named a path Peer2Peer couldn't resolve"
+    };
     PROJECT_NOTICE_PREFIX = "project boundaries:";
   }
 });
@@ -26228,7 +26431,7 @@ function editedFiles(toolName, input) {
   return [...out];
 }
 var LITERAL = "";
-function shellTokens(command, markLiteral = false) {
+function shellTokens(command, markLiteral = false, substs) {
   const out = [];
   let cur = "";
   let has = false;
@@ -26255,6 +26458,15 @@ function shellTokens(command, markLiteral = false) {
         q = "";
       else
         cur += markLiteral && (c === "$" || c === "`") ? LITERAL : c;
+      continue;
+    }
+    if (substs && (c === "$" && command[i + 1] === "(" || c === "`")) {
+      const open2 = c === "`" ? 1 : 2;
+      const end = c === "`" ? closingTick(command, i + 1) : closingParen(command, i + 2);
+      substs.push(command.slice(i + open2, end));
+      cur += SUBST;
+      has = true;
+      i = end;
       continue;
     }
     if (q === '"') {
@@ -26295,17 +26507,47 @@ function shellTokens(command, markLiteral = false) {
   push();
   return out;
 }
+function closingParen(s2, j) {
+  let depth = 1;
+  for (let k = j; k < s2.length; k++) {
+    const c = s2[k];
+    if (c === "\\")
+      k++;
+    else if (c === "'") {
+      const e = s2.indexOf("'", k + 1);
+      k = e < 0 ? s2.length : e;
+    } else if (c === '"') {
+      let e = k + 1;
+      while (e < s2.length && s2[e] !== '"')
+        e += s2[e] === "\\" ? 2 : 1;
+      k = e;
+    } else if (c === "(")
+      depth++;
+    else if (c === ")" && --depth === 0)
+      return k;
+  }
+  return s2.length;
+}
+function closingTick(s2, j) {
+  for (let k = j; k < s2.length; k++) {
+    if (s2[k] === "\\")
+      k++;
+    else if (s2[k] === "`")
+      return k;
+  }
+  return s2.length;
+}
 function resolveLike(cwd, p) {
   const isSep = (c) => c === "/" || c === "\\";
   const drive = (s2) => s2.length >= 3 && /[A-Za-z]/.test(s2[0]) && s2[1] === ":" && isSep(s2[2]);
   const unc = (s2) => s2.startsWith("\\\\");
   const abs = p.startsWith("/") || drive(p) || unc(p);
   const win = drive(p) || unc(p) || !p.startsWith("/") && (drive(cwd) || unc(cwd));
-  const sep3 = win ? "\\" : "/";
+  const sep4 = win ? "\\" : "/";
   let base = cwd;
   while (base.length > 1 && isSep(base[base.length - 1]))
     base = base.slice(0, -1);
-  const full = abs ? p : `${base}${sep3}${p}`;
+  const full = abs ? p : `${base}${sep4}${p}`;
   let prefix = "";
   let rest = full;
   if (drive(full)) {
@@ -26339,38 +26581,263 @@ function resolveLike(cwd, p) {
       seg += c;
   }
   flush();
-  return `${prefix}${sep3}${out.join(sep3)}`;
+  return `${prefix}${sep4}${out.join(sep4)}`;
 }
 var MAX_COMMAND_PATHS = 256;
-function shellPaths(command, cwd, home) {
+var SUBST = "";
+var DEVICES = /* @__PURE__ */ new Set(["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/full"]);
+var isDevice = (p) => DEVICES.has(p) || /^\/dev\/fd\/\d+$/.test(p);
+var ENV_FILES = /CLAUDE_ENV_FILE|session-env|shell-snapshots/i;
+var EVAL_LIKE = /(^|[;&|(){}`\n!'"]|\b(then|do|else|elif|exec|command|builtin|xargs)\b)\s*(eval|source|\.)\s/;
+var namesMarker = (c) => c === ".git" || c === ".p2p-private" || (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || /\{[^{}]*(,|\.\.)[^{}]*\}/.test(c);
+function commandName(w) {
+  let base = (w.split(/[\\/]/).pop() ?? "").toLowerCase();
+  if (base.endsWith(".exe"))
+    base = base.slice(0, -4);
+  let end = base.length;
+  while (end > 0 && "0123456789.".includes(base[end - 1]))
+    end--;
+  return { base, bare: base.slice(0, end) };
+}
+var CODE_SHELLS = /* @__PURE__ */ new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "fish"]);
+var SED = /* @__PURE__ */ new Set(["sed", "gsed"]);
+var JQ = /* @__PURE__ */ new Set(["jq", "gojq"]);
+var AWK = /* @__PURE__ */ new Set(["awk", "gawk", "mawk", "nawk"]);
+var sedShape = (w) => w !== void 0 && /^[\s\d$,!~+;]*[sy]([^\w\s\\])(?:(?!\1)[^\\]|\\.)*\1(?:(?!\1)[^\\]|\\.)*\1/s.test(w);
+var jqShape = (w) => w !== void 0 && (/^\s*(\.(?!\.?[\\/])|[[{("@$])/.test(w) || w.includes("|"));
+var awkShape = (w) => w !== void 0 && (/[{}]/.test(w) || /^\s*(BEGIN|END)\b/.test(w));
+var codeShape = (w) => w !== void 0 && (/[\s;(){}'"=]/.test(w) || sedShape(w));
+function programWords(words) {
   const out = /* @__PURE__ */ new Set();
-  let over = false;
-  const isSep = (c) => c === "/" || c === "\\";
-  for (const word of shellTokens(command, true)) {
-    const eq = word.startsWith("-") ? word.indexOf("=") : -1;
-    let t2 = eq >= 0 ? word.slice(eq + 1) : word;
-    if (t2 === "" || word.startsWith("-") && eq < 0 || t2.includes("://") || t2.includes("\0") || t2.includes("\n"))
-      continue;
-    for (const [v, val] of [["${HOME}", home], ["$HOME", home], ["${PWD}", cwd], ["$PWD", cwd]]) {
-      let k = t2.indexOf(v);
-      while (k >= 0) {
-        const after2 = t2[k + v.length];
-        if (v.startsWith("$") && !v.startsWith("${") && after2 !== void 0 && /[A-Za-z0-9_]/.test(after2)) {
-          k = t2.indexOf(v, k + 1);
-          continue;
+  const mark = (j, ok) => {
+    if (ok(words[j]))
+      out.add(j);
+  };
+  for (let i = 0; i < words.length; i++) {
+    const { base, bare } = commandName(words[i]);
+    if (SED.has(base)) {
+      let script = false;
+      for (let j = i + 1; j < words.length; j++) {
+        const w = words[j];
+        if (w === "--") {
+          if (!script)
+            mark(j + 1, sedShape);
+          break;
         }
-        if (val === void 0)
-          over = true;
-        t2 = `${t2.slice(0, k)}${val ?? ""}${t2.slice(k + v.length)}`;
-        k = t2.indexOf(v, k + (val ?? "").length);
+        if (w === "-e" || w === "--expression") {
+          mark(j + 1, sedShape);
+          script = true;
+          j++;
+        } else if (w.startsWith("--expression=")) {
+          if (sedShape(w.slice(13)))
+            out.add(j);
+          script = true;
+        } else if (w === "-f" || w === "--file") {
+          script = true;
+          j++;
+        } else if (w.startsWith("--file="))
+          script = true;
+        else if (w === "-l" || w === "--line-length")
+          j++;
+        else if (/^-[A-Za-z]+$/.test(w)) {
+          if (w.endsWith("e")) {
+            mark(j + 1, sedShape);
+            script = true;
+            j++;
+          } else if (w.endsWith("f")) {
+            script = true;
+            j++;
+          } else if (w.endsWith("l"))
+            j++;
+        } else if (w.startsWith("-") && w.length > 1)
+          continue;
+        else {
+          if (!script)
+            mark(j, sedShape);
+          break;
+        }
+      }
+    } else if (JQ.has(base)) {
+      let script = false;
+      for (let j = i + 1; j < words.length; j++) {
+        const w = words[j];
+        if (w === "--") {
+          if (!script)
+            mark(j + 1, jqShape);
+          break;
+        }
+        if (w === "-f" || w === "--from-file") {
+          script = true;
+          j++;
+        } else if (w === "--arg" || w === "--argjson" || w === "--slurpfile" || w === "--rawfile")
+          j += 2;
+        else if (w === "--indent" || w === "-L" || w === "--library-path")
+          j++;
+        else if (w.startsWith("-") && w.length > 1)
+          continue;
+        else {
+          if (!script)
+            mark(j, jqShape);
+          break;
+        }
+      }
+    } else if (AWK.has(base)) {
+      let script = false;
+      for (let j = i + 1; j < words.length; j++) {
+        const w = words[j];
+        if (w === "--") {
+          if (!script)
+            mark(j + 1, awkShape);
+          break;
+        }
+        if (w === "-f" || w === "-E" || w === "--file" || w === "--exec") {
+          script = true;
+          j++;
+        } else if (w === "-e" || w === "--source") {
+          mark(j + 1, awkShape);
+          script = true;
+          j++;
+        } else if (w.startsWith("--source=")) {
+          if (awkShape(w.slice(9)))
+            out.add(j);
+          script = true;
+        } else if (/^-[Fvil]$/.test(w) || w === "--field-separator" || w === "--assign" || w === "--include" || w === "--load")
+          j++;
+        else if (w.startsWith("-") && w.length > 1) {
+          if (/^-[A-Za-z]*f$/.test(w)) {
+            script = true;
+            j++;
+          }
+        } else {
+          if (!script)
+            mark(j, awkShape);
+          break;
+        }
+      }
+    } else if (INTERPRETERS.has(base) || INTERPRETERS.has(bare) || CODE_SHELLS.has(base)) {
+      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) {
+        const w = words[j];
+        if (CODE_FLAGS.has(w) || /^-[A-Za-z]*[ceE]$/.test(w)) {
+          mark(j + 1, codeShape);
+          break;
+        }
+        if (!w.startsWith("-"))
+          break;
+      }
+    }
+  }
+  return out;
+}
+function embedded(t2) {
+  const out = [];
+  const starts = " 	\n\r\"'`(<>=:";
+  const ends = " 	\n\r\"'`;|&()<>," + LITERAL + SUBST;
+  for (let k = 1; k < t2.length; k++) {
+    const c = t2[k];
+    const tilde = c === "~" && t2[k + 1] === "/";
+    const dot = c === "." && (t2[k + 1] === "/" || t2[k + 1] === "." && t2[k + 2] === "/");
+    if (c !== "/" && !tilde && !dot || !starts.includes(t2[k - 1]))
+      continue;
+    const first = t2[tilde ? k + 2 : dot ? k + (t2[k + 1] === "/" ? 2 : 3) : k + 1];
+    if (first === void 0 || !/[\w.~@%+-]/.test(first))
+      continue;
+    let e = k;
+    while (e < t2.length && !ends.includes(t2[e]))
+      e++;
+    out.push(t2.slice(k, e));
+    k = e;
+  }
+  return out;
+}
+function mentions(raw, name2) {
+  for (let k = raw.indexOf(name2); k >= 0; k = raw.indexOf(name2, k + 1)) {
+    const before = raw[k - 1];
+    const after2 = raw[k + name2.length];
+    if (before !== void 0 && /\w/.test(before) || after2 !== void 0 && /\w/.test(after2))
+      continue;
+    if (before === "$" || before === "{" && raw[k - 2] === "$")
+      continue;
+    return true;
+  }
+  return false;
+}
+function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
+  const out = /* @__PURE__ */ new Set();
+  const why = /* @__PURE__ */ new Set();
+  const isSep = (c) => c === "/" || c === "\\";
+  const sticky = ENV_FILES.test(command);
+  const done = () => ({ paths: [...out], over: why.size > 0, ...why.size > 0 ? { why: [...why] } : {}, ...sticky ? { sticky: true } : {} });
+  if (depth > 8) {
+    why.add("unresolved");
+    return done();
+  }
+  const substs = [];
+  const words = shellTokens(command, true, substs);
+  const changesDir = words.some((w) => w === "cd" || w === "pushd" || w === "popd");
+  const known2 = /* @__PURE__ */ new Map();
+  const trusted = !ctx.untrusted && !sticky && !EVAL_LIKE.test(command);
+  for (const [name2, val] of [["HOME", home], ["PWD", cwd], ...Object.entries(ctx.vars ?? {})]) {
+    if (!trusted || !val || !/^[A-Za-z_]\w*$/.test(name2) || /[\0\n]/.test(val) || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(val) || mentions(command, name2))
+      continue;
+    if (name2 === "PWD" && changesDir)
+      continue;
+    known2.set(name2, val);
+  }
+  const bases = [cwd];
+  if (changesDir) {
+    for (let i = 0; i < words.length; i++) {
+      if (words[i] !== "cd" && words[i] !== "pushd")
+        continue;
+      let j = i + 1;
+      while (j < words.length && /^-[LPe@]+$/.test(words[j]))
+        j++;
+      const target = words[j];
+      if (target === void 0 || target === "") {
+        if (home)
+          bases.push(home);
+        continue;
+      }
+      if (target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target))
+        bases.push(target);
+      else if ((target === "~" || target.startsWith("~/")) && home)
+        bases.push(resolveLike(home, target.slice(2) || "."));
+      else if (!/[$`~]/.test(target) && !target.includes(SUBST) && !target.includes(LITERAL) && target !== "-")
+        bases.push(resolveLike(cwd, target));
+    }
+  }
+  const add2 = (p) => {
+    if (isDevice(p))
+      return true;
+    out.add(p);
+    return out.size <= MAX_COMMAND_PATHS;
+  };
+  const take = (word, inner) => {
+    let t2 = word;
+    if (changesDir) {
+      for (const v of ["${PWD}", "$PWD"])
+        if (t2 === v || t2.startsWith(`${v}/`) || t2.startsWith(`${v}\\`))
+          t2 = `.${t2.slice(v.length)}`;
+    }
+    for (const [name2, val] of known2) {
+      for (const v of [`\${${name2}}`, `$${name2}`]) {
+        let k = t2.indexOf(v);
+        while (k >= 0) {
+          const after2 = t2[k + v.length];
+          if (!v.startsWith("${") && after2 !== void 0 && /\w/.test(after2)) {
+            k = t2.indexOf(v, k + 1);
+            continue;
+          }
+          t2 = `${t2.slice(0, k)}${val}${t2.slice(k + v.length)}`;
+          k = t2.indexOf(v, k + val.length);
+        }
       }
     }
     const pathLike = t2.startsWith("~") || t2.startsWith(".") || t2.includes("/") || t2.includes("\\");
     if (!pathLike)
-      continue;
+      return true;
     let x = -1;
     for (let k = 0; k < t2.length; k++) {
-      if (t2[k] === "$" || t2[k] === "`") {
+      if (t2[k] === "$" || t2[k] === "`" || t2[k] === SUBST || inner && t2[k] === LITERAL) {
         x = k;
         break;
       }
@@ -26381,29 +26848,93 @@ function shellPaths(command, cwd, home) {
         if (isSep(t2[k]))
           lastSep = k;
       if (lastSep <= 0) {
-        over = true;
-        continue;
+        if (!inner)
+          why.add("unresolved");
+        return true;
       }
       t2 = t2.slice(0, lastSep);
     }
     t2 = t2.split(LITERAL).join("$");
-    let p;
+    let ps;
     if (t2 === "~" || t2.startsWith("~/") || t2.startsWith("~\\")) {
       if (!home) {
-        over = true;
-        continue;
+        if (!inner)
+          why.add("unresolved");
+        return true;
       }
-      p = resolveLike(home, t2.slice(2) || ".");
-    } else
-      p = resolveLike(cwd, t2);
-    const last = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-    const name2 = p.slice(last + 1);
-    const folder = x < 0 && name2.includes(".") && !name2.startsWith(".") && last > 0 ? p.slice(0, last) : p;
-    out.add(folder);
-    if (out.size > MAX_COMMAND_PATHS)
-      return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true };
+      ps = [resolveLike(home, t2.slice(2) || ".")];
+    } else if (t2.startsWith("~")) {
+      if (!inner)
+        why.add("unresolved");
+      return true;
+    } else if (t2.startsWith("/") || /^[A-Za-z]:[\\/]/.test(t2) || t2.startsWith("\\\\"))
+      ps = [resolveLike(cwd, t2)];
+    else
+      ps = [...new Set(bases.map((b) => resolveLike(b, t2)))];
+    for (const p of ps) {
+      const last = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+      const name2 = p.slice(last + 1);
+      const folder = x < 0 && name2.includes(".") && !name2.startsWith(".") && !/[*?[\]{}]/.test(name2) && last > 0 ? p.slice(0, last) : p;
+      if (!add2(folder))
+        return false;
+    }
+    return true;
+  };
+  const programs = programWords(words);
+  let mayUnmark = /dotglob|globdots|glob_dots|GLOBIGNORE/i.test(command) || /[*?\]@!+]\(/.test(command);
+  for (let i = 0; i < words.length && !mayUnmark; i++) {
+    const w = words[i];
+    const { base, bare } = commandName(w);
+    if (!/[\\/]/.test(w) && namesMarker(w))
+      mayUnmark = true;
+    else if (base === "xargs")
+      mayUnmark = true;
+    else if (base === "find" || base === "gfind" || base === "fd" || base === "fdfind")
+      mayUnmark = words.some((x) => /^(-delete|-exec|-execdir|-ok|-okdir|-x|-X|--exec|--exec-batch)$/.test(x));
+    else if (base === "rsync")
+      mayUnmark = words.some((x) => x.startsWith("--del") || x === "--remove-source-files");
+    else if (INTERPRETERS.has(base) || INTERPRETERS.has(bare) || CODE_SHELLS.has(base))
+      mayUnmark = words.slice(i + 1, i + 6).some((x) => CODE_FLAGS.has(x) || /^-[A-Za-z]*[ceE]$/.test(x));
   }
-  return { paths: [...out], over };
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const eq = word.startsWith("-") ? word.indexOf("=") : (/^[A-Za-z_]\w*=/.exec(word)?.[0].length ?? 0) - 1;
+    const t2 = eq >= 0 ? word.slice(eq + 1) : word;
+    if (t2 === "" || word.startsWith("-") && eq < 0 || t2.includes("\0"))
+      continue;
+    const program2 = programs.has(i);
+    if (program2 || /\s/.test(t2)) {
+      for (const e of embedded(t2))
+        if (!e.includes("://") && !take(e, true))
+          return capped();
+    }
+    if (t2.includes("://") || t2.includes("\n") || program2 && !t2.startsWith("/") && !t2.startsWith("~") && !/[$`\uE001]/.test(t2))
+      continue;
+    if (!take(t2, false))
+      return capped();
+  }
+  for (const s2 of substs) {
+    const r = shellPaths(s2, cwd, home, ctx, depth + 1);
+    for (const p of r.paths)
+      if (!add2(p))
+        return capped();
+    for (const w of r.why ?? [])
+      why.add(w);
+  }
+  if (mayUnmark) {
+    for (const p of [...out, ...bases]) {
+      let q = p;
+      for (let k = Math.max(q.lastIndexOf("/"), q.lastIndexOf("\\")); k > 0 && /[*?[\]{}]/.test(q.slice(k + 1)); k = Math.max(q.lastIndexOf("/"), q.lastIndexOf("\\")))
+        q = q.slice(0, k);
+      if (!add2(`${q}${q.includes("\\") && !q.includes("/") ? "\\" : "/"}.git`))
+        return capped();
+    }
+  }
+  return done();
+  function capped() {
+    why.add("folders");
+    return { ...done(), paths: [...out].slice(0, MAX_COMMAND_PATHS) };
+  }
 }
 var INTERPRETERS = /* @__PURE__ */ new Set(["python", "python2", "python3", "node", "nodejs", "perl", "ruby", "deno", "bun", "php", "lua", "osascript", "tclsh", "pwsh", "powershell"]);
 var CODE_FLAGS = /* @__PURE__ */ new Set(["-c", "-e", "-E", "-p", "-r", "--eval", "--print", "-command", "-Command"]);
@@ -26713,12 +27244,12 @@ var P2P = class {
     for (const dir of o.projectDirs ?? [])
       args.push(`--project-dir=${dir}`);
     if (o.projectDirsOver)
-      args.push("--project-dirs-over");
+      args.push(overFlag(o.projectDirsOver));
     return this.call(args, timeoutMs !== void 0 ? { timeoutMs } : {});
   }
   /** A message from this session; refused (`not_shared`) to anyone its projects don't share (projects.ts). */
   send(o) {
-    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...o.projectDirsOver ? ["--project-dirs-over"] : []];
+    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...o.projectDirsOver ? [overFlag(o.projectDirsOver)] : []];
     return this.call(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...o.notifyWhenIdle ? ["--notify-when-idle"] : [], ...dirs, "--stdin"], { stdin: o.text });
   }
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */
@@ -26731,6 +27262,10 @@ var P2P = class {
     return r.ok ? { ok: true, value: Array.isArray(r.value.held) ? r.value.held : [] } : r;
   }
 };
+function overFlag(v) {
+  const why = v === true ? [] : v.filter((w) => /^[a-z]{1,16}$/.test(w));
+  return why.length ? `--project-dirs-over=${why.join(",")}` : "--project-dirs-over";
+}
 
 // packages/codex-bridge/dist/bridge.js
 import { createHash, randomUUID } from "node:crypto";
@@ -27542,28 +28077,32 @@ function threadDirsFile(home, threadId) {
 function loadThread(home, threadId) {
   const f = threadDirsFile(home, threadId);
   if (!f)
-    return { dirs: [], over: false };
+    return { dirs: [], over: false, why: [] };
   let text2;
   try {
     text2 = readFileSync2(f, "utf8");
   } catch (e) {
-    return { dirs: [], over: e.code !== "ENOENT" };
+    const over = e.code !== "ENOENT";
+    return { dirs: [], over, why: over ? ["front"] : [] };
   }
   try {
     const v = JSON.parse(text2);
     const dirs = Array.isArray(v.dirs) ? v.dirs.filter((x) => typeof x === "string" && isAbsolute2(x)) : [];
-    return { dirs: dirs.slice(0, 512), over: v.over === true || dirs.length > 512 };
+    const over = v.over === true || dirs.length > 512;
+    const said = Array.isArray(v.why) ? v.why.filter((x) => typeof x === "string" && /^[a-z]{1,16}$/.test(x)).slice(0, 8) : [];
+    return { dirs: dirs.slice(0, 512), over, why: over ? said.length ? said : dirs.length > 512 ? ["folders"] : ["front"] : [] };
   } catch {
-    return { dirs: [], over: true };
+    return { dirs: [], over: true, why: ["front"] };
   }
 }
-function saveThreadDirs(home, threadId, dirs, over = false) {
+function saveThreadDirs(home, threadId, dirs, over = false, why = []) {
   const f = threadDirsFile(home, threadId);
   if (!f)
     return;
   try {
     mkdirSync2(join2(home, "codex-threads"), { recursive: true, mode: 448 });
-    writeFileSync2(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: over || dirs.length > 512, at: Date.now() }), { mode: 384 });
+    const isOver = over || dirs.length > 512;
+    writeFileSync2(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: isOver, ...isOver ? { why: [.../* @__PURE__ */ new Set([...why, ...dirs.length > 512 ? ["folders"] : []])] } : {}, at: Date.now() }), { mode: 384 });
   } catch {
   }
 }
@@ -27611,6 +28150,8 @@ var Bridge = class {
   touched = /* @__PURE__ */ new Set();
   /** Past a cap, or a path that couldn't be resolved: the CLI keeps this session private (`--project-dirs-over`). */
   isDirsOver = false;
+  /** Why (the CLI's OverWhy words), so its refusal names the cause. */
+  dirsOverWhy = /* @__PURE__ */ new Set();
   /** Where sandboxed commands may write, per the trusted turn context ("all": no sandbox; undefined: unknown). */
   trustedWritable;
   /** Why this thread's rollout file isn't trusted (planted or malformed), once found. */
@@ -27689,8 +28230,17 @@ var Bridge = class {
   sessionDirs() {
     const all = [.../* @__PURE__ */ new Set([...this.deps.projectDirs ?? [], this.deps.cwd, ...this.projectSeen, ...this.touched])];
     if (all.length > 512)
-      this.isDirsOver = true;
+      this.markOver("folders");
     return all.slice(0, 512);
+  }
+  /** Private from now on, and why. */
+  markOver(why) {
+    this.isDirsOver = true;
+    this.dirsOverWhy.add(why);
+  }
+  /** What `--project-dirs-over` says: false, or why (an over set without a reason is `front`). */
+  dirsOver() {
+    return this.isDirsOver ? this.dirsOverWhy.size ? [...this.dirsOverWhy] : ["front"] : false;
   }
   async goOnline() {
     if (this.isOnline || this.stop.signal.aborted)
@@ -27758,9 +28308,9 @@ var Bridge = class {
       if (typeof d !== "string" || !isAbsolute2(d) || this.touched.has(d))
         continue;
       if (this.touched.size >= 512) {
-        if (!this.isDirsOver)
+        if (!this.dirsOverWhy.has("folders"))
           added = true;
-        this.isDirsOver = true;
+        this.markOver("folders");
         continue;
       }
       this.touched.add(d);
@@ -27769,7 +28319,7 @@ var Bridge = class {
     if (!added)
       return;
     if (this.threadId)
-      saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched], this.isDirsOver);
+      saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched], this.isDirsOver, [...this.dirsOverWhy]);
     this.announce();
   }
   /** The repo (the git toplevel's folder name), branch and label for `cwd`. */
@@ -27823,7 +28373,7 @@ var Bridge = class {
       do {
         this.isAnnounceQueued = false;
         const summary3 = this.sharedSummary();
-        const r = await this.deps.p2p.status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...summary3 ? { summary: summary3 } : {}, ...this.shareStatus ? { files: this.files } : {}, projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => null);
+        const r = await this.deps.p2p.status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...summary3 ? { summary: summary3 } : {}, ...this.shareStatus ? { files: this.files } : {}, projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() }).catch(() => null);
         if (r && !r.ok)
           this.lastError = `status not shared: ${r.reason}`;
         else if (r && r.ok && this.lastError?.startsWith("status not shared"))
@@ -27871,7 +28421,8 @@ var Bridge = class {
       for (const d of saved.dirs)
         this.touched.add(d);
       if (saved.over)
-        this.isDirsOver = true;
+        for (const w of saved.why)
+          this.markOver(w);
       this.transcript = this.deps.transcript?.(info.threadId);
       this.deps.onChange?.();
     }
@@ -28131,7 +28682,7 @@ var Bridge = class {
     for (const c of found) {
       this.activityNotes.push(`POTENTIAL CONFLICT with ${sessionAddress(c.peer)}: you both changed ${c.files.map(inert).join(", ")}.`);
       if (this.shareStatus && this.repo) {
-        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => void 0);
+        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() }).catch(() => void 0);
       }
     }
   }
@@ -28285,7 +28836,7 @@ var Bridge = class {
   async notice(item, what) {
     if (item.kind !== "message" || !this.isOnline)
       return;
-    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => void 0);
+    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() }).catch(() => void 0);
   }
   async expireHeld() {
     const now = this.clock.now();
@@ -28475,11 +29026,16 @@ var Bridge = class {
         return context("UserPromptSubmit", [items.length > 0 ? this.frame(items) : void 0, this.takeActivityNotes(), this.heldNote(), reminder]);
       }
       case "PreToolUse": {
-        if (r.over && !this.isDirsOver) {
-          this.isDirsOver = true;
-          if (this.threadId)
-            saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched], true);
-          this.announce();
+        if (r.over) {
+          const before = this.dirsOverWhy.size;
+          const was = this.isDirsOver;
+          for (const w of r.overWhy?.length ? r.overWhy : ["front"])
+            this.markOver(w);
+          if (!was || this.dirsOverWhy.size !== before) {
+            if (this.threadId)
+              saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched], true, [...this.dirsOverWhy]);
+            this.announce();
+          }
         }
         this.noteTouched(r.dirs ?? []);
         return {};
@@ -28652,7 +29208,7 @@ function makeTools(bridge, onMeta) {
         if (target.kind === "ambiguous")
           return text(`More than one session matches ${inertMax(to, 100)}. Retry with one of:
 ${target.candidates.map((p) => `- ${sessionAddress(p)} — ${p.state}`).join("\n")}`, true);
-        const r = await bridge.p2p.send({ fromSession: bridge.sid, to: target.to, text: message, notifyWhenIdle: args.notify_when_idle === true, projectDirs: bridge.sessionDirs(), projectDirsOver: bridge.isDirsOver });
+        const r = await bridge.p2p.send({ fromSession: bridge.sid, to: target.to, text: message, notifyWhenIdle: args.notify_when_idle === true, projectDirs: bridge.sessionDirs(), projectDirsOver: bridge.dirsOver() });
         if (!r.ok)
           return text(`Not sent: ${inert(r.reason)}`, true);
         const where = sessionAddress({ address: r.value.to.address, ref: r.value.to.ref, ...target.kind === "peer" ? { label: target.peer.label } : {} });
@@ -29428,7 +29984,9 @@ function sanitizeReport(raw) {
     ...Array.isArray(r.files) ? { files: r.files.filter((f) => typeof f === "string").slice(0, 50) } : {},
     ...Array.isArray(r.dirs) ? { dirs: r.dirs.filter((f) => typeof f === "string" && isAbsolute3(f) && f.length <= 4096).slice(0, 256) } : {},
     // Only narrows: a report can make the session private, never the reverse.
-    ...r.over === true || Array.isArray(r.dirs) && r.dirs.length > 256 ? { over: true } : {}
+    ...r.over === true || Array.isArray(r.dirs) && r.dirs.length > 256 ? { over: true } : {},
+    // Why (the CLI's OverWhy words), only alongside `over`: a word the CLI doesn't know counts as `front` there.
+    ...r.over === true || Array.isArray(r.dirs) && r.dirs.length > 256 ? { overWhy: [.../* @__PURE__ */ new Set([...Array.isArray(r.overWhy) ? r.overWhy.filter((w) => typeof w === "string" && /^[a-z]{1,16}$/.test(w)).slice(0, 8) : [], ...Array.isArray(r.dirs) && r.dirs.length > 256 ? ["folders"] : []])] } : {}
   };
 }
 async function runMcpServer(o) {
@@ -29586,25 +30144,26 @@ function guard(toolName, input, binNames = [], ownSid) {
 }
 function touchedPaths(toolName, input, cwd, home) {
   const out = [];
-  let over = false;
+  const why = /* @__PURE__ */ new Set();
   if (SHELL_TOOLS.test(toolName)) {
     if (!cwd)
-      over = true;
+      why.add("unresolved");
     else {
       const r = shellPaths(commandOf(input), cwd, home);
       out.push(...r.paths);
-      over ||= r.over;
+      for (const w of r.why ?? [])
+        why.add(w);
     }
   }
   for (const f of editedFiles(toolName, input)) {
     if (cwd || isAbsolute4(f))
       out.push(resolveLike(cwd ?? "/", f));
     else
-      over = true;
+      why.add("unresolved");
   }
   if (out.length > MAX_COMMAND_PATHS)
-    over = true;
-  return { paths: out.slice(0, MAX_COMMAND_PATHS), over };
+    why.add("folders");
+  return { paths: out.slice(0, MAX_COMMAND_PATHS), over: why.size > 0, ...why.size > 0 ? { why: [...why] } : {} };
 }
 async function runHook(event, stdin, deps) {
   let payload;
@@ -29632,7 +30191,7 @@ async function runHook(event, stdin, deps) {
       return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: deny } });
     const t2 = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
     if (entry && (t2.paths.length > 0 || t2.over)) {
-      const told = await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...sessionId ? { sessionId } : {}, ...cwd ? { cwd } : {}, mode: {}, dirs: t2.paths, ...t2.over ? { over: true } : {} } }, 8e3).then((r) => r?.ok === true).catch(() => false);
+      const told = await ask(entry.sock, { op: "hook", report: { event: "PreToolUse", ...sessionId ? { sessionId } : {}, ...cwd ? { cwd } : {}, mode: {}, dirs: t2.paths, ...t2.over ? { over: true, overWhy: t2.why ?? [] } : {} } }, 8e3).then((r) => r?.ok === true).catch(() => false);
       if (!told) {
         return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Refused by Peer2Peer: this call reaches folders outside the session's, and the Peer2Peer bridge couldn't be told (its project boundary would be wrong). Try again; if it keeps failing, ask your user." } });
       }
@@ -32240,8 +32799,8 @@ Expecting one of '${allowedValues.join("', '")}'`);
   /**
    * @private
    */
-  _dispatchSubcommand(commandName, operands, unknown) {
-    const subCommand = this._findCommand(commandName);
+  _dispatchSubcommand(commandName2, operands, unknown) {
+    const subCommand = this._findCommand(commandName2);
     if (!subCommand) this.help({ error: true });
     subCommand._prepareForParse();
     let promiseChain;
@@ -34647,7 +35206,7 @@ function untilAborted(p, signal) {
     );
   });
 }
-function within2(p, ms) {
+function within3(p, ms) {
   return Promise.race([p.catch(() => void 0), new Promise((r) => setTimeout(r, ms).unref())]);
 }
 async function watch(app, opts) {
@@ -34772,8 +35331,8 @@ async function watch(app, opts) {
     for (const t2 of timers) clearInterval(t2);
     opts.signal.removeEventListener("abort", onAbort);
     const deadline = Date.now() + WATCH_EXIT_MS;
-    await within2(unmarkRunning(app, sid), CLOSE_GRACE_MS);
-    await within2(app.close(), Math.max(0, deadline - Date.now()));
+    await within3(unmarkRunning(app, sid), CLOSE_GRACE_MS);
+    await within3(app.close(), Math.max(0, deadline - Date.now()));
   }
   if (fatal) {
     opts.log(`p2p watch: ${fatal}`);
@@ -38189,7 +38748,7 @@ or, for a browser: ${r2.web}` };
 ! unreachable: ${relays2.failed.map((f) => f.url).join(", ")}` : ""), pretty: (p) => prettyPeers(r, relays2, p) };
     })
   );
-  program2.command("send [text...]").description("Send a message to a peer session (text from args or stdin)").option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)").option("--to <address>", 'name@fingerprint, userId or petname, optionally "[ref]" or /sid (on a terminal: picked from a list)').option("--notify-when-idle", "Tell this session when the target next goes idle").option("--stdin", "Read the text from stdin (also: a single `-` as the text)").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect).option("--project-dirs-over", "The front end dropped folders past its cap: the session is private").option("--json", "JSON output").action(async (text2, o, cmd) => {
+  program2.command("send [text...]").description("Send a message to a peer session (text from args or stdin)").option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)").option("--to <address>", 'name@fingerprint, userId or petname, optionally "[ref]" or /sid (on a terminal: picked from a list)').option("--notify-when-idle", "Tell this session when the target next goes idle").option("--stdin", "Read the text from stdin (also: a single `-` as the text)").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect).option("--project-dirs-over [why]", "The front end dropped folders past its cap or couldn't resolve a path: the session is private (why: unresolved, folders or front, comma-separated; use the = form)").option("--json", "JSON output").action(async (text2, o, cmd) => {
     if (!canAsk(cmd)) {
       if (o.fromSession === void 0) cmd.error("error: required option '--from-session <sid>' not specified", { code: "commander.missingMandatoryOptionValue" });
       if (o.to === void 0) cmd.error("error: required option '--to <address>' not specified", { code: "commander.missingMandatoryOptionValue" });
@@ -38233,7 +38792,7 @@ or, for a browser: ${r2.web}` };
       r = s2.result;
       if (s2.shared) shared = `shared session tui with ${s2.shared.address}
 `;
-    } else r = await ops.sendMessage(app, { fromSession: o.fromSession, to: o.to, text: body, notifyWhenIdle: o.notifyWhenIdle, ...o.projectDir ? { projectDirs: o.projectDir } : {}, ...o.projectDirsOver ? { projectDirsOver: true } : {}, ...person ? { person: true } : {} });
+    } else r = await ops.sendMessage(app, { fromSession: o.fromSession, to: o.to, text: body, notifyWhenIdle: o.notifyWhenIdle, ...o.projectDir ? { projectDirs: o.projectDir } : {}, ...o.projectDirsOver !== void 0 && o.projectDirsOver !== false ? { projectDirsOver: o.projectDirsOver === true || o.projectDirsOver === "" ? true : [o.projectDirsOver] } : {}, ...person ? { person: true } : {} });
     const tail = r.notifyWhenIdle ? `; will notify when ${r.to.address} [${r.to.ref}] is idle` : "";
     const where = r.to.own === r.to.userId ? `${r.to.address} [${r.to.ref}]` : `${r.to.address} (in your session ${r.to.sid})`;
     const ago4 = (ms) => {
@@ -38272,7 +38831,7 @@ sent from session tui; replies show in \`p2p tui\`${boundary}` : "";
       { requireIdentity: false }
     )
   );
-  program2.command("status").description("Post this session's status to everyone its roster allows (safe every 60 s)").requiredOption("--session <sid>", "Your session id").addOption(new Option("--state <state>", "busy or idle").choices(["busy", "idle"]).makeOptionMandatory()).option("--summary <text>", "What the session is working on (one line)").option("--file <path>", "A repo-relative file being changed (repeatable)", collect).option("--label <label>", "Short session name (default: the directory name)").option("--repo <repo>", "Repository").option("--branch <branch>", "Branch").option("--mode <mode>", "Permission mode").option("--cap <cap>", "Something this session's client understands, e.g. agents.v1 (repeatable)", collect).option("--agents-json <json>", "The session's subagents as a JSON array (`-` reads it from stdin); sent only to peers that understand agents.v1").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who sees it", collect).option("--project-dirs-over", "The front end dropped folders past its cap: the session is private").option("--json", "JSON output").action(
+  program2.command("status").description("Post this session's status to everyone its roster allows (safe every 60 s)").requiredOption("--session <sid>", "Your session id").addOption(new Option("--state <state>", "busy or idle").choices(["busy", "idle"]).makeOptionMandatory()).option("--summary <text>", "What the session is working on (one line)").option("--file <path>", "A repo-relative file being changed (repeatable)", collect).option("--label <label>", "Short session name (default: the directory name)").option("--repo <repo>", "Repository").option("--branch <branch>", "Branch").option("--mode <mode>", "Permission mode").option("--cap <cap>", "Something this session's client understands, e.g. agents.v1 (repeatable)", collect).option("--agents-json <json>", "The session's subagents as a JSON array (`-` reads it from stdin); sent only to peers that understand agents.v1").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who sees it", collect).option("--project-dirs-over [why]", "The front end dropped folders past its cap or couldn't resolve a path: the session is private (why: unresolved, folders or front, comma-separated; use the = form)").option("--json", "JSON output").action(
     run(async (app, o) => {
       let agents;
       if (o.agentsJson !== void 0) {
@@ -38284,7 +38843,7 @@ sent from session tui; replies show in \`p2p tui\`${boundary}` : "";
           throw new CliError("usage", "--agents-json must be a JSON array of agents");
         }
       }
-      const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...o.projectDir ? { projectDirs: o.projectDir } : {}, ...o.projectDirsOver ? { projectDirsOver: true } : {} });
+      const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...o.projectDir ? { projectDirs: o.projectDir } : {}, ...o.projectDirsOver !== void 0 && o.projectDirsOver !== false ? { projectDirsOver: o.projectDirsOver === true || o.projectDirsOver === "" ? true : [o.projectDirsOver] } : {} });
       for (const w of r.warnings ?? []) io2.err(`p2p: ${w}`);
       const n = r.delivered.length;
       return {
@@ -38365,6 +38924,22 @@ ${projectView2(r.project)}` };
     run(async (app, o) => {
       const v = await ops.showProject(app, o.dir ?? sessionWorkdir(app.env));
       return { json: { project: v }, human: projectView2(v) };
+    })
+  );
+  session.command("show <sid>").description("A session's bound projects, who each is shared with, and every reason it is private (read only; yours: refused inside an agent's session)").option("--json", "JSON output").action(
+    run(async (app, sid) => {
+      const v = await ops.showSession(app, checkSid(sid, "sid"));
+      const lines = [`session ${v.sid}: ${v.policy === "none" ? "not bound to any project" : v.policy}`];
+      if (v.reasons.length) lines.push("  private because:", ...v.reasons.map((r) => `    - ${r.why}`));
+      if (v.remedy) lines.push(`  ${v.remedy.charAt(0).toUpperCase()}${v.remedy.slice(1)}`);
+      if (v.policy === "shared") lines.push(`  reaches: ${[...(v.circles ?? []).map((c) => `circle ${c}`), ...v.people ?? []].join(", ") || "nobody"}`);
+      if (v.constraints) lines.push(`  ${plural(v.constraints, "bound")} from messages your other sessions sent it`);
+      for (const p of v.projects) {
+        lines.push("", ...projectView2(p).split("\n"));
+        if (p.underOver) lines.push("  covering many of its subfolders");
+        else if (p.under?.length) lines.push(`  covering ${p.under.join(", ")}`);
+      }
+      return { json: { session: v }, human: lines.join("\n") };
     })
   );
   session.command("bound <sid>").description("Bind a session to the bound an own-session message it took carried (front ends call it on Deliver; narrowing only)").requiredOption("--bound <json>", '"private" or {"circles": [...], "people": [...]}, as the message carried it').option("--json", "JSON output").action(

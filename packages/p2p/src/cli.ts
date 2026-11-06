@@ -1256,9 +1256,9 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--notify-when-idle", "Tell this session when the target next goes idle")
     .option("--stdin", "Read the text from stdin (also: a single `-` as the text)")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect)
-    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
+    .option("--project-dirs-over [why]", "The front end dropped folders past its cap or couldn't resolve a path: the session is private (why: unresolved, folders or front, comma-separated; use the = form)")
     .option("--json", "JSON output")
-    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }, cmd: Command) => {
+    .action(async (text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean | string }, cmd: Command) => {
       // Without a picker these stay required, with commander's own error (as before they were requiredOption).
       if (!canAsk(cmd)) {
         if (o.fromSession === undefined) cmd.error("error: required option '--from-session <sid>' not specified", { code: "commander.missingMandatoryOptionValue" });
@@ -1266,7 +1266,7 @@ export function buildProgram(deps: ProgramDeps): Command {
       }
       return (sendAction as (...a: unknown[]) => Promise<void>)(text, o, cmd);
     });
-  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean }) => {
+  const sendAction = run(async (app, text: string[], o: { fromSession?: string; to?: string; notifyWhenIdle?: boolean; stdin?: boolean; projectDir?: string[]; projectDirsOver?: boolean | string }) => {
         if (o.to === undefined) {
           await app.connectAndDrain().catch(() => undefined);
           const peers = await ops.listPeers(app, { all: true });
@@ -1316,7 +1316,7 @@ export function buildProgram(deps: ProgramDeps): Command {
           const s = await ops.sendSharing(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle });
           r = s.result;
           if (s.shared) shared = `shared session tui with ${s.shared.address}\n`;
-        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}), ...(person ? { person: true } : {}) });
+        } else r = await ops.sendMessage(app, { fromSession: o.fromSession!, to: o.to!, text: body, notifyWhenIdle: o.notifyWhenIdle, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver !== undefined && o.projectDirsOver !== false ? { projectDirsOver: o.projectDirsOver === true || o.projectDirsOver === "" ? true : [o.projectDirsOver] } : {}), ...(person ? { person: true } : {}) });
         const tail = r.notifyWhenIdle ? `; will notify when ${r.to.address} [${r.to.ref}] is idle` : "";
         const where = r.to.own === r.to.userId ? `${r.to.address} [${r.to.ref}]` : `${r.to.address} (in your session ${r.to.sid})`;
         const ago = (ms: number) => {
@@ -1378,10 +1378,10 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--cap <cap>", "Something this session's client understands, e.g. agents.v1 (repeatable)", collect)
     .option("--agents-json <json>", "The session's subagents as a JSON array (`-` reads it from stdin); sent only to peers that understand agents.v1")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who sees it", collect)
-    .option("--project-dirs-over", "The front end dropped folders past its cap: the session is private")
+    .option("--project-dirs-over [why]", "The front end dropped folders past its cap or couldn't resolve a path: the session is private (why: unresolved, folders or front, comma-separated; use the = form)")
     .option("--json", "JSON output")
     .action(
-      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string; projectDir?: string[]; projectDirsOver?: boolean }) => {
+      run(async (app, o: { session: string; state: string; summary?: string; file?: string[]; label?: string; repo?: string; branch?: string; mode?: string; cap?: string[]; agentsJson?: string; projectDir?: string[]; projectDirsOver?: boolean | string }) => {
         let agents: unknown;
         if (o.agentsJson !== undefined) {
           const text = o.agentsJson === "-" ? (io.readStdin ? await io.readStdin() : "") : o.agentsJson;
@@ -1392,7 +1392,7 @@ export function buildProgram(deps: ProgramDeps): Command {
             throw new CliError("usage", "--agents-json must be a JSON array of agents");
           }
         }
-        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver ? { projectDirsOver: true } : {}) });
+        const r = await ops.sendStatus(app, { session: o.session, state: o.state, summary: o.summary, files: o.file, label: o.label, repo: o.repo, branch: o.branch, mode: o.mode, caps: o.cap, agents, ...(o.projectDir ? { projectDirs: o.projectDir } : {}), ...(o.projectDirsOver !== undefined && o.projectDirsOver !== false ? { projectDirsOver: o.projectDirsOver === true || o.projectDirsOver === "" ? true : [o.projectDirsOver] } : {}) });
         for (const w of r.warnings ?? []) io.err(`p2p: ${w}`);
         const n = r.delivered.length;
         return {
@@ -1506,6 +1506,27 @@ export function buildProgram(deps: ProgramDeps): Command {
       run(async (app, o: { dir?: string }) => {
         const v = await ops.showProject(app, o.dir ?? projects.sessionWorkdir(app.env));
         return { json: { project: v }, human: projectView(v) };
+      }),
+    );
+
+  session
+    .command("show <sid>")
+    .description("A session's bound projects, who each is shared with, and every reason it is private (read only; yours: refused inside an agent's session)")
+    .option("--json", "JSON output")
+    .action(
+      run(async (app, sid: string) => {
+        const v = await ops.showSession(app, sessions.checkSid(sid, "sid"));
+        const lines = [`session ${v.sid}: ${v.policy === "none" ? "not bound to any project" : v.policy}`];
+        if (v.reasons.length) lines.push("  private because:", ...v.reasons.map((r) => `    - ${r.why}`));
+        if (v.remedy) lines.push(`  ${v.remedy.charAt(0).toUpperCase()}${v.remedy.slice(1)}`);
+        if (v.policy === "shared") lines.push(`  reaches: ${[...(v.circles ?? []).map((c) => `circle ${c}`), ...(v.people ?? [])].join(", ") || "nobody"}`);
+        if (v.constraints) lines.push(`  ${fmt.plural(v.constraints, "bound")} from messages your other sessions sent it`);
+        for (const p of v.projects) {
+          lines.push("", ...projectView(p).split("\n"));
+          if (p.underOver) lines.push("  covering many of its subfolders");
+          else if (p.under?.length) lines.push(`  covering ${p.under.join(", ")}`);
+        }
+        return { json: { session: v }, human: lines.join("\n") };
       }),
     );
 

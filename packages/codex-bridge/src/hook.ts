@@ -52,24 +52,25 @@ export function guard(toolName: string, input: unknown, binNames: readonly strin
  * The paths a tool call names outside its folder (a shell command's absolute, ~ and .. paths; the
  * files an apply_patch or edit names), resolved: the bridge binds each one's project (projects.ts).
  */
-export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): { paths: string[]; over: boolean } {
+export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): { paths: string[]; over: boolean; why?: string[] } {
   const out: string[] = [];
-  let over = false;
+  // Why it is private (the CLI's OverWhy words): a path that can't be placed, or too many.
+  const why = new Set<string>();
   if (SHELL_TOOLS.test(toolName)) {
     // No folder to resolve against: what it names can't be placed, so private.
-    if (!cwd) over = true;
+    if (!cwd) why.add("unresolved");
     else {
       const r = shellPaths(commandOf(input), cwd, home);
       out.push(...r.paths);
-      over ||= r.over;
+      for (const w of r.why ?? []) why.add(w);
     }
   }
   for (const f of editedFiles(toolName, input)) {
     if (cwd || isAbsolute(f)) out.push(resolveLike(cwd ?? "/", f));
-    else over = true;
+    else why.add("unresolved");
   }
-  if (out.length > MAX_COMMAND_PATHS) over = true;
-  return { paths: out.slice(0, MAX_COMMAND_PATHS), over };
+  if (out.length > MAX_COMMAND_PATHS) why.add("folders");
+  return { paths: out.slice(0, MAX_COMMAND_PATHS), over: why.size > 0, ...(why.size > 0 ? { why: [...why] } : {}) };
 }
 
 export interface HookDeps {
@@ -111,7 +112,7 @@ export async function runHook(event: string, stdin: string, deps: HookDeps): Pro
     const t = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
     if (entry && (t.paths.length > 0 || t.over)) {
       // The bridge must hear it before the call runs: if it can't be told, the call doesn't run.
-      const told = await ask<{ ok?: boolean }>(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true } : {}) } }, 8_000)
+      const told = await ask<{ ok?: boolean }>(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true, overWhy: t.why ?? [] } : {}) } }, 8_000)
         .then((r) => r?.ok === true)
         .catch(() => false);
       if (!told) {

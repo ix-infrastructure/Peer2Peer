@@ -47,7 +47,7 @@ Each agent run is a **session** with its own id. Its **roster** says who may see
 You may work on one project with your circle and keep two others to yourself. A **project** is where a session works:
 
 - **A git repository:** keyed by its normalised remote URL (credentials dropped, `git@host:a/b` and `https://host/a/b.git` the same) plus its git common dir. So every worktree and subfolder of one clone is the same project, and another clone of the same remote is a different one. The CLI reads the repository's files to find these; it never runs git in it.
-- **No git:** the real path of the folder.
+- **No git:** a folder, by its real path. A folder you shared covers its subfolders: with `~/src` shared, a session in `~/src/tmp` is in `~/src`'s project. The nearest folder at or above with a policy of its own is the project, so a subfolder you made private stays private, and the walk never crosses a git repository (always its own project), a `.p2p-private` (at a folder or above it: private, whatever covers it) or a folder whose `.git` the path itself names (a command that may have just removed it). A policy a covered subfolder gets later still narrows the sessions that worked in it. Device files (`/dev/null`) are no project; a path that doesn't exist yet is its nearest existing folder's.
 
 Each project has a **policy**, kept only on your device (in `P2P_HOME`, never synced, never read from a repository):
 
@@ -65,6 +65,12 @@ Each project has a **policy**, kept only on your device (in `P2P_HOME`, never sy
 - **Messages out:** `p2p send --from-session`, the Codex bridge's `p2p_send`, the mod's `SendMessage`, `ix note`, `ix subgraph` and `ix impact` all refuse recipients outside the session's projects' audience, with `not_shared` and the command the **person** runs to share the project. There is no flag that lets a caller skip it.
 
 **Sessions that move.** Every folder a session works in binds it to that folder's project, until the session ends: its working directory, a folder it `cd`s into, files it reads or changes elsewhere (the mod and the Codex bridge pass these as `--project-dir` / `P2P_PROJECT_DIRS`). Its audience is the **intersection** of all those projects' policies (the circles and people every one of them shares). So a session that touched a private project's files stays private until it ends: what it read can't be carried out through Peer2Peer. Subagents report through their session, so they share its projects and audience.
+
+**Why a session is private, and what helps.** A refusal says its cause, and `p2p session show <sid>` (in your own terminal; `/peers session` in Claude Code) lists a session's projects, who each is shared with, and every reason:
+- a project never shared, or made private: sharing it helps (`p2p project share`);
+- more than 16 projects, more folders than Peer2Peer keeps track of, a path its front end couldn't resolve (one starting with a variable or `$(…)` it doesn't know, like `$X/y`), a front end that lost track (a forked conversation), a `.p2p-private`, or a private session's message: these last until the session ends, so sharing can't help. Start a new session for the work you want to share.
+
+An agent's shell can't run `session show` (it would read other sessions' bindings).
 
 **Repositories can only ask for more privacy.** Nothing committed in a repository can share it: a cloned repository that carries a file claiming "shared with circle X" changes nothing. A `.p2p-private` file at a repository's top level makes it private whatever your policy says, and `p2p project share` refuses it.
 

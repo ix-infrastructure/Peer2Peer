@@ -199,6 +199,12 @@ describe("H1: who may release a held message (sandbox-based)", () => {
     const r = sanitizeReport({ event: "UserPromptSubmit", mode: { permissionMode: "default", approval: "on-request", sandbox: "read-only" }, sessionId: "t", files: ["a", 1], cwd: "relative" });
     expect(r).toEqual({ event: "UserPromptSubmit", mode: { permissionMode: "default" }, files: ["a"] });
   });
+
+  it("an over's reasons are plain words, and only ride along with over (a report can't un-private a session)", () => {
+    expect(sanitizeReport({ event: "PreToolUse", over: true, overWhy: ["unresolved", "EVIL;rm -rf", 5] })).toMatchObject({ over: true, overWhy: ["unresolved"] });
+    expect(sanitizeReport({ event: "PreToolUse", overWhy: ["unresolved"] })).not.toHaveProperty("overWhy");
+    expect(sanitizeReport({ event: "PreToolUse", dirs: Array.from({ length: 300 }, (_, i) => `/d${i}`) })).toMatchObject({ over: true, overWhy: ["folders"] });
+  });
 });
 
 describe("H1: P2P_HOME must be out of the sandbox's reach", () => {

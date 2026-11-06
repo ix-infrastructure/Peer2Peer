@@ -58,6 +58,7 @@ On one machine, Claude sessions already reach each other: `ListAgents` lists the
   | `/peers add <user>` / `/peers remove <user>` | Changes who sees and may message THIS session |
   | `/peers private` / `/peers circle <cid>` | Shares this session with nobody else, or with a circle you joined (within what its project shares) |
   | `/peers project [show\|ls]` | Who sees sessions in this session's project (its repository, or folder): private until you share it |
+  | `/peers session` | This session's bound projects, who each is shared with, and why it is private (a project not shared, or a cause no share lifts, such as a path the mod couldn't resolve: then start a new session). Typed only |
   | `/peers project share [<circle>…] [--person <user>]…` / `/peers project private` | Shares this project (bare: with your default circle), or makes it private again. Typed only: the model's `/peers project share` and its shell's `p2p project share` are refused |
   | `/peers approve <id>` / `/peers decline <id>` | Acts on a held item |
   | `/peers dismiss [n\|all]` | Clears a notice above the prompt (a join, an invite code, a warning) without the keyboard. Bare, it clears the only one, or lists them numbered when there are several. Typed only; it never removes anyone (that is the notice's **Remove**) |

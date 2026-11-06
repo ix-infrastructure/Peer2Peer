@@ -173,11 +173,25 @@ describe("project boundaries in the Codex guard: caps and residuals (PR #30 re-r
     expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).over).toBe(true);
   });
 
+  it("each over says why (unresolved, folders), and the noise of #45 is gone: /dev/null, sed and jq programs (same rules as the mod)", () => {
+    expect(touchedPaths("Bash", { command: "cat $T/x 2>/dev/null" }, "/w/repo", "/home/u")).toEqual({ paths: [], over: true, why: ["unresolved"] });
+    expect(touchedPaths("Bash", { command: Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(" ") }, "/w/repo", "/home/u").why).toEqual(["folders"]);
+    expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).why).toEqual(["unresolved"]);
+    expect(touchedPaths("Bash", { command: "ls 2>/dev/null; sed -i 's#a/b#c/d#' x; jq '.a/b' y" }, "/w/repo", "/home/u")).toEqual({ paths: [], over: false });
+    // Widening: a command that may remove a .git names it; one that sets $HOME makes it unknown.
+    expect(touchedPaths("Bash", { command: "find /w/old -name .git -delete" }, "/w/repo", "/home/u").paths).toContain("/w/old/.git");
+    expect(touchedPaths("Bash", { command: "HOME=/w/secret; cat $HOME/k" }, "/w/repo", "/home/u").over).toBe(true);
+  });
+
   it("a thread saved as over stays over; a file it can't read fails closed (H3)", () => {
     const home = mkdtempSync(join(tmpdir(), "p2p-thread-over-"));
     homes.push(home);
     saveThreadDirs(home, "t-over", ["/a"], true);
-    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true });
+    // Over with no reason said (an older bridge's file): the front end lost track.
+    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true, why: ["front"] });
+    // With its reason, kept for the CLI's refusal.
+    saveThreadDirs(home, "t-why", ["/a"], true, ["unresolved"]);
+    expect(loadThread(home, "t-why")).toEqual({ dirs: ["/a"], over: true, why: ["unresolved"] });
     saveThreadDirs(home, "t-bad", ["/a"]);
     const f = readdirSync(join(home, "codex-threads")).map((n) => join(home, "codex-threads", n));
     for (const x of f) writeFileSync(x, "{not json");

@@ -137,6 +137,10 @@ export function sanitizeReport(raw: unknown): HookReport {
     ...(Array.isArray(r.dirs) ? { dirs: r.dirs.filter((f): f is string => typeof f === "string" && isAbsolute(f) && f.length <= 4096).slice(0, 256) } : {}),
     // Only narrows: a report can make the session private, never the reverse.
     ...(r.over === true || (Array.isArray(r.dirs) && r.dirs.length > 256) ? { over: true } : {}),
+    // Why (the CLI's OverWhy words), only alongside `over`: a word the CLI doesn't know counts as `front` there.
+    ...(r.over === true || (Array.isArray(r.dirs) && r.dirs.length > 256)
+      ? { overWhy: [...new Set([...(Array.isArray(r.overWhy) ? r.overWhy.filter((w): w is string => typeof w === "string" && /^[a-z]{1,16}$/.test(w)).slice(0, 8) : []), ...(Array.isArray(r.dirs) && r.dirs.length > 256 ? ["folders"] : [])])] }
+      : {}),
   };
 }
 

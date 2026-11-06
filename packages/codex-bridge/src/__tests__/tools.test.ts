@@ -249,7 +249,20 @@ describe("hooks: delivery, turn caps, status", () => {
     bridge.noteTouched(Array.from({ length: 600 }, (_, i) => `/many/d${i}`));
     await bridge.settled();
     expect(bridge.isDirsOver).toBe(true);
-    expect(world.statuses().at(-1)?.argv).toContain("--project-dirs-over");
+    // Said as its cause, so the CLI's refusal names it (never the 16-projects text).
+    expect(world.statuses().at(-1)?.argv).toContain("--project-dirs-over=folders");
+  });
+
+  it("a hook's unresolved path reaches the CLI as such, and stays said for the thread", async () => {
+    const { bridge, world } = await makeBridge();
+    await bridge.onHook({ event: "PreToolUse", dirs: [], over: true, overWhy: ["unresolved"] });
+    await bridge.settled();
+    expect(bridge.dirsOver()).toEqual(["unresolved"]);
+    expect(world.statuses().at(-1)?.argv).toContain("--project-dirs-over=unresolved");
+    // An older hook's bare over: the front end lost track.
+    const b2 = await makeBridge();
+    await b2.bridge.onHook({ event: "PreToolUse", dirs: [], over: true });
+    expect(b2.bridge.dirsOver()).toEqual(["front"]);
   });
 
   it("status and p2p_send carry every folder the session has worked in (projects.ts binds each one's project)", async () => {

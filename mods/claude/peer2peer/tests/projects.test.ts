@@ -167,7 +167,8 @@ describe('project boundaries: the mod', () => {
     const w = world(on, { gitTop: '/work/web', store: { 'dirs:claude-session-1': { dirs: many, over: false, at: 1 } } })
     await start($, w)
     await settle(w, () => ran(w, 'status').length > 0)
-    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS_OVER).toBe('1')
+    // Said as the cause (the CLI words its refusal from it): too many folders, not an unresolved path.
+    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS_OVER).toBe('folders')
   })
 })
 

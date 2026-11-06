@@ -468,6 +468,11 @@ export class P2P {
     return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])
   }
 
+  /** `p2p session show`: this session's bound projects, their policies and why it is private (the person's: it needs the token). */
+  sessionShow(sid: string): Promise<Outcome<Record<string, unknown>>> {
+    return this.call(['session', 'show', '--', sid])
+  }
+
   /** `p2p session bound`: binds this session to the bound an own-session message it holds carried (narrowing only). */
   sessionBound(sid: string, bound: unknown): Promise<Outcome<Record<string, unknown>>> {
     return this.call(['session', 'bound', `--bound=${JSON.stringify(bound)}`, '--', sid])
