@@ -294,7 +294,9 @@ test("I4/I5: the unit is written inside the private build directory; only a real
   mkdirSync(join(fake, "packages/core"), { recursive: true });
   writeFileSync(join(fake, "packages/relay/Dockerfile"), "FROM scratch\n");
   const r = sh(["--dry-run", ...URL], DOCKER_LINUX, { cwd: fake });
-  refused(r, "lookalike checkout", /no Peer2Peer release is pinned/);
+  assert.equal(r.code, 0, r.all);
+  assert.doesNotMatch(r.out, /building from the checkout/, "lookalike checkout: not built from");
+  assert.ok(r.out.includes(`+ download ${pinnedSourceUrl()}, check sha256 `), "lookalike checkout: the pinned release is used instead");
   // P2P_SOURCE_DIR is an explicit choice.
   const e = sh(["--dry-run", ...URL], { ...DOCKER_LINUX, P2P_SOURCE_DIR: repo }, { cwd: elsewhere });
   assert.equal(e.code, 0, e.all);
@@ -318,10 +320,23 @@ test("bad options are refused before anything happens", () => {
   assert.match(sh(["--dry-run"], JETSON).err, /no --url/);
 });
 
-test("outside a checkout, with no release pinned yet, it refuses rather than guess", () => {
+function pinnedSourceUrl() {
+  const text = readFileSync(SH, "utf8");
+  const v = text.match(/^RELAY_VERSION="([^"]*)"/m)[1];
+  return `https://github.com/ix-infrastructure/Peer2Peer/releases/download/v${v}/peer2peer-${v}-src.tar.gz`;
+}
+
+test("outside a checkout it downloads the pinned release and checks its SHA-256, and refuses when nothing is pinned", () => {
+  const text = readFileSync(SH, "utf8");
+  const sum = text.match(/^RELAY_SOURCE_SHA256="([^"]*)"/m)[1];
   const r = sh(["--dry-run", ...URL], JETSON, { cwd: elsewhere });
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /no Peer2Peer release is pinned in this script yet: run it from the root of a checkout/);
+  assert.equal(r.code, 0, r.all);
+  assert.ok(r.out.includes(`+ download ${pinnedSourceUrl()}, check sha256 ${sum}, unpack`), r.out);
+  const unpinned = join(elsewhere, "unpinned.sh");
+  writeFileSync(unpinned, text.replace(/^RELAY_VERSION="[^"]*"/m, 'RELAY_VERSION=""').replace(/^RELAY_SOURCE_SHA256="[^"]*"/m, 'RELAY_SOURCE_SHA256=""'));
+  const u = spawnSync("sh", [unpinned, "--dry-run", ...URL], { cwd: elsewhere, env: { PATH: process.env.PATH, HOME: process.env.HOME, ...JETSON }, encoding: "utf8" });
+  assert.notEqual(u.status, 0);
+  assert.match(u.stderr, /no Peer2Peer release is pinned in this script yet: run it from the root of a checkout/);
 });
 
 test("piped into sh it works from a checkout, and a truncated download runs nothing", () => {
@@ -513,8 +528,9 @@ test("I3/I5/I6 (ps1): elevation via -EncodedCommand, a re-checked takeover guard
   mkdirSync(join(fake, "packages/relay"), { recursive: true });
   writeFileSync(join(fake, "packages/relay/Dockerfile"), "FROM scratch\n");
   const out = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", ps("-DryRun -Url wss://relay.example.org/v3")], { cwd: fake, env: { ...process.env, ...WIN, P2P_SOURCE_DIR: "" }, encoding: "utf8" });
-  assert.notEqual(out.status, 0);
-  assert.match(out.stdout + out.stderr, /No Peer2Peer release is pinned/);
+  assert.equal(out.status, 0, out.stdout + out.stderr);
+  assert.doesNotMatch(out.stdout, /building from the checkout/);
+  assert.ok(out.stdout.includes(`+ download ${pinnedSourceUrl()}, check SHA-256 `), out.stdout);
 });
 
 test("W1 (ps1): a custom -DataDir whose parent you can write is refused; the elevated step locks folders before the copy", (t) => {
