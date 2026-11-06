@@ -38,7 +38,7 @@ import type {
   TrustList,
   Whoami,
 } from '../types'
-import { inert, parseEvent, parseJson, takeLines } from './lib'
+import { inert, parseEvent, parseJson, takeLines, type HistoryRecord } from './lib'
 
 export type RunResult = { exitCode: number; stdout: string; stderr: string }
 export type Chunk = { stream: 'stdout' | 'stderr'; text: string }
@@ -397,6 +397,22 @@ export class P2P {
    */
   doctor(user?: string): Promise<Outcome<DoctorResult>> {
     return this.call<DoctorResult>(['doctor', ...(user ? ['--', user] : [])], { timeoutMs: LONG_TIMEOUT_MS })
+  }
+
+  /**
+   * `p2p history`: the person's view (everything on this device, or `inbox` only), or one session's
+   * own (`session`). Only ever for a /peers command the person typed: the CLI lets this front end's
+   * token read the person's inbox, so the mod never runs it for the model.
+   */
+  history(o: { session?: string; inbox?: boolean; since?: string; peer?: string; limit?: number }): Promise<Outcome<{ messages: HistoryRecord[]; truncated?: boolean; retention?: { days?: number; enabled?: boolean } }>> {
+    const args = ['history']
+    if (o.session) args.push(`--session=${o.session}`)
+    if (o.inbox) args.push('--inbox')
+    if (o.since) args.push(`--since=${o.since}`)
+    if (o.peer) args.push(`--peer=${o.peer}`)
+    if (o.limit !== undefined) args.push(`--limit=${o.limit}`)
+
+    return this.call(args)
   }
 
   /** The relays this identity's document lists. */

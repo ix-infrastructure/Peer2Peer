@@ -103,7 +103,7 @@ describe.skipIf(!hasCli)("Codex bridge over a real relay", () => {
     expect(init.result.serverInfo.name).toBe("peer2peer");
     mcp.notify("notifications/initialized");
     const tools = await mcp.request("tools/list");
-    expect(tools.result.tools.map((t: Json) => t.name).sort()).toEqual(["p2p_inbox", "p2p_list_peers", "p2p_peer_activity", "p2p_send", "p2p_status"]);
+    expect(tools.result.tools.map((t: Json) => t.name).sort()).toEqual(["p2p_history", "p2p_inbox", "p2p_list_peers", "p2p_peer_activity", "p2p_send", "p2p_status"]);
     const s = await until("the session in `p2p codex sessions`", async () => {
       const r = await cody.p2p(["codex", "sessions"]);
       return r.sessions?.[0]?.online && r.sessions[0].ref ? r.sessions[0] : undefined;
@@ -260,6 +260,11 @@ describe.skipIf(!hasCli)("Codex bridge over a real relay", () => {
     expect(msg.from.userId).toBe(cody.userId);
     expect(msg.toSession).toBe(SID_A);
     expect(msg.own).toBe(ann.userId);
+    // The real CLI keeps it in this session's history; p2p_history reads it back (its own session only).
+    const h = await mcp.tool("p2p_history", {});
+    expect(h.isError).toBe(false);
+    expect(h.text).toContain("I'll wait for your session.ts change.");
+    expect(h.text).toContain("<p2p-sent to=");
   });
 
   it("project boundaries: once the person makes the project private, p2p_send refuses ann and says how the person shares it", async () => {
