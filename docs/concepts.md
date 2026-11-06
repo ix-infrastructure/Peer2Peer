@@ -78,6 +78,22 @@ These checks are best effort against an agent with your shell; [sandbox your age
 
 **Moving from the default circle.** Before project boundaries, new sessions followed your default circle. They don't any more: the default circle now only says what invites join and what `p2p project share` with no circle shares. The first time a session of yours is private only because its project was never shared, `p2p status` says so once (the mod shows it as a toast) and names the command that shares the project with your default circle. Nothing is ever widened for you.
 
+## Message history
+
+Messages to you (in `p2p tui`, or with no session named) and to your agent sessions only show live, so each device also keeps a **message history**: what it sent and received, to look back at with `p2p history` (the TUI's Messages screen, `/peers history` in Claude Code, `p2p_history` in Codex).
+
+- **Local only.** It lives in `P2P_HOME` on each device and is never synced, sent to a relay or shared with a peer. Nothing on the wire changes.
+- **Encrypted at rest.** Sealed (ChaCha20-Poly1305) under a key of its own, `P2P_HOME/cli/history.key` (0600), with each file's name bound in, so no message text sits in the history files. There's no OS keychain backend yet, so the key sits next to your device keys: it keeps the text out of backups, indexers and a grep of the folder, not away from malware running as you.
+- **Bounded.** 30 days by default and at most 8 MiB, pruned on every write: `"history": {"retentionDays": 30, "maxBytes": 8388608}` in `config.json`. `"enabled": false` (or `P2P_HISTORY=0`) keeps nothing new; `p2p history --clear` deletes it all, key included.
+- **What it keeps.** Message text in and out, once each, and extension kinds as their one-line fallback (never the body). Not statuses, rosters or control events.
+
+**Who reads what.**
+
+- **Your inbox, and everything** (`p2p history`, `--inbox`): only you, by the same gate as the other person-only commands: your front end's token (the mod's typed `/peers history`), or your `yes` typed on your own terminal. It is refused inside an agent's session.
+- **A session's own** (`--session <sid>`): its front end reads it for it, for a session a front end registered, and only what the session recorded in projects it is still bound to. A session never reads your inbox, another session's history or another project's: a session id that comes back in another project sees nothing from before. The Codex bridge's `p2p_history` applies the hold rule again, so a message held for you stays held there.
+
+Message text is still the sender's data: framed as theirs when a model reads it, and stripped of control characters for a terminal.
+
 ## Envelopes (§4)
 
 Every message, status, invite or circle update is an **envelope**: encrypted (XChaCha20-Poly1305 over X25519) to each of the recipient's devices, signed (Ed25519) by the sending device, and replay-protected. Its outer header stays readable to relays: sender and recipient user and device ids, the session's owner and id, sequence and timestamp counters, and the **kind**. It can't be altered, because it's bound into the encryption, but it isn't hidden. Who may send what to whom is decided by your own device, from keys, friendships, circles and rosters (§4.2), never by a relay or an extension.

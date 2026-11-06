@@ -41,6 +41,7 @@ import {
   firstLine,
   friendsText,
   heldListText,
+  historyText,
   sessionsText,
   REPO_PROBE,
   parseRepoProbe,
@@ -2589,6 +2590,8 @@ const peersCommand = async (S: Sess, $: EngineInterface, args: string, origin: s
   const command = parsePeersArgs(args)
   if (command.verb === 'usage') return `${command.error ? `${command.error}\n` : ''}${PEERS_USAGE}`
   const isTyped = origin === 'composer' || origin === 'bridge'
+  // The person's own messages (their inbox, every session's history) are theirs to read: typed only.
+  if (command.verb === 'history' && !isTyped) return 'Only your user reads their message history: they type /peers history themselves.'
   if (isMutating(command) && !isTyped) return 'Only what your user types at the prompt changes who reaches them: run this /peers command yourself.'
   // Trust only from the terminal (pre-release review N4): the engine's own types call a Remote Control
   // (`bridge`) input the user's, but also "not attestably the owner's hand" (it may come through a
@@ -2631,6 +2634,17 @@ const peersCommand = async (S: Sess, $: EngineInterface, args: string, origin: s
       const h = await p.held()
 
       return h.ok ? heldListText(h.value) : `p2p held failed: ${h.reason}`
+    }
+    case 'history': {
+      // Typed by the person (checked above): their view, their inbox, or this session's own.
+      const r = await p.history({
+        ...(command.scope === 'here' ? { session: current.sid } : command.scope === 'inbox' ? { inbox: true } : {}),
+        ...(command.since ? { since: command.since } : {}),
+        ...(command.peer ? { peer: command.peer } : {}),
+        ...(command.limit !== undefined ? { limit: command.limit } : {}),
+      })
+
+      return r.ok ? historyText(r.value, current.sid) : `p2p history failed: ${r.reason}`
     }
     case 'ls': {
       const r = await p.ls()

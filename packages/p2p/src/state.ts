@@ -34,6 +34,7 @@
 //   relayInfo the relays' /.well-known/p2p-relay.json (features and frames), as last fetched
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
+//   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";
