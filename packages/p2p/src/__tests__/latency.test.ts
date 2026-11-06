@@ -18,6 +18,8 @@ import { processStartMs } from "../procstart.js";
 import { CliError } from "../errors.js";
 import { CliState, STATE_BURST } from "../state.js";
 import { watch } from "../watch.js";
+import { App } from "../app.js";
+import { createServer } from "node:net";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-latency.test/v3";
@@ -106,6 +108,53 @@ describe("latency mechanisms", () => {
     expect((await waitFor("other-process-1")) - t0).toBeLessThan(2500);
     ctl.abort();
     expect(await running).toBe(0);
+  }, 30_000);
+
+  // Release dry run: a stopped watch once took ~30 s to return. Every wait on its way out gives way to
+  // the stop now; these pin the two cases deterministically.
+  const stopsWithin = async (app: App, setup: (ctl: AbortController) => Promise<void>) => {
+    const ctl = new AbortController();
+    const running = watch(app, { session: "as1", signal: ctl.signal, log: () => {}, write: async () => true, pollMs: 60_000 });
+    await setup(ctl);
+    const t0 = Date.now();
+    ctl.abort();
+    const code = await running;
+    return { code, ms: Date.now() - t0 };
+  };
+
+  it("a stopped watch returns at once while its relay refuses connections (in reconnect backoff)", async () => {
+    // A port nobody listens on: every dial is refused, and the pool schedules reconnects with backoff.
+    const port = await new Promise<number>((r) => {
+      const srv = createServer().listen(0, "127.0.0.1", () => {
+        const p = (srv.address() as { port: number }).port;
+        srv.close(() => r(p));
+      });
+    });
+    const app = new App({ env: { ...ann.env, P2P_RELAY_TRANSPORT: JSON.stringify({ [R]: `ws://127.0.0.1:${port}/v3` }) }, io: { out: () => {}, err: () => {} } });
+    await app.load();
+    app.front = true;
+    const { code, ms } = await stopsWithin(app, async () => {
+      // Past the first refusal, into the backoff sleep.
+      await new Promise((r) => setTimeout(r, 1500));
+    });
+    expect(code).toBe(0);
+    expect(ms).toBeLessThan(2000);
+  }, 30_000);
+
+  it("a stopped watch returns at once while its loop waits on a state read that doesn't finish", async () => {
+    const app = await ann.app();
+    await app.load();
+    const { code, ms } = await stopsWithin(app, async () => {
+      await new Promise((r) => setTimeout(r, 500));
+      // A read stuck behind a lock held elsewhere: the next scan waits on it forever.
+      const get = app.state.get.bind(app.state);
+      app.state.get = ((name: string) => (name === "events" ? new Promise(() => {}) : get(name as never))) as never;
+      // Wake the loop into that read.
+      await app.state.addEvents([{ id: "stall-1", at: Date.now(), kind: "p2p.test", toSession: "as1", data: {} }]);
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    expect(code).toBe(0);
+    expect(ms).toBeLessThan(2000);
   }, 30_000);
 
   // pre-release review M1: a handler still running while close() waits for it used to find no pool and

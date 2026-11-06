@@ -43,7 +43,7 @@ export interface FileConfig {
 
 /**
  * Whether this device puts its caps and client version in the identity document (`dinfo`).
- * Off by default in this release: clients from before protocol 3.1 (main up to 73e547d) refuse
+ * Off by default in this release: pre-release clients from before protocol 3.1 refuse
  * an identity document with a field they don't know, so the user would become unreachable to them.
  * Step 2 (once the two previous releases are 3.1) turns it on. `P2P_DEVICE_INFO` (`1`/`true`,
  * `0`/`false`) wins over `"deviceInfo": true` in config.json. Even on, it is published only to

@@ -7,16 +7,15 @@
 // where both have them. It asserts that shared features work, that new-only features degrade
 // cleanly (the newer side leaves them out), and that no side rejects an envelope.
 //
-//   node scripts/compat/matrix.mjs [--refs c1bda28,e3a07d4,60b4d61,73e547d,082e7e0] [--new mods/claude/peer2peer/bin/p2p.mjs] [--new-env K=V]... [--json]
+//   node scripts/compat/matrix.mjs [--refs 70b86c7,v0.1.0] [--new mods/claude/peer2peer/bin/p2p.mjs] [--new-env K=V]... [--json]
 //
 // `--new-env` sets an environment variable for the new side only: `--new-env P2P_DEVICE_INFO=1` is
 // step 2 of the device-info rollout, which must pass against every ref it is meant to support.
 //
 // Each old CLI is the committed single-file bundle at that ref (`git show <ref>:mods/claude/
-// peer2peer/bin/p2p.mjs`), so nothing is built. The default refs, until there are release tags,
-// are c1bda28 (offline delivery), e3a07d4 (delivery receipts), 60b4d61 (main with the members-only relay
-// and the ix-infra.com/p2p links), 73e547d (main with per-person trust) and 082e7e0 (main with protocol 3.1 and the tui); P2P_COMPAT_REFS
-// overrides them. Needs packages/relay built.
+// peer2peer/bin/p2p.mjs`), so nothing is built. The default ref, until there are release tags, is
+// 70b86c7 (the initial public release: protocol 3.1); after that, the previous two release tags.
+// Every ref must be reachable in this repository's history. P2P_COMPAT_REFS or --refs overrides it. Needs packages/relay built.
 // Every home is a fresh temp directory (P2P_HOME); nothing reads ~/.p2p or talks to a real relay.
 
 import { execFile, execFileSync } from "node:child_process";
@@ -28,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const RELAY_URL = "wss://relay-matrix.test/v3";
-export const DEFAULT_REFS = ["c1bda28", "e3a07d4", "60b4d61", "73e547d", "082e7e0"];
+export const DEFAULT_REFS = ["70b86c7"];
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });

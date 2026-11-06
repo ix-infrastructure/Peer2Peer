@@ -29,6 +29,14 @@ export interface TestRelay {
   close(): Promise<void>;
 }
 
+/**
+ * Every test user connects from one address (127.0.0.1), where in use each would have their own. The
+ * relay's per-address connection limit (120 a minute) is sized for one machine, so a suite of several
+ * users crossed it on a fast runner and a refused connection looked like a stale result (release dry
+ * runs). Raised here for every test relay; a test of that limit sets its own (`limits`).
+ */
+const ONE_ADDRESS_LIMITS = { connectsPerIpPerMinute: 100_000 };
+
 export async function startRelay(
   url: string,
   opts: { powBits?: number; limits?: Record<string, number>; now?: () => number; config?: { allow?: string[]; allowCircle?: string; inviteAdmitSec?: number } } = {},
@@ -36,7 +44,7 @@ export async function startRelay(
   const crypto = createRelayCrypto();
   const relay = new Relay({
     ...(opts.now ? { now: opts.now } : {}),
-    config: makeConfig(crypto, { relayUrl: url, logLevel: "error", powBits: opts.powBits ?? 0, ...opts.config, ...(opts.limits ? { limits: opts.limits } : {}) }),
+    config: makeConfig(crypto, { relayUrl: url, logLevel: "error", powBits: opts.powBits ?? 0, ...opts.config, limits: { ...ONE_ADDRESS_LIMITS, ...opts.limits } }),
     store: new MemoryStore(),
     crypto,
     logger: createLogger({ level: "error", sink: () => {} }),
@@ -142,6 +150,9 @@ export class User {
   async ok(args: string[], opts: { stdin?: string } = {}): Promise<any> {
     const r = await this.run(args, opts);
     if (r.code !== 0) throw new Error(`${this.name}: p2p ${args.join(" ")} failed (${r.code}): ${r.out}\n${r.err}`);
+    // A relay that refused the connection (a per-address limit) leaves the command working from what it
+    // held: in a test that expects success, that is the fixture's limits, never the code under test.
+    if (/\bHTTP 429\b/.test(r.err)) throw new Error(`${this.name}: p2p ${args.join(" ")}: the test relay refused a connection (HTTP 429): raise its limits for this suite\n${r.err}`);
     return r.json;
   }
 

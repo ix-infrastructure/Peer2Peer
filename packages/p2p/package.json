@@ -57,7 +57,7 @@
     "postbuild": "node scripts/postbuild.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "pretest": "npm --prefix ../core run build && npm --prefix ../relay run build && npm --prefix ../codex-bridge run build",
+    "pretest": "npm --prefix ../core run build && npm --prefix ../relay run build && npm --prefix ../codex-bridge run build && npm run build",
     "test": "vitest run",
     "bundle": "node scripts/bundle.mjs",
     "bundle:check": "node scripts/bundle.mjs --check",

@@ -13813,7 +13813,11 @@ async function sendStatus(app, o) {
   await app.connectAndDrain();
   const sess = await noteOpenCircle(app, await getSession(app, sid, warnings), warnings);
   const audience = await rosterAudience(app, sess);
-  if (before && before.jws !== sess.jws) await retract(app, sid, before, audience).catch(() => void 0);
+  if (before && before.jws !== sess.jws) {
+    for (const miss of await retract(app, sid, before, audience)) {
+      warnings.push(`the blank private status didn't reach ${miss.address} (${miss.error}): they still see its last status until it is no longer live`);
+    }
+  }
   if (audience.length === 0) {
     delete status.summary;
     delete status.summaryAt;
@@ -13848,9 +13852,17 @@ async function sendStatus(app, o) {
 }
 async function retract(app, sid, before, now) {
   const gone = (await rosterAudience(app, before)).filter((u) => !now.includes(u));
-  await mapLimit(gone, STATUS_FANOUT, async (u) => {
-    await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws }).catch(() => void 0);
+  const out = await mapLimit(gone, STATUS_FANOUT, async (u) => {
+    let error;
+    try {
+      const d = await app.deliver(u, "status", { own: app.userId, sid }, { status: { state: "idle", label: "private" }, roster: before.jws });
+      if (d.relays.length === 0) error = `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`;
+    } catch (e) {
+      error = e.message;
+    }
+    return error === void 0 ? void 0 : { userId: u, address: await app.addressOf(u).catch(() => u), error };
   });
+  return out.filter((x) => x !== void 0);
 }
 async function listPeers(app, opts = {}) {
   const peers = await app.state.get("peers") ?? {};
@@ -25201,7 +25213,7 @@ var init_app = __esm({
             }), new Promise((r) => setTimeout(r, CLOSE_GRACE_MS).unref())]);
             if (pool.busy) {
               pool.stopHandling();
-              await this.onAbandon?.().catch(() => void 0);
+              if (this.onAbandon) await Promise.race([this.onAbandon().catch(() => void 0), new Promise((r) => setTimeout(r, CLOSE_GRACE_MS).unref())]);
             }
           } finally {
             this.pool = void 0;
@@ -34609,6 +34621,35 @@ function eventLine(e) {
   const data = Object.fromEntries(Object.entries(e.data).filter(([k]) => !k.startsWith("_")));
   return safeJson({ kind: e.kind, id: e.id, at: e.at, ...data, ...e.toSession ? { toSession: e.toSession } : {} });
 }
+var WATCH_EXIT_MS = 2 * CLOSE_GRACE_MS;
+function untilAborted(p, signal) {
+  if (signal.aborted) {
+    p.catch(() => void 0);
+    return Promise.resolve(void 0);
+  }
+  return new Promise((resolve4, reject) => {
+    const off = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      off();
+      resolve4(void 0);
+    };
+    signal.addEventListener("abort", onAbort);
+    p.then(
+      (v) => {
+        off();
+        resolve4(v);
+      },
+      (e) => {
+        off();
+        if (signal.aborted) resolve4(void 0);
+        else reject(e);
+      }
+    );
+  });
+}
+function within2(p, ms) {
+  return Promise.race([p.catch(() => void 0), new Promise((r) => setTimeout(r, ms).unref())]);
+}
 async function watch(app, opts) {
   const sid = checkSid(opts.session);
   receiving(app);
@@ -34685,13 +34726,16 @@ async function watch(app, opts) {
     while (!stop.signal.aborted) {
       woke = false;
       if (polls++ % 10 === 0) {
-        if (app.userId !== startedAs || (await app.state.get("keys"))?.userId !== startedAs) {
+        const keys = await untilAborted(app.state.get("keys"), stop.signal);
+        if (stop.signal.aborted) break;
+        if (app.userId !== startedAs || keys?.userId !== startedAs) {
           opts.log(`p2p watch: this device moved to your new identity; restart watch`);
           stop.abort();
           break;
         }
       }
-      const doc = await app.state.get("events");
+      const doc = await untilAborted(app.state.get("events"), stop.signal);
+      if (stop.signal.aborted) break;
       for (const e of doc?.items ?? []) {
         if (stop.signal.aborted) break;
         if (!eventFor(e, sid, app.userId, cursor)) continue;
@@ -34701,12 +34745,13 @@ async function watch(app, opts) {
           break;
         }
         cursor = { ...cursor, n: e.n };
-        await writeCursor(app, sid, cursor);
+        await untilAborted(writeCursor(app, sid, cursor), stop.signal);
       }
+      if (stop.signal.aborted) break;
       const last = doc?.items.at(-1)?.n ?? cursor.n;
       if (last > cursor.n && !(doc?.items ?? []).some((e) => e.n > cursor.n && eventFor(e, sid, app.userId, cursor))) {
         cursor = { ...cursor, n: last };
-        await writeCursor(app, sid, cursor);
+        await untilAborted(writeCursor(app, sid, cursor), stop.signal);
       }
       if (woke) continue;
       await new Promise((r) => {
@@ -34722,12 +34767,13 @@ async function watch(app, opts) {
       });
     }
   } finally {
-    await unmarkRunning(app, sid).catch(() => void 0);
     offEvents();
     logWatcher?.close();
     for (const t2 of timers) clearInterval(t2);
     opts.signal.removeEventListener("abort", onAbort);
-    await app.close();
+    const deadline = Date.now() + WATCH_EXIT_MS;
+    await within2(unmarkRunning(app, sid), CLOSE_GRACE_MS);
+    await within2(app.close(), Math.max(0, deadline - Date.now()));
   }
   if (fatal) {
     opts.log(`p2p watch: ${fatal}`);
