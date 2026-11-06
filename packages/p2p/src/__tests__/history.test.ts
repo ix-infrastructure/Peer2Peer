@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../cli.js";
-import { assertHistoryReader, historyKeyFile, historySettings, parseSince, readHistory, recordHistory, type HistoryRec } from "../history.js";
+import { assertHistoryReader, historyKeyFile, historySettings, parseSince, readHistory, recordEvents, recordHistory, UNBOUND, type HistoryRec } from "../history.js";
 import { projectOf } from "../projects.js";
 import { sendExtension } from "../sessions.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
@@ -257,19 +257,59 @@ describe("message history", () => {
     }
   });
 
-  it("a session id that comes back in another project doesn't see what the earlier one had", async () => {
+  it("a session id that comes back in another project, or with a binding made anew, doesn't see what the earlier one had (M2)", async () => {
+    const app = await ann.app();
+    await app.load();
+    const pP = projectOf(repo.P).id;
+    const pS = projectOf(repo.S).id;
+    const bind = (projects: Record<string, { name: string }>, since: number) =>
+      app.state.update("sessionProjects", (cur = {}) => ({ next: { ...cur, reused: { projects, registered: true as const, since, at: Date.now() } }, result: undefined }));
+    try {
+      const t0 = Date.now();
+      // "reused" worked in the private project and got a message there...
+      await bind({ [pP]: { name: "secret" } }, t0 - 1000);
+      await recordHistory(app, [{ id: "r:1", at: t0, dir: "in", type: "message", session: "reused", peer: { userId: app.userId, address: "me", self: true }, text: "FROM-THE-PRIVATE-RUN", projects: [pP] }]);
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual(["FROM-THE-PRIVATE-RUN"]);
+      // ...then its binding ended (TTL) and one with the same id began in the shared project...
+      await bind({ [pS]: { name: "shared" } }, t0 + 1000);
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual([]);
+      // ...or even in the same project again: a binding made anew inherits nothing from before it began.
+      await bind({ [pP]: { name: "secret" } }, t0 + 1000);
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual([]);
+      // A binding from before `since` existed shows nothing.
+      await app.state.update("sessionProjects", (cur = {}) => ({ next: { ...cur, reused: { projects: { [pP]: { name: "secret" } }, registered: true as const, at: Date.now() } }, result: undefined }));
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual([]);
+      // Records with no projects, or UNBOUND (the binding was missing or unreadable when recorded), never reach a session.
+      await bind({ [pP]: { name: "secret" } }, t0 - 1000);
+      await recordHistory(app, [
+        { id: "r:2", at: t0 + 1, dir: "in", type: "message", session: "reused", peer: { userId: app.userId, address: "me", self: true }, text: "NO-PROJECTS" },
+        { id: "r:3", at: t0 + 2, dir: "in", type: "message", session: "reused", peer: { userId: app.userId, address: "me", self: true }, text: "UNBOUND-REC", projects: [UNBOUND] },
+      ]);
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual(["FROM-THE-PRIVATE-RUN"]);
+      // The person still sees all of it.
+      expect(texts(await readHistory(app, { person: true }, { session: "reused" }))).toEqual(["FROM-THE-PRIVATE-RUN", "NO-PROJECTS", "UNBOUND-REC"]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a message into a session with no binding here is recorded UNBOUND; the time kept is when it arrived, the sender's apart (M2, L3)", async () => {
     const app = await ann.app();
     await app.load();
     try {
-      // "reused" worked in the private project and got a message there...
-      await app.state.update("sessionProjects", (cur = {}) => ({ next: { ...cur, reused: { projects: { [projectOf(repo.P).id]: { name: "secret" } }, registered: true, at: Date.now() } }, result: undefined }));
-      await recordHistory(app, [{ id: "r:1", at: Date.now(), dir: "in", type: "message", session: "reused", peer: { userId: app.userId, address: "me", self: true }, text: "FROM-THE-PRIVATE-RUN", projects: [projectOf(repo.P).id] }]);
-      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual(["FROM-THE-PRIVATE-RUN"]);
-      // ...then its binding ended (TTL) and a session with the same id started in the shared one.
-      await app.state.update("sessionProjects", (cur = {}) => ({ next: { ...cur, reused: { projects: { [projectOf(repo.S).id]: { name: "shared" } }, registered: true, at: Date.now() } }, result: undefined }));
-      expect(texts(await readHistory(app, await assertHistoryReader(app, "reused")))).toEqual([]);
-      // The person still sees it.
-      expect(texts(await readHistory(app, { person: true }, { session: "reused" }))).toEqual(["FROM-THE-PRIVATE-RUN"]);
+      const sent = Date.now() - 3 * 3_600_000;
+      const ev = { n: 1, id: "p2p.message:unbound-1", at: sent, kind: "p2p.message", toSession: "nobind-1", own: app.userId, sid: "nobind-1", data: { from: { userId: ids.ben, address: "ben", did: "d", self: false }, own: app.userId, sid: "nobind-1", ref: "abcabc", text: "INTO-AN-UNBOUND-SESSION" } };
+      const before = Date.now();
+      await recordEvents(app, [ev]);
+      const rec = (await readHistory(app, { person: true }, { session: "nobind-1" })).messages[0] as HistoryRec;
+      expect(rec).toMatchObject({ text: "INTO-AN-UNBOUND-SESSION", sentAt: sent });
+      // Kept by when it arrived here, not by the sender's clock (a sender can't backdate it past retention or --since).
+      expect(rec.at).toBeGreaterThanOrEqual(before);
+      // Whatever binding that id gets later, even one that began long before, a session never sees it.
+      await app.state.update("sessionProjects", (cur = {}) => ({ next: { ...cur, "nobind-1": { projects: { [projectOf(repo.S).id]: { name: "shared" } }, registered: true as const, since: 0, at: Date.now() } }, result: undefined }));
+      expect(texts(await readHistory(app, await assertHistoryReader(app, "nobind-1")))).toEqual([]);
+      // What the person sees never names projects either.
+      expect(JSON.stringify(await readHistory(app, { person: true }, { session: "nobind-1" }))).not.toContain(UNBOUND);
     } finally {
       await app.close();
     }
@@ -337,16 +377,21 @@ describe("message history", () => {
         expect(bytes).toBeLessThanOrEqual(64 * 1024 + 2048);
         expect(left.messages.at(-1)!.text.startsWith("199 ")).toBe(true);
         expect(left.messages.some((m) => m.text.startsWith("0 "))).toBe(false);
-        // A key that was replaced (deleted, then made anew): what it sealed can't be read, and the next
-        // write removes it from disk rather than leaving it to outlive retention.
-        const before = filesUnder(join(u.home, "cli")).filter((f) => /history-\d+\.json$/.test(f.path)).map((f) => f.path);
+        // A key that was replaced (deleted, then made anew): what it sealed can't be opened. The next
+        // write sets it aside (history.bad-*), never deletes it silently and never overwrites it, and
+        // the set-aside files go once past retention (L6).
+        const before = filesUnder(join(u.home, "cli")).filter((f) => /\/history-\d+\.json$/.test(f.path)).map((f) => f.path);
         expect(before.length).toBeGreaterThan(0);
         rmSync(historyKeyFile(u.home));
         await recordHistory(app, [rec("after-new-key", now + day + 3500)], now + day + 3500);
-        const after = filesUnder(join(u.home, "cli")).filter((f) => /history-\d+\.json$/.test(f.path)).map((f) => f.path);
-        expect(after).toHaveLength(1);
+        const after = filesUnder(join(u.home, "cli")).filter((f) => /\/history-\d+\.json$/.test(f.path)).map((f) => f.path);
+        expect(after, JSON.stringify({ before, after })).toHaveLength(1);
         expect(before).not.toContain(after[0]);
+        const aside = filesUnder(join(u.home, "cli")).filter((f) => /history\.bad-\d{13}-history(-\d+)?\.json$/.test(f.path));
+        expect(aside.length).toBe(before.length + 1);
         expect(texts(await readHistory(app, { person: true }, { limit: 1000 }, now + day + 3500))).toEqual(["after-new-key"]);
+        await recordHistory(app, [rec("way-later", now + 40 * day)], now + 40 * day);
+        expect(filesUnder(join(u.home, "cli")).some((f) => /history\.bad-/.test(f.path))).toBe(false);
         // Off: nothing more is kept.
         writeFileSync(join(u.home, "config.json"), JSON.stringify({ history: { enabled: false } }));
         await recordHistory(app, [rec("while-off", now + day + 4000)], now + day + 4000);
@@ -356,11 +401,73 @@ describe("message history", () => {
       }
       // --clear deletes it all, the key included; only the person may.
       writeFileSync(join(u.home, "config.json"), "{}");
+      // The event log p2p watch reads holds message text too: --clear purges it there (L5), keeping the rest.
+      const ea = await u.app();
+      await ea.load();
+      try {
+        await ea.state.addEvents([
+          { id: "p2p.message:clear-1", at: Date.now(), kind: "p2p.message", data: { text: "EVENT-LOG-TEXT" } },
+          { id: "p2p.ext:clear-2", at: Date.now(), kind: "p2p.ext", data: { fallback: "EVENT-LOG-EXT" } },
+          { id: "p2p.friend:keep", at: Date.now(), kind: "p2p.friend", data: {} },
+        ]);
+      } finally {
+        await ea.close();
+      }
       expect((await as(u, { CLAUDECODE: "1" }, ["history", "--clear"], true)).json?.error).toBe("refused");
+      expect(readFileSync(join(u.home, "cli", "events.json"), "utf8")).toContain("EVENT-LOG-TEXT");
       const cleared = await u.ok(["history", "--clear"]);
       expect(cleared.cleared).toBeGreaterThan(0);
+      expect(cleared.events).toBe(2);
+      const log = readFileSync(join(u.home, "cli", "events.json"), "utf8");
+      expect(log).not.toMatch(/EVENT-LOG-TEXT|EVENT-LOG-EXT/);
+      expect(log).toContain("p2p.friend:keep");
       expect(filesUnder(join(u.home, "cli")).some((f) => /history/.test(f.path))).toBe(false);
       expect(texts(await u.ok(["history"]))).toEqual([]);
+    } finally {
+      u.cleanup();
+    }
+  });
+
+  it("a document that can't be opened is set aside, never silently swept or overwritten; an older copy put back is refused (L6)", async () => {
+    const u = new User("damage", transport);
+    try {
+      await u.ok(["init", "--name", "damage", "--relay", R, "--yes"]);
+      const app = await u.app();
+      await app.load();
+      const errs: string[] = [];
+      (app.io as { err: (s: string) => void }).err = (s) => errs.push(s);
+      const rec = (id: string): HistoryRec => ({ id, at: Date.now(), dir: "in", type: "message", session: "x", peer: { userId: app.userId, address: "me" }, text: id });
+      const dir = join(u.home, "cli");
+      try {
+        await recordHistory(app, [rec("one")]);
+        const v1 = readFileSync(join(dir, "history-1.json"), "utf8");
+        await recordHistory(app, [rec("two")]);
+        // An older sealed copy of the segment put back: it opens, but it isn't the one the index names.
+        writeFileSync(join(dir, "history-1.json"), v1);
+        const rolled = await readHistory(app, { person: true });
+        expect(texts(rolled)).toEqual([]);
+        expect(rolled.unreadable).toBe(1);
+        // The next write sets it aside (with a word on stderr) and starts a new segment; nothing is overwritten.
+        await recordHistory(app, [rec("three")]);
+        expect(errs.join("\n")).toMatch(/history-1 couldn't be opened \(not the copy the index names\); set aside as history\.bad-/);
+        const aside = readdirSync(dir).filter((f) => f.startsWith("history.bad-"));
+        expect(aside).toHaveLength(1);
+        expect(readFileSync(join(dir, aside[0]), "utf8")).toBe(v1);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["three"]);
+        // A document that isn't even JSON: the read survives it, the next write sets it aside.
+        writeFileSync(join(dir, "history-2.json"), "{not json");
+        expect((await readHistory(app, { person: true })).unreadable).toBe(1);
+        await recordHistory(app, [rec("four")]);
+        expect(readdirSync(dir).filter((f) => f.startsWith("history.bad-"))).toHaveLength(2);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["four"]);
+        // An index that can't be opened: rebuilt from the segments that do (set aside itself).
+        writeFileSync(join(dir, "history.json"), "{}");
+        await recordHistory(app, [rec("five")]);
+        expect(texts(await readHistory(app, { person: true }))).toEqual(["four", "five"]);
+        expect(readdirSync(dir).some((f) => /^history\.bad-\d+-history\.json$/.test(f))).toBe(true);
+      } finally {
+        await app.close();
+      }
     } finally {
       u.cleanup();
     }

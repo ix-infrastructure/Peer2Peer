@@ -17,21 +17,25 @@
 //  - Bounded: older than `history.retentionDays` (config.json, default 30) or past
 //    `history.maxBytes` (default 8 MiB of records), the oldest go, pruned on every write.
 //    `history.enabled: false` (or P2P_HISTORY=0) records nothing more; `p2p history --clear`
-//    deletes everything, the key included.
+//    deletes everything, the key included, and the messages in the event log (events.json).
+//    A record's `at` is when it arrived here (`sentAt`: the sender's clock), so a sender can't
+//    backdate one. A document that can't be opened is set aside (history.bad-*), never swept
+//    silently or overwritten; the index carries each segment's hash, so an older copy put back is too.
 //  - Who reads it (assertHistoryReader):
 //      the person's own view (no --session, or session `tui`: messages to the person, to no
 //      session, or from `p2p tui` / a terminal send): only the person, by the same gate as the
 //      other person-only commands (their front end's token, or outside any agent's session their
 //      "yes" on the controlling terminal; refused inside an agent's session);
 //      one session's (`--session <sid>`): its front end (the token), for a session a front end
-//      registered, and only records made while that session was in projects it is still bound to
-//      (so a session id that comes back in another project never sees the earlier one's history).
+//      registered, and only records made since its binding began (projects.ts `since`), while the
+//      session was in projects it is still bound to (a record kept with no binding is UNBOUND: the
+//      person's only), so a session id bound anew never sees the earlier one's history.
 //      Without the token, only the person at their own terminal, as above.
 //  - Peer text stays untrusted: kept as received, sanitized for a terminal on the way out, and
 //    framed as the peer's data by the front ends that show it to a model.
 
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { b64uDecode, b64uEncode, loadCircle, sanitizePeerText } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
@@ -63,8 +67,10 @@ const AAD_PREFIX = "p2p/v3/history/v1|";
 export interface HistoryRec {
   /** The event id for one received (what `p2p watch` printed), or `out:<random>`. */
   id: string;
-  /** When it was recorded here (ms). */
+  /** When it was recorded here (ms, this device's clock): retention, `--since` and the boundary check use it. */
   at: number;
+  /** Received: when the sender says it sent it (the envelope's ts, the sender's clock). */
+  sentAt?: number;
   dir: "in" | "out";
   type: "message" | "ext";
   /**
@@ -84,7 +90,11 @@ export interface HistoryRec {
   ext?: string;
   /** Sends: what became of it when it was sent. */
   state?: "sent" | "offline" | "outbox";
-  /** The session's projects when it was recorded (projects.ts), for the boundary check on reads. */
+  /**
+   * The session's projects when it was recorded (projects.ts), for the boundary check on reads.
+   * UNBOUND when the session had none, or they couldn't be read: such a record is never shown to a
+   * session's reader, only to the person.
+   */
   projects?: string[];
 }
 
@@ -98,7 +108,8 @@ interface Sealed {
 interface IndexDoc {
   v: 1;
   /** Oldest first. */
-  segs: { name: string; first: number; last: number; bytes: number; count: number }[];
+  /** `h`: a hash of the sealed document as written, so an older copy put back is set aside. */
+  segs: { name: string; first: number; last: number; bytes: number; count: number; h?: string }[];
   next: number;
 }
 
@@ -189,11 +200,114 @@ function open<T>(key: Buffer, name: string, doc: unknown): T | undefined {
 // Writing
 
 const recBytes = (r: HistoryRec) => Buffer.byteLength(JSON.stringify(r), "utf8");
+const docHash = (doc: unknown) => createHash("sha256").update(JSON.stringify(doc), "utf8").digest("base64url").slice(0, 22);
 
-/** A new index, numbered past any segment on disk (one left by an index that didn't open is swept, never reused). */
-function freshIndex(app: App): IndexDoc {
-  const top = Math.max(0, ...segmentNames(app).map((n) => Number(n.slice("history-".length))));
-  return { v: 1, segs: [], next: top + 1 };
+/** At most this many set-aside files are kept (each also goes once it is past retention). */
+export const MAX_QUARANTINED = 16;
+const QUARANTINE_RE = /^history\.bad-(\d{13})-[\w.-]{1,40}\.json$/;
+
+/** Segment documents on disk (`<home>/cli/history-<n>.json`), whatever the index says. */
+function segmentNames(app: App): string[] {
+  try {
+    return readdirSync(join(app.state.dir, "cli"))
+      .map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1])
+      .filter((x): x is string => x !== undefined)
+      .sort((a, b) => Number(a.slice(8)) - Number(b.slice(8)));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A history document that can't be read or opened (altered, rolled back, sealed under another key,
+ * not JSON): moved aside to `history.bad-<ms>-<name>.json`, never silently deleted or overwritten,
+ * and said once on stderr. Set-aside files go once past retention, or past MAX_QUARANTINED.
+ */
+function quarantine(app: App, name: string, why: string): void {
+  const dir = join(app.state.dir, "cli");
+  const to = `history.bad-${Date.now()}-${name}.json`;
+  try {
+    renameSync(join(dir, `${name}.json`), join(dir, to));
+    app.io.err(`p2p: message history: ${name} couldn't be opened (${why}); set aside as ${to}`);
+  } catch {
+    // gone meanwhile
+  }
+}
+
+function pruneQuarantine(app: App, cutoff: number): void {
+  const dir = join(app.state.dir, "cli");
+  let files: { f: string; at: number }[];
+  try {
+    files = readdirSync(dir)
+      .map((f) => ({ f, m: QUARANTINE_RE.exec(f) }))
+      .filter((x) => x.m)
+      .map((x) => ({ f: x.f, at: Number(x.m![1]) }))
+      .sort((a, b) => a.at - b.at);
+  } catch {
+    return;
+  }
+  for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync(join(dir, x.f), { force: true });
+}
+
+type Opened<T> = { ok: true; value: T } | { ok: false; missing: boolean; why: string };
+
+/** One document read and opened; never throws (each document's failure is its own). */
+async function readSealed<T>(app: App, key: Buffer, name: string, hash?: string): Promise<Opened<T>> {
+  let doc: unknown;
+  try {
+    doc = await app.state.backend.read(name);
+  } catch {
+    return { ok: false, missing: false, why: "not readable" };
+  }
+  if (doc === undefined || doc === null) return { ok: false, missing: true, why: "missing" };
+  if (hash !== undefined && docHash(doc) !== hash) return { ok: false, missing: false, why: "not the copy the index names" };
+  const v = open<T>(key, name, doc);
+  return v === undefined ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v };
+}
+
+/** A segment's place in the index, from its records. */
+function segEntry(name: string, items: readonly HistoryRec[], sealed: Sealed): IndexDoc["segs"][number] {
+  return {
+    name,
+    first: items.length ? Math.min(...items.map((r) => r.at)) : 0,
+    last: items.length ? Math.max(...items.map((r) => r.at)) : 0,
+    bytes: items.reduce((n, r) => n + recBytes(r), 0),
+    count: items.length,
+    h: docHash(sealed),
+  };
+}
+
+/**
+ * The index, or one rebuilt from the segments on disk when it can't be opened (the one that didn't
+ * is set aside): segments that open are kept, the others set aside. Under the lock.
+ */
+async function loadIndex(app: App, key: Buffer): Promise<IndexDoc> {
+  const got = await readSealed<IndexDoc>(app, key, INDEX);
+  if (got.ok && got.value?.v === 1 && Array.isArray(got.value.segs)) {
+    // Segments it doesn't list: adopted if they open, else set aside.
+    const listed = new Set(got.value.segs.map((s) => s.name));
+    const extra = segmentNames(app).filter((n) => !listed.has(n));
+    if (extra.length === 0) return got.value;
+    const idx = { ...got.value, segs: [...got.value.segs] };
+    for (const name of extra) await adopt(app, key, idx, name);
+    idx.segs.sort((a, b) => a.first - b.first);
+    return idx;
+  }
+  if (!got.ok && !got.missing) quarantine(app, INDEX, got.why);
+  const names = segmentNames(app);
+  const idx: IndexDoc = { v: 1, segs: [], next: Math.max(0, ...names.map((n) => Number(n.slice(8)))) + 1 };
+  for (const name of names) await adopt(app, key, idx, name);
+  idx.segs.sort((a, b) => a.first - b.first);
+  return idx;
+}
+
+async function adopt(app: App, key: Buffer, idx: IndexDoc, name: string): Promise<void> {
+  const seg = await readSealed<HistoryRec[]>(app, key, name);
+  if (seg.ok && Array.isArray(seg.value)) {
+    const doc = (await app.state.backend.read(name)) as Sealed;
+    idx.segs.push(segEntry(name, seg.value, doc));
+    idx.next = Math.max(idx.next, Number(name.slice(8)) + 1);
+  } else if (!seg.ok && !seg.missing) quarantine(app, name, seg.why);
 }
 
 /**
@@ -209,15 +323,31 @@ export async function recordHistory(app: App, recs: readonly HistoryRec[], now =
     if (!key) return;
     const b = app.state.backend;
     await app.state.withLock(async () => {
-      const idx = open<IndexDoc>(key, INDEX, await b.read(INDEX)) ?? freshIndex(app);
+      const idx = await loadIndex(app, key);
       let last = idx.segs.at(-1);
-      let items: HistoryRec[] = last ? (open<HistoryRec[]>(key, last.name, await b.read(last.name)) ?? []) : [];
+      let items: HistoryRec[] = [];
+      if (last) {
+        const seg = await readSealed<HistoryRec[]>(app, key, last.name, last.h);
+        if (seg.ok && Array.isArray(seg.value)) items = seg.value;
+        else {
+          // Never appended to (and so never overwritten): set aside, and a new segment begins.
+          if (!seg.ok && !seg.missing) quarantine(app, last.name, seg.why);
+          idx.segs.pop();
+          last = undefined;
+        }
+      }
       const have = new Set(items.map((r) => r.id));
+      const write = async () => {
+        if (!last) return;
+        const sealed = seal(key, last.name, items);
+        await b.write(last.name, sealed);
+        Object.assign(last, segEntry(last.name, items, sealed));
+      };
       for (const r0 of recs) {
         const r: HistoryRec = { ...r0, text: r0.text.length > MAX_RECORD_TEXT ? r0.text.slice(0, MAX_RECORD_TEXT) : r0.text };
         if (have.has(r.id)) continue;
         if (!last || last.bytes >= SEGMENT_BYTES) {
-          if (last) await b.write(last.name, seal(key, last.name, items));
+          await write();
           last = { name: `history-${idx.next++}`, first: r.at, last: r.at, bytes: 0, count: 0 };
           idx.segs.push(last);
           items = [];
@@ -225,27 +355,13 @@ export async function recordHistory(app: App, recs: readonly HistoryRec[], now =
         items.push(r);
         have.add(r.id);
         last.bytes += recBytes(r);
-        last.count = items.length;
-        last.first = Math.min(last.first, r.at);
-        last.last = Math.max(last.last, r.at);
       }
-      if (last) await b.write(last.name, seal(key, last.name, items));
+      await write();
       await prune(app, key, idx, settings, now);
       await b.write(INDEX, seal(key, INDEX, idx));
     });
   } catch (e) {
     app.io.err(`p2p: message history not written: ${sanitizePeerText((e as Error).message, 200)}`);
-  }
-}
-
-/** Segment documents on disk (`<home>/cli/history-<n>.json`), whatever the index says. */
-function segmentNames(app: App): string[] {
-  try {
-    return readdirSync(join(app.state.dir, "cli"))
-      .map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1])
-      .filter((x): x is string => x !== undefined);
-  } catch {
-    return [];
   }
 }
 
@@ -257,6 +373,7 @@ async function prune(app: App, key: Buffer, idx: IndexDoc, s: HistorySettings, n
     if (b.remove) await b.remove(name);
     else await b.write(name, null);
   };
+  pruneQuarantine(app, cutoff);
   // Whole segments past retention.
   while (idx.segs.length > 0 && idx.segs[0].last < cutoff) await drop(idx.segs.shift()!.name);
   // Past the size cap: whole segments, oldest first, but never the newest one.
@@ -266,14 +383,16 @@ async function prune(app: App, key: Buffer, idx: IndexDoc, s: HistorySettings, n
     total -= gone.bytes;
     await drop(gone.name);
   }
-  // Segments the index doesn't list (an index that didn't open, a key that was replaced): removed,
-  // so nothing outlives retention unseen.
-  const listed = new Set(idx.segs.map((x) => x.name));
-  for (const name of segmentNames(app)) if (!listed.has(name)) await drop(name);
   // The oldest segment still holding records past retention, or the only one over the cap: trimmed.
   const first = idx.segs[0];
   if (first && (first.first < cutoff || total > s.maxBytes)) {
-    const items = (open<HistoryRec[]>(key, first.name, await b.read(first.name)) ?? []).filter((r) => r.at >= cutoff);
+    const seg = await readSealed<HistoryRec[]>(app, key, first.name, first.h);
+    if (!seg.ok || !Array.isArray(seg.value)) {
+      if (!seg.ok && !seg.missing) quarantine(app, first.name, seg.why);
+      idx.segs.shift();
+      return;
+    }
+    const items = seg.value.filter((r) => r.at >= cutoff);
     let bytes = items.reduce((n, r) => n + recBytes(r), 0);
     const others = total - first.bytes;
     while (items.length > 0 && others + bytes > s.maxBytes) bytes -= recBytes(items.shift()!);
@@ -281,39 +400,59 @@ async function prune(app: App, key: Buffer, idx: IndexDoc, s: HistorySettings, n
       idx.segs.shift();
       await drop(first.name);
     } else {
-      Object.assign(first, { first: Math.min(...items.map((r) => r.at)), last: Math.max(...items.map((r) => r.at)), bytes, count: items.length });
-      await b.write(first.name, seal(key, first.name, items));
+      const sealed = seal(key, first.name, items);
+      await b.write(first.name, sealed);
+      Object.assign(first, segEntry(first.name, items, sealed));
     }
   }
 }
 
-/** `p2p history --clear`: every segment, the index and the key (what is left can't be opened). */
-export async function clearHistory(app: App): Promise<{ cleared: number }> {
+/**
+ * `p2p history --clear`: every segment, the index, set-aside files and the key, and the messages and
+ * extension notices in the event log `p2p watch` reads (events.json), so no copy of their text is
+ * left in P2P_HOME. A message a session's watch hasn't printed yet is gone with it.
+ */
+export async function clearHistory(app: App): Promise<{ cleared: number; events: number }> {
   const key = historyKey(app.home, false);
   const b = app.state.backend;
-  return app.state.withLock(async () => {
+  const cleared = await app.state.withLock(async () => {
     let n = 0;
-    const idx = key ? open<IndexDoc>(key, INDEX, await b.read(INDEX)) : undefined;
-    for (const s of idx?.segs ?? []) n += s.count;
-    for (const name of new Set([...(idx?.segs ?? []).map((s) => s.name), ...segmentNames(app)])) {
+    const idx = key ? await readSealed<IndexDoc>(app, key, INDEX) : undefined;
+    const segs = idx?.ok ? idx.value.segs : [];
+    for (const s of segs) n += s.count;
+    for (const name of new Set([...segs.map((s) => s.name), ...segmentNames(app)])) {
       if (b.remove) await b.remove(name);
       else await b.write(name, null);
     }
     if (b.remove) await b.remove(INDEX);
+    else await b.write(INDEX, null);
+    pruneQuarantine(app, Number.MAX_SAFE_INTEGER);
     rmSync(historyKeyFile(app.home), { force: true });
-    return { cleared: n };
+    return n;
   });
+  const events = await app.state.update("events", (cur) => {
+    if (!cur) return { result: 0 };
+    const keep = cur.items.filter((e) => e.kind !== "p2p.message" && e.kind !== "p2p.ext");
+    return keep.length === cur.items.length ? { result: 0 } : { next: { ...cur, items: keep }, result: cur.items.length - keep.length };
+  });
+  return { cleared, events };
 }
 
 // ---------------------------------------------------------------------------
 // What gets recorded
 
-/** The projects a session is bound to now (projects.ts), for the record's boundary. */
+/** The marker a record carries when its session's projects were unknown (fail closed: the person's only). */
+export const UNBOUND = "!unbound";
+
+/** The projects a session is bound to now (projects.ts), for the record's boundary; [UNBOUND] when none or unreadable. */
 async function projectsOf(app: App, sid: string | undefined): Promise<string[] | undefined> {
   if (sid === undefined || sid === PERSON_SESSION) return undefined;
-  const b = await sessionBinding(app, sid);
-  const ids = Object.keys(b?.projects ?? {}).sort();
-  return ids.length > 0 ? ids : undefined;
+  try {
+    const ids = Object.keys((await sessionBinding(app, sid))?.projects ?? {}).sort();
+    return ids.length > 0 ? ids : [UNBOUND];
+  } catch {
+    return [UNBOUND];
+  }
 }
 
 async function circleOf(app: App, own: string, sid: string): Promise<string | undefined> {
@@ -351,7 +490,8 @@ async function historyRecords(app: App, events: readonly EventRec[]): Promise<Hi
     const projects = await projectsOf(app, session);
     recs.push({
       id: e.id,
-      at: e.at,
+      at: Date.now(),
+      sentAt: e.at,
       dir: "in",
       type: e.kind === "p2p.message" ? "message" : "ext",
       ...(session !== undefined ? { session } : {}),
@@ -372,7 +512,7 @@ export async function recordSent(
   o: { fromSession: string; to: { userId: string; address: string; own: string; sid: string; ref: string }; text: string; ext?: string; state?: HistoryRec["state"] },
 ): Promise<void> {
   if (app.readOnly || !historySettings(app).enabled) return;
-  const projects = await projectsOf(app, o.fromSession).catch(() => undefined);
+  const projects = await projectsOf(app, o.fromSession);
   const circle = await circleOf(app, o.to.own, o.to.sid);
   await recordHistory(app, [
     {
@@ -400,23 +540,31 @@ export function isPersonRecord(r: HistoryRec): boolean {
   return r.session === undefined || r.session === PERSON_SESSION;
 }
 
-/** Every record held (decrypted), oldest first, without the ones past retention. */
-async function readAll(app: App, now: number): Promise<HistoryRec[]> {
+/**
+ * Every record held (decrypted), oldest first, without the ones past retention, and how many
+ * documents couldn't be opened (they are set aside at the next write, never shown).
+ */
+async function readAll(app: App, now: number): Promise<{ recs: HistoryRec[]; unreadable: number }> {
   const key = historyKey(app.home, false);
-  if (!key) return [];
-  const b = app.state.backend;
-  const idx = open<IndexDoc>(key, INDEX, await b.read(INDEX));
-  if (!idx) return [];
+  if (!key) return { recs: [], unreadable: 0 };
+  const idx = await readSealed<IndexDoc>(app, key, INDEX);
+  if (!idx.ok || !Array.isArray(idx.value?.segs)) return { recs: [], unreadable: idx.ok || !idx.missing ? 1 : 0 };
   const cutoff = now - historySettings(app).retentionDays * 86_400_000;
   const out: HistoryRec[] = [];
-  for (const s of idx.segs) {
+  let unreadable = 0;
+  for (const s of idx.value.segs) {
     if (s.last < cutoff) continue;
-    for (const r of open<HistoryRec[]>(key, s.name, await b.read(s.name)) ?? []) if (r && typeof r.at === "number" && r.at >= cutoff) out.push(r);
+    const seg = await readSealed<HistoryRec[]>(app, key, s.name, s.h);
+    if (!seg.ok || !Array.isArray(seg.value)) {
+      unreadable++;
+      continue;
+    }
+    for (const r of seg.value) if (r && typeof r.at === "number" && r.at >= cutoff && typeof r.text === "string") out.push(r);
   }
-  return out.sort((a, b) => a.at - b.at);
+  return { recs: out.sort((a, b) => a.at - b.at), unreadable };
 }
 
-export type HistoryReader = { person: true } | { person: false; sid: string; projects: Set<string> };
+export type HistoryReader = { person: true } | { person: false; sid: string; projects: Set<string>; since: number };
 
 /**
  * Who may read: the person (every record), or one session (its own records, within its projects).
@@ -440,14 +588,21 @@ export async function assertHistoryReader(app: App, sid: string | undefined): Pr
   // The front end (it holds the person token) speaks for its own session: one it registered.
   const b = await sessionBinding(app, sid);
   if (!b?.registered) throw new CliError("refused", `session ${sid} isn't a session a front end of yours registered: no history is read for it`);
-  return { person: false, sid, projects: new Set(Object.keys(b.projects ?? {})) };
+  // A binding from before it had a start (`since`) shows nothing until the session's next status gives it one.
+  return { person: false, sid, projects: new Set(Object.keys(b.projects ?? {})), since: typeof b.since === "number" ? b.since : Number.MAX_SAFE_INTEGER };
 }
 
-/** Whether `reader` may see `r`. A session sees only its own, and only within its projects. */
+/**
+ * Whether `reader` may see `r`. A session sees only its own: recorded since its binding began (a
+ * binding made anew, after the old one expired, inherits nothing), with projects known (never
+ * UNBOUND or none), all of which it is still bound to.
+ */
 export function mayRead(reader: HistoryReader, r: HistoryRec): boolean {
   if (reader.person) return true;
   if (isPersonRecord(r) || r.session !== reader.sid) return false;
-  return (r.projects ?? []).every((p) => reader.projects.has(p));
+  if (typeof r.at !== "number" || r.at < reader.since) return false;
+  if (!Array.isArray(r.projects) || r.projects.length === 0 || r.projects.includes(UNBOUND)) return false;
+  return r.projects.every((p) => reader.projects.has(p));
 }
 
 export interface HistoryQuery {
@@ -464,6 +619,8 @@ export interface HistoryResult {
   messages: (HistoryRec & { inbox?: true })[];
   /** More matched than `limit`: the oldest of them were left out. */
   truncated: boolean;
+  /** History documents that couldn't be opened (set aside at the next write). */
+  unreadable?: number;
   retention: { days: number; maxBytes: number; enabled: boolean };
 }
 
@@ -484,7 +641,8 @@ export function parseSince(s: string, now = Date.now()): number {
 /** `p2p history`: the records `reader` may see that match `q`, oldest first, at most `limit` (the newest). */
 export async function readHistory(app: App, reader: HistoryReader, q: HistoryQuery = {}, now = Date.now()): Promise<HistoryResult> {
   const s = historySettings(app);
-  let recs = (await readAll(app, now)).filter((r) => mayRead(reader, r));
+  const all = await readAll(app, now);
+  let recs = all.recs.filter((r) => mayRead(reader, r));
   if (!reader.person) recs = recs.filter((r) => r.session === reader.sid);
   else if (q.inbox) recs = recs.filter(isPersonRecord);
   else if (q.session !== undefined) recs = recs.filter((r) => (q.session === PERSON_SESSION ? isPersonRecord(r) : r.session === q.session));
@@ -509,7 +667,7 @@ export async function readHistory(app: App, reader: HistoryReader, q: HistoryQue
     void _p;
     return { ...rest, ...(reader.person && isPersonRecord(r) ? { inbox: true as const } : {}) };
   });
-  return { messages, truncated, retention: { days: s.retentionDays, maxBytes: s.maxBytes, enabled: s.enabled } };
+  return { messages, truncated, ...(all.unreadable > 0 ? { unreadable: all.unreadable } : {}), retention: { days: s.retentionDays, maxBytes: s.maxBytes, enabled: s.enabled } };
 }
 
 /** One record as a terminal line: peer text sanitized (no control, bidi or format characters, one line). */
@@ -520,5 +678,14 @@ export function historyLine(r: HistoryRec): string {
   const arrow = r.dir === "in" ? `${who} → ${where}` : `${where} → ${who}`;
   const kind = r.type === "ext" ? ` (${sanitizePeerText(r.ext ?? "extension", 64)})` : "";
   const state = r.state && r.state !== "sent" ? ` [${r.state}]` : "";
-  return `${when}  ${arrow}${kind}${state}: ${sanitizePeerText(r.text, 4000)}`;
+  return `${when}  ${arrow}${kind}${state}: ${capText(sanitizePeerText(r.text, HISTORY_SHOW_MAX + 1))}`;
+}
+
+/** What one record shows at most, in a terminal or to a model (the rest: `--json`). */
+export const HISTORY_SHOW_MAX = 4000;
+
+/** `s` cut at HISTORY_SHOW_MAX characters, saying so. */
+export function capText(s: string, max = HISTORY_SHOW_MAX): string {
+  const cps = [...s];
+  return cps.length > max ? `${cps.slice(0, max).join("")}… (truncated)` : s;
 }

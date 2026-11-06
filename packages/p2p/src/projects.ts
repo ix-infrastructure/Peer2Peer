@@ -117,6 +117,8 @@ export interface SessionBinding {
   unregistered?: true;
   /** A front end holding the person token (personTokenOk) has used it. */
   registered?: true;
+  /** When this binding began (ms): a session id bound anew (its old binding expired) starts again here (history.ts). */
+  since?: number;
   at: number;
 }
 
@@ -494,6 +496,7 @@ export async function bindSession(
       ...(constraints.length ? { constraints } : {}),
       ...(unregistered ? { unregistered: true as const } : {}),
       ...(registered ? { registered: true as const } : {}),
+      since: typeof have?.since === "number" ? have.since : now,
       at: now,
     };
     return { next: { ...all, [sid]: next }, result: next };

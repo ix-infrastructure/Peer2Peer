@@ -1007,7 +1007,8 @@ export const PEERS_USAGE = [
   '  /peers held                 what waits for you: first contacts, circle invites, moved keys (as `p2p held`)',
   '  /peers history [inbox|here] [--since <30m|12h|7d|date>] [--peer <user>] [--limit <n>]',
   '                              messages this device sent and received (kept encrypted here, 30 days by',
-  '                              default): all of them, your inbox only, or this session\'s. Typed only',
+  '                              default): all of them, your inbox only, or this session\'s. Typed at your',
+  '                              terminal only; shown above the prompt to you, never to Claude',
   '  /peers doctor [user]        why sessions are or aren\'t visible: this device, or whether you can see <user>',
   '  /peers rotate [resume]      move to a new identity key: the remedy for a lost or stolen key-holding device',
   '                              (the plan first: drop a lost device, then Rotate; friends approve "moved to a',
@@ -1234,6 +1235,13 @@ export type HistoryRecord = {
   state?: string
 }
 
+/** How many records `/peers history` shows above the prompt by default (--limit for more). */
+export const HISTORY_BAND_DEFAULT = 30
+/** What one record shows at most above the prompt. */
+export const HISTORY_BAND_TEXT_MAX = 2000
+
+const capBand = (s: string) => ([...s].length > HISTORY_BAND_TEXT_MAX ? `${[...s].slice(0, HISTORY_BAND_TEXT_MAX).join('')}… (truncated)` : s)
+
 /**
  * `/peers history`: what the person typed it for, one line each. Everything a peer wrote is inert (one
  * line, no control or format characters, no < >) and quoted as their data.
@@ -1245,7 +1253,7 @@ export function historyText(r: { messages: readonly HistoryRecord[]; truncated?:
     const when = new Date(m.at).toISOString().replace('T', ' ').slice(0, 16)
     const who = `${inert(m.peer.address)}${m.peerSession?.ref ? ` [${inert(m.peerSession.ref)}]` : ''}`
     const where = m.session === undefined || m.session === 'tui' ? 'you' : m.session === here ? 'this session' : `your session ${inert(m.session)}`
-    const what = m.type === 'ext' ? `(${inert(m.ext ?? 'extension')}) ${inert(m.text)}` : peerData(m.dir === 'in' ? m.peer.address : 'you', m.text)
+    const what = m.type === 'ext' ? `(${inert(m.ext ?? 'extension')}) ${capBand(inert(m.text))}` : peerData(m.dir === 'in' ? m.peer.address : 'you', capBand(m.text))
     return `  ${when}  ${m.dir === 'in' ? `${who} → ${where}` : `${where} → ${who}`}: ${what}`
   })
 
@@ -1560,7 +1568,8 @@ export function isOwnCode(codes: Iterable<{ code: string; label?: string | null 
 // message is the model's ordinary job. `doctor` and the listings only read.
 // `tui` is the person's full-screen terminal UI (it accepts, declines, trusts and sends on key presses): never the
 // model's, wherever it sits after the CLI's name (`p2p --session x tui`). See also uncheckableShell (pty wrappers).
-const MUTATING_ONE = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'tui'])
+// `history`: the person's own messages (and `history --clear` deletes them): theirs, typed (/peers history) or in their terminal.
+const MUTATING_ONE = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'tui', 'history'])
 /** Verbs refused only as the subcommand itself (the first word after the CLI): they're common words in message text. */
 const MUTATING_FIRST = new Set(['status'])
 // `ix import` writes a peer's note into the local Ix graph and `ix resolve` runs Ix for a peer's reference:
