@@ -252,11 +252,24 @@ export interface ExtAudience {
   orgs?: number;
 }
 
+/**
+ * Which Ix graph a call may reach (projects.ts graphTarget, the chokepoint): this machine's backend,
+ * or one circle's shared graph. An extension that runs Ix takes the endpoint (and any token) only
+ * from here, never from its environment.
+ */
+export type ExtGraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
+
 /** What a command gets from `p2p`: no keys, no store, only these. */
 export interface ExtContext {
   env: Env;
   /** The user's working directory: P2P_WORKDIR (an existing absolute directory), else the process's. */
   cwd: string;
+  /**
+   * The graph target for a call made for session `sid` (when given) working in this context's folders
+   * (P2P_WORKDIR and P2P_PROJECT_DIRS): projects.ts graphTarget. Absent on clients from before graph
+   * targets: an extension then treats every call as local.
+   */
+  graphTarget?(opts?: { sid?: string }): Promise<ExtGraphTarget>;
   /** stdout lines are for `--json`-less output only; use the returned `human`. */
   io: { err(s: string): void; readStdin?: () => Promise<string> };
   /** Whether --json was given (no prompts then). */

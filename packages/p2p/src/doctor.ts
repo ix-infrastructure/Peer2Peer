@@ -54,6 +54,9 @@ import { CliError } from "./errors.js";
 import { readCapped, RelayConnection } from "./relay-client.js";
 import { rosterAudience, sessionRef } from "./sessions.js";
 import type { PeerStatusRec } from "./state.js";
+import { enabledNamespaces } from "./extensions.js";
+import { extIxInstalled, ixBinary, IX_INSTALL_URL, ixVersion, runIx } from "./ix-local.js";
+import { describeGraphTarget, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir } from "./projects.js";
 
 export type CheckStatus = "ok" | "fail" | "unknown";
 
@@ -590,7 +593,66 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
     );
   }
 
+  await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
+}
+
+
+// ---------------------------------------------------------------------------
+// Ix (epic #41): the local CLI, its backend, this checkout's map, and each project's graph target
+
+/** At most this many projects' graph targets are listed. */
+const MAX_GRAPH_ROWS = 10;
+
+/**
+ * The Ix section: the binary and its version, the local backend (reachable at the local endpoint),
+ * whether the project here is mapped, and the graph target of the project here and of each project
+ * with a policy ("local only" today). Without Ix nothing is a failure: Peer2Peer works without it.
+ * `ix` runs as ext-ix runs it (ix-local.ts): absolute path, allowlisted environment, the local
+ * endpoint pinned, read-only commands, bounded.
+ */
+export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
+  const local = localGraphEndpoint(app.env, app.file);
+  const target = { endpoint: local };
+  const bin = ixBinary(app.env);
+  const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
+  if (!bin) {
+    c.add("ix", "unknown", "Ix", "the Ix CLI isn't installed (Peer2Peer works without it; peers' Ix items show as plain text)", `install Ix (${IX_INSTALL_URL}), then \`p2p extensions enable ix\``);
+  } else {
+    const v = (await bounded(ixVersion(bin, app.env, target, ms), ms + 500)).value;
+    if (v) c.add("ix", "ok", "Ix", `ix ${v} (${bin})`);
+    else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
+    if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
+    else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
+    const h = await httpProbe(`${local}/v1/health`, ms);
+    if (h.ok && h.status !== undefined && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
+    else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
+    const here = projectOf(sessionWorkdir(app.env));
+    if (here.kind === "git" && h.ok) {
+      const st = (await bounded(runIx(bin, ["status", "--format", "json", "--root", here.root], { env: app.env, target, cwd: here.root, timeoutMs: ms }), ms + 500)).value;
+      let mapped: boolean | undefined;
+      try {
+        const j = st && st.code === 0 ? (JSON.parse(st.stdout) as { graphCompleted?: unknown }) : undefined;
+        mapped = j ? j.graphCompleted === true : undefined;
+      } catch {
+        mapped = undefined;
+      }
+      if (mapped === true) c.add("ix-workspace", "ok", "Ix workspace", `${here.name} is mapped`);
+      else if (mapped === false) c.add("ix-workspace", "unknown", "Ix workspace", `${here.name} isn't mapped yet`, `run \`ix map\` in ${here.root}`);
+      else c.add("ix-workspace", "unknown", "Ix workspace", `couldn't tell whether ${here.name} is mapped`, "run `ix status` in it");
+    }
+  }
+  // Graph targets: the project here first, then each project with a policy.
+  const doc = (await bounded(projectsDoc(app), ms)).value ?? { v: 1 as const, projects: {} };
+  const here = projectOf(sessionWorkdir(app.env));
+  const rows: { id: string; name: string; repoPrivate?: true }[] = [{ id: here.id, name: here.name, ...(here.repoPrivate ? { repoPrivate: true as const } : {}) }];
+  const all = (await bounded(listProjects(app), ms)).value ?? [];
+  for (const p of all) if (!rows.some((r) => r.id === p.id)) rows.push({ id: p.id, name: p.name });
+  for (const r of rows.slice(0, MAX_GRAPH_ROWS)) {
+    const t = projectGraphTarget(app, r, doc);
+    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t)}${t.kind === "local" ? `: ${t.why}` : ""}`);
+  }
+  if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
 }
 
 // ---------------------------------------------------------------------------

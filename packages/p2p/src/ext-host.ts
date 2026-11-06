@@ -27,7 +27,7 @@ import {
   type ExtStateValue,
   type P2PExtension,
 } from "./extensions.js";
-import { sessionWorkdir } from "./projects.js";
+import { graphPinnedEnv, graphTarget, localGraphEndpoint, sessionDirs, sessionWorkdir } from "./projects.js";
 import { listPeers, sendExtension, sessionAudience, sessionRef } from "./sessions.js";
 import { sessKey, type EventRec, type XStateRec } from "./state.js";
 import { declaredState, expiresAt, keptCopy, liveStates, publishExtensionState } from "./xstate.js";
@@ -65,9 +65,15 @@ function toExtEvent(e: EventRec): ExtEvent {
 }
 
 export function extContext(app: App, ext: P2PExtension, io: Io, json: boolean, confirm: (q: string, yes?: boolean) => Promise<boolean>): ExtContext {
+  // Pinned to the local graph: no IX_* cloud setting of the caller's reaches an extension's `ix` (projects.ts).
+  const pinned = graphPinnedEnv(app.env, { kind: "local", endpoint: localGraphEndpoint(app.env, app.file), why: "" });
   return {
-    env: app.env,
+    env: pinned,
     cwd: extWorkdir(app.env),
+    graphTarget: async (o = {}) => {
+      const { dirs, over } = sessionDirs(app.env);
+      return graphTarget(app, { ...(typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}), dirs, over });
+    },
     io: { err: (s) => io.err(s), ...(io.readStdin ? { readStdin: io.readStdin } : {}) },
     json,
     interactive: !json && io.prompt !== undefined,

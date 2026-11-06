@@ -321,6 +321,8 @@ export interface ProjectView {
   /** Why it is private although a policy shares it, or `unmapped` when none does. */
   why?: string;
   repoPrivate?: true;
+  /** Which Ix graph its work may reach (graphTarget): `local` (only this machine's) today. */
+  graph: GraphTarget;
 }
 
 export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" | "kind" | "root" | "remote" | "repoPrivate">, doc?: ProjectsDoc): Promise<ProjectView> {
@@ -349,6 +351,7 @@ export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" 
     people,
     ...(why ? { why } : {}),
     ...(ref.repoPrivate ? { repoPrivate: true as const } : {}),
+    graph: projectGraphTarget(app, ref, d),
   };
 }
 
@@ -761,3 +764,167 @@ export async function defaultCircleNotice(app: App, sid: string): Promise<string
 
 /** The text of the one-time notice starts so (the mod and the Codex bridge match it). */
 export const PROJECT_NOTICE_PREFIX = "project boundaries:";
+
+// ---------------------------------------------------------------------------
+// Graph targets (epic #41 piece 5): which Ix graph a project's work may reach
+
+/**
+ * Where Ix calls made for a project (or a session) may go. `local`: this machine's own Ix backend,
+ * the only target today. `shared`: the shared graph of exactly one circle the project is shared
+ * with (Ix-memory, through Ix Pro), once one exists: a later PR adds the registry of shared
+ * graphs, and until then nothing resolves to it.
+ */
+export type GraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string };
+
+/** What `p2p doctor` and `p2p project show` print for a local target. */
+export const GRAPH_LOCAL_ONLY = "local only";
+
+/** Ix's own default backend (ix-cli config.ts DEFAULT_ENDPOINT): `ix docker` runs it on this machine. */
+export const DEFAULT_IX_ENDPOINT = "http://localhost:8090";
+
+/**
+ * Whether `url` is an Ix backend on this machine: http(s) to localhost, 127.0.0.0/8 or ::1, with no
+ * credentials, query or fragment. Anything else (a cloud URL, a LAN host, `localhost.example.com`,
+ * `http://127.0.0.1@evil.example`) is not.
+ */
+export function isLoopbackEndpoint(url: unknown): url is string {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return false;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || u.search || u.hash) return false;
+  const h = u.hostname.toLowerCase();
+  return h === "localhost" || h === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * The local Ix endpoint every `local` target names: IX_ENDPOINT when it is a loopback URL (a person
+ * running their backend on another local port), else `ixEndpoint` in config.json when loopback, else
+ * Ix's default. Never a non-loopback URL, wherever it was set: env injection can at most pick another
+ * port on this machine.
+ */
+export function localGraphEndpoint(env: Record<string, string | undefined>, file?: { ixEndpoint?: unknown }): string {
+  const e = env.IX_ENDPOINT?.trim();
+  if (isLoopbackEndpoint(e)) return e.replace(/\/+$/, "");
+  const f = typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : undefined;
+  if (isLoopbackEndpoint(f)) return f.replace(/\/+$/, "");
+  return DEFAULT_IX_ENDPOINT;
+}
+
+/**
+ * The circles that have a shared graph, and its endpoint. None yet: the shared cloud graph (epic #41
+ * piece 3) comes in a later PR, which fills this from settled, person-made state. Nothing in the
+ * environment, config.json, a repository or a peer's message can add to it.
+ */
+export const SHARED_GRAPHS: ReadonlyMap<string, string> = new Map();
+
+/** One input to a graph target: a bound project's (or a constraint's) share, as the ceiling sees it. */
+export interface GraphShareInput {
+  name: string;
+  share: ProjectShare;
+  repoPrivate?: true;
+}
+
+/**
+ * The graph target of a set of projects (pure: graphTarget gathers the inputs). Intersection, like
+ * the session ceiling: any private, repository-private or unmapped project makes it local, and so
+ * does an empty set. A shared target needs every input shared with the same circle, and exactly one
+ * such circle with a shared graph (an https endpoint); people-only shares, no common circle, or a
+ * choice of several circles all stay local.
+ */
+export function graphTargetOf(inputs: readonly GraphShareInput[], o: { local: string; sharedGraphs?: ReadonlyMap<string, string> }): GraphTarget {
+  const local = (why: string): GraphTarget => ({ kind: "local", endpoint: o.local, why });
+  if (inputs.length === 0) return local("no project: nothing is shared");
+  let circles: Set<string> | undefined;
+  for (const i of inputs) {
+    if (i.repoPrivate) return local(`${i.name} asks to stay private (${PRIVATE_MARKER})`);
+    if (i.share === "private" || typeof i.share !== "object") return local(`${i.name} is private`);
+    const cs = Array.isArray(i.share.circles) ? i.share.circles.filter((c) => typeof c === "string") : [];
+    circles = circles ? new Set(cs.filter((c) => circles!.has(c))) : new Set(cs);
+  }
+  if (!circles || circles.size === 0) return local(inputs.length > 1 ? "its projects share no circle in common" : `${inputs[0].name} isn't shared with a circle`);
+  const graphs = o.sharedGraphs ?? SHARED_GRAPHS;
+  const withGraph = [...circles].filter((c) => {
+    const ep = graphs.get(c);
+    return typeof ep === "string" && /^https:\/\//i.test(ep) && !isLoopbackEndpoint(ep);
+  });
+  if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
+  if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
+  return { kind: "shared", circle: withGraph[0], endpoint: graphs.get(withGraph[0])!.replace(/\/+$/, "") };
+}
+
+/**
+ * The chokepoint for every Ix call Peer2Peer makes or lets an extension make (ext-ix takes its
+ * endpoint only from here, ExtContext.graphTarget): the graph a session, the folders it works in,
+ * or both may reach. A session bound to a private project, or one whose ceiling is private for any
+ * reason (an unregistered agent session, too many projects, a private session's message), is local.
+ * The folders' own projects are intersected in, so a session can't name a shared sibling to widen
+ * a private repository it works in. A named session that isn't bound yet is local. Read only:
+ * binds nothing.
+ */
+export async function graphTarget(app: App, o: { sid?: string; dirs?: readonly string[]; over?: boolean } = {}, sharedGraphs: ReadonlyMap<string, string> = SHARED_GRAPHS): Promise<GraphTarget> {
+  const lo = localGraphEndpoint(app.env, app.file);
+  const local = (why: string): GraphTarget => ({ kind: "local", endpoint: lo, why });
+  if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
+  const doc = await projectsDoc(app);
+  const inputs: GraphShareInput[] = [];
+  if (o.sid !== undefined && o.sid !== PERSON_SESSION) {
+    const c = await sessionCeiling(app, o.sid);
+    if (c.kind === "private") return local(`session ${o.sid} is private: ${c.why}`);
+    // A session no front end has bound yet has no ceiling to intersect: fail closed.
+    if (c.kind === "none") return local(`session ${o.sid} isn't bound to a project yet`);
+    if (c.kind === "shared") inputs.push({ name: `session ${o.sid}`, share: { circles: c.circles, people: c.people } });
+  }
+  const seen = new Set<string>();
+  for (const d of o.dirs ?? []) {
+    if (typeof d !== "string" || d.trim() === "") continue;
+    const r = projectOf(d);
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    if (seen.size > MAX_SESSION_PROJECTS) return local(`it works in more than ${MAX_SESSION_PROJECTS} projects`);
+    inputs.push({ name: r.name, share: shareOf(doc, r.id), ...(r.repoPrivate ? { repoPrivate: true as const } : {}) });
+  }
+  return graphTargetOf(inputs, { local: lo, sharedGraphs });
+}
+
+/** One project's graph target (`p2p project show`, `p2p doctor`). */
+export function projectGraphTarget(app: Pick<App, "env" | "file">, ref: Pick<ProjectRef, "id" | "name" | "repoPrivate">, doc: ProjectsDoc): GraphTarget {
+  const lo = localGraphEndpoint(app.env, app.file);
+  return graphTargetOf([{ name: ref.name, share: shareOf(doc, ref.id), ...(ref.repoPrivate ? { repoPrivate: true as const } : {}) }], { local: lo });
+}
+
+/** How a target reads in one line: `local only (http://localhost:8090)`, or the circle's shared graph. */
+export function describeGraphTarget(t: GraphTarget): string {
+  return t.kind === "local" ? `${GRAPH_LOCAL_ONLY} (${t.endpoint})` : `the shared graph of circle ${t.circle} (${t.endpoint})`;
+}
+
+/**
+ * The Ix variables that could send an `ix` call somewhere other than its graph target, or carry a
+ * cloud credential: Ix Pro's PAT mode (IX_PAT, IX_ORG, its endpoint override), the cloud push and
+ * ingestion knobs, the OAuth secret, auto-map routing to the cloud. Every IX_* variable outside
+ * IX_KEEP is dropped as well; these are named so tests and docs can point at them.
+ */
+export const IX_CLOUD_ENV: readonly string[] = ["IX_ENDPOINT", "IX_PAT", "IX_ORG", "IX_ORG_ID", "IX_PUSH_ENDPOINT", "IX_PUSH_TOKEN", "IX_OAUTH_CLIENT_SECRET", "IX_AUTO_MAP_CLOUD", "IX_AUTO_MAP", "IX_KARTR_UI_URL", "IX_VIEW_BACKEND_URL", "IX_VIEW_BACKEND_TOKEN"];
+
+/** IX_* variables an `ix` call keeps: which binary (read by ext-ix, not ix), where Ix keeps its local state, and the local backend's token (Ix sends it to a loopback endpoint only). */
+export const IX_KEEP: readonly string[] = ["IX_BIN", "IX_HOME", "IX_TOKEN"];
+
+/**
+ * The environment an extension gets (ExtContext.env), with the target pinned: every IX_* variable
+ * outside IX_KEEP set to undefined (so a `{...process.env, ...ctx.env}` merge drops it too: an older
+ * ext-ix spreads it), IX_ENDPOINT set to the target's endpoint, and readers kept from starting a
+ * background `ix map` (Ix Pro routes a map to the cloud when an org session is active, whatever
+ * IX_ENDPOINT says). Defence in depth: ext-ix builds its own allowlisted env from the target.
+ */
+export function graphPinnedEnv(env: Record<string, string | undefined>, target: GraphTarget, base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = { ...env };
+  const keep = new Set(IX_KEEP);
+  for (const k of new Set([...Object.keys(base), ...Object.keys(env)])) if (/^IX_/i.test(k) && !keep.has(k.toUpperCase())) out[k] = undefined;
+  out.IX_ENDPOINT = target.endpoint;
+  out.IX_MAP_BACKGROUND_REFRESH = "0";
+  out.IX_NO_UPDATE_CHECK = "1";
+  return out;
+}

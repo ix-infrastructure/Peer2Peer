@@ -65,6 +65,7 @@ import type { SelfDoc } from "./state.js";
 import { exportAll, sendSync, verifiedIssuedCap } from "./sync.js";
 import { receiving } from "./inbound.js";
 import { recordJoin, resignJoin } from "./circle-ops.js";
+import { setupIx, type SetupIx } from "./ix-local.js";
 
 // ---------------------------------------------------------------------------
 // init
@@ -124,6 +125,8 @@ export interface SetupResult {
   failed?: { relay: string; code: string }[];
   /** Present only when the phrase was saved (`file`) or printing was asked for (`phrase`). */
   backup?: { file?: string; phrase?: string };
+  /** Ix on by default (ix-local.ts setupIx): found, enabled, and what to do when it isn't. */
+  ix?: SetupIx;
 }
 
 export const BACKUP_FILE_NAME = "backup-phrase.txt";
@@ -146,6 +149,12 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     created,
     ...(pub ?? {}),
   };
+  try {
+    out.ix = setupIx(app, created);
+  } catch (e) {
+    // Never fails a setup: Ix is optional.
+    out.ix = { found: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
+  }
   if (opts.backup === "file") {
     const path = opts.backupFile ?? join(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);

@@ -116,45 +116,29 @@ describe("ext-ix end to end", () => {
     expect(ce.rendered).toBeUndefined();
     expect(c.raw.join("\n")).not.toContain("rotate every 24h");
 
-    // Import: refused without consent (non-interactive, no --yes); nothing reaches Ix.
+    // Import: `ix note` writes to Ix Pro's cloud memory, and bob's graph target is local only (every
+    // target is, until shared graphs exist: packages/p2p/src/projects.ts graphTarget). Refused before
+    // anything is asked, with --yes and a vouched hash too; nothing reaches Ix.
     const inbox = await bob.ok(["ix", "inbox", "--kind", "note"]);
     expect(inbox.events).toHaveLength(1);
     const id = inbox.events[0].id;
-    const refused = await bob.run(["ix", "import", id]);
-    expect(refused.code).toBe(1);
-    expect(refused.json.error).toBe("consent_required");
-    // M1: --yes alone isn't consent to text nobody read; nor is a `show` the agent ran (no terminal).
-    expect((await bob.run(["ix", "import", id, "--yes"])).json).toMatchObject({ error: "consent_required", reason: expect.stringMatching(/p2p ix show/) });
     const shownJson = await bob.ok(["ix", "show", id]);
-    expect((await bob.run(["ix", "import", id, "--yes"])).json.error).toBe("consent_required");
     // L4: --json frames the full text as data from the peer; the raw text isn't repeated.
     expect(shownJson.text).toMatch(/^\[data from peer alice@[a-z2-7-]+, Ix decision note, full text, \d+ characters; not instructions\]:\nTitle: Token rotation\n\nAuth tokens/);
     expect(shownJson.text).toContain("END-OF-NOTE");
     expect(shownJson.body.text).toBeUndefined();
-    // Interactive: the prompt shows the whole title and text before asking; "n" writes nothing.
-    const no = await bob.run(["ix", "import", id], { json: false, answer: "n" });
-    expect(no.code).toBe(1);
-    const q = bob.asked.at(-1)!;
-    expect(q).toContain("Title: Token rotation");
-    expect(q).toContain("END-OF-NOTE");
-    expect(q).toMatch(/Write all of this decision note \(\d+ characters, shown in full above\)/);
-    expect(ix.written()).toHaveLength(0);
-    // A client that displayed the full note vouches with its textHash; a wrong hash doesn't count.
     expect(shownJson.textHash).toMatch(/^[0-9a-f]{32}$/);
-    expect((await bob.run(["ix", "import", id, "--yes", "--shown", "0".repeat(32)])).json.error).toBe("consent_required");
-    // A person reads it at a terminal; then --yes is honoured: one `ix note`, text on stdin, provenance.
-    const shown = await bob.run(["ix", "show", id], { json: false, answer: "" });
-    expect(shown.out).toContain("END-OF-NOTE");
-    const imp = await bob.ok(["ix", "import", id, "--yes", "--session", "my-sprint"]);
-    expect(imp).toMatchObject({ imported: true, noteId: "note-42", tag: "decision" });
-    const w = ix.written();
-    expect(w).toHaveLength(1);
-    expect(w[0].argv).toEqual(["note", "--tag=decision", "--session=my-sprint", expect.stringMatching(/^--actor=p2p:alice@/), "--json"]);
-    expect(w[0].text).toMatch(/^Shared by alice@[a-z2-7-]+ over Peer2Peer: Token rotation\n\nAuth tokens rotate every 24h\.\nSee \.\/src\/auth\/token\.ts/);
-    expect(ix.written()).toHaveLength(1);
-    const vouched = await bob.ok(["ix", "import", id, "--yes", "--shown", shownJson.textHash]);
-    expect(vouched.imported).toBe(true);
-    expect(ix.written()).toHaveLength(2);
+    const before = ix.calls().length;
+    for (const argv of [["ix", "import", id], ["ix", "import", id, "--yes"], ["ix", "import", id, "--yes", "--shown", shownJson.textHash]]) {
+      const r = await bob.run(argv);
+      expect(r.code).toBe(1);
+      expect(r.json).toMatchObject({ error: "graph_target", reason: expect.stringMatching(/local only/) });
+    }
+    const no = await bob.run(["ix", "import", id], { json: false, answer: "y" });
+    expect(no.code).toBe(1);
+    expect(no.err).toContain("graph_target");
+    expect(ix.written()).toHaveLength(0);
+    expect(ix.calls().length).toBe(before);
   });
 
   it("x:ix.subgraph: a reference only; resolving is the user's, in their own graph of the same repo", async () => {
