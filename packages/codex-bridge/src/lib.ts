@@ -759,15 +759,22 @@ export const LITERAL = '\uE000'
  * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
  * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
  * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
- * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing. With
+ * `starts`: the index of each word that begins a simple command (the first word, and the first
+ * after an unquoted `;`, `|`, `&`, `(`, `)` or newline).
  */
-export function shellTokens(command: string, markLiteral = false): string[] {
+export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>): string[] {
   const out: string[] = [];
   let cur = '';
   let has = false;
   let q: '' | "'" | '"' | '$' = '';
+  let fresh = true;
   const push = () => {
-    if (has) out.push(cur)
+    if (has) {
+      if (fresh) starts?.add(out.length);
+      fresh = false;
+      out.push(cur);
+    }
     cur = '';
     has = false;
   }
@@ -784,6 +791,18 @@ export function shellTokens(command: string, markLiteral = false): string[] {
       if (c === '\\' && i + 1 < command.length) cur += command[++i]
       else if (c === "'") q = ''
       else cur += markLiteral && (c === '$' || c === '`') ? LITERAL : c
+
+      continue;
+    }
+    // With `substs`: a `$(…)` or backtick command stays one placeholder in its word (SUBST), its text
+    // collected for shellPaths to read (unquoted and in double quotes, where the shell runs it).
+    if (substs && ((c === '$' && command[i + 1] === '(') || c === '`')) {
+      const open = c === '`' ? 1 : 2;
+      const end = c === '`' ? closingTick(command, i + 1) : closingParen(command, i + 2);
+      substs.push(command.slice(i + open, end));
+      cur += SUBST;
+      has = true;
+      i = end;
 
       continue;
     }
@@ -817,6 +836,7 @@ export function shellTokens(command: string, markLiteral = false): string[] {
     }
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
       push();
+      if (c === '\n' || ';|&()'.includes(c)) fresh = true;
 
       continue;
     }
@@ -826,6 +846,36 @@ export function shellTokens(command: string, markLiteral = false): string[] {
   push();
 
   return out;
+}
+
+/** The index of the `)` that closes a `$(` whose text starts at `j` (quotes and escapes skipped), or the end. Linear. */
+function closingParen(s: string, j: number): number {
+  let depth = 1
+  for (let k = j; k < s.length; k++) {
+    const c = s[k]
+    if (c === '\\') k++
+    else if (c === "'") {
+      const e = s.indexOf("'", k + 1)
+      k = e < 0 ? s.length : e
+    } else if (c === '"') {
+      let e = k + 1
+      while (e < s.length && s[e] !== '"') e += s[e] === '\\' ? 2 : 1
+      k = e
+    } else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return k
+  }
+
+  return s.length
+}
+
+/** The index of the backtick that closes one whose text starts at `j`, or the end. */
+function closingTick(s: string, j: number): number {
+  for (let k = j; k < s.length; k++) {
+    if (s[k] === '\\') k++
+    else if (s[k] === '`') return k
+  }
+
+  return s.length
 }
 
 /** `p` made absolute against `cwd` (POSIX or Windows separators), `.` and `..` resolved. Linear: no regex over the input. */
@@ -871,45 +921,522 @@ export function resolveLike(cwd: string, p: string): string {
 }
 
 /** At most this many folders one command may name; past it the session is private (`over`). */
-export const MAX_COMMAND_PATHS = 256;
+export const MAX_COMMAND_PATHS = 256
+
+/** Stands for a `$(…)` or backtick substitution in a word (shellTokens with `substs`): an expansion whose value is unknown. */
+const SUBST = '\uE001'
+
+/** Why a command makes a session private: a path it couldn't resolve, or more folders than one command may name. */
+export type PathsOverWhy = 'unresolved' | 'folders'
 
 /**
- * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
- * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
- * against `cwd`, a file to its folder, `$HOME`/`${HOME}` and `$PWD`/`${PWD}` expanded). A path
- * built any other way (`$X/y`, `$(…)`, backticks) can't be resolved, so the session is `over`
- * (private), and so it is past MAX_COMMAND_PATHS. URLs are not paths.
+ * What a front end knows of the model's shell, for shellPaths: variables whose value it knows (as
+ * the shell sees them), and `untrusted` once the session touched the files Claude Code runs before
+ * each command (then no variable is known).
  */
-export function shellPaths(command: string, cwd: string, home?: string): { paths: string[]; over: boolean } {
-  const out = new Set<string>()
-  let over = false
-  const isSep = (c: string | undefined) => c === '/' || c === '\\'
-  for (const word of shellTokens(command, true)) {
-    const eq = word.startsWith('-') ? word.indexOf('=') : -1
-    let t = eq >= 0 ? word.slice(eq + 1) : word
-    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('://') || t.includes('\0') || t.includes('\n')) continue
-    // $HOME, ${HOME}, $PWD and ${PWD} anywhere in the word (only real expansions: quoted ones are LITERAL).
-    for (const [v, val] of [['${HOME}', home], ['$HOME', home], ['${PWD}', cwd], ['$PWD', cwd]] as const) {
-      let k = t.indexOf(v)
-      while (k >= 0) {
-        const after = t[k + v.length]
-        // `$HOMEDIR` is another variable: only the whole name.
-        if (v.startsWith('$') && !v.startsWith('${') && after !== undefined && /[A-Za-z0-9_]/.test(after)) {
-          k = t.indexOf(v, k + 1)
-          continue
+export interface ShellContext {
+  vars?: Readonly<Record<string, string | undefined>>
+  untrusted?: boolean
+}
+
+/** Device files a command names by habit (`2>/dev/null`): never a folder of the session's. */
+const DEVICES = new Set(['/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/dev/tty', '/dev/stdin', '/dev/stdout', '/dev/stderr', '/dev/full'])
+const isDevice = (p: string) => DEVICES.has(p) || /^\/dev\/fd\/\d+$/.test(p)
+
+/** The files Claude Code runs ahead of each Bash command (CLAUDE_ENV_FILE, its session-env and shell-snapshots folders): they can set any variable. */
+const ENV_FILES = /CLAUDE_ENV_FILE|session-env|shell-snapshots/i
+/** Characters after which a word starts a command, for evalLike. */
+const EVAL_BOUNDARY = ';&|(){}`\n!\'"'
+/** Words after which the next word starts a command, for evalLike. */
+const EVAL_KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'exec', 'command', 'builtin', 'xargs'])
+const isSpace = (c: string | undefined) => c !== undefined && /\s/.test(c)
+const isWordChar = (c: string | undefined) => c !== undefined && /\w/.test(c)
+
+/**
+ * A command that may set variables in ways no word shows: eval, source or `.` at the start, after
+ * `;`, `&`, `|`, a bracket, a quote, a newline or `!`, or after then/do/else/elif/exec/command/
+ * builtin/xargs, each followed by a space. One pass over the text, so it stays linear.
+ */
+function evalLike(s: string): boolean {
+  let boundary = true
+  for (let i = 0; i < s.length; ) {
+    const c = s[i] as string
+    if (EVAL_BOUNDARY.includes(c)) {
+      boundary = true
+      i++
+      continue
+    }
+    if (isSpace(c)) {
+      i++
+      continue
+    }
+    if (boundary) for (const w of ['eval', 'source', '.']) if (s.startsWith(w, i) && isSpace(s[i + w.length])) return true
+    if (isWordChar(c)) {
+      let j = i
+      while (j < s.length && isWordChar(s[j])) j++
+      boundary = EVAL_KEYWORDS.has(s.slice(i, j))
+      i = j
+      continue
+    }
+    boundary = false
+    i++
+  }
+
+  return false
+}
+
+/** Whether `c` holds a brace expansion with a choice: a `{`, then `,` or `..` with no brace between, then `}`. Linear. */
+function braceChoice(c: string): boolean {
+  let open = false
+  let choice = false
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]
+    if (ch === '{') {
+      open = true
+      choice = false
+    } else if (ch === '}') {
+      if (open && choice) return true
+      open = false
+    } else if (open && (ch === ',' || (ch === '.' && c[i + 1] === '.'))) choice = true
+  }
+
+  return false
+}
+
+/** A path component that names a repository marker or could match one (`.git`, `.p2p-private`, `.g*`, `[.]git`, `{.git,x}`). */
+const namesMarker = (c: string) => c === '.git' || c === '.p2p-private' || ((c.startsWith('.') || c.startsWith('[')) && /[*?[]/.test(c)) || braceChoice(c)
+
+/** A command word's name: its last path segment, lower-cased, `.exe` and a version (python3.12) dropped. */
+function commandName(w: string): { base: string; bare: string } {
+  let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase()
+  if (base.endsWith('.exe')) base = base.slice(0, -4)
+  let end = base.length
+  while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+
+  return { base, bare: base.slice(0, end) }
+}
+
+const CODE_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish'])
+const SED = new Set(['sed', 'gsed'])
+const JQ = new Set(['jq', 'gojq'])
+const AWK = new Set(['awk', 'gawk', 'mawk', 'nawk'])
+
+// Shapes a program has and a path almost never does. A word in a program's place that lacks one stays a path.
+const sedShape = (w: string | undefined) => w !== undefined && /^[\s\d$,!~+;]*[sy]([^\w\s\\])(?:(?!\1)[^\\]|\\.)*\1(?:(?!\1)[^\\]|\\.)*\1/s.test(w)
+const jqShape = (w: string | undefined) => w !== undefined && (/^\s*(\.(?!\.?[\\/])|[[{("@$])/.test(w) || w.includes('|'))
+const awkShape = (w: string | undefined) => w !== undefined && (/[{}]/.test(w) || /^\s*(BEGIN|END)\b/.test(w))
+const codeShape = (w: string | undefined) => w !== undefined && (/[\s;(){}'"=]/.test(w) || sedShape(w))
+
+/** Shell words that come before a simple command's command word (`if x`, `then x`, `! x`, `{ x`). */
+const KEYWORDS = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'fi', 'done', 'esac', 'time', 'coproc'])
+/** Commands that run the next word as the command, and their options that take a value. */
+const RUNNERS: Readonly<Record<string, readonly string[]>> = {
+  sudo: ['-u', '-g', '-p', '-C', '-D', '-h', '-r', '-t', '-T', '-U', '--user', '--group', '--prompt', '--chdir', '--close-from', '--host', '--role', '--type', '--command-timeout', '--other-user'],
+  doas: ['-u', '-C'],
+  env: ['-u', '--unset', '-C', '--chdir'],
+  exec: ['-a'],
+  time: ['-f', '-o', '--format', '--output'],
+  nohup: [],
+  command: [],
+  builtin: [],
+  nice: ['-n', '--adjustment'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+  xargs: ['-I', '-L', '-n', '-P', '-s', '-d', '-E', '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs', '--max-lines', '--replace', '--eof', '--max-chars'],
+  stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'],
+  unbuffer: [],
+  ionice: ['-c', '-n', '-p', '--class', '--classdata', '--pid'],
+  caffeinate: ['-t', '-w'],
+  noglob: [],
+  nocorrect: [],
+}
+
+/**
+ * The simple commands of a command line, as `[first, end)` word ranges (shellTokens `starts`).
+ */
+function segmentsOf(count: number, starts: ReadonlySet<number>): [number, number][] {
+  const at = [...starts].filter(k => k < count).sort((x, y) => x - y)
+  if (count > 0 && at[0] !== 0) at.unshift(0)
+
+  return at.map((k, n) => [k, at[n + 1] ?? count] as [number, number])
+}
+
+/**
+ * The command word of the simple command `words[s..e)`: past keywords (`then`, `!`), assignments
+ * (`X=1`) and runners with their options (`sudo -u x`, `env -i`, `timeout 5`, `xargs -0`), or -1
+ * when there is none or it can't be told (`env -S '…'`). `dirs`: the folders a runner moves to
+ * first (`env -C d`, `sudo -D d`).
+ */
+function commandAt(words: readonly string[], s: number, e: number): { at: number; dirs: string[] } {
+  const dirs: string[] = []
+  let i = s
+  for (let guard = 0; guard < 64 && i < e; guard++) {
+    const w = words[i] as string
+    if (KEYWORDS.has(w) || /^[A-Za-z_]\w*=/.test(w)) {
+      i++
+      continue
+    }
+    const { base } = commandName(w)
+    const opts = Object.prototype.hasOwnProperty.call(RUNNERS, base) ? RUNNERS[base] : undefined
+    if (opts === undefined) break
+    i++
+    while (i < e && (words[i] as string).startsWith('-') && words[i] !== '-') {
+      const opt = words[i] as string
+      i++
+      if (opt === '--') break
+      if (base === 'env' && (opt === '-S' || opt === '--split-string' || opt.startsWith('--split-string=') || /^-[A-Za-z]*S/.test(opt))) return { at: -1, dirs }
+      const eq = opt.indexOf('=')
+      const name = eq > 0 ? opt.slice(0, eq) : opt
+      const chdir = ((base === 'env' || base === 'doas') && name === '-C') || name === '--chdir' || (base === 'sudo' && name === '-D')
+      if (eq > 0) {
+        if (chdir) dirs.push(opt.slice(eq + 1))
+      } else if (opts.includes(opt)) {
+        if (chdir && i < e) dirs.push(words[i] as string)
+        i++
+      } else if (base === 'env' && /^-C./.test(opt)) dirs.push(opt.slice(2))
+    }
+    if (base === 'timeout' && /^\d/.test(words[i] ?? '')) i++
+  }
+
+  return { at: i < e ? i : -1, dirs }
+}
+
+/**
+ * The words that are a program, not a path: the script of sed (`s#a/b#c/d#`), jq (`.a/b`), awk
+ * and perl -e, and the code of `python -c`, `node -e`, `sh -c` and the like. Only for the command
+ * word of a simple command (`segs`: commandAt), in a program's place (after the options, with
+ * -e/-f/--from-file read as they are), within that simple command, and only with a program's
+ * shape: anything else stays a path, since a path missed binds nothing. A word named sed or jq
+ * anywhere else (`cat jq x/../k`) is an argument like any other. Their absolute paths are still
+ * read (shellPaths: embedded).
+ */
+function programWords(words: readonly string[], segs: readonly (readonly [number, number])[]): Set<number> {
+  const out = new Set<number>()
+  const mark = (j: number, ok: (w: string | undefined) => boolean) => {
+    if (j < end && ok(words[j])) out.add(j)
+  }
+  let end = 0
+  for (const [s, e] of segs) {
+    const i = commandAt(words, s, e).at
+    if (i < 0) continue
+    end = e
+    const { base, bare } = commandName(words[i] as string)
+    if (SED.has(base)) {
+      let script = false
+      for (let j = i + 1; j < e; j++) {
+        const w = words[j] as string
+        if (w === '--') {
+          if (!script) mark(j + 1, sedShape)
+          break
         }
-        if (val === undefined) over = true
-        t = `${t.slice(0, k)}${val ?? ''}${t.slice(k + v.length)}`
-        k = t.indexOf(v, k + (val ?? '').length)
+        if (w === '-e' || w === '--expression') {
+          mark(j + 1, sedShape)
+          script = true
+          j++
+        } else if (w.startsWith('--expression=')) {
+          if (sedShape(w.slice(13))) out.add(j)
+          script = true
+        } else if (w === '-f' || w === '--file') {
+          script = true
+          j++
+        } else if (w.startsWith('--file=')) script = true
+        else if (w === '-l' || w === '--line-length') j++
+        else if (/^-[A-Za-z]+$/.test(w)) {
+          if (w.endsWith('e')) {
+            mark(j + 1, sedShape)
+            script = true
+            j++
+          } else if (w.endsWith('f')) {
+            script = true
+            j++
+          } else if (w.endsWith('l')) j++
+        } else if (w.startsWith('-') && w.length > 1) continue
+        else {
+          if (!script) mark(j, sedShape)
+          break
+        }
+      }
+    } else if (JQ.has(base)) {
+      let script = false
+      for (let j = i + 1; j < e; j++) {
+        const w = words[j] as string
+        if (w === '--') {
+          if (!script) mark(j + 1, jqShape)
+          break
+        }
+        if (w === '-f' || w === '--from-file') {
+          script = true
+          j++
+        } else if (w === '--arg' || w === '--argjson' || w === '--slurpfile' || w === '--rawfile') j += 2
+        else if (w === '--indent' || w === '-L' || w === '--library-path') j++
+        else if (w.startsWith('-') && w.length > 1) continue
+        else {
+          if (!script) mark(j, jqShape)
+          break
+        }
+      }
+    } else if (AWK.has(base)) {
+      let script = false
+      for (let j = i + 1; j < e; j++) {
+        const w = words[j] as string
+        if (w === '--') {
+          if (!script) mark(j + 1, awkShape)
+          break
+        }
+        if (w === '-f' || w === '-E' || w === '--file' || w === '--exec') {
+          script = true
+          j++
+        } else if (w === '-e' || w === '--source') {
+          mark(j + 1, awkShape)
+          script = true
+          j++
+        } else if (w.startsWith('--source=')) {
+          if (awkShape(w.slice(9))) out.add(j)
+          script = true
+        } else if (/^-[Fvil]$/.test(w) || w === '--field-separator' || w === '--assign' || w === '--include' || w === '--load') j++
+        else if (w.startsWith('-') && w.length > 1) {
+          if (/^-[A-Za-z]*f$/.test(w)) {
+            script = true
+            j++
+          }
+        } else {
+          if (!script) mark(j, awkShape)
+          break
+        }
+      }
+    } else if (INTERPRETERS.has(base) || INTERPRETERS.has(bare) || CODE_SHELLS.has(base)) {
+      // The word after a code flag (-c, -e, --eval; a cluster like -ne, -lc): code, when it looks like code.
+      for (let j = i + 1; j < Math.min(e, i + 6); j++) {
+        const w = words[j] as string
+        if (CODE_FLAGS.has(w) || /^-[A-Za-z]*[ceE]$/.test(w)) {
+          mark(j + 1, codeShape)
+          break
+        }
+        if (!w.startsWith('-')) break
       }
     }
+  }
+
+  return out
+}
+
+/**
+ * The absolute, `~/`, `./` and `../` paths written inside a program or a quoted phrase
+ * (`open("/x/y")`, `sed 'r /x/y'`, `sh -c 'cat ../x/y'`): each begins after a space, a quote, `(`,
+ * `<`, `>`, `=` or `:`, never at the word's start (a sed or awk address there is a pattern). Linear.
+ */
+function embedded(t: string): string[] {
+  const out: string[] = []
+  const starts = ' \t\n\r"\'`(<>=:'
+  const ends = ' \t\n\r"\'`;|&()<>,' + LITERAL + SUBST
+  for (let k = 1; k < t.length; k++) {
+    const c = t[k]
+    const tilde = c === '~' && t[k + 1] === '/'
+    const dot = c === '.' && (t[k + 1] === '/' || (t[k + 1] === '.' && t[k + 2] === '/'))
+    if ((c !== '/' && !tilde && !dot) || !starts.includes(t[k - 1] as string)) continue
+    const first = t[tilde ? k + 2 : dot ? k + (t[k + 1] === '/' ? 2 : 3) : k + 1]
+    if (first === undefined || !/[\w.~@%+-]/.test(first)) continue
+    let e = k
+    while (e < t.length && !ends.includes(t[e] as string)) e++
+    out.push(t.slice(k, e))
+    k = e
+  }
+
+  return out
+}
+
+/** Whether `raw` uses the variable `name` other than by expanding it (`name=…`, `export name`, `read name`, `for name in`). */
+function mentions(raw: string, name: string): boolean {
+  for (let k = raw.indexOf(name); k >= 0; k = raw.indexOf(name, k + 1)) {
+    const before = raw[k - 1]
+    const after = raw[k + name.length]
+    if ((before !== undefined && /\w/.test(before)) || (after !== undefined && /\w/.test(after))) continue
+    if (before === '$' || (before === '{' && raw[k - 2] === '$')) continue
+
+    return true
+  }
+
+  return false
+}
+
+/** Commands whose `-C <dir>` (or `--directory`) runs them in another folder. */
+const DIR_FLAG_COMMANDS = new Set(['git', 'make', 'gmake', 'bmake', 'tar', 'gtar', 'bsdtar', 'ninja'])
+/** A path with a `..` segment. */
+const DOTDOT = /(^|[\\/])\.\.([\\/]|$)/
+
+/**
+ * What shellPaths found. `maybe`: what the words it read as a program (sed's script, jq's filter)
+ * would name if they were paths: the front end binds each one that exists (a file named like a
+ * program is still that file).
+ */
+export interface ShellPaths {
+  paths: string[]
+  over: boolean
+  why?: PathsOverWhy[]
+  sticky?: true
+  maybe?: string[]
+}
+
+/**
+ * The paths a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
+ * against `cwd` and every folder the command moves to) and the absolute paths written inside a
+ * program or quoted phrase. A path is passed as written (`/src/secret.repo` stays itself): the CLI
+ * maps a file to its folder.
+ *
+ * The folders it moves to, read per simple command: `cd`/`pushd`/`chdir` (none: `$HOME`), `git -C`,
+ * `make -C`, `tar -C`, `env -C`, `sudo -D` and the like. Each binds, and relative paths resolve
+ * against each one (and against the ones before it). One it can't place (`cd -`, `cd $X`, `popd`
+ * with no `pushd`) is `unresolved`.
+ *
+ * Variables expand only when the front end knows their value as the shell sees it: `$HOME`,
+ * `$PWD`, and `ctx.vars` (the mod's `$CLAUDE_JOB_DIR`), and only when the command doesn't set
+ * them itself (`HOME=…`, `export`, `read`, `cd` for `$PWD`, eval, source). Any other expansion
+ * (`$X/y`, `$(…)/y`, backticks) in a path's first segment can't be resolved: the session is `over`
+ * (private), `why` `unresolved`; further in, the folder before it binds. A bare `$X` or `$(…)`
+ * names no path. A `$(…)` or backtick command is read for its own paths.
+ *
+ * A program's text (programWords: only for a simple command's command word) isn't a path, unless
+ * it has a `..` segment or a shell expansion; what it would name otherwise is `maybe`.
+ *
+ * Device files (`/dev/null`, `/dev/fd/1`) are skipped. A command that could delete a repository's
+ * `.git` or `.p2p-private` without naming it (find -delete, xargs, dotglob, inline code) also
+ * names `<folder>/.git` for each folder, so a shared folder above never covers it afterwards
+ * (projects.ts projectOf). Past MAX_COMMAND_PATHS: `over`, `why` `folders`. URLs are not paths.
+ * `sticky`: the command touched the files Claude Code runs before each command (pass `untrusted`
+ * from then on).
+ */
+export function shellPaths(command: string, cwd: string, home?: string, ctx: ShellContext = {}, depth = 0): ShellPaths {
+  const out = new Set<string>()
+  const maybe = new Set<string>()
+  const why = new Set<PathsOverWhy>()
+  const isSep = (c: string | undefined) => c === '/' || c === '\\'
+  const isAbs = (t: string) => t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')
+  const sticky = ENV_FILES.test(command)
+  const done = (): ShellPaths => ({ paths: [...out], over: why.size > 0, ...(why.size > 0 ? { why: [...why] } : {}), ...(sticky ? { sticky: true as const } : {}), ...(maybe.size > 0 ? { maybe: [...maybe] } : {}) })
+  if (depth > 8) {
+    why.add('unresolved')
+
+    return done()
+  }
+  const substs: string[] = []
+  const starts = new Set<number>()
+  const words = shellTokens(command, true, substs, starts)
+  const segs = segmentsOf(words.length, starts)
+  const changesDir = words.some(w => w === 'cd' || w === 'pushd' || w === 'popd' || w === 'chdir')
+  // The variables known here, as this command's shell sees them.
+  const known = new Map<string, string>()
+  const trusted = !ctx.untrusted && !sticky && !evalLike(command)
+  for (const [name, val] of [['HOME', home], ['PWD', cwd], ...Object.entries(ctx.vars ?? {})] as [string, string | undefined][]) {
+    if (!trusted || !val || !/^[A-Za-z_]\w*$/.test(name) || /[\0\n]/.test(val) || !/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(val) || mentions(command, name)) continue
+    // After a cd, $PWD is where the command went: resolved as a relative path below (against each folder it cds to).
+    if (name === 'PWD' && changesDir) continue
+    known.set(name, val)
+  }
+  // A word with the variables known here expanded.
+  const expand = (word: string): string => {
+    let t = word
+    // A $PWD the command may have moved: the folder it is in, relative to each base.
+    if (changesDir) for (const v of ['${PWD}', '$PWD']) if (t === v || t.startsWith(`${v}/`) || t.startsWith(`${v}\\`)) t = `.${t.slice(v.length)}`
+    for (const [name, val] of known) {
+      for (const v of [`\${${name}}`, `$${name}`]) {
+        let k = t.indexOf(v)
+        while (k >= 0) {
+          const after = t[k + v.length]
+          // `$HOMEDIR` is another variable: only the whole name.
+          if (!v.startsWith('${') && after !== undefined && /\w/.test(after)) {
+            k = t.indexOf(v, k + 1)
+            continue
+          }
+          t = `${t.slice(0, k)}${val}${t.slice(k + v.length)}`
+          k = t.indexOf(v, k + val.length)
+        }
+      }
+    }
+
+    return t
+  }
+  // Folders a relative path may be in: the session's, and each one the command moves to, in order
+  // (a relative move is relative to every folder before it).
+  const bases = [cwd]
+  const moved: string[] = []
+  const moveTo = (word: string): boolean => {
+    let t = expand(word)
+    if (/[$`]/.test(t) || t.includes(SUBST)) return false
+    t = t.split(LITERAL).join('$')
+    if (t === '') return true
+    let ps: string[]
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) return false
+      ps = [resolveLike(home, t.slice(2) || '.')]
+    } else if (t.startsWith('~')) return false
+    else if (isAbs(t)) ps = [resolveLike(cwd, t)]
+    else ps = bases.map(b => resolveLike(b, t))
+    for (const p of ps) {
+      if (!bases.includes(p)) bases.push(p)
+      moved.push(p)
+    }
+
+    return true
+  }
+  let pushed = false
+  for (const [s, e] of segs) {
+    const c = commandAt(words, s, e)
+    const targets = [...c.dirs]
+    let unknown = false
+    if (c.at >= 0) {
+      const name = commandName(words[c.at] as string).base
+      if (name === 'cd' || name === 'pushd' || name === 'chdir') {
+        let j = c.at + 1
+        while (j < e && /^-[LPe@]+$/.test(words[j] as string)) j++
+        if (words[j] === '--' && j < e) j++
+        const target = j < e ? (words[j] as string) : undefined
+        if (name === 'pushd') pushed = true
+        // A bare pushd swaps the top two folders of a stack this front end doesn't see; cd -, pushd +1 likewise.
+        if (target === undefined) {
+          if (name === 'pushd') unknown = true
+          else targets.push('~')
+        } else if (target === '-' || /^[+-]\d+$/.test(target)) unknown = true
+        else targets.push(target)
+      } else if (name === 'popd') {
+        if (!pushed) unknown = true
+      } else if (DIR_FLAG_COMMANDS.has(name)) {
+        for (let j = c.at + 1; j < e; j++) {
+          const w = words[j] as string
+          // git's own -C (and --git-dir, --work-tree) come before its subcommand.
+          if (name === 'git' && !w.startsWith('-')) break
+          if (w === '-C' || w === '--directory' || (name === 'git' && (w === '--git-dir' || w === '--work-tree'))) {
+            if (j + 1 < e) targets.push(words[++j] as string)
+          } else if (w.startsWith('--directory=') || (name === 'git' && (w.startsWith('--git-dir=') || w.startsWith('--work-tree=')))) targets.push(w.slice(w.indexOf('=') + 1))
+          else if (name !== 'git' && /^-C./.test(w)) targets.push(w.slice(2))
+          else if (name === 'git' && (w === '-c' || w === '--namespace' || w === '--exec-path')) j++
+        }
+      }
+    }
+    if (unknown) why.add('unresolved')
+    for (const t of targets) if (!moveTo(t)) why.add('unresolved')
+    if (bases.length > 32) {
+      why.add('folders')
+      break
+    }
+  }
+  const add = (p: string): boolean => {
+    if (isDevice(p)) return true
+    out.add(p)
+
+    return out.size <= MAX_COMMAND_PATHS
+  }
+  // One path. `inner`: one written inside a program, whose own `$x` and unknowns bind nothing (never
+  // over). `maybe`: a program's own text, kept apart (ShellPaths.maybe) for the front end to check.
+  const take = (word: string, mode: 'path' | 'inner' | 'maybe'): boolean => {
+    const inner = mode !== 'path'
+    let t = expand(word)
     const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
-    if (!pathLike) continue
+    if (!pathLike) return true
     // Any other expansion: where it sits decides. In the path's first segment, the location itself
     // is unknown: private. Further in, the folder before it is known: that one binds.
     let x = -1
     for (let k = 0; k < t.length; k++) {
-      if (t[k] === '$' || t[k] === '`') {
+      if (t[k] === '$' || t[k] === '`' || t[k] === SUBST || (inner && t[k] === LITERAL)) {
         x = k
         break
       }
@@ -918,29 +1445,92 @@ export function shellPaths(command: string, cwd: string, home?: string): { paths
       let lastSep = -1
       for (let k = 0; k < x; k++) if (isSep(t[k])) lastSep = k
       if (lastSep <= 0) {
-        over = true
-        continue
+        if (!inner) why.add('unresolved')
+
+        return true
       }
       t = t.slice(0, lastSep)
     }
     t = t.split(LITERAL).join('$')
-    let p: string
+    let ps: string[]
     if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
       if (!home) {
-        over = true
-        continue
+        if (!inner) why.add('unresolved')
+
+        return true
       }
-      p = resolveLike(home, t.slice(2) || '.')
-    } else p = resolveLike(cwd, t)
-    // A file's folder (the CLI resolves it by real path, through symlinks); a folder as named.
-    const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
-    const name = p.slice(last + 1)
-    const folder = x < 0 && name.includes('.') && !name.startsWith('.') && last > 0 ? p.slice(0, last) : p
-    out.add(folder)
-    if (out.size > MAX_COMMAND_PATHS) return { paths: [...out].slice(0, MAX_COMMAND_PATHS), over: true }
+      ps = [resolveLike(home, t.slice(2) || '.')]
+    } else if (t.startsWith('~')) {
+      // ~user, ~+, ~-: another folder this front end doesn't know.
+      if (!inner) why.add('unresolved')
+
+      return true
+    } else if (isAbs(t)) ps = [resolveLike(cwd, t)]
+    else ps = [...new Set(bases.map(b => resolveLike(b, t)))]
+    // As written: a file, a folder or a pattern (the CLI finds a file's folder, by real path, through symlinks).
+    for (const p of ps) {
+      if (mode === 'maybe') {
+        if (!isDevice(p)) maybe.add(p)
+        if (maybe.size > MAX_COMMAND_PATHS) return false
+      } else if (!add(p)) return false
+    }
+
+    return true
+  }
+  const programs = programWords(words, segs)
+  // A command that may remove a .git or .p2p-private without naming it.
+  let mayUnmark = /dotglob|globdots|glob_dots|GLOBIGNORE/i.test(command) || /[*?\]@!+]\(/.test(command)
+  for (let i = 0; i < words.length && !mayUnmark; i++) {
+    const w = words[i] as string
+    const { base, bare } = commandName(w)
+    if (!/[\\/]/.test(w) && namesMarker(w)) mayUnmark = true
+    else if (base === 'xargs') mayUnmark = true
+    else if (base === 'find' || base === 'gfind' || base === 'fd' || base === 'fdfind') mayUnmark = words.some(x => /^(-delete|-exec|-execdir|-ok|-okdir|-x|-X|--exec|--exec-batch)$/.test(x))
+    else if (base === 'rsync') mayUnmark = words.some(x => x.startsWith('--del') || x === '--remove-source-files')
+    else if (INTERPRETERS.has(base) || INTERPRETERS.has(bare) || CODE_SHELLS.has(base)) mayUnmark = words.slice(i + 1, i + 6).some(x => CODE_FLAGS.has(x) || /^-[A-Za-z]*[ceE]$/.test(x))
+  }
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i] as string
+    // An option's value (`--file=/x`), and an assignment's (`T=/x/y`: the folder it names binds, though `$T` later can't be read).
+    const eq = word.startsWith('-') ? word.indexOf('=') : (/^[A-Za-z_]\w*=/.exec(word)?.[0].length ?? 0) - 1
+    const t = eq >= 0 ? word.slice(eq + 1) : word
+    if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('\0')) continue
+    const program = programs.has(i)
+    // A program's (or a quoted phrase's) own absolute paths.
+    if (program || /\s/.test(t)) for (const e of embedded(t)) if (!e.includes('://') && !take(e, 'inner')) return capped()
+    if (t.includes('://') || t.includes('\n')) continue
+    // A program's own text isn't a path, unless it holds an expansion of the shell's ("$X/y" in
+    // double quotes) or a `..` segment (`jq .git/../../k`): those are read as paths. Otherwise it
+    // is `maybe`: bound when such a path exists.
+    if (program && !t.startsWith('/') && !t.startsWith('~') && !/[$`]/.test(t) && !DOTDOT.test(t)) {
+      if (!take(t, 'maybe')) return capped()
+      continue
+    }
+    if (!take(t, 'path')) return capped()
+  }
+  for (const p of moved) if (!add(p)) return capped()
+  for (const s of substs) {
+    const r = shellPaths(s, cwd, home, ctx, depth + 1)
+    for (const p of r.paths) if (!add(p)) return capped()
+    for (const p of r.maybe ?? []) maybe.add(p)
+    for (const w of r.why ?? []) why.add(w)
+  }
+  if (mayUnmark) {
+    for (const p of [...out, ...bases]) {
+      // The folder a pattern is in (`/x/old/*`: /x/old), whose .git it may match.
+      let q = p
+      for (let k = Math.max(q.lastIndexOf('/'), q.lastIndexOf('\\')); k > 0 && /[*?[\]{}]/.test(q.slice(k + 1)); k = Math.max(q.lastIndexOf('/'), q.lastIndexOf('\\'))) q = q.slice(0, k)
+      if (!add(`${q}${q.includes('\\') && !q.includes('/') ? '\\' : '/'}.git`)) return capped()
+    }
   }
 
-  return { paths: [...out], over }
+  return done()
+
+  function capped(): ShellPaths {
+    why.add('folders')
+
+    return { ...done(), paths: [...out].slice(0, MAX_COMMAND_PATHS), ...(maybe.size > 0 ? { maybe: [...maybe].slice(0, MAX_COMMAND_PATHS) } : {}) }
+  }
 }
 
 /** Interpreters that run code given as an argument, and terminals that run a command under a pseudo-terminal. */
