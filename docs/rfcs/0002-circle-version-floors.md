@@ -5,7 +5,7 @@
 | **Status** | Proposed (open for comment; at least 14 days per GOVERNANCE.md). Nothing here is implemented. |
 | **Date** | 2026-11-05 |
 | **Applies to** | [protocol.md](../protocol.md) v3 draft 3 (protocol 3.1), §3.3 circle versions, as an additive amendment with a two-step rollout per [compatibility.md](../compatibility.md) |
-| **Discussion** | the RFC issue linked from the PR that adds this file |
+| **Discussion** | [#37](https://github.com/ix-infrastructure/Peer2Peer/issues/37) |
 
 Words in capitals (MUST, SHOULD, MAY) are used as in RFC 2119. Section signs (§) without a file name point into [protocol.md](../protocol.md).
 
