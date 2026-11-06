@@ -87,7 +87,15 @@ export function releaseRefs(n = SUPPORTED_RELEASES) {
 export const DEFAULT_REFS = releaseRefs();
 
 /** The committed CLI bundle at `ref`, and the ext-ix copy committed beside it, written to `dir`. */
+/** A git ref as a baseline may name it: no option-like or shell-special spelling reaches git. */
+const SAFE_REF = /^[A-Za-z0-9._/-]+$/;
+export function checkRef(ref) {
+  if (!SAFE_REF.test(ref) || ref.startsWith("-")) throw new Error(`not a git ref this matrix takes: ${JSON.stringify(ref)}`);
+  return ref;
+}
+
 export function bundleAt(ref, dir) {
+  checkRef(ref);
   const sha = sh("git", ["rev-parse", "--short=12", `${ref}^{commit}`]).trim();
   const file = join(dir, `p2p-${sha}.mjs`);
   if (!existsSync(file)) writeFileSync(file, sh("git", ["show", `${sha}:mods/claude/peer2peer/bin/p2p.mjs`]));
@@ -126,12 +134,18 @@ function npm(args, cwd) {
   return execFileSync("npm", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false" } });
 }
 
-/** `npm view <name>@<version> dist.integrity`, or undefined when that version isn't published. */
+/** `npm view <name>@<version> dist.integrity` and its publish time, or undefined when that version isn't published. */
 function registryIntegrity(name, version) {
   try {
-    const out = npm(["view", `${name}@${version}`, "dist.integrity", "--json"], tmpdir()).trim();
-    return out ? JSON.parse(out) : undefined;
+    const out = npm(["view", `${name}@${version}`, "dist.integrity", "time", "--json"], tmpdir()).trim();
+    if (!out) return undefined;
+    const v = JSON.parse(out);
+    const integrity = v["dist.integrity"];
+    const published = v.time?.[version];
+    if (typeof integrity !== "string" || typeof published !== "string") throw new Error(`no integrity or publish time in ${out.slice(0, 200)}`);
+    return { integrity, published };
   } catch (e) {
+    if (!("stderr" in e)) throw e;
     const err = String(e.stderr ?? e.message ?? e);
     if (/E404|404 Not Found|is not in this registry|No match found/.test(err)) return undefined;
     throw new Error(`npm view ${name}@${version}: ${err.slice(-400)}`);
@@ -140,8 +154,11 @@ function registryIntegrity(name, version) {
 
 /**
  * @peer2peer/cli@<version> (and @peer2peer/ext-ix@<version> when published) installed into a fresh
- * project under `dir`, as a user installs it: exact versions, `--ignore-scripts`, and the lockfile's
- * integrity for each checked against the registry's. Returns undefined when the CLI isn't published.
+ * project under `dir`, as a user installs it: exact versions, `--ignore-scripts`, and `--before` the
+ * later of the two packages' publish times (so a ranged transitive dependency resolves to what existed
+ * when the release shipped, never to something published since). The lockfile's integrity for each is
+ * checked against the registry's, and `npm audit signatures` checks every installed package's registry
+ * signature and provenance attestation where it has one. Returns undefined when the CLI isn't published.
  */
 export function installFromNpm(version, dir) {
   if (!EXACT_VERSION.test(version)) throw new Error(`--npm takes exact versions (like 0.1.0), not ${JSON.stringify(version)}`);
@@ -152,9 +169,15 @@ export function installFromNpm(version, dir) {
   const proj = join(dir, `npm-${version}`);
   mkdirSync(proj, { recursive: true });
   writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "p2p-matrix-baseline", private: true, version: "0.0.0" }));
-  npm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", ...Object.keys(want).map((n) => `${n}@${version}`)], proj);
+  const before = new Date(Math.max(...Object.values(want).map((w) => Date.parse(w.published))) + 1000).toISOString();
+  npm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", `--before=${before}`, ...Object.keys(want).map((n) => `${n}@${version}`)], proj);
+  try {
+    npm(["audit", "signatures"], proj);
+  } catch (e) {
+    throw new Error(`npm audit signatures failed for ${version}: ${String(e.stdout ?? "").slice(-400)} ${String(e.stderr ?? e.message ?? e).slice(-400)}`);
+  }
   const lock = JSON.parse(readFileSync(join(proj, "package-lock.json"), "utf8"));
-  for (const [name, integrity] of Object.entries(want)) {
+  for (const [name, { integrity }] of Object.entries(want)) {
     const got = lock.packages?.[`node_modules/${name}`];
     if (got?.version !== version) throw new Error(`${name}: installed ${got?.version}, not ${version}`);
     if (got.integrity !== integrity) throw new Error(`${name}@${version}: the lockfile's integrity ${got.integrity} is not the registry's ${integrity}`);
@@ -223,7 +246,7 @@ class Peer {
 
   run(args, stdin) {
     return new Promise((done) => {
-      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { cwd: ROOT, env: this.env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
+      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { cwd: this.home, env: this.env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
         this.stderr.push(...String(stderr).split("\n").filter(Boolean).map((l) => `${this.name}: p2p ${args[0]}: ${l}`));
         let json;
         try {
@@ -523,6 +546,7 @@ export async function runMatrix(opts = {}) {
   const skipped = [];
   try {
     const olds = [];
+    for (const ref of base.refs) checkRef(ref);
     for (const ref of base.refs) olds.push(bundleAt(ref, cache));
     for (const v of base.npm) {
       const o = installFromNpm(v, cache);
