@@ -107,8 +107,19 @@ jobs:
         run: |
           set -euo pipefail
           cd .release/tarballs
-          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.tarball)' |
-          while read -r tarball; do npm publish "./$tarball" --access public --dry-run; done
+          version=$(node -p 'require("./manifest.json").version')
+          # As the publish job does: a package whose exact version is already on npm is skipped, so a
+          # dry run on main between releases still checks every package that isn't published yet.
+          # (If `npm view` can't reach the registry, the package is tried, and fails loudly if it is
+          # already there.)
+          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.name + " " + p.tarball)' |
+          while read -r name tarball; do
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version: already published, skipped"
+              continue
+            fi
+            npm publish "./$tarball" --access public --dry-run
+          done
       - name: source tarball for the relay install scripts (deterministic) and SHA256SUMS
         run: |
           set -euo pipefail
