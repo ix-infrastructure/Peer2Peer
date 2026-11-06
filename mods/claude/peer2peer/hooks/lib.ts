@@ -286,13 +286,25 @@ export function capHeld<T extends { from: { userId: string } }>(list: readonly T
 export const TURN_WINDOW_MS = 10 * 60_000
 export const TURNS_PER_SENDER = 3
 export const TURNS_TOTAL = 10
+/**
+ * Turns this user's own sessions (other devices, and other sessions on this one) may start here, in
+ * the same window: more than a peer's, since they are the person's own work, but still a cap, so two
+ * sessions answering each other can't loop unattended. They don't count toward TURNS_TOTAL, which
+ * is the peers'. Constants, never configuration: nothing a session or its agent sets changes them.
+ */
+export const TURNS_FROM_SELF = 30
 
-/** Whether `senders` may start one more turn at `now`, given the turns peers started before. */
-export function mayStartTurn(history: readonly { at: number; sender: string }[], senders: readonly string[], now: number): boolean {
+/**
+ * Whether `senders` may start one more turn at `now`, given the turns started before. `self` is
+ * this user's userId: their own sessions' turns are capped at TURNS_FROM_SELF and left out of the
+ * peers' total.
+ */
+export function mayStartTurn(history: readonly { at: number; sender: string }[], senders: readonly string[], now: number, self?: string): boolean {
   const recent = history.filter(one => now - one.at < TURN_WINDOW_MS)
-  if (recent.length >= TURNS_TOTAL) return false
+  const isPeer = (sender: string) => self === undefined || sender !== self
+  if (senders.some(isPeer) && recent.filter(one => isPeer(one.sender)).length >= TURNS_TOTAL) return false
 
-  return senders.every(sender => recent.filter(one => one.sender === sender).length < TURNS_PER_SENDER)
+  return senders.every(sender => recent.filter(one => one.sender === sender).length < (isPeer(sender) ? TURNS_PER_SENDER : TURNS_FROM_SELF))
 }
 
 /**
@@ -1021,9 +1033,9 @@ export const PEERS_USAGE = [
   'circle-mates are delivered. In any mode that approves tool calls by itself (bypassPermissions, acceptEdits,',
   'auto, dontAsk, or unknown), every message from another person waits for Deliver, unless you list their',
   'userId (p2p:…) or name@fingerprint in P2P_AUTO_DELIVER (bare names and petnames are ignored: names are',
-  'self-chosen). Your own devices are always delivered. Until you have typed a prompt, the session counts as',
+  'self-chosen). Your own sessions (other devices, or another session here) skip the hold. Until you have typed a prompt, the session counts as',
   'auto-approving. Peers start at most',
-  '3 turns each, and 10 in all, per 10 minutes; past that their messages wait for Deliver.',
+  '3 turns each, and 10 in all, per 10 minutes (your own sessions: 30 per 10 minutes); past that their messages wait for Deliver.',
 ].join('\n')
 
 const CIRCLE_VERBS = new Set(['create', 'invite', 'join', 'leave', 'ls', 'members', 'propose', 'transfer', 'policy', 'default'])

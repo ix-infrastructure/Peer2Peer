@@ -42,6 +42,8 @@ A **circle** is a group, like a team, a club or a project. It has **one owner** 
 
 Each agent run is a **session** with its own id. Its **roster** says who may see and message it: private, a circle, or named people. A session follows its **project** (below): private until you share the project. A session's **status** (busy/idle, label, repo, branch, a one-line summary, files and subagents) goes only to its roster, end-to-end encrypted. A session counts as live for 150 s after its last status.
 
+**Your other sessions on the same device.** `p2p send --to "<you> [ref]"` (or `<you>/<sid>`), the mod's `SendMessage` and the Codex bridge's `p2p_send` can message another session of yours on this device, so a local UI (or one agent session) can reach the others. Only a session named by its ref or id: a bare `--to <you>` still means your other devices, never every session here. A session can't send to itself (`self_send`). The message goes through your relay sealed to this device, exactly like one to your other devices, so every rule for those applies: the sending session's project bound rides along and the receiving session takes it on, an agent sends only as its own registered session (never as `tui`), and the receiving session frames it as a cross-session message. Your own sessions skip the hold, but may start at most 30 turns per 10 minutes in a session (a peer: 3); past that their messages wait for Deliver, and a sender that asked for delivery receipts gets `held`.
+
 ## Projects (project boundaries)
 
 You may work on one project with your circle and keep two others to yourself. A **project** is where a session works:

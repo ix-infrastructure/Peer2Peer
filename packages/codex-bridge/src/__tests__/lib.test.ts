@@ -68,6 +68,13 @@ describe("addressing: bare names are refused", () => {
     expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", two).kind).toBe("ambiguous");
     expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web [def456]", two)).toMatchObject({ kind: "peer", to: `${ANN} [def456]` });
   });
+
+  it("resolveTarget: another session on this device resolves when this session's sid is given; this session never does", () => {
+    const here = [peer({ sid: "local-2", ref: "0c0c0c", thisDevice: true, self: true }), peer({ sid: "me", ref: "ffffff", thisDevice: true, self: true, label: "mine" })];
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", here, "me")).toMatchObject({ kind: "peer", to: `${ANN} [0c0c0c]` });
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/mine", here, "me").kind).toBe("cli");
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", here).kind).toBe("cli");
+  });
 });
 
 describe("the hold rule", () => {

@@ -737,6 +737,9 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   // This device keeps the full status: its own `ls` and ExtContext.ownStatus see the agents.
   const rec: PeerStatusRec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: undefined }));
+  // Another session here asked to hear when this one next goes idle (`send --notify-when-idle` to a
+  // session on this device): its statuses never come back here as envelopes, so it is noticed here.
+  if (status.state === "idle" && prev?.status.state === "busy") await localIdle(app, sid, rec.ts);
   // `bound`: the folders the front end passed are bound for good (it can stop sending them).
   return { status, roster: await rosterView(app, sess), delivered, failed, ...(warnings.length > 0 ? { warnings } : {}), project: await sessionProjectView(app, sid), bound: true };
 }
@@ -930,16 +933,27 @@ export const OFFLINE_TARGET_MS = 24 * 3600 * 1000;
 /**
  * Where a message to `toArg` goes: one of their live sessions, or our own
  * session `fromSession` when its roster lets them in (see the header).
+ *
+ * Our own sessions on this device are reached only by name (`<you> [ref]`, `<you>/<sid>`), never
+ * by a bare `--to <you>`, and never `fromSession` itself (`self_send`). The message is sealed to
+ * this device and goes through a relay like one to our other devices, so the receive side applies
+ * the same checks: signature, replay, the receiving session's roster and project bound.
  */
 async function resolveTarget(app: App, fromSession: string, toArg: string): Promise<ResolvedTarget> {
   const { user, pick } = parseTarget(toArg);
   const userId = await app.resolveUser(user);
   if (await app.store.isBlocked(userId)) throw new CliError("blocked", "you blocked that user");
+  // A session never messages itself (a loop with nothing in between): refused, never "not found".
+  if (userId === app.userId && pick !== undefined && (pick === fromSession || pick === sessionRef(app.userId, fromSession))) {
+    throw new CliError("self_send", `that is session ${fromSession} itself: a session can't send to itself`, { delivered: false });
+  }
   const peers = (await app.state.get("peers")) ?? {};
   const now = Date.now();
-  const live = Object.values(peers).filter(
-    (p) => p.own === userId && isLive(p.ts, now) && !(p.own === app.userId && (p.sid === fromSession || p.did === app.did)) && (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick),
-  );
+  // Our own sessions on this device are candidates only when one is named (`[ref]` or `/sid`): a bare
+  // `--to <you>` still means your other devices' sessions, never every session here at once.
+  const eligible = (p: PeerStatusRec) =>
+    p.own === userId && !(p.own === app.userId && (p.sid === fromSession || (p.did === app.did && pick === undefined))) && (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick);
+  const live = Object.values(peers).filter((p) => eligible(p) && isLive(p.ts, now));
   let target: { own: string; sid: string; did?: string };
   let offlineSince: number | undefined;
   // Not live now, but seen recently (a dropped connection, a laptop asleep): the same sessions a
@@ -948,13 +962,7 @@ async function resolveTarget(app: App, fromSession: string, toArg: string): Prom
     live.length > 0
       ? []
       : Object.values(peers)
-          .filter(
-            (p) =>
-              p.own === userId &&
-              now - p.ts <= OFFLINE_TARGET_MS &&
-              !(p.own === app.userId && (p.sid === fromSession || p.did === app.did)) &&
-              (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick),
-          )
+          .filter((p) => eligible(p) && now - p.ts <= OFFLINE_TARGET_MS)
           .sort((a, b) => b.ts - a.ts);
   if (live.length === 1) target = { own: userId, sid: live[0].sid, did: live[0].did };
   else if (live.length === 0 && recent.length === 1) {
@@ -1338,6 +1346,17 @@ export async function routableSessions(app: App, sender: string, now = Date.now(
     if (await mayReach(app, p.sid, sender)) out.add(p.sid);
   }
   return [...out].sort();
+}
+
+/** `p2p.idle` for the subscriptions of this device's sessions to `sid`, another session on this device. */
+async function localIdle(app: App, sid: string, ts: number): Promise<void> {
+  const subs = await takeSubs(app, app.userId, sid);
+  if (subs.length === 0) return;
+  const from = { userId: app.userId, did: app.did, address: await app.addressOf(app.userId), self: true };
+  const ref = sessionRef(app.userId, sid);
+  await app.state.addEvents(
+    subs.map((s) => ({ id: `p2p.idle:local:${sid}:${s.toSession}:${ts}`, at: ts, kind: "p2p.idle", own: app.userId, sid, toSession: s.toSession, data: { from, own: app.userId, sid, ref, reason: "idle" } })),
+  );
 }
 
 async function takeSubs(app: App, own: string, sid: string): Promise<IdleSub[]> {

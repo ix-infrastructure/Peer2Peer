@@ -1252,7 +1252,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     .command("send [text...]")
     .description("Send a message to a peer session (text from args or stdin)")
     .option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)")
-    .option("--to <address>", "name@fingerprint, userId or petname, optionally \"[ref]\" or /sid (on a terminal: picked from a list)")
+    .option("--to <address>", "name@fingerprint, userId or petname, optionally \"[ref]\" or /sid; another session of yours on this device only by \"[ref]\" or /sid, never the sending session itself (on a terminal: picked from a list)")
     .option("--notify-when-idle", "Tell this session when the target next goes idle")
     .option("--stdin", "Read the text from stdin (also: a single `-` as the text)")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect)

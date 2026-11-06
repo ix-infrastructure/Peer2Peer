@@ -13074,7 +13074,7 @@ async function sendReceipt(app, o) {
     const doc = sessions[sid];
     return !doc || doc.vis === "private" && doc.parts.length === 0;
   };
-  if (isPrivate(o.fromSession) || asked.unclaimedFor !== void 0 && isPrivate(asked.unclaimedFor)) return { sent: false, reason: "private" };
+  if (asked.from !== app.userId && (isPrivate(o.fromSession) || asked.unclaimedFor !== void 0 && isPrivate(asked.unclaimedFor))) return { sent: false, reason: "private" };
   const key = `${asked.from}|${asked.id}`;
   const verdict = await withDoc(app, (d2, now) => {
     const done = d2.sent[key]?.outcomes ?? [];
@@ -13848,6 +13848,7 @@ async function sendStatus(app, o) {
   }
   const rec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
   await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: void 0 }));
+  if (status.state === "idle" && prev?.status.state === "busy") await localIdle(app, sid, rec.ts);
   return { status, roster: await rosterView(app, sess), delivered, failed, ...warnings.length > 0 ? { warnings } : {}, project: await sessionProjectView(app, sid), bound: true };
 }
 async function retract(app, sid, before, now) {
@@ -13925,16 +13926,16 @@ async function resolveTarget2(app, fromSession, toArg) {
   const { user, pick } = parseTarget(toArg);
   const userId = await app.resolveUser(user);
   if (await app.store.isBlocked(userId)) throw new CliError("blocked", "you blocked that user");
+  if (userId === app.userId && pick !== void 0 && (pick === fromSession || pick === sessionRef(app.userId, fromSession))) {
+    throw new CliError("self_send", `that is session ${fromSession} itself: a session can't send to itself`, { delivered: false });
+  }
   const peers = await app.state.get("peers") ?? {};
   const now = Date.now();
-  const live = Object.values(peers).filter(
-    (p) => p.own === userId && isLive(p.ts, now) && !(p.own === app.userId && (p.sid === fromSession || p.did === app.did)) && (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick)
-  );
+  const eligible = (p) => p.own === userId && !(p.own === app.userId && (p.sid === fromSession || p.did === app.did && pick === void 0)) && (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick);
+  const live = Object.values(peers).filter((p) => eligible(p) && isLive(p.ts, now));
   let target;
   let offlineSince;
-  const recent = live.length > 0 ? [] : Object.values(peers).filter(
-    (p) => p.own === userId && now - p.ts <= OFFLINE_TARGET_MS && !(p.own === app.userId && (p.sid === fromSession || p.did === app.did)) && (!pick || p.sid === pick || sessionRef(p.own, p.sid) === pick)
-  ).sort((a, b) => b.ts - a.ts);
+  const recent = live.length > 0 ? [] : Object.values(peers).filter((p) => eligible(p) && now - p.ts <= OFFLINE_TARGET_MS).sort((a, b) => b.ts - a.ts);
   if (live.length === 1) target = { own: userId, sid: live[0].sid, did: live[0].did };
   else if (live.length === 0 && recent.length === 1) {
     target = { own: userId, sid: recent[0].sid, did: recent[0].did };
@@ -14212,6 +14213,15 @@ async function routableSessions(app, sender, now = Date.now()) {
     if (await mayReach(app, p.sid, sender)) out.add(p.sid);
   }
   return [...out].sort();
+}
+async function localIdle(app, sid, ts) {
+  const subs = await takeSubs(app, app.userId, sid);
+  if (subs.length === 0) return;
+  const from = { userId: app.userId, did: app.did, address: await app.addressOf(app.userId), self: true };
+  const ref = sessionRef(app.userId, sid);
+  await app.state.addEvents(
+    subs.map((s2) => ({ id: `p2p.idle:local:${sid}:${s2.toSession}:${ts}`, at: ts, kind: "p2p.idle", own: app.userId, sid, toSession: s2.toSession, data: { from, own: app.userId, sid, ref, reason: "idle" } }))
+  );
 }
 async function takeSubs(app, own, sid) {
   return app.state.update("subs", (cur = []) => {
@@ -25676,7 +25686,7 @@ var init_app = __esm({
         const pool = this.pool ?? await this.connect();
         const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
         if (!view) throw new CliError("unknown_user", `no identity document for ${to}: can't find their devices or relays`);
-        const devices2 = view.devices.filter((d) => !(to === this.userId && d === this.did) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
+        const devices2 = view.devices.filter((d) => (to !== this.userId || d !== this.did || opts.onlyDevices?.includes(d) === true) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
         const relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
         const caps = await this.capsFor(to, kind, opts.extraCaps);
         const resolveCert = storeCertResolver(this.store);
@@ -27514,7 +27524,7 @@ var BUSY_WITHOUT_HOOKS_MS = 2 * 6e4;
 var WATCH_BACKOFF_MS = [1e3, 2e3, 5e3, 1e4, 3e4];
 var WATCH_STABLE_MS = 1e4;
 var QUEUE_DEBOUNCE_MS = 500;
-var SELF_TURNS = 5;
+var SELF_TURNS = 30;
 var FINAL_STATUS_TIMEOUT_MS = 8e3;
 var realClock = {
   now: () => Date.now(),
@@ -28642,10 +28652,10 @@ function makeTools(bridge, onMeta) {
           return text("Nothing to send: `message` is empty.", true);
         if (message.length > MAX_MESSAGE_CHARS)
           return text(`The message is too long (${message.length} characters; at most ${MAX_MESSAGE_CHARS}).`, true);
-        let target = resolveTarget(to, bridge.peers);
+        let target = resolveTarget(to, bridge.peers, bridge.sid);
         if (target.kind === "cli" || target.kind === "ambiguous") {
           await bridge.refreshPeers();
-          target = resolveTarget(to, bridge.peers);
+          target = resolveTarget(to, bridge.peers, bridge.sid);
         }
         if (target.kind === "refused")
           return text(target.reason, true);
@@ -38189,7 +38199,7 @@ or, for a browser: ${r2.web}` };
 ! unreachable: ${relays2.failed.map((f) => f.url).join(", ")}` : ""), pretty: (p) => prettyPeers(r, relays2, p) };
     })
   );
-  program2.command("send [text...]").description("Send a message to a peer session (text from args or stdin)").option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)").option("--to <address>", 'name@fingerprint, userId or petname, optionally "[ref]" or /sid (on a terminal: picked from a list)').option("--notify-when-idle", "Tell this session when the target next goes idle").option("--stdin", "Read the text from stdin (also: a single `-` as the text)").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect).option("--project-dirs-over", "The front end dropped folders past its cap: the session is private").option("--json", "JSON output").action(async (text2, o, cmd) => {
+  program2.command("send [text...]").description("Send a message to a peer session (text from args or stdin)").option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)").option("--to <address>", 'name@fingerprint, userId or petname, optionally "[ref]" or /sid; another session of yours on this device only by "[ref]" or /sid, never the sending session itself (on a terminal: picked from a list)').option("--notify-when-idle", "Tell this session when the target next goes idle").option("--stdin", "Read the text from stdin (also: a single `-` as the text)").option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect).option("--project-dirs-over", "The front end dropped folders past its cap: the session is private").option("--json", "JSON output").action(async (text2, o, cmd) => {
     if (!canAsk(cmd)) {
       if (o.fromSession === void 0) cmd.error("error: required option '--from-session <sid>' not specified", { code: "commander.missingMandatoryOptionValue" });
       if (o.to === void 0) cmd.error("error: required option '--to <address>' not specified", { code: "commander.missingMandatoryOptionValue" });

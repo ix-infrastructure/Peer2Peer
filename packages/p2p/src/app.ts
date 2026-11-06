@@ -1041,7 +1041,9 @@ export class App {
     const pool = this.pool ?? (await this.connect());
     const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
     if (!view) throw new CliError("unknown_user", `no identity document for ${to}: can't find their devices or relays`);
-    const devices = view.devices.filter((d) => !(to === this.userId && d === this.did) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
+    // This device only when named in onlyDevices (a message to another session of ours here, or a
+    // receipt for one): sealed to itself and sent through a relay like any other copy.
+    const devices = view.devices.filter((d) => (to !== this.userId || d !== this.did || opts.onlyDevices?.includes(d) === true) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
     const relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
     const caps = await this.capsFor(to, kind, opts.extraCaps);
     const resolveCert = storeCertResolver(this.store);

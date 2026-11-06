@@ -69,6 +69,7 @@ import {
   uncheckableShell,
   nodeRuntime,
   mayStartTurn,
+  TURNS_FROM_SELF,
   parseAutoDeliver,
   peerData,
   pickHolder,
@@ -1067,7 +1068,8 @@ const noteStatus = (S: Sess, $: EngineInterface, event: P2PEvent & { kind: 'p2p.
 const takeTurn = async (S: Sess, $: EngineInterface, senders: readonly string[]): Promise<boolean> => {
   const now = await $.clock.now()
   S.peerTurns = S.peerTurns.filter(one => now - one.at < 10 * 60_000)
-  if (!mayStartTurn(S.peerTurns, senders, now)) return false
+  // This user's own sessions get their own, larger share (TURNS_FROM_SELF); unknown who we are, a peer's.
+  if (!mayStartTurn(S.peerTurns, senders, now, S.who?.userId)) return false
   for (const sender of new Set(senders)) S.peerTurns.push({ at: now, sender })
 
   return true
@@ -1116,7 +1118,7 @@ const flushPending = async (S: Sess, $: EngineInterface) => {
 const startPeerTurn = async (S: Sess, $: EngineInterface, queued: readonly PendingItem[]) => {
   const items = await screen(S, $, queued)
   if (items.length === 0) return
-  const senders = items.flatMap(item => (item.from ? [item.from.userId] : []))
+  const senders = items.flatMap(item => (item.from ? [item.from.userId] : item.fromOwn ? [item.fromOwn.userId] : []))
   if (senders.length === 0 || (await takeTurn(S, $, senders))) {
     const text = items.map(item => item.text).join('\n\n')
     // The engine raises classic.UserPromptSubmit for it with the live mode,
@@ -1126,14 +1128,21 @@ const startPeerTurn = async (S: Sess, $: EngineInterface, queued: readonly Pendi
 
     return
   }
-  $.ui.toast('Peer2Peer: peers started too many turns here lately; their messages wait above the prompt for Deliver.')
+  const isOwn = items.every(item => item.from === undefined)
+  $.ui.toast(
+    isOwn
+      ? `Peer2Peer: your own sessions started too many turns here lately (${TURNS_FROM_SELF} per 10 minutes); their messages wait above the prompt for Deliver.`
+      : 'Peer2Peer: peers started too many turns here lately; their messages wait above the prompt for Deliver.',
+  )
   const now = await $.clock.now()
+  const why = isOwn ? `too many turns started by your own sessions lately (${TURNS_FROM_SELF} per 10 minutes)` : 'too many peer-started turns lately'
   for (const [i, item] of items.entries()) {
+    // Held with its receipt event: a sender that asked learns it waits for Deliver ("held").
     await hold(
       S, $,
       item.message
-        ? { ...item.message, why: 'too many peer-started turns lately' }
-        : { id: `capped:${now}:${i}:${item.id}`, kind: 'message', from: item.from ?? { userId: 'unknown', address: 'p2p:unknown' }, text: item.text, heldAt: now, why: 'too many peer-started turns lately', isFramed: true },
+        ? { ...item.message, why }
+        : { id: `capped:${now}:${i}:${item.id}`, kind: 'message', from: item.from ?? item.fromOwn ?? { userId: 'unknown', address: 'p2p:unknown' }, text: item.text, heldAt: now, why, isFramed: true, ...(item.receiptEvent ? { receiptEvent: item.receiptEvent } : {}) },
     )
   }
 }
@@ -1522,7 +1531,11 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       }
       const text = wrapMessage(address, event.text)
       const receiptEvent = event.receipt === true ? { receiptEvent: event.id } : {}
-      await deliver(S, $, event.from.self ? { text, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent }, `${address} sent a message: ${firstLine(event.text, 100)}`)
+      await deliver(
+        S, $,
+        event.from.self ? { text, fromOwn: { userId: event.from.userId, address }, message, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent },
+        `${address} sent a message: ${firstLine(event.text, 100)}`,
+      )
 
       return
     }
@@ -1658,7 +1671,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
 
         return
       }
-      await deliver(S, $, event.from.self ? { text } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
+      await deliver(S, $, event.from.self ? { text, fromOwn: { userId: event.from.userId, address }, message } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
 
       return
     }

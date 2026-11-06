@@ -3,6 +3,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { TURNS_FROM_SELF } from '../hooks/lib'
+
 import {
   ANA,
   ANA_ADDR,
@@ -662,6 +664,33 @@ describe('peer2peer: H1, an auto-approving session holds every other person\'s m
     w.emit(message(w))
     await gather(w)
     expect(w.submits).toEqual([])
+  })
+
+  test('own sessions (another device, or another session here) start up to 30 turns per 10 minutes, then wait for Deliver and the sender hears so', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    const capped = () => w.toasts.some(t => t.includes('your own sessions started too many turns'))
+    const n = TURNS_FROM_SELF
+    for (let i = 0; i <= n; i++) {
+      w.emit(message(w, { id: `own-${i}`, text: `own ${i}`, from: from(ME_ID, ME_ADDR, true), own: ME_ID, sid: sidOf(w), ref: 'abcdef', receipt: true }))
+      await settle(w, () => w.notices.length > 0 || i > 0)
+      await w.clock.advance(600)
+      await settle(w, () => w.submits.length > i || capped())
+      await $.turn.start({ text: '', turnId: `own-t-${i}` } as never)
+      await $.turn.complete(done(`own-t-${i}`))
+    }
+    // Far past a peer's 3; the 31st waits above the prompt, never dropped, and its sender's receipt says "held".
+    expect(w.submits.length).toBe(n)
+    expect(capped()).toBe(true)
+    await settle(w, () => (w.statuses.at(-1) ?? '').includes('1 held'))
+    expect(w.statuses.at(-1)).toContain('1 held')
+    await settle(w, () => ran(w, 'receipt').some(r => flag(r.argv, 'outcome') === 'held'))
+    expect(ran(w, 'receipt').filter(r => flag(r.argv, 'outcome') === 'held').map(r => r.argv.at(-1))).toEqual([`own-${n}`])
+    // A peer still has their own 3 (the own sessions' turns don't count toward the peers' share).
+    w.emit(message(w, { id: 'ben-after', text: 'ben after' }))
+    await w.clock.advance(600)
+    await settle(w, () => w.submits.length > n)
+    expect(w.submits.at(-1)).toContain('ben after')
   })
 
   test('the user\'s own devices still deliver', async ($, on) => {

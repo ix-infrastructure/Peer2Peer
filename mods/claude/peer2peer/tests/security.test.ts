@@ -11,6 +11,7 @@ import {
   HELD_PER_SENDER,
   HELD_TOTAL,
   STATUS_SYSTEM,
+  TURNS_FROM_SELF,
   TURNS_PER_SENDER,
   TURNS_TOTAL,
   TURN_WINDOW_MS,
@@ -110,6 +111,25 @@ describe('M3: turn caps', () => {
     expect(mayStart(ben.map(one => ({ ...one, at: now - TURN_WINDOW_MS })), [BEN_ID], now)).toBe(true)
     const many = Array.from({ length: TURNS_TOTAL }, (_, i) => ({ at: now, sender: `p2p:${'x'.repeat(40)}${i}` }))
     expect(mayStart(many, [ANA_ID], now)).toBe(false)
+  })
+
+  test('this user\'s own sessions: 30 per window, apart from the peers\' share, still a cap', () => {
+    const now = TURN_WINDOW_MS * 2
+    const ME = `p2p:${'m'.repeat(52)}`
+    expect(TURNS_FROM_SELF).toBe(30)
+    const mine = (n: number) => Array.from({ length: n }, (_, i) => ({ at: now - i, sender: ME }))
+    // A peer's 3 would stop them; their own sessions go on to 30 (a loop guard), then stop.
+    expect(mayStart(mine(TURNS_PER_SENDER), [ME], now, ME)).toBe(true)
+    expect(mayStart(mine(TURNS_FROM_SELF - 1), [ME], now, ME)).toBe(true)
+    expect(mayStart(mine(TURNS_FROM_SELF), [ME], now, ME)).toBe(false)
+    expect(mayStart(mine(TURNS_FROM_SELF).map(one => ({ ...one, at: now - TURN_WINDOW_MS })), [ME], now, ME)).toBe(true)
+    // Their turns don't use up the peers' total, nor the peers' theirs.
+    expect(mayStart(mine(TURNS_FROM_SELF - 1), [BEN_ID], now, ME)).toBe(true)
+    const many = Array.from({ length: TURNS_TOTAL }, (_, i) => ({ at: now, sender: `p2p:${'x'.repeat(40)}${i}` }))
+    expect(mayStart(many, [ME], now, ME)).toBe(true)
+    expect(mayStart(many, [ME, BEN_ID], now, ME)).toBe(false)
+    // Without knowing who this user is, everyone gets a peer's share.
+    expect(mayStart(mine(TURNS_PER_SENDER), [ME], now)).toBe(false)
   })
 })
 

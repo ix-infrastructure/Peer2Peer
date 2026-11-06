@@ -58,6 +58,18 @@ describe("MCP tools: what the model may and may not do", () => {
     expect(sent?.stdin).toBe("secret-ish text");
   });
 
+  it("p2p_send reaches another session on this device by its listed address; never this session itself", async () => {
+    const { call, world, bridge } = await makeBridge();
+    const mine = (o: Record<string, unknown>) => annRow({ own: ME, address: ME_ADDR, self: true, thisDevice: true, ...o });
+    world.peers = [mine({ sid: "local-2", ref: "0c0c0c", label: "other" }), mine({ sid: bridge.sid, ref: "ffffff", label: "me" })];
+    const ok = await call("p2p_send", { to: `p2p:${ME_ADDR}/other`, message: "to my other session" });
+    expect(ok.isError).toBe(false);
+    expect(world.sent()[0]?.argv).toContain(`--to=${ME} [0c0c0c]`);
+    // Its own row never resolves: the CLI gets the bare address (which never picks a session here) and refuses a self-send by ref.
+    await call("p2p_send", { to: `p2p:${ME_ADDR}/me`, message: "to myself" });
+    expect(world.sent().map((s) => s.argv.join(" ")).join("\n")).not.toContain("[ffffff]");
+  });
+
   it("p2p_status: summary cleaned, files repo-relative and existing in the repo, never a mode (M2)", async () => {
     const { call, world, bridge, root } = await makeBridge();
     const r = await call("p2p_status", { summary: "Refactoring login in /Users/me/work/web/src/auth", files: ["src/auth.ts", `${root}/src/b.ts`, "src/ghost-not-in-repo.ts", "/etc/passwd", "../x"] });
@@ -295,17 +307,18 @@ describe("hooks: delivery, turn caps, status", () => {
     expect(bridge.heldList()[0]?.why).toContain("3 per sender");
   });
 
-  it("L1: the user's own devices start at most 5 turns per 10 minutes too", async () => {
+  it("L1: the user's own sessions start at most 30 turns per 10 minutes too", async () => {
     const { bridge, feed, world } = await makeBridge();
+    expect(SELF_TURNS).toBe(30);
     for (let i = 0; i < SELF_TURNS; i++) {
       await feed(message({ text: `self ${i}`, self: true, from: ME, address: ME_ADDR }));
       expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision).toBe("block");
     }
-    await feed(message({ text: "self 5", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "self over", self: true, from: ME, address: ME_ADDR }));
     expect(await bridge.onHook({ event: "Stop" })).toEqual({});
     // Not held: it rides along with the next prompt.
     const next = (await bridge.onHook({ event: "UserPromptSubmit" })) as { hookSpecificOutput?: { additionalContext?: string } };
-    expect(next.hookSpecificOutput?.additionalContext).toContain("self 5");
+    expect(next.hookSpecificOutput?.additionalContext).toContain("self over");
     world.t += 10 * 60_000;
     await feed(message({ text: "self later", self: true, from: ME, address: ME_ADDR }));
     expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision).toBe("block");

@@ -68,8 +68,12 @@ export const BUSY_WITHOUT_HOOKS_MS = 2 * 60_000;
 export const WATCH_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const WATCH_STABLE_MS = 10_000;
 const QUEUE_DEBOUNCE_MS = 500;
-/** L1: turns this user's own devices may start, per 10 minutes. */
-export const SELF_TURNS = 5;
+/**
+ * L1: turns this user's own sessions (other devices, and other sessions on this one) may start, per
+ * 10 minutes: the person's own work, so more than a peer's 3, but still a cap against two sessions
+ * answering each other unattended. A constant: nothing a session or its agent sets changes it.
+ */
+export const SELF_TURNS = 30;
 const FINAL_STATUS_TIMEOUT_MS = 8_000;
 
 export type InboxState = "pending" | "held" | "released" | "shown" | "declined" | "expired";

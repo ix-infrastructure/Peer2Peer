@@ -420,6 +420,12 @@ export type PendingItem = {
   isActivity?: boolean
   /** The peer who sent it; absent for this user's own devices and the mod's own notes. */
   from?: { userId: string; address: string }
+  /**
+   * This user's own session sent it (another device, or another session on this one): never held
+   * by the hold rule, but it may start at most TURNS_FROM_SELF turns per window; past that, `message`
+   * waits for Deliver (and its sender's receipt says so).
+   */
+  fromOwn?: { userId: string; address: string }
   /** The held message it becomes if the hold rule turns against it before delivery. */
   message?: HeldMessage
   /** The CLI event a `shown` receipt is reported for once the model has it. */

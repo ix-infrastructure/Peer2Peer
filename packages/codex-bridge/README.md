@@ -103,7 +103,7 @@ A hook's `permission_mode` can only make the mode stricter: `bypassPermissions` 
 - **The session asks before acting** when approvals go to you (`untrusted` or `on-request`, not `never`, not auto-review) **and** the sandbox is `read-only`. Messages from friends and circle-mates are then delivered.
 - **Anything else counts as auto-approving.** That covers `workspace-write` (Codex edits files and runs sandboxed commands without asking), `danger-full-access`, `never`, `--yolo`, `--approve-for-me` and `granular`. **An unknown mode holds too**: no tool call has named the thread yet, or there is no turn context. A message held only because the mode was unknown goes out once Codex confirms the session asks. Every message from another person is otherwise **held**. There are two exceptions:
   - senders listed in `P2P_AUTO_DELIVER`, by full userId (`p2p:…`) or `name@fingerprint`. Bare names and petnames are ignored, since names are self-chosen;
-  - messages from your own devices, which are always delivered.
+  - messages from your own sessions (your other devices, or another session on this one), which are always delivered, at most 30 turns per 10 minutes (past that they ride along with the next prompt).
 - **The mode is never published** in a status.
 - **A message sent to you rather than to a session** is never delivered by itself. Your most recently used Codex session holds it.
 - **Held messages** wait up to 10 minutes. Their text never reaches the model. Review them in your own terminal:
