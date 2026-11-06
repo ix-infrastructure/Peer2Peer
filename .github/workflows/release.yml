@@ -15,7 +15,9 @@
 #
 # Three jobs, so the code that builds never sees a credential:
 #   build    contents: read only, no environment, no token, no OIDC. Installs
-#            with --ignore-scripts, tests, packs, uploads the tarballs. It also
+#            with --ignore-scripts, tests, runs the cross-version matrix
+#            against the previous two releases (docs/compatibility.md; a
+#            failure fails the release), packs, uploads the tarballs. It also
 #            makes the deterministic source tarball the relay install scripts
 #            download (peer2peer-<ver>-src.tar.gz: `git archive` of the tag
 #            with the commit's time as every file's mtime, `gzip -n`) and its
@@ -58,6 +60,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # The cross-version matrix reads the earlier releases' CLI bundles and tags from history.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "24"
@@ -84,6 +88,18 @@ jobs:
           for p in core relay codex-bridge p2p ext-ix; do (cd "packages/$p" && npm test); done
           node scripts/check-boundaries.mjs
           scripts/check-bundle.sh
+      - name: cross-version matrix against the previous two releases (from git and npm, both ways)
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        run: |
+          set -euo pipefail
+          # The previous two v* release tags reachable from this commit (this tag itself left out),
+          # filled in with 70b86c7 (the initial public release) while there are fewer; each tag also
+          # as npm installs it, when it's published. Any failed check fails the release here,
+          # before anything is packed.
+          node scripts/compat/matrix.mjs --npm-releases
       - name: build, pack, verify and smoke-test the tarballs
         run: node scripts/release-pack.mjs --clean-install
       - name: npm publish --dry-run (no credentials)

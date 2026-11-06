@@ -150,22 +150,45 @@ Project boundaries (docs/concepts.md "Projects") change no envelope: a private p
 
 ## Testing across versions
 
-`scripts/compat/matrix.mjs` runs this tree's committed CLI bundle against the bundles committed at earlier refs. Each old CLI is `git show <ref>:mods/claude/peer2peer/bin/p2p.mjs`, so nothing is built. It runs over a local relay built from this tree, in both directions, and covers:
+`scripts/compat/matrix.mjs` runs this tree's committed CLI bundle against earlier releases, over a local relay built from this tree, in both directions: each scenario runs once with the new client as the one that invites, creates the circles and sends first, and once with the old one in that role.
 
-- invite and accept (short code);
-- statuses;
-- messages both ways;
-- delivery receipts where both sides have them, and their clean absence where one doesn't;
-- a circle create, invite and join;
-- the offline queue.
+### Baselines
 
-Every run asserts that no side rejected an envelope.
+- **Release tags (the default).** The previous two releases: the two highest `v<x.y.z>` tags reachable from `HEAD`, leaving out prereleases (`v0.2.0-rc.1`) and a tag on `HEAD` itself, so a release run on its own tag tests against the two before it. While fewer than two tags exist, 70b86c7 (the initial public release) fills in. Each old CLI is the bundle committed at the tag (`git show <tag>:mods/claude/peer2peer/bin/p2p.mjs`), with the ext-ix copy committed beside it, so nothing is built.
+- **npm, as users install it.** `--npm <version>` installs `@peer2peer/cli` at exactly that version, and `@peer2peer/ext-ix` at the same version when it is published, into a fresh temporary project: `npm install --ignore-scripts --save-exact`, then each package's integrity in the lockfile is checked against the registry's `dist.integrity`. The installed CLI runs from its `dist`, with its real dependencies, and finds ext-ix as its sibling, the way `npm i -g @peer2peer/cli @peer2peer/ext-ix` does. A version that isn't published is skipped with a notice (`--require-npm` makes that a failure). `--npm-releases` adds every release tag among the git baselines as its npm version, which is how CI and the release workflow run it.
+- **Before publishing.** `--tarballs .release/tarballs` installs the tarballs `scripts/release-pack.mjs` built, the same way, to try the installed layout of a version that isn't on npm yet.
+- `--refs` or `P2P_COMPAT_REFS` names other git refs; `--npm` or `P2P_COMPAT_NPM` other npm versions.
+
+### What it checks
+
+Every item runs in both directions, against every baseline:
+
+| Check | What it asserts |
+|---|---|
+| Invite and join | A short code (or, where the redeemer has invite links, the web link with its confirmation) makes the two friends both ways. |
+| Statuses | Each side sees the other's live session in `p2p ls`. |
+| Direct friend messages | A message from each side's session reaches the other's. |
+| Project boundaries | A session in an unshared project reaches nobody, an older peer included: its status goes to no one, a send from it is refused (`not_shared`), and the other side never sees it or its message. |
+| Delivery receipts | Asked for and answered end to end where both sides have them; never asked for where one side doesn't, and the message is still delivered. |
+| Extension envelopes | An `x:ix.note` from each side (when its release ships ext-ix): a receiver without the extension enabled shows the plain fallback and interprets nothing; one with it enabled renders it. |
+| Circle invite and join | A circle created on one side, invited to by user id, held and approved on the other, which then stands in it. |
+| Invite codes for several circles | One code for two circles: a client with them joins both; one before them joins the first and holds the second as a circle invite. |
+| Circle messages | A third user, on the second side's release, joins an open circle by its link. It and the circle's owner aren't friends; their circle-shared sessions see each other's statuses and exchange messages both ways. |
+| Offline queue | A message to a session seen recently but not live is queued at the relay, asks for no receipt, and is delivered when the session drains. |
+| No rejection | No side logged a rejected envelope, an unknown field, `malformed` or `unsupported-critical`. |
+
+A feature only one side has is checked for clean absence, never skipped silently: the line says which side lacked it.
+
+### Running it
 
 ```sh
 (cd packages/core && npm run build) && (cd packages/relay && npm run build)
-node scripts/compat/matrix.mjs                       # default ref: 70b86c7 (the initial public release)
-node scripts/compat/matrix.mjs --refs v0.2.0,v0.3.0  # once there are release tags: the previous two
+node scripts/compat/matrix.mjs                          # the previous two release tags
+node scripts/compat/matrix.mjs --npm-releases           # ... and each of them as npm installs it
+node scripts/compat/matrix.mjs --npm 0.1.0              # one published version only
+node scripts/compat/matrix.mjs --refs v0.2.0,v0.1.0     # named refs
+node scripts/compat/matrix.mjs --new-env P2P_DEVICE_INFO=1   # step 2 of a two-step rollout
 P2P_COMPAT=1 packages/p2p/node_modules/.bin/vitest run packages/p2p/src/__tests__/compat-matrix.test.ts
 ```
 
-The default ref is the initial public release (70b86c7) until releases are tagged. After that they are the previous two release tags (`P2P_COMPAT_REFS` or `--refs`). In CI, dispatch `ci` manually with `compat_matrix: true`. The release checklist ([docs/releasing.md](releasing.md)) requires a green matrix against the previous two releases.
+It takes about 30 seconds per baseline. In CI it runs on every pull request (`ci-public.yml`, the `compat` job, with `--npm-releases`), and on a dispatch unless `compat_matrix` is unticked (`compat_refs` and `compat_npm` pick other baselines). The release workflow's build job runs it against the previous two releases, from git and npm, before it packs anything, and a failure stops the release. The release checklist ([docs/releasing.md](releasing.md)) lists it too.
