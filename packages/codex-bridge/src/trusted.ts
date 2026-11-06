@@ -33,6 +33,11 @@ export type TrustedMode = {
   writableEver?: string[] | "all" | "unknown";
   /** Why the file isn't trusted at all (planted or malformed): then nothing in it counts. */
   untrusted?: string;
+  /**
+   * How many prompts the person typed in this thread so far (typedPromptOf): the only signal that the
+   * person was here. Never a hook report, never the bridge's own `codex queue` pointer.
+   */
+  typed?: number;
 };
 
 export interface TranscriptSource {
@@ -74,6 +79,33 @@ export async function findRollout(sessionsDir: string, threadId: string, depth =
 }
 
 /** Reads one thread's rollout file as it grows, keeping its latest turn context. */
+/**
+ * Whether a rollout line is a prompt the person typed: a user message (`event_msg` `user_message`, or
+ * an `item_completed` UserMessage), whose text isn't a wrapper Codex or this bridge injects. Those start
+ * with `<` (environment context, AGENTS.md, a hook's context, this bridge's `<peer2peer-inbox>` Stop
+ * continuation) or are this bridge's own `codex queue` pointer (`[Peer2Peer] …`).
+ */
+export function typedPromptOf(line: string): boolean {
+  if (!line.includes('"user_message"') && !line.includes('"UserMessage"')) return false;
+  try {
+    const v = JSON.parse(line) as { type?: string; payload?: Record<string, unknown> };
+    if (v.type !== "event_msg" || typeof v.payload !== "object" || v.payload === null) return false;
+    const p = v.payload;
+    let text: unknown;
+    if (p.type === "user_message") text = p.message;
+    else if (p.type === "item_completed" && typeof p.item === "object" && p.item !== null && (p.item as Record<string, unknown>).type === "UserMessage") {
+      const content = (p.item as Record<string, unknown>).content;
+      const first = Array.isArray(content) ? (content[0] as Record<string, unknown> | undefined) : undefined;
+      text = first?.text;
+    } else return false;
+    if (typeof text !== "string") return false;
+    const t = text.trimStart();
+    return t !== "" && !t.startsWith("<") && !t.startsWith("[Peer2Peer]");
+  } catch {
+    return false;
+  }
+}
+
 export class RolloutReader implements TranscriptSource {
   private path: string | undefined;
   private offset = 0;
@@ -85,6 +117,7 @@ export class RolloutReader implements TranscriptSource {
   private lastAt = 0;
   private untrusted: string | undefined;
   private ever: Set<string> | "all" | "unknown" = new Set();
+  private typed = 0;
 
   constructor(
     private readonly codexHome: string,
@@ -134,6 +167,10 @@ export class RolloutReader implements TranscriptSource {
         for (const line of lines) {
           const bad = this.check(line);
           if (bad) return this.distrust(bad);
+          if (typedPromptOf(line)) {
+            this.typed += 1;
+            if (this.last) this.last = { ...this.last, typed: this.typed };
+          }
           const ctx = turnContextOf(line);
           if (ctx) {
             this.seq += 1;
@@ -148,6 +185,7 @@ export class RolloutReader implements TranscriptSource {
               ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
               ...(ctx.writable !== undefined ? { writable: ctx.writable } : {}),
               writableEver: this.ever instanceof Set ? [...this.ever] : this.ever,
+              ...(this.typed > 0 ? { typed: this.typed } : {}),
             };
           }
         }

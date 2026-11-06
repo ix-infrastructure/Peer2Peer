@@ -69,6 +69,9 @@ import {
   uncheckableShell,
   nodeRuntime,
   mayStartTurn,
+  OWN_TURNS_UNATTENDED,
+  replyToOf,
+  TURNS_FROM_SELF,
   parseAutoDeliver,
   peerData,
   pickHolder,
@@ -316,6 +319,10 @@ const newSess = () => ({
   trustedCircles: [] as string[],
   // The turns peers started (sliding window).
   peerTurns: [] as { at: number; sender: string }[],
+  // Turns this user's own sessions started here since the person last typed a prompt (OWN_TURNS_UNATTENDED).
+  ownSinceTyped: 0,
+  // The one-time notice that messages from this user's other devices are held (RFC #48).
+  isOtherDeviceHoldNoted: false,
   // Turns the mod submitted for peers, by their text, until the engine raises them.
   peerSubmissions: new Map<string, PendingItem[]>(),
   // Turns the person approved with Deliver, by their text: the UserPromptSubmit gate lets them pass.
@@ -1010,9 +1017,19 @@ const refreshTrust = async (S: Sess, $: EngineInterface) => {
  * circle state and blocks as they are now, so someone removed from a trusted circle (or blocked)
  * since is held. Trust only skips the hold: the message is still framed as the peer's data.
  */
-const verdictOf = async (S: Sess, $: EngineInterface, o: { fromSelf: boolean; fromUserId: string; mode: string | null }): Promise<HoldVerdict> => {
+const verdictOf = async (S: Sess, $: EngineInterface, o: { fromSelf: boolean; fromUserId: string; mode: string | null; ownAgent?: boolean; fromDid?: string; isElsewhere?: boolean }): Promise<HoldVerdict> => {
   const verdict = holdVerdict({ ...o, autoDeliver: S.autoDeliver })
-  if (!verdict.isHeld || !S.trusted.has(o.fromUserId)) return verdict
+  if (verdict.isHeld && o.ownAgent === true) {
+    // The person's `p2p own-agents deliver` (or `--devices` naming that device), as it stands now: asked
+    // at delivery time, never read off the event.
+    const r = o.fromDid ? await (await client(S, $)).ownAgentsCheck(o.fromDid) : undefined
+    if (r?.ok && r.value.deliver) return { isHeld: false }
+    // From another device: it can't say whether the person typed it (that needs RFC #48's wire field).
+    return o.isElsewhere
+      ? { isHeld: true, why: `from another device of yours, which can't say whether you typed it, and this session approves tool calls by itself (${o.mode ?? 'mode unknown'}): Deliver, or \`p2p own-agents deliver --devices all-other\` in your own terminal` }
+      : verdict
+  }
+  if (!verdict.isHeld || o.ownAgent === true || !S.trusted.has(o.fromUserId)) return verdict
   const r = await (await client(S, $)).trustCheck(o.fromUserId)
 
   return r.ok && r.value.trusted ? { isHeld: false } : verdict
@@ -1067,8 +1084,14 @@ const noteStatus = (S: Sess, $: EngineInterface, event: P2PEvent & { kind: 'p2p.
 const takeTurn = async (S: Sess, $: EngineInterface, senders: readonly string[]): Promise<boolean> => {
   const now = await $.clock.now()
   S.peerTurns = S.peerTurns.filter(one => now - one.at < 10 * 60_000)
-  if (!mayStartTurn(S.peerTurns, senders, now)) return false
+  // This user's own sessions get their own, larger share (TURNS_FROM_SELF); unknown who we are, a peer's.
+  // And at most OWN_TURNS_UNATTENDED since the person last typed here: a slow loop stops too.
+  const own = S.who?.userId
+  const hasOwn = own !== undefined && senders.includes(own)
+  if (hasOwn && S.ownSinceTyped >= OWN_TURNS_UNATTENDED) return false
+  if (!mayStartTurn(S.peerTurns, senders, now, own)) return false
   for (const sender of new Set(senders)) S.peerTurns.push({ at: now, sender })
+  if (hasOwn) S.ownSinceTyped += 1
 
   return true
 }
@@ -1081,7 +1104,11 @@ const takeTurn = async (S: Sess, $: EngineInterface, senders: readonly string[])
 const screen = async (S: Sess, $: EngineInterface, items: readonly PendingItem[]): Promise<PendingItem[]> => {
   const ok: PendingItem[] = []
   for (const item of items) {
-    const verdict = item.from ? await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: effectiveMode(S, $) }) : { isHeld: false as const }
+    const verdict = item.from
+      ? await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: effectiveMode(S, $) })
+      : item.fromOwn?.isAgent === true
+        ? await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: effectiveMode(S, $), ...(item.fromOwn.did ? { fromDid: item.fromOwn.did } : {}) })
+        : { isHeld: false as const }
     if (!verdict.isHeld) {
       ok.push(item)
       continue
@@ -1116,7 +1143,7 @@ const flushPending = async (S: Sess, $: EngineInterface) => {
 const startPeerTurn = async (S: Sess, $: EngineInterface, queued: readonly PendingItem[]) => {
   const items = await screen(S, $, queued)
   if (items.length === 0) return
-  const senders = items.flatMap(item => (item.from ? [item.from.userId] : []))
+  const senders = items.flatMap(item => (item.from ? [item.from.userId] : item.fromOwn ? [item.fromOwn.userId] : []))
   if (senders.length === 0 || (await takeTurn(S, $, senders))) {
     const text = items.map(item => item.text).join('\n\n')
     // The engine raises classic.UserPromptSubmit for it with the live mode,
@@ -1126,14 +1153,22 @@ const startPeerTurn = async (S: Sess, $: EngineInterface, queued: readonly Pendi
 
     return
   }
-  $.ui.toast('Peer2Peer: peers started too many turns here lately; their messages wait above the prompt for Deliver.')
+  const isOwn = items.every(item => item.from === undefined)
+  const ownCap = `${TURNS_FROM_SELF} per 10 minutes, or ${OWN_TURNS_UNATTENDED} since you last typed here`
+  $.ui.toast(
+    isOwn
+      ? `Peer2Peer: your own sessions started too many turns here lately (${ownCap}); their messages wait above the prompt for Deliver.`
+      : 'Peer2Peer: peers started too many turns here lately; their messages wait above the prompt for Deliver.',
+  )
   const now = await $.clock.now()
+  const why = isOwn ? `too many turns started by your own sessions lately (${ownCap})` : 'too many peer-started turns lately'
   for (const [i, item] of items.entries()) {
+    // Held with its receipt event: a sender that asked learns it waits for Deliver ("held").
     await hold(
       S, $,
       item.message
-        ? { ...item.message, why: 'too many peer-started turns lately' }
-        : { id: `capped:${now}:${i}:${item.id}`, kind: 'message', from: item.from ?? { userId: 'unknown', address: 'p2p:unknown' }, text: item.text, heldAt: now, why: 'too many peer-started turns lately', isFramed: true },
+        ? { ...item.message, why }
+        : { id: `capped:${now}:${i}:${item.id}`, kind: 'message', from: item.from ?? item.fromOwn ?? { userId: 'unknown', address: 'p2p:unknown' }, text: item.text, heldAt: now, why, isFramed: true, ...(item.receiptEvent ? { receiptEvent: item.receiptEvent } : {}) },
     )
   }
 }
@@ -1192,8 +1227,11 @@ const notice = async (S: Sess, $: EngineInterface, message: HeldMessage, what: s
   if (message.kind !== 'message' || message.isExt || message.isUnclaimed || !isLive(current) || !current.isOnline || current.isPrivate) return
   // A sender that asked for delivery receipts gets one instead of this message (report).
   if (message.receiptEvent !== undefined) return
+  // One of your own sessions is answered only at the session that sent it (replyTo), never at your bare address.
+  const to = message.replyTo ?? (message.from.userId === S.who?.userId ? undefined : message.from.userId)
+  if (to === undefined) return
   const p = await client(S, $)
-  await p.send({ fromSession: current.sid, to: message.replyTo ?? message.from.userId, text: `[Cross-session delivery notice] Your message to ${selfAddress(S, $)} ${what}.` }).catch(() => undefined)
+  await p.send({ fromSession: current.sid, to, text: `[Cross-session delivery notice] Your message to ${selfAddress(S, $)} ${what}.` }).catch(() => undefined)
 }
 
 /**
@@ -1478,7 +1516,10 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       // claims (a mode included) decides anything here: holdVerdict looks
       // only at this session's own mode and the person's P2P_AUTO_DELIVER.
       const address = eventAddress(event, S.peers)
-      const replyTo = event.own === event.from.userId ? `${event.from.userId} [${event.ref}]` : event.from.userId
+      const replyTo = replyToOf(event)
+      // From one of your own sessions that isn't the person at their own terminal: held like a peer's
+      // where a peer's would be (an injected instruction must not drive this session unattended).
+      const ownAgent = event.from.self && event.via !== 'person'
       const message: HeldMessage = {
         id: event.id,
         kind: 'message',
@@ -1486,7 +1527,8 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
         text: event.text,
         heldAt: await $.clock.now(),
         why: '',
-        replyTo,
+        ...(replyTo !== undefined ? { replyTo } : {}),
+        ...(event.from.self ? { bucket: `${event.from.userId}/${typeof event.fromRef === 'string' ? event.fromRef : 'elsewhere'}` } : {}),
         ...(typeof event.unclaimedFor === 'string' ? { isUnclaimed: true } : {}),
         ...(event.receipt === true ? { receiptEvent: event.id } : {}),
       }
@@ -1514,15 +1556,25 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
         return
       }
       $.ui.toast(`${address}: ${firstLine(event.text, 80)}`)
-      const verdict = await verdictOf(S, $, { fromSelf: event.from.self, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
+      const isElsewhere = event.from.self && typeof event.fromRef !== 'string'
+      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromDid: event.from.did, isElsewhere, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
       if (verdict.isHeld) {
+        // Once a session: messages from your other devices are held now, and why (RFC #48 would let them through).
+        if (ownAgent && isElsewhere && !S.isOtherDeviceHoldNoted) {
+          S.isOtherDeviceHoldNoted = true
+          $.ui.toast('Peer2Peer: messages from your other devices now wait for Deliver in a session that approves its own tool calls: another device can\'t say whether you typed them. `p2p own-agents deliver --devices all-other` in your own terminal lets them through.')
+        }
         await hold(S, $, { ...message, why: verdict.why })
 
         return
       }
       const text = wrapMessage(address, event.text)
       const receiptEvent = event.receipt === true ? { receiptEvent: event.id } : {}
-      await deliver(S, $, event.from.self ? { text, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent }, `${address} sent a message: ${firstLine(event.text, 100)}`)
+      await deliver(
+        S, $,
+        event.from.self ? { text, fromOwn: { userId: event.from.userId, address, did: event.from.did, ...(ownAgent ? { isAgent: true } : {}) }, message, ...receiptEvent } : { text, from: { userId: event.from.userId, address }, message, ...receiptEvent },
+        `${address} sent a message: ${firstLine(event.text, 100)}`,
+      )
 
       return
     }
@@ -1559,7 +1611,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
         }
         S.lastIdleTurnAt = now
       }
-      await deliver(S, $, event.from.self ? { text } : { text, from: { userId: event.from.userId, address: eventAddress(event, S.peers) } }, text)
+      await deliver(S, $, event.from.self ? { text, fromOwn: { userId: event.from.userId, address: eventAddress(event, S.peers) } } : { text, from: { userId: event.from.userId, address: eventAddress(event, S.peers) } }, text)
 
       return
     }
@@ -1650,15 +1702,17 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       // With it: like a message, under the same hold rule and turn caps; framed as the peer's data.
       const address = eventAddress(event, S.peers)
       const text = extMessage(address, event.ext, event.id, digest)
+      const ownAgent = event.from.self && event.via !== 'person'
       const message: HeldMessage = { id: event.id, kind: 'message', from: { userId: event.from.userId, address }, text, heldAt: await $.clock.now(), why: '', isFramed: true, isExt: true }
       $.ui.toast(inert(event.fallback))
-      const verdict = await verdictOf(S, $, { fromSelf: event.from.self, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
+      const isElsewhere = event.from.self && typeof event.fromRef !== 'string'
+      const verdict = await verdictOf(S, $, { fromSelf: event.from.self && !ownAgent, ownAgent, fromDid: event.from.did, isElsewhere, fromUserId: event.from.userId, mode: effectiveMode(S, $) })
       if (verdict.isHeld) {
         await hold(S, $, { ...message, why: verdict.why })
 
         return
       }
-      await deliver(S, $, event.from.self ? { text } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
+      await deliver(S, $, event.from.self ? { text, fromOwn: { userId: event.from.userId, address, did: event.from.did, ...(ownAgent ? { isAgent: true } : {}) }, message } : { text, from: { userId: event.from.userId, address }, message }, `${address} shared an item: ${firstLine(event.fallback, 100)}`)
 
       return
     }
@@ -2971,7 +3025,10 @@ export const register: Register = on => {
       return next(e)
     }
     const blocked: PendingItem[] = []
-    for (const item of items ?? []) if (item.from && (await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: live })).isHeld) blocked.push(item)
+    for (const item of items ?? []) {
+      if (item.from && (await verdictOf(S, $, { fromSelf: false, fromUserId: item.from.userId, mode: live })).isHeld) blocked.push(item)
+      else if (item.fromOwn?.isAgent === true && (await verdictOf(S, $, { fromSelf: false, ownAgent: true, fromUserId: item.fromOwn.userId, mode: live, ...(item.fromOwn.did ? { fromDid: item.fromOwn.did } : {}) })).isHeld) blocked.push(item)
+    }
     if (items !== undefined && blocked.length === 0) {
       shown()
 
@@ -2995,7 +3052,7 @@ export const register: Register = on => {
     } else {
       for (const item of items) {
         if (item.message) S.claimed.delete(item.message.id)
-        await hold(S, $, item.message ? { ...item.message, why } : framed(item.text, item.from, item.id))
+        await hold(S, $, item.message ? { ...item.message, why } : framed(item.text, item.from ?? item.fromOwn, item.id))
       }
     }
 
@@ -3250,6 +3307,10 @@ export const register: Register = on => {
     const S = await bindSess($, 'hook')
     if (!S) return next(e)
     const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again. Only the engine's own
+    // stamps for the person (PromptOrigin: `composer`, Enter at the prompt; `bridge`, Remote Control); this
+    // mod's `$.prompt.submit` arrives as `plugin`, another session's message as `peer`/`peer-send-message`.
+    if (typed && !e.isMeta && !e.command) S.ownSinceTyped = 0
     const current = S.run
     if (!isLive(current) || !current.isOnline || e.isMeta || e.command || !typed) return next(e)
     bg(updateSummary(S, $, current, e.text))

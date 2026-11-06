@@ -115,10 +115,11 @@ export function makeTools(bridge: Bridge, onMeta?: (meta: unknown) => void): Too
         const message = str(args.message) ?? "";
         if (message.trim() === "" && args.notify_when_idle !== true) return text("Nothing to send: `message` is empty.", true);
         if (message.length > MAX_MESSAGE_CHARS) return text(`The message is too long (${message.length} characters; at most ${MAX_MESSAGE_CHARS}).`, true);
-        let target = resolveTarget(to, bridge.peers);
-        if (target.kind === "cli" || target.kind === "ambiguous") {
+        // Another session on this device is a target like any other listed one; this session itself never is.
+        let target = resolveTarget(to, bridge.peers, bridge.sid);
+        if (target.kind === "cli" || target.kind === "ambiguous" || (target.kind === "refused" && target.code === "no-label")) {
           await bridge.refreshPeers();
-          target = resolveTarget(to, bridge.peers);
+          target = resolveTarget(to, bridge.peers, bridge.sid);
         }
         if (target.kind === "refused") return text(target.reason, true);
         if (target.kind === "ambiguous") return text(`More than one session matches ${inertMax(to, 100)}. Retry with one of:\n${target.candidates.map((p) => `- ${sessionAddress(p)} — ${p.state}`).join("\n")}`, true);

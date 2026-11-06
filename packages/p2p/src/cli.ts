@@ -14,7 +14,7 @@ import type { Readable, Writable } from "node:stream";
 import * as codex from "@peer2peer/codex-bridge";
 import { Command, CommanderError, Option } from "commander";
 import { App, type Io } from "./app.js";
-import { readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
+import { ownAgentsDeliver, ownAgentsDeliverFrom, ownDevicesDeliver, readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
 import { receiptsSetting, sendReceipt } from "./receipts.js";
 import * as trustOps from "./trust.js";
 import { CliError, toErrorJson } from "./errors.js";
@@ -29,6 +29,7 @@ import { receiving } from "./inbound.js";
 import * as rotation from "./rotation.js";
 import * as sessions from "./sessions.js";
 import * as projects from "./projects.js";
+import { isDid } from "@peer2peer/core/v3";
 import { confirmOnTty } from "./tty-confirm.js";
 import * as social from "./social.js";
 import { watch } from "./watch.js";
@@ -1252,7 +1253,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     .command("send [text...]")
     .description("Send a message to a peer session (text from args or stdin)")
     .option("--from-session <sid>", "Your session id (on a terminal: default tui, as `p2p tui` sends)")
-    .option("--to <address>", "name@fingerprint, userId or petname, optionally \"[ref]\" or /sid (on a terminal: picked from a list)")
+    .option("--to <address>", "name@fingerprint, userId or petname, optionally \"[ref]\" or /sid; another session of yours on this device only by \"[ref]\" or /sid, never the sending session itself (on a terminal: picked from a list)")
     .option("--notify-when-idle", "Tell this session when the target next goes idle")
     .option("--stdin", "Read the text from stdin (also: a single `-` as the text)")
     .option("--project-dir <dir>", "Another folder the session works in (repeatable): binds it to that project too, which only ever narrows who it may reach", collect)
@@ -1327,7 +1328,8 @@ export function buildProgram(deps: ProgramDeps): Command {
         // The person's own sends cross no project boundary, but say which one this folder has (projects.ts).
         const here = person ? await ops.showProject(app, projects.sessionWorkdir(app.env)).catch(() => undefined) : undefined;
         const boundary = here ? `\nproject ${here.name} here is ${here.policy === "private" ? "private (agent sessions in it reach only your own devices)" : "shared"}; this send was yours, from your terminal` : "";
-        const from = fromTui ? `\nsent from session tui; replies show in \`p2p tui\`${boundary}` : "";
+        const taint = fromTui ? await ops.tuiTaintNote(app, r.to.userId).catch(() => undefined) : undefined;
+        const from = fromTui ? `\nsent from session tui; replies show in \`p2p tui\`${boundary}${taint ? `\nnote: ${taint}` : ""}` : "";
         if (r.queued && r.state === "outbox") {
           return { json: r, human: `${shared}Queued for ${where}: this device can't reach a relay right now; it goes out when one is back (${until(r.expiresAt!)})${tail}.${from}` };
         }
@@ -1344,9 +1346,57 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--json", "JSON output")
     .action(
       run(async (app, event: string, o: { fromSession: string; outcome: string }) => {
-        const r = await sendReceipt(app, { eventId: event, fromSession: sessions.checkSid(o.fromSession, "--from-session"), outcome: o.outcome });
+        const sid = sessions.checkSid(o.fromSession, "--from-session");
+        // Only the session's front end (or, outside an agent, a caller for an unregistered session) reports for it.
+        await projects.assertSpeaksFor(app, sid);
+        const r = await sendReceipt(app, { eventId: event, fromSession: sid, outcome: o.outcome });
         return { json: r, human: r.sent ? `Receipt sent: ${r.outcome}.` : `No receipt sent (${r.reason}).` };
       }),
+    );
+  program
+    .command("own-agents [state] [did]")
+    .description(
+      "Whether messages from your own agent sessions skip the hold in a session that approves its own tool calls: `hold` (the default), `deliver` (you only; `--devices <did…|all-other>` for only your other devices' sessions), or `check <did>` (a front end, at delivery)",
+    )
+    .option("--devices <devices...>", "With deliver: only messages from these other devices of yours (their device ids, or all-other); this device's agent sessions stay held")
+    .option("--json", "JSON output")
+    .action(
+      run(
+        async (app, state: string | undefined, did: string | undefined, o: { devices?: string[] }) => {
+          if (state !== undefined && state !== "hold" && state !== "deliver" && state !== "check") throw new CliError("usage", "p2p own-agents [hold|deliver [--devices <did…|all-other>]|check <did>]");
+          if (state === "check") {
+            if (!did || !isDid(did)) throw new CliError("usage", "p2p own-agents check <did>: a v3 device id");
+            return { json: { did, deliver: ownAgentsDeliverFrom(app.home, did, app.did) }, human: ownAgentsDeliverFrom(app.home, did, app.did) ? "deliver" : "hold" };
+          }
+          if (did !== undefined) throw new CliError("usage", "p2p own-agents [hold|deliver [--devices <did…|all-other>]]");
+          const devices = o.devices?.flatMap((d) => d.split(",")).map((d) => d.trim()).filter(Boolean);
+          if (devices !== undefined && state !== "deliver") throw new CliError("usage", "--devices goes with deliver");
+          if (devices !== undefined && !(devices.length === 1 && devices[0] === "all-other") && !devices.every((d) => isDid(d) && d !== app.did)) {
+            throw new CliError("usage", "--devices takes your other devices' ids (p2p devices) or all-other, never this device");
+          }
+          // Turning the hold off widens what drives a session: the person only, never an agent. Turning it back on never asks.
+          if (state === "deliver") await projects.assertPersonForWidening(app, devices ? "own-agents deliver --devices" : "own-agents deliver", app.confirmTty);
+          if (state === "hold") {
+            await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: false, result: undefined }));
+            await updateFileConfigField(app, "ownDevicesDeliver", () => ({ next: [], result: undefined }));
+          } else if (state === "deliver" && devices) {
+            await updateFileConfigField(app, "ownDevicesDeliver", () => ({ next: devices.length === 1 && devices[0] === "all-other" ? "all-other" : devices, result: undefined }));
+          } else if (state === "deliver") {
+            await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: true, result: undefined }));
+          }
+          const on = ownAgentsDeliver(app.home);
+          const list = ownDevicesDeliver(app.home);
+          const some = list === "all-other" ? "all your other devices" : list.length > 0 ? `your devices ${list.join(", ")}` : undefined;
+          return {
+            json: { ownAgents: on ? "deliver" : "hold", devices: list },
+            human: on
+              ? "Messages from your own agent sessions reach a session that approves its own tool calls without the hold."
+              : `Messages from your own agent sessions wait for Deliver in a session that approves its own tool calls (your own terminal's here are delivered)${some ? `, except those from ${some}` : ""}.`,
+          };
+        },
+        // `check` and `--devices` need this device's id.
+        {},
+      ),
     );
   program
     .command("receipts [state]")
