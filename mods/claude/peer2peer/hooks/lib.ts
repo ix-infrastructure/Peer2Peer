@@ -996,7 +996,7 @@ export const PEERS_USAGE = [
   '  /peers private              only the people you added see this session',
   '  /peers circle <cid>         share this session with a circle you joined',
   '  /peers project [show|ls]    who sees sessions in this project (private until you share it)',
-  '  /peers project share [<circle>…] [--person <user>]…  share this project (bare: your default circle)',
+  '  /peers project share [<circle>…] [--person <user>]… [--subfolders]  share this project (bare: your default circle; --subfolders: a folder outside git covers its subfolders too)',
   '  /peers project private      only your own devices see this project\'s sessions',
   '  /peers session              this session\'s projects, who each is shared with, and why it is private',
   '  /peers approve <id>         act on a held item (friend invite, circle invite, join request, moved key)',
@@ -1120,7 +1120,7 @@ export function parsePeersArgs(args: string): PeersCommand {
     case 'session':
       return rest.length === 0 || (rest.length === 1 && first?.toLowerCase() === 'show') ? { verb: 'session' } : { verb: 'usage', error: 'session takes no arguments (it shows this session)' }
     case 'project': {
-      // `/peers project [show|ls|share [<circle>…] [--person <user>]…|private]`: as `p2p project`, in this session's folder.
+      // `/peers project [show|ls|share [<circle>…] [--person <user>]… [--subfolders]|private]`: as `p2p project`, in this session's folder.
       const sub = (first ?? 'show').toLowerCase()
       if (sub === 'show' || sub === 'ls' || sub === 'private') return rest.length <= 1 ? { verb: 'project', args: [sub] } : { verb: 'usage', error: `project ${sub} takes no arguments` }
       if (sub === 'share') {
@@ -1132,6 +1132,8 @@ export function parsePeersArgs(args: string): PeersCommand {
             if (!u) return { verb: 'usage', error: '--person needs a friend (p2p:… or name@fingerprint)' }
             args.push(`--person=${u}`)
           } else if (w === '--add') args.push('--add')
+          // Opt-in: a shared folder (outside git) covers its subfolders only when the person asks.
+          else if (w === '--subfolders') args.push('--subfolders')
           else if (w.startsWith('-')) return { verb: 'usage', error: `project share: unknown option ${w}` }
           else args.push(w)
         }
@@ -1139,7 +1141,7 @@ export function parsePeersArgs(args: string): PeersCommand {
         return { verb: 'project', args }
       }
 
-      return { verb: 'usage', error: 'project takes show, ls, share [<circle>…] [--person <user>]… or private' }
+      return { verb: 'usage', error: 'project takes show, ls, share [<circle>…] [--person <user>]… [--subfolders] or private' }
     }
     case 'approve':
     case 'decline':
@@ -1946,15 +1948,22 @@ export const LITERAL = '\uE000'
  * parts join into one word (`''x1` and `"x"1` are `x1`), backslashes escape, `$'…'` is
  * ANSI-C quoted, and `;`, `|`, `&`, `(`, `)`, `<`, `>` and newlines separate words. Expansions
  * (`$X`, `$(…)`, backticks) stay as text. Linear in the length, with no cap on the number of words
- * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing.
+ * (a cap would let padding hide what follows it). Best effort: no aliases, no globbing. With
+ * `starts`: the index of each word that begins a simple command (the first word, and the first
+ * after an unquoted `;`, `|`, `&`, `(`, `)` or newline).
  */
-export function shellTokens(command: string, markLiteral = false, substs?: string[]): string[] {
+export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>): string[] {
   const out: string[] = []
   let cur = ''
   let has = false
   let q: '' | "'" | '"' | '$' = ''
+  let fresh = true
   const push = () => {
-    if (has) out.push(cur)
+    if (has) {
+      if (fresh) starts?.add(out.length)
+      fresh = false
+      out.push(cur)
+    }
     cur = ''
     has = false
   }
@@ -2016,6 +2025,7 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
     }
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
       push()
+      if (c === '\n' || ';|&()'.includes(c)) fresh = true
 
       continue
     }
@@ -2151,23 +2161,102 @@ const jqShape = (w: string | undefined) => w !== undefined && (/^\s*(\.(?!\.?[\\
 const awkShape = (w: string | undefined) => w !== undefined && (/[{}]/.test(w) || /^\s*(BEGIN|END)\b/.test(w))
 const codeShape = (w: string | undefined) => w !== undefined && (/[\s;(){}'"=]/.test(w) || sedShape(w))
 
+/** Shell words that come before a simple command's command word (`if x`, `then x`, `! x`, `{ x`). */
+const KEYWORDS = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'fi', 'done', 'esac', 'time', 'coproc'])
+/** Commands that run the next word as the command, and their options that take a value. */
+const RUNNERS: Readonly<Record<string, readonly string[]>> = {
+  sudo: ['-u', '-g', '-p', '-C', '-D', '-h', '-r', '-t', '-T', '-U', '--user', '--group', '--prompt', '--chdir', '--close-from', '--host', '--role', '--type', '--command-timeout', '--other-user'],
+  doas: ['-u', '-C'],
+  env: ['-u', '--unset', '-C', '--chdir'],
+  exec: ['-a'],
+  time: ['-f', '-o', '--format', '--output'],
+  nohup: [],
+  command: [],
+  builtin: [],
+  nice: ['-n', '--adjustment'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+  xargs: ['-I', '-L', '-n', '-P', '-s', '-d', '-E', '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs', '--max-lines', '--replace', '--eof', '--max-chars'],
+  stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'],
+  unbuffer: [],
+  ionice: ['-c', '-n', '-p', '--class', '--classdata', '--pid'],
+  caffeinate: ['-t', '-w'],
+  noglob: [],
+  nocorrect: [],
+}
+
+/**
+ * The simple commands of a command line, as `[first, end)` word ranges (shellTokens `starts`).
+ */
+function segmentsOf(count: number, starts: ReadonlySet<number>): [number, number][] {
+  const at = [...starts].filter(k => k < count).sort((x, y) => x - y)
+  if (count > 0 && at[0] !== 0) at.unshift(0)
+
+  return at.map((k, n) => [k, at[n + 1] ?? count] as [number, number])
+}
+
+/**
+ * The command word of the simple command `words[s..e)`: past keywords (`then`, `!`), assignments
+ * (`X=1`) and runners with their options (`sudo -u x`, `env -i`, `timeout 5`, `xargs -0`), or -1
+ * when there is none or it can't be told (`env -S '…'`). `dirs`: the folders a runner moves to
+ * first (`env -C d`, `sudo -D d`).
+ */
+function commandAt(words: readonly string[], s: number, e: number): { at: number; dirs: string[] } {
+  const dirs: string[] = []
+  let i = s
+  for (let guard = 0; guard < 64 && i < e; guard++) {
+    const w = words[i] as string
+    if (KEYWORDS.has(w) || /^[A-Za-z_]\w*=/.test(w)) {
+      i++
+      continue
+    }
+    const { base } = commandName(w)
+    const opts = Object.prototype.hasOwnProperty.call(RUNNERS, base) ? RUNNERS[base] : undefined
+    if (opts === undefined) break
+    i++
+    while (i < e && (words[i] as string).startsWith('-') && words[i] !== '-') {
+      const opt = words[i] as string
+      i++
+      if (opt === '--') break
+      if (base === 'env' && (opt === '-S' || opt === '--split-string' || opt.startsWith('--split-string=') || /^-[A-Za-z]*S/.test(opt))) return { at: -1, dirs }
+      const eq = opt.indexOf('=')
+      const name = eq > 0 ? opt.slice(0, eq) : opt
+      const chdir = ((base === 'env' || base === 'doas') && name === '-C') || name === '--chdir' || (base === 'sudo' && name === '-D')
+      if (eq > 0) {
+        if (chdir) dirs.push(opt.slice(eq + 1))
+      } else if (opts.includes(opt)) {
+        if (chdir && i < e) dirs.push(words[i] as string)
+        i++
+      } else if (base === 'env' && /^-C./.test(opt)) dirs.push(opt.slice(2))
+    }
+    if (base === 'timeout' && /^\d/.test(words[i] ?? '')) i++
+  }
+
+  return { at: i < e ? i : -1, dirs }
+}
+
 /**
  * The words that are a program, not a path: the script of sed (`s#a/b#c/d#`), jq (`.a/b`), awk
- * and perl -e, and the code of `python -c`, `node -e`, `sh -c` and the like. Only in a program's
- * place (after the options, with -e/-f/--from-file read as they are) and only with a program's
- * shape: anything else stays a path, since a path missed binds nothing. Their absolute paths are
- * still read (shellPaths: embedded).
+ * and perl -e, and the code of `python -c`, `node -e`, `sh -c` and the like. Only for the command
+ * word of a simple command (`segs`: commandAt), in a program's place (after the options, with
+ * -e/-f/--from-file read as they are), within that simple command, and only with a program's
+ * shape: anything else stays a path, since a path missed binds nothing. A word named sed or jq
+ * anywhere else (`cat jq x/../k`) is an argument like any other. Their absolute paths are still
+ * read (shellPaths: embedded).
  */
-function programWords(words: readonly string[]): Set<number> {
+function programWords(words: readonly string[], segs: readonly (readonly [number, number])[]): Set<number> {
   const out = new Set<number>()
   const mark = (j: number, ok: (w: string | undefined) => boolean) => {
-    if (ok(words[j])) out.add(j)
+    if (j < end && ok(words[j])) out.add(j)
   }
-  for (let i = 0; i < words.length; i++) {
+  let end = 0
+  for (const [s, e] of segs) {
+    const i = commandAt(words, s, e).at
+    if (i < 0) continue
+    end = e
     const { base, bare } = commandName(words[i] as string)
     if (SED.has(base)) {
       let script = false
-      for (let j = i + 1; j < words.length; j++) {
+      for (let j = i + 1; j < e; j++) {
         const w = words[j] as string
         if (w === '--') {
           if (!script) mark(j + 1, sedShape)
@@ -2202,7 +2291,7 @@ function programWords(words: readonly string[]): Set<number> {
       }
     } else if (JQ.has(base)) {
       let script = false
-      for (let j = i + 1; j < words.length; j++) {
+      for (let j = i + 1; j < e; j++) {
         const w = words[j] as string
         if (w === '--') {
           if (!script) mark(j + 1, jqShape)
@@ -2221,7 +2310,7 @@ function programWords(words: readonly string[]): Set<number> {
       }
     } else if (AWK.has(base)) {
       let script = false
-      for (let j = i + 1; j < words.length; j++) {
+      for (let j = i + 1; j < e; j++) {
         const w = words[j] as string
         if (w === '--') {
           if (!script) mark(j + 1, awkShape)
@@ -2250,7 +2339,7 @@ function programWords(words: readonly string[]): Set<number> {
       }
     } else if (INTERPRETERS.has(base) || INTERPRETERS.has(bare) || CODE_SHELLS.has(base)) {
       // The word after a code flag (-c, -e, --eval; a cluster like -ne, -lc): code, when it looks like code.
-      for (let j = i + 1; j < Math.min(words.length, i + 6); j++) {
+      for (let j = i + 1; j < Math.min(e, i + 6); j++) {
         const w = words[j] as string
         if (CODE_FLAGS.has(w) || /^-[A-Za-z]*[ceE]$/.test(w)) {
           mark(j + 1, codeShape)
@@ -2303,11 +2392,35 @@ function mentions(raw: string, name: string): boolean {
   return false
 }
 
+/** Commands whose `-C <dir>` (or `--directory`) runs them in another folder. */
+const DIR_FLAG_COMMANDS = new Set(['git', 'make', 'gmake', 'bmake', 'tar', 'gtar', 'bsdtar', 'ninja'])
+/** A path with a `..` segment. */
+const DOTDOT = /(^|[\\/])\.\.([\\/]|$)/
+
 /**
- * The folders a shell command names: absolute, `~` and relative paths (anything with a separator,
+ * What shellPaths found. `maybe`: what the words it read as a program (sed's script, jq's filter)
+ * would name if they were paths: the front end binds each one that exists (a file named like a
+ * program is still that file).
+ */
+export interface ShellPaths {
+  paths: string[]
+  over: boolean
+  why?: PathsOverWhy[]
+  sticky?: true
+  maybe?: string[]
+}
+
+/**
+ * The paths a shell command names: absolute, `~` and relative paths (anything with a separator,
  * or starting with `.` or `~`), an option's value (`--file=/x`) too, each resolved (relative ones
- * against `cwd` and any folder the command `cd`s to, a file to its folder) and the absolute paths
- * written inside a program or quoted phrase.
+ * against `cwd` and every folder the command moves to) and the absolute paths written inside a
+ * program or quoted phrase. A path is passed as written (`/src/secret.repo` stays itself): the CLI
+ * maps a file to its folder.
+ *
+ * The folders it moves to, read per simple command: `cd`/`pushd`/`chdir` (none: `$HOME`), `git -C`,
+ * `make -C`, `tar -C`, `env -C`, `sudo -D` and the like. Each binds, and relative paths resolve
+ * against each one (and against the ones before it). One it can't place (`cd -`, `cd $X`, `popd`
+ * with no `pushd`) is `unresolved`.
  *
  * Variables expand only when the front end knows their value as the shell sees it: `$HOME`,
  * `$PWD`, and `ctx.vars` (the mod's `$CLAUDE_JOB_DIR`), and only when the command doesn't set
@@ -2316,6 +2429,9 @@ function mentions(raw: string, name: string): boolean {
  * (private), `why` `unresolved`; further in, the folder before it binds. A bare `$X` or `$(…)`
  * names no path. A `$(…)` or backtick command is read for its own paths.
  *
+ * A program's text (programWords: only for a simple command's command word) isn't a path, unless
+ * it has a `..` segment or a shell expansion; what it would name otherwise is `maybe`.
+ *
  * Device files (`/dev/null`, `/dev/fd/1`) are skipped. A command that could delete a repository's
  * `.git` or `.p2p-private` without naming it (find -delete, xargs, dotglob, inline code) also
  * names `<folder>/.git` for each folder, so a shared folder above never covers it afterwards
@@ -2323,20 +2439,24 @@ function mentions(raw: string, name: string): boolean {
  * `sticky`: the command touched the files Claude Code runs before each command (pass `untrusted`
  * from then on).
  */
-export function shellPaths(command: string, cwd: string, home?: string, ctx: ShellContext = {}, depth = 0): { paths: string[]; over: boolean; why?: PathsOverWhy[]; sticky?: true } {
+export function shellPaths(command: string, cwd: string, home?: string, ctx: ShellContext = {}, depth = 0): ShellPaths {
   const out = new Set<string>()
+  const maybe = new Set<string>()
   const why = new Set<PathsOverWhy>()
   const isSep = (c: string | undefined) => c === '/' || c === '\\'
+  const isAbs = (t: string) => t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')
   const sticky = ENV_FILES.test(command)
-  const done = () => ({ paths: [...out], over: why.size > 0, ...(why.size > 0 ? { why: [...why] } : {}), ...(sticky ? { sticky: true as const } : {}) })
+  const done = (): ShellPaths => ({ paths: [...out], over: why.size > 0, ...(why.size > 0 ? { why: [...why] } : {}), ...(sticky ? { sticky: true as const } : {}), ...(maybe.size > 0 ? { maybe: [...maybe] } : {}) })
   if (depth > 8) {
     why.add('unresolved')
 
     return done()
   }
   const substs: string[] = []
-  const words = shellTokens(command, true, substs)
-  const changesDir = words.some(w => w === 'cd' || w === 'pushd' || w === 'popd')
+  const starts = new Set<number>()
+  const words = shellTokens(command, true, substs, starts)
+  const segs = segmentsOf(words.length, starts)
+  const changesDir = words.some(w => w === 'cd' || w === 'pushd' || w === 'popd' || w === 'chdir')
   // The variables known here, as this command's shell sees them.
   const known = new Map<string, string>()
   const trusted = !ctx.untrusted && !sticky && !EVAL_LIKE.test(command)
@@ -2346,31 +2466,8 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
     if (name === 'PWD' && changesDir) continue
     known.set(name, val)
   }
-  // Folders a relative path may be in: the session's, and each one the command cds to (when it can be told).
-  const bases = [cwd]
-  if (changesDir) {
-    for (let i = 0; i < words.length; i++) {
-      if (words[i] !== 'cd' && words[i] !== 'pushd') continue
-      let j = i + 1
-      while (j < words.length && /^-[LPe@]+$/.test(words[j] as string)) j++
-      const target = words[j]
-      if (target === undefined || target === '') {
-        if (home) bases.push(home)
-        continue
-      }
-      if (target.startsWith('/') || /^[A-Za-z]:[\\/]/.test(target)) bases.push(target)
-      else if ((target === '~' || target.startsWith('~/')) && home) bases.push(resolveLike(home, target.slice(2) || '.'))
-      else if (!/[$`~]/.test(target) && !target.includes(SUBST) && !target.includes(LITERAL) && target !== '-') bases.push(resolveLike(cwd, target))
-    }
-  }
-  const add = (p: string): boolean => {
-    if (isDevice(p)) return true
-    out.add(p)
-
-    return out.size <= MAX_COMMAND_PATHS
-  }
-  // One path: `inner` for one written inside a program, whose own `$x` and unknowns bind nothing (never over).
-  const take = (word: string, inner: boolean): boolean => {
+  // A word with the variables known here expanded.
+  const expand = (word: string): string => {
     let t = word
     // A $PWD the command may have moved: the folder it is in, relative to each base.
     if (changesDir) for (const v of ['${PWD}', '$PWD']) if (t === v || t.startsWith(`${v}/`) || t.startsWith(`${v}\\`)) t = `.${t.slice(v.length)}`
@@ -2389,6 +2486,84 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
         }
       }
     }
+
+    return t
+  }
+  // Folders a relative path may be in: the session's, and each one the command moves to, in order
+  // (a relative move is relative to every folder before it).
+  const bases = [cwd]
+  const moved: string[] = []
+  const moveTo = (word: string): boolean => {
+    let t = expand(word)
+    if (/[$`]/.test(t) || t.includes(SUBST)) return false
+    t = t.split(LITERAL).join('$')
+    if (t === '') return true
+    let ps: string[]
+    if (t === '~' || t.startsWith('~/') || t.startsWith('~\\')) {
+      if (!home) return false
+      ps = [resolveLike(home, t.slice(2) || '.')]
+    } else if (t.startsWith('~')) return false
+    else if (isAbs(t)) ps = [resolveLike(cwd, t)]
+    else ps = bases.map(b => resolveLike(b, t))
+    for (const p of ps) {
+      if (!bases.includes(p)) bases.push(p)
+      moved.push(p)
+    }
+
+    return true
+  }
+  let pushed = false
+  for (const [s, e] of segs) {
+    const c = commandAt(words, s, e)
+    const targets = [...c.dirs]
+    let unknown = false
+    if (c.at >= 0) {
+      const name = commandName(words[c.at] as string).base
+      if (name === 'cd' || name === 'pushd' || name === 'chdir') {
+        let j = c.at + 1
+        while (j < e && /^-[LPe@]+$/.test(words[j] as string)) j++
+        if (words[j] === '--' && j < e) j++
+        const target = j < e ? (words[j] as string) : undefined
+        if (name === 'pushd') pushed = true
+        // A bare pushd swaps the top two folders of a stack this front end doesn't see; cd -, pushd +1 likewise.
+        if (target === undefined) {
+          if (name === 'pushd') unknown = true
+          else targets.push('~')
+        } else if (target === '-' || /^[+-]\d+$/.test(target)) unknown = true
+        else targets.push(target)
+      } else if (name === 'popd') {
+        if (!pushed) unknown = true
+      } else if (DIR_FLAG_COMMANDS.has(name)) {
+        for (let j = c.at + 1; j < e; j++) {
+          const w = words[j] as string
+          // git's own -C (and --git-dir, --work-tree) come before its subcommand.
+          if (name === 'git' && !w.startsWith('-')) break
+          if (w === '-C' || w === '--directory' || (name === 'git' && (w === '--git-dir' || w === '--work-tree'))) {
+            if (j + 1 < e) targets.push(words[++j] as string)
+          } else if (w.startsWith('--directory=') || (name === 'git' && (w.startsWith('--git-dir=') || w.startsWith('--work-tree=')))) targets.push(w.slice(w.indexOf('=') + 1))
+          else if (name !== 'git' && /^-C./.test(w)) targets.push(w.slice(2))
+          else if (name === 'git' && (w === '-c' || w === '--namespace' || w === '--exec-path')) j++
+        }
+      }
+    }
+    if (unknown) why.add('unresolved')
+    for (const t of targets) if (!moveTo(t)) why.add('unresolved')
+    if (bases.length > 32) {
+      why.add('folders')
+      break
+    }
+  }
+  const add = (p: string): boolean => {
+    if (isDevice(p)) return true
+    out.add(p)
+
+    return out.size <= MAX_COMMAND_PATHS
+  }
+  // One path. `inner`: one written inside a program, whose own `$x` and unknowns bind nothing (never
+  // over). `maybe`: a program's own text, kept apart (ShellPaths.maybe) for the front end to check.
+  const take = (word: string, mode: 'path' | 'inner' | 'maybe'): boolean => {
+    const inner = mode !== 'path'
+    let t = expand(word)
     const pathLike = t.startsWith('~') || t.startsWith('.') || t.includes('/') || t.includes('\\')
     if (!pathLike) return true
     // Any other expansion: where it sits decides. In the path's first segment, the location itself
@@ -2424,19 +2599,19 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
       if (!inner) why.add('unresolved')
 
       return true
-    } else if (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t) || t.startsWith('\\\\')) ps = [resolveLike(cwd, t)]
+    } else if (isAbs(t)) ps = [resolveLike(cwd, t)]
     else ps = [...new Set(bases.map(b => resolveLike(b, t)))]
+    // As written: a file, a folder or a pattern (the CLI finds a file's folder, by real path, through symlinks).
     for (const p of ps) {
-      // A file's folder (the CLI resolves it by real path, through symlinks); a folder or a pattern as named.
-      const last = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
-      const name = p.slice(last + 1)
-      const folder = x < 0 && name.includes('.') && !name.startsWith('.') && !/[*?[\]{}]/.test(name) && last > 0 ? p.slice(0, last) : p
-      if (!add(folder)) return false
+      if (mode === 'maybe') {
+        if (!isDevice(p)) maybe.add(p)
+        if (maybe.size > MAX_COMMAND_PATHS) return false
+      } else if (!add(p)) return false
     }
 
     return true
   }
-  const programs = programWords(words)
+  const programs = programWords(words, segs)
   // A command that may remove a .git or .p2p-private without naming it.
   let mayUnmark = /dotglob|globdots|glob_dots|GLOBIGNORE/i.test(command) || /[*?\]@!+]\(/.test(command)
   for (let i = 0; i < words.length && !mayUnmark; i++) {
@@ -2456,14 +2631,22 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
     if (t === '' || (word.startsWith('-') && eq < 0) || t.includes('\0')) continue
     const program = programs.has(i)
     // A program's (or a quoted phrase's) own absolute paths.
-    if (program || /\s/.test(t)) for (const e of embedded(t)) if (!e.includes('://') && !take(e, true)) return capped()
-    // A program's own text isn't a path, unless it holds an expansion of the shell's ("$X/y" in double quotes): read as before.
-    if (t.includes('://') || t.includes('\n') || (program && !t.startsWith('/') && !t.startsWith('~') && !/[$`\uE001]/.test(t))) continue
-    if (!take(t, false)) return capped()
+    if (program || /\s/.test(t)) for (const e of embedded(t)) if (!e.includes('://') && !take(e, 'inner')) return capped()
+    if (t.includes('://') || t.includes('\n')) continue
+    // A program's own text isn't a path, unless it holds an expansion of the shell's ("$X/y" in
+    // double quotes) or a `..` segment (`jq .git/../../k`): those are read as paths. Otherwise it
+    // is `maybe`: bound when such a path exists.
+    if (program && !t.startsWith('/') && !t.startsWith('~') && !/[$`]/.test(t) && !DOTDOT.test(t)) {
+      if (!take(t, 'maybe')) return capped()
+      continue
+    }
+    if (!take(t, 'path')) return capped()
   }
+  for (const p of moved) if (!add(p)) return capped()
   for (const s of substs) {
     const r = shellPaths(s, cwd, home, ctx, depth + 1)
     for (const p of r.paths) if (!add(p)) return capped()
+    for (const p of r.maybe ?? []) maybe.add(p)
     for (const w of r.why ?? []) why.add(w)
   }
   if (mayUnmark) {
@@ -2477,10 +2660,10 @@ export function shellPaths(command: string, cwd: string, home?: string, ctx: She
 
   return done()
 
-  function capped() {
+  function capped(): ShellPaths {
     why.add('folders')
 
-    return { ...done(), paths: [...out].slice(0, MAX_COMMAND_PATHS) }
+    return { ...done(), paths: [...out].slice(0, MAX_COMMAND_PATHS), ...(maybe.size > 0 ? { maybe: [...maybe].slice(0, MAX_COMMAND_PATHS) } : {}) }
   }
 }
 
@@ -2530,11 +2713,11 @@ export function toolPaths(input: unknown, cwd?: string, home?: string): string[]
 }
 
 /**
- * toolPaths, plus a shell command's folders (shellPaths) and whether any couldn't be resolved or
+ * toolPaths, plus a shell command's paths (shellPaths) and whether any couldn't be resolved or
  * were too many (`over`: private; `why` says which). `sticky`: the call touched the files Claude
- * Code runs before each command (shellPaths `untrusted` from then on).
+ * Code runs before each command (shellPaths `untrusted` from then on). `maybe`: shellPaths'.
  */
-export function toolPathsAll(input: unknown, cwd?: string, home?: string, ctx: ShellContext = {}): { paths: string[]; over: boolean; why?: PathsOverWhy[]; sticky?: true } {
+export function toolPathsAll(input: unknown, cwd?: string, home?: string, ctx: ShellContext = {}): ShellPaths {
   const e = (input ?? {}) as Record<string, unknown>
   const paths = toolPaths(input, cwd, home)
   const touched = paths.some(p => ENV_FILES.test(p))
@@ -2543,7 +2726,7 @@ export function toolPathsAll(input: unknown, cwd?: string, home?: string, ctx: S
     if (!cwd) return { paths, over: true, why: ['unresolved'], ...(touched ? { sticky: true as const } : {}) }
     const r = shellPaths(e.command, cwd, home, ctx)
 
-    return { paths: [...paths, ...r.paths], over: r.over, ...(r.why ? { why: r.why } : {}), ...(touched || r.sticky ? { sticky: true as const } : {}) }
+    return { paths: [...paths, ...r.paths], over: r.over, ...(r.why ? { why: r.why } : {}), ...(touched || r.sticky ? { sticky: true as const } : {}), ...(r.maybe ? { maybe: r.maybe } : {}) }
   }
 
   return { paths, over: false, ...(touched ? { sticky: true as const } : {}) }
@@ -3157,6 +3340,68 @@ export function parseRepoProbe(stdout: string): { root?: string; branch?: string
   const branch = typeof b === 'string' && /^[A-Za-z0-9._/-]{1,128}$/.test(b) && !b.includes('..') && !/^[-/]/.test(b) && !b.endsWith('/') ? b : undefined
 
   return { root: v.root, ...(branch ? { branch } : {}) }
+}
+
+/**
+ * `node -e MARKER_PROBE <path>…`: for each absolute path, whether it exists, and the marker of
+ * the nearest folder at or above it that holds a `.git` (any kind), a `.p2p-private`, or is a bare
+ * repository (`<that folder>/.git` then): the front end binds that marker too, so a shared folder
+ * above never covers the repository once its files are gone (projects.ts namedStop). Reads only
+ * metadata (and a bare repository's small `config`); never runs git. Same rules as the CLI's
+ * projectOf and the Codex bridge's markerPaths.
+ */
+export const MARKER_PROBE = String.raw`
+const fs = require('fs'), path = require('path');
+const st = p => { try { return fs.statSync(p); } catch { return null; } };
+const lst = p => { try { return fs.lstatSync(p); } catch { return null; } };
+const bare = d => {
+  const h = st(path.join(d, 'HEAD')), o = st(path.join(d, 'objects')), r = st(path.join(d, 'refs'));
+  if (h && h.isFile() && o && o.isDirectory() && r && r.isDirectory()) return true;
+  const c = path.join(d, 'config'), cs = st(c);
+  try { return !!cs && cs.isFile() && cs.size <= 262144 && /^\s*bare\s*=\s*true\s*$/mi.test(fs.readFileSync(c, 'utf8')); } catch { return false; }
+};
+const out = { exists: [], markers: [] };
+for (const p of process.argv.slice(1)) {
+  if (!path.isAbsolute(p)) continue;
+  let cur = path.resolve(p);
+  if (st(cur)) out.exists.push(p);
+  for (let i = 0; i < 4096; i++) {
+    const s = st(cur);
+    if (s) { if (!s.isDirectory()) cur = path.dirname(cur); break; }
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+  for (let i = 0; i < 4096; i++) {
+    if (lst(path.join(cur, '.git')) || (path.basename(cur) !== '.git' && bare(cur))) { out.markers.push(path.join(cur, '.git')); break; }
+    if (lst(path.join(cur, '.p2p-private'))) { out.markers.push(path.join(cur, '.p2p-private')); break; }
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+}
+process.stdout.write(JSON.stringify(out));
+`
+
+/** MARKER_PROBE's answer, or undefined when it isn't one (the caller then fails closed). */
+export function parseMarkerProbe(stdout: string): { exists: string[]; markers: string[] } | undefined {
+  const v = parseJson<{ exists?: unknown; markers?: unknown }>(stdout)
+  const ok = (a: unknown): a is string[] => Array.isArray(a) && a.length <= 4096 && a.every(x => typeof x === 'string' && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(x) && !/[\0\n]/.test(x))
+  if (!v || !ok(v.exists) || !ok(v.markers)) return undefined
+
+  return { exists: v.exists, markers: v.markers }
+}
+
+/**
+ * The paths a tool call binds beyond its own (ShellPaths), from MARKER_PROBE's answer for
+ * `probed`: each marker it found, and each `maybe` that exists. No answer (the probe failed): fail
+ * closed, every `maybe` and `<path>/.git` for each path (never covered from above).
+ */
+export function markerExtras(probed: readonly string[], maybe: readonly string[], answer: { exists: string[]; markers: string[] } | undefined): string[] {
+  if (!answer) return [...maybe, ...probed.filter(p => !maybe.includes(p)).map(p => `${p}${p.includes('\\') && !p.includes('/') ? '\\' : '/'}.git`)]
+  const exists = new Set(answer.exists)
+
+  return [...answer.markers, ...maybe.filter(m => exists.has(m))]
 }
 
 // Path and secret scrubbing: core's own rules, from a verified copy (hooks/redact.ts).

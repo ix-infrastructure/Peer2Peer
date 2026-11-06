@@ -4,8 +4,9 @@
 //
 //  - A project is a git repository, keyed by its normalised remote URL (if any) and its git
 //    common dir, so every worktree and subfolder of one clone is the same project. Outside git,
-//    the real path of the folder, or of the nearest folder above it that has a policy (a shared
-//    folder covers its subfolders), never past a `.p2p-private` or a folder with its own policy.
+//    the real path of the folder, or of the nearest folder above it whose share covers its
+//    subfolders (opt-in: `p2p project share --subfolders`), never past a repository, a
+//    `.p2p-private`, a folder with its own policy or a folder that is gone.
 //  - Its policy lives only in this user's state (`<home>/cli/projects`): shared with circles and
 //    named people, or private. A project with no policy is private: only this user's own devices
 //    see its sessions. Nothing in a repository can widen that; a committed `.p2p-private` file at
@@ -22,7 +23,8 @@
 
 import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
@@ -115,6 +117,11 @@ export interface ProjectPolicyRec {
   root: string;
   remote?: string;
   share: ProjectShare;
+  /**
+   * A folder project's share covers its subfolders too (`p2p project share --subfolders`). Without
+   * it (every policy from before it), the policy is for that folder alone.
+   */
+  covers?: true;
   at: number;
 }
 
@@ -335,18 +342,74 @@ function readSmall(file: string): string | undefined {
 }
 
 /**
+ * Whether `d` is a bare git repository: `HEAD`, `objects/` and `refs/` in it, or a `config` that
+ * says `bare = true` (a folder named `.git` is a working tree's, found from its parent instead).
+ */
+function isBareRepo(d: string): boolean {
+  if (basename(d) === ".git") return false;
+  const st = (p: string) => {
+    try {
+      return statSync(p);
+    } catch {
+      return undefined;
+    }
+  };
+  if (st(join(d, "HEAD"))?.isFile() && st(join(d, "objects"))?.isDirectory() && st(join(d, "refs"))?.isDirectory()) return true;
+  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join(d, "config")) ?? "");
+}
+
+/** The git project whose git dir is `gitDir`, found at the folder `root`. */
+function gitRef(gitDir: string, root: string): ProjectRef {
+  let common = gitDir;
+  const cd = readSmall(join(gitDir, "commondir"))?.trim();
+  if (cd) common = resolve(gitDir, cd);
+  common = real(common);
+  const urls = remotesOf(readSmall(join(common, "config")) ?? "");
+  const remote = urls.map(normalizeRemote).find((x): x is string => x !== undefined);
+  const main = basename(common) === ".git" ? dirname(common) : common;
+  const name = clean(remote ? (remote.split("/").pop() ?? "") : basename(main)) || clean(basename(root)) || "project";
+  return {
+    id: `pj_${sha(`git\n${remote ?? ""}\n${common}`).slice(0, 24)}`,
+    name,
+    kind: "git",
+    root,
+    ...(remote ? { remote } : {}),
+    ...(existsSync(join(root, PRIVATE_MARKER)) ? { repoPrivate: true as const } : {}),
+  };
+}
+
+/** Whether `p` names something that is there, its trailing pattern parts (`*.log`, `{a,b}`) left out. */
+function present(p: string): boolean {
+  let q = resolve(p);
+  while (/[*?[\]{}]/.test(basename(q)) && dirname(q) !== q) q = dirname(q);
+  try {
+    statSync(q);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The project `dir` belongs to, read from the files alone (git is never run: no hook, fsmonitor
  * or config of the repository's can execute). A `.git` directory or `gitdir:` file up the tree
  * marks a working tree; its common dir (`commondir` for a linked worktree) identifies the clone.
+ * A bare repository (isBareRepo) is a git project too, and a `.git` that can't be read as one is
+ * a folder project of its own.
  *
  * Outside git, a folder project. With `doc` (the policies), the nearest folder at or above `dir`
- * that has a policy of its own is the project, so a shared folder covers its subfolders. That walk
- * never crosses:
+ * that has a policy of its own is the project when that is `dir`'s own folder, or when its share
+ * covers subfolders (`covers`, given with `p2p project share --subfolders`; a policy without it
+ * is for that folder alone, as before). The walk stops at the first folder with a policy (the
+ * nearest one wins, so a private subfolder stays private; one that doesn't cover leaves `dir`'s
+ * own folder as the project), and it never crosses:
  *  - a git repository (found first: a nested repository is always its own project);
- *  - a folder with a policy (the nearest one wins, so a private subfolder stays private);
  *  - a `.p2p-private` (at or above `dir`: the folder project is private, whatever covers it);
  *  - a folder whose `.git` or `.p2p-private` the path itself names (namedStop: a command that may
- *    have just removed it), and nothing above a folder that doesn't exist yet.
+ *    have just removed it);
+ *  - the nearest existing folder, when `dir` itself isn't there (deleted or moved since the
+ *    session named it, or not made yet): that folder is the project unless it has a policy, so a
+ *    repository removed after a session read it is never covered from above.
  * Without `doc` (sharing, `project show`): the folder itself.
  */
 export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
@@ -357,14 +420,14 @@ export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
     const dotgit = join(cur, ".git");
     // Anything named .git here (a folder, a file, a symlink, even a broken or unreadable one) ends
     // the walk: this folder is its own project, never the parent repository's.
-    let present: boolean;
+    let isThere: boolean;
     try {
       lstatSync(dotgit);
-      present = true;
+      isThere = true;
     } catch {
-      present = false;
+      isThere = false;
     }
-    if (present) {
+    if (isThere) {
       let st: ReturnType<typeof statSync> | undefined;
       try {
         st = statSync(dotgit);
@@ -381,25 +444,10 @@ export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
         // A .git that can't be read as one: a folder project at this level (private until shared).
         return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
       }
-      {
-        let common = gitDir;
-        const cd = readSmall(join(gitDir, "commondir"))?.trim();
-        if (cd) common = resolve(gitDir, cd);
-        common = real(common);
-        const urls = remotesOf(readSmall(join(common, "config")) ?? "");
-        const remote = urls.map(normalizeRemote).find((x): x is string => x !== undefined);
-        const main = basename(common) === ".git" ? dirname(common) : common;
-        const name = clean(remote ? (remote.split("/").pop() ?? "") : basename(main)) || clean(basename(cur)) || "project";
-        return {
-          id: `pj_${sha(`git\n${remote ?? ""}\n${common}`).slice(0, 24)}`,
-          name,
-          kind: "git",
-          root: cur,
-          ...(remote ? { remote } : {}),
-          ...(existsSync(join(cur, PRIVATE_MARKER)) ? { repoPrivate: true as const } : {}),
-        };
-      }
+      return gitRef(gitDir, cur);
     }
+    // A bare repository (a clone with no working tree): a git project, never a shared folder's.
+    if (isBareRepo(cur)) return gitRef(cur, cur);
     const up = dirname(cur);
     if (up === cur) break;
     cur = up;
@@ -419,12 +467,13 @@ export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
   }
   if (!doc || marked) return dirRef(start, marked);
   // The walk stops at a folder the path names a marker in (it may be gone now: never covered from
-  // above), and at `start` itself when that named folder isn't there yet (only its parent is).
+  // above), and at `start` itself when the path isn't there (only its nearest parent is).
   const named = namedStop(given);
   const ns = named === undefined ? undefined : existingDir(named);
-  const stop = ns === undefined ? undefined : within(start, ns) ? ns : start;
+  const stop = !present(given) ? start : ns === undefined ? undefined : within(start, ns) ? ns : start;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (doc.projects[dirProjectId(c)]) return dirRef(c, false);
+    const rec = doc.projects[dirProjectId(c)];
+    if (rec) return c === start || rec.covers === true ? dirRef(c, false) : dirRef(start, false);
     if (c === stop) break;
     const up = dirname(c);
     if (up === c) break;
@@ -465,6 +514,8 @@ export interface ProjectView {
   /** Why it is private although a policy shares it, or `unmapped` when none does. */
   why?: string;
   repoPrivate?: true;
+  /** A folder whose share covers its subfolders (`p2p project share --subfolders`). */
+  covers?: true;
 }
 
 export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" | "kind" | "root" | "remote" | "repoPrivate">, doc?: ProjectsDoc): Promise<ProjectView> {
@@ -493,7 +544,92 @@ export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" 
     people,
     ...(why ? { why } : {}),
     ...(ref.repoPrivate ? { repoPrivate: true as const } : {}),
+    ...(d.projects[ref.id]?.covers === true && ref.kind === "dir" ? { covers: true as const } : {}),
   };
+}
+
+/**
+ * Why `root` may not cover its subfolders (a share for it alone is still allowed), or undefined:
+ * the file system's root, a home folder or a folder above one (`$HOME`, `/Users`, `/home/<u>`),
+ * the temporary folders (`/tmp`, `/private/tmp`, `/var/folders/…`, os.tmpdir() and above it), and
+ * the system's top folders. Everything below them would be one project.
+ */
+export function broadRoot(root: string, env: Record<string, string | undefined> = {}): string | undefined {
+  const norm = (p: string) => {
+    const r = resolve(p);
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  const forms = (p: string) => [...new Set([norm(p), norm(real(p))])];
+  const at = forms(root);
+  const isOrAbove = (dir: string | undefined) => !!dir && isAbsolute(dir) && forms(dir).some((d) => at.some((r) => within(d, r)));
+  if (at.some((r) => dirname(r) === r)) return "the file system's root";
+  const homes = [homedir(), env.HOME, env.USERPROFILE].filter((x): x is string => typeof x === "string" && x !== "");
+  if (homes.some(isOrAbove)) return "a home folder (or a folder that holds one)";
+  if (isOrAbove(tmpdir()) || isOrAbove(env.TMPDIR)) return "the temporary folder (or a folder that holds it)";
+  for (const r of at) {
+    const parts = r.split(/[\\/]+/).filter(Boolean);
+    const top = (parts[0] ?? "").toLowerCase();
+    if (!/^[a-z]:$/i.test(top) && parts.length === 1) return "a top-level system folder";
+    if (/^[a-z]:$/i.test(parts[0] ?? "") && parts.length <= 2 && (parts.length === 1 || (parts[1] ?? "").toLowerCase() === "users")) return "a drive's root or its Users folder";
+    if (/^[a-z]:$/i.test(parts[0] ?? "") && parts.length === 3 && (parts[1] ?? "").toLowerCase() === "users") return "a home folder";
+    if (["home", "users"].includes(top) && parts.length <= 2) return "a home folder (or the folder that holds them)";
+    if (top === "tmp" && parts.length === 1) return "the temporary folder";
+    if (top === "private" && parts.length <= 2) return "a system folder";
+    if (top === "private" && (parts[1] === "tmp" || parts[1] === "var") && parts.length === 2) return "the temporary folder";
+    const vf = top === "var" ? 1 : top === "private" && parts[1] === "var" ? 2 : -1;
+    if (vf > 0 && parts[vf] === "folders" && parts.length <= vf + 4) return "the temporary folder (or a folder that holds it)";
+    if (vf > 0 && parts.length <= vf + 1) return "a system folder";
+    if (top === "run" && parts.length <= 3) return "a system folder";
+    if (["volumes", "mnt", "media"].includes(top) && parts.length <= 2) return "a volume's root";
+  }
+  return undefined;
+}
+
+/** At most this deep and this many entries `nestedBoundaries` looks through below a covering share. */
+export const NESTED_SCAN_DEPTH = 4;
+export const NESTED_SCAN_ENTRIES = 2000;
+
+/**
+ * The nested git repositories (a `.git`, or a bare repository) and `.p2p-private` folders below
+ * `root`, for the warning a covering share prints: each stays its own project, but only while its
+ * marker is there. Bounded (NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES: `capped` past it); symlinks
+ * are never followed.
+ */
+export function nestedBoundaries(root: string): { repos: string[]; private: string[]; capped: boolean } {
+  const repos: string[] = [];
+  const priv: string[] = [];
+  let seen = 0;
+  let capped = false;
+  let level: string[] = [root];
+  for (let depth = 1; depth <= NESTED_SCAN_DEPTH && level.length > 0 && !capped; depth++) {
+    const next: string[] = [];
+    for (const d of level) {
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = readdirSync(d, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (++seen > NESTED_SCAN_ENTRIES) {
+          capped = true;
+          break;
+        }
+        if (!e.isDirectory() || e.isSymbolicLink()) continue;
+        const p = join(d, e.name);
+        if (e.name === ".git") continue;
+        if (existsSync(join(p, ".git")) || isBareRepo(p)) {
+          repos.push(p);
+          continue;
+        }
+        if (existsSync(join(p, PRIVATE_MARKER))) priv.push(p);
+        next.push(p);
+      }
+      if (capped) break;
+    }
+    level = next;
+  }
+  return { repos, private: priv, capped };
 }
 
 /**
@@ -502,14 +638,29 @@ export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" 
  * command: no session or file can run it for them (the mod and the Codex bridge refuse it from a
  * model).
  */
-export async function shareProject(app: App, dir: string, targets: { circles?: string[]; people?: string[]; add?: boolean }): Promise<{ project: ProjectView; warnings: string[] }> {
+export async function shareProject(app: App, dir: string, targets: { circles?: string[]; people?: string[]; add?: boolean; subfolders?: boolean }): Promise<{ project: ProjectView; warnings: string[] }> {
   const ref = projectOf(dir);
   if (ref.repoPrivate) {
     throw new CliError("repo_private", `${ref.name} asks to stay private: its repository has ${PRIVATE_MARKER} at the top level. Peer2Peer never shares it; remove that file from your copy first if you mean to`);
   }
+  const warnings: string[] = [];
+  // Subfolders are covered only when asked, and never below a root that holds everything.
+  let subfolders = targets.subfolders === true;
+  if (subfolders && ref.kind === "git") {
+    warnings.push(`${ref.name} is a git repository: its subfolders are part of it already (--subfolders is for folders outside git)`);
+    subfolders = false;
+  }
+  if (subfolders) {
+    const broad = broadRoot(ref.root, app.env);
+    if (broad) throw new CliError("usage", `${ref.root} is ${broad}: a share there can't cover its subfolders (share it without --subfolders, or share the folders below it you mean)`);
+    const n = nestedBoundaries(ref.root);
+    const list = (xs: string[]) => `${xs.slice(0, 10).join(", ")}${xs.length > 10 ? ` and ${xs.length - 10} more` : ""}`;
+    if (n.repos.length > 0) warnings.push(`git repositories below ${ref.root} stay their own projects (private until you share each one), only while their .git is there: ${list(n.repos)}`);
+    if (n.private.length > 0) warnings.push(`folders below ${ref.root} with ${PRIVATE_MARKER} stay private: ${list(n.private)}`);
+    if (n.capped) warnings.push(`stopped looking for repositories below ${ref.root} after ${NESTED_SCAN_ENTRIES} entries (${NESTED_SCAN_DEPTH} levels deep): there may be more than listed`);
+  }
   const { resolveCircle } = await import("./circle-ops.js");
   const circles: string[] = [];
-  const warnings: string[] = [];
   for (const c of targets.circles ?? []) {
     const r = await resolveCircle(app, c);
     if (!r.record.joinedByMe) throw new CliError("usage", `you haven't joined circle ${c}`);
@@ -535,7 +686,9 @@ export async function shareProject(app: App, dir: string, targets: { circles?: s
     const keep = targets.add && old !== "private" ? old : { circles: [], people: [] };
     const share = { circles: [...new Set([...keep.circles, ...circles])], people: [...new Set([...keep.people, ...people])] };
     if (share.circles.length + share.people.length > MAX_PROJECT_SHARES) throw new CliError("usage", `a project is shared with at most ${MAX_PROJECT_SHARES} circles and people`);
-    const next: ProjectsDoc = { ...d, projects: { ...d.projects, [ref.id]: { name: ref.name, root: ref.root, ...(ref.remote ? { remote: ref.remote } : {}), share, at: Date.now() } } };
+    // --add keeps whether it covers its subfolders; a share made afresh covers them only when asked.
+    const covers = subfolders || (targets.add === true && targets.subfolders === undefined && d.projects[ref.id]?.covers === true);
+    const next: ProjectsDoc = { ...d, projects: { ...d.projects, [ref.id]: { name: ref.name, root: ref.root, ...(ref.remote ? { remote: ref.remote } : {}), share, ...(covers ? { covers: true as const } : {}), at: Date.now() } } };
     return { next: next, result: next };
   });
   return { project: await projectView(app, ref, doc), warnings };
@@ -830,6 +983,8 @@ function boundShares(doc: ProjectsDoc, id: string, p: BoundProject): { share: Pr
     seen.add(pid);
     out.push({ share: shareOf(doc, pid), mapped: true, name: clean(String(r.name ?? "")) || p.name });
   };
+  // Subfolders it covered, and its share no longer covers them (shared again without --subfolders): private.
+  if ((p.underOver || (p.under?.length ?? 0) > 0) && doc.projects[id]?.covers !== true) out.push({ share: "private", mapped: true, name: p.name });
   if (p.underOver) {
     for (const [pid, r] of Object.entries(doc.projects)) if (typeof r?.root === "string" && r.root !== root && within(r.root, root) && pid === dirProjectId(r.root)) add(pid);
     return out;

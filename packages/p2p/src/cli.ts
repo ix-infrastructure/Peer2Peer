@@ -1433,7 +1433,7 @@ export function buildProgram(deps: ProgramDeps): Command {
       ].join("\n"),
     );
   const projectView = (v: projects.ProjectView) => {
-    const lines = [`${v.name}  ${v.policy === "private" ? "private" : "shared"}${v.kind === "git" ? (v.remote ? `  (${v.remote})` : "  (git, no remote)") : "  (folder)"}`, `  ${v.root}`];
+    const lines = [`${v.name}  ${v.policy === "private" ? "private" : "shared"}${v.kind === "git" ? (v.remote ? `  (${v.remote})` : "  (git, no remote)") : v.covers ? "  (folder, and its subfolders)" : "  (folder)"}`, `  ${v.root}`];
     if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
     for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
     for (const p of v.people) lines.push(`  ${p.address}`);
@@ -1444,10 +1444,11 @@ export function buildProgram(deps: ProgramDeps): Command {
     .description("Share the project here with circles you joined (and friends with --person); on a terminal with none named, pick them")
     .option("--person <user>", "A friend to share it with too (repeatable)", collect)
     .option("--add", "Keep what it is shared with already (default: replace it)")
+    .option("--subfolders", "A folder outside git: the share covers its subfolders too (never past a repository, a .p2p-private or a folder with its own policy; refused for a home, temporary or system folder). Without it, the share is for that folder alone")
     .option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)")
     .option("--json", "JSON output")
     .action(
-      run(async (app, named: string[], o: { person?: string[]; add?: boolean; dir?: string }) => {
+      run(async (app, named: string[], o: { person?: string[]; add?: boolean; subfolders?: boolean; dir?: string }) => {
         const dir = o.dir ?? projects.sessionWorkdir(app.env);
         let circlesIn = [...named];
         let people = [...(o.person ?? [])];
@@ -1471,7 +1472,7 @@ export function buildProgram(deps: ProgramDeps): Command {
           if (!def) throw new CliError("usage", "name a circle (or --person <friend>) to share this project with");
           circlesIn = [def];
         }
-        const r = await ops.shareProject(app, dir, { circles: circlesIn, people, ...(o.add ? { add: true } : {}) });
+        const r = await ops.shareProject(app, dir, { circles: circlesIn, people, ...(o.add ? { add: true } : {}), ...(o.subfolders ? { subfolders: true } : {}) });
         for (const w of r.warnings) io.err(`p2p: warning: ${w}`);
         return { json: { project: r.project, ...(r.warnings.length ? { warnings: r.warnings } : {}) }, human: `Shared. Sessions in ${r.project.name} are seen by:\n${projectView(r.project)}` };
       }),

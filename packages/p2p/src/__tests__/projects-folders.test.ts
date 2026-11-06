@@ -8,10 +8,10 @@
 // `p2p session show` lists them for the person only.
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { dirProjectId, MAX_SESSION_PROJECTS, PRIVATE_MARKER, projectOf, pseudoPath, type ProjectsDoc } from "../projects.js";
+import { broadRoot, dirProjectId, MAX_SESSION_PROJECTS, NESTED_SCAN_ENTRIES, nestedBoundaries, PRIVATE_MARKER, projectOf, pseudoPath, type ProjectsDoc } from "../projects.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-projects-folders.test/v3";
@@ -23,10 +23,10 @@ function gitRepo(dir: string, remote?: string): string {
   return dir;
 }
 
-/** A policies document sharing (or making private) these folders. */
-function docOf(shared: string[], priv: string[] = []): ProjectsDoc {
+/** A policies document sharing (or making private) these folders; `covers`: shared with --subfolders. */
+function docOf(shared: string[], priv: string[] = [], covers = true): ProjectsDoc {
   const projects: ProjectsDoc["projects"] = {};
-  for (const root of shared) projects[dirProjectId(root)] = { name: "x", root, share: { circles: ["c_team"], people: [] }, at: 1 };
+  for (const root of shared) projects[dirProjectId(root)] = { name: "x", root, share: { circles: ["c_team"], people: [] }, ...(covers ? { covers: true as const } : {}), at: 1 };
   for (const root of priv) projects[dirProjectId(root)] = { name: "x", root, share: "private", at: 1 };
   return { v: 1, projects };
 }
@@ -41,9 +41,9 @@ describe("folder projects: a shared folder covers its subfolders, never past a b
   });
   afterAll(() => rmSync(d, { recursive: true, force: true }));
 
-  it("~/src shared covers ~/src/tmp and below, and a file not written yet there", () => {
+  it("~/src shared with --subfolders covers ~/src/tmp and below, and a file not written yet in ~/src itself", () => {
     const doc = docOf([src]);
-    for (const p of [join(src, "tmp"), join(src, "tmp", "deep"), join(src, "tmp", "new", "file.ts")]) expect(projectOf(p, doc), p).toMatchObject({ id: dirProjectId(src), kind: "dir", root: src });
+    for (const p of [join(src, "tmp"), join(src, "tmp", "deep"), join(src, "new-file.ts")]) expect(projectOf(p, doc), p).toMatchObject({ id: dirProjectId(src), kind: "dir", root: src });
     // Without the policies (sharing, `project share` in it): the folder itself.
     expect(projectOf(join(src, "tmp")).root).toBe(join(src, "tmp"));
     // No policy anywhere above: the folder itself, as before (private until shared).
@@ -80,7 +80,9 @@ describe("folder projects: a shared folder covers its subfolders, never past a b
     const own = join(src, "own");
     mkdirSync(join(own, "x"), { recursive: true });
     const doc = docOf([src], [own]);
-    expect(projectOf(join(own, "x"), doc)).toMatchObject({ id: dirProjectId(own), root: own });
+    expect(projectOf(own, doc)).toMatchObject({ id: dirProjectId(own), root: own });
+    // Below it, the private policy (which doesn't cover) stops the walk: its own folder, never shared, never ~/src's.
+    expect(projectOf(join(own, "x"), doc)).toMatchObject({ id: dirProjectId(join(own, "x")), root: join(own, "x") });
     expect(projectOf(join(src, "tmp"), doc).root).toBe(src);
   });
 
@@ -126,6 +128,97 @@ describe("folder projects: a shared folder covers its subfolders, never past a b
   });
 });
 
+describe("folder projects after the #49 review: gone folders, opt-in coverage, bare repositories", () => {
+  let d: string;
+  let src: string;
+  beforeAll(() => {
+    d = realpathSync(mkdtempSync(join(tmpdir(), "p2p-folders-review-")));
+    src = join(d, "src");
+    mkdirSync(join(src, "team"), { recursive: true });
+  });
+  afterAll(() => rmSync(d, { recursive: true, force: true }));
+
+  it("widening (H2): a repository cloned into a covered folder, read, then deleted, is never covered from above", () => {
+    // ~/src shared with --subfolders, ~/src/team has no policy; a clone in ~/src/team/tmp.
+    const doc = docOf([src]);
+    const clone = gitRepo(join(src, "team", "tmp"), "git@github.com:acme/secret.git");
+    writeFileSync(join(clone, "key.txt"), "k");
+    expect(projectOf(join(clone, "key.txt"), doc)).toMatchObject({ kind: "git", name: "secret" });
+    rmSync(clone, { recursive: true, force: true });
+    // What the front end reported before the delete (the folder, a file in it, the marker it found):
+    // after it, each binds the nearest existing folder exactly, never ~/src.
+    for (const p of [clone, join(clone, "key.txt"), join(clone, "lib", "deep"), join(clone, ".git")]) {
+      expect(projectOf(p, doc), p).toMatchObject({ id: dirProjectId(join(src, "team")), root: join(src, "team") });
+    }
+    // A missing path whose nearest existing folder has a policy of its own binds that one.
+    expect(projectOf(join(src, "gone", "x.ts"), doc).root).toBe(src);
+    // A pattern in an existing folder still follows the share (its folder is there).
+    expect(projectOf(join(src, "team", "*.md"), doc).root).toBe(src);
+  });
+
+  it("widening (H3): a policy without covers (every one from before --subfolders) is for that folder alone", () => {
+    mkdirSync(join(src, "team", "a"), { recursive: true });
+    const legacy = docOf([src], [], false);
+    expect(projectOf(join(src, "team", "a"), legacy).root).toBe(join(src, "team", "a"));
+    expect(projectOf(src, legacy).root).toBe(src);
+    // A folder in between with a policy that doesn't cover stops the walk: the folder itself.
+    const doc = docOf([src]);
+    doc.projects[dirProjectId(join(src, "team"))] = { name: "team", root: join(src, "team"), share: { circles: ["c_other"], people: [] }, at: 1 };
+    expect(projectOf(join(src, "team", "a"), doc).root).toBe(join(src, "team", "a"));
+  });
+
+  it("widening (M3): a bare repository, or one whose config says bare = true, is its own git project", () => {
+    const doc = docOf([src]);
+    const bare = join(src, "secret.git");
+    mkdirSync(join(bare, "objects"), { recursive: true });
+    mkdirSync(join(bare, "refs", "heads"), { recursive: true });
+    writeFileSync(join(bare, "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(bare, "config"), '[core]\n\tbare = true\n[remote "origin"]\n\turl = git@github.com:acme/bare-secret.git\n');
+    for (const p of [bare, join(bare, "objects"), join(bare, "refs", "heads")]) expect(projectOf(p, doc), p).toMatchObject({ kind: "git", name: "bare-secret", root: bare });
+    const cfgOnly = join(src, "cfg-only");
+    mkdirSync(cfgOnly, { recursive: true });
+    writeFileSync(join(cfgOnly, "config"), "[core]\n  bare = true\n");
+    expect(projectOf(cfgOnly, doc)).toMatchObject({ kind: "git", root: cfgOnly });
+    // A folder with a .git file (a worktree or submodule) is its own project, read or not.
+    const wt = join(src, "wt");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(d, "nowhere")}\n`);
+    expect(projectOf(wt, doc).root).toBe(wt);
+    // A folder named like a repository (`x.repo`) is named as itself (M4): its own project, not its parent's.
+    const dotted = gitRepo(join(src, "secret.repo"));
+    expect(projectOf(dotted, doc)).toMatchObject({ kind: "git", root: dotted });
+  });
+
+  it("H3: subfolder coverage is refused for a home, temporary or system folder (an exact share is fine)", () => {
+    for (const r of ["/", homedir(), dirname(homedir()), "/Users", "/home", "/home/someone", "/tmp", "/private/tmp", "/var", "/var/folders", "/var/folders/ab", "/var/folders/ab/cd/T", tmpdir(), "/usr", "/Volumes/disk", "/mnt/data"]) {
+      expect(broadRoot(r), r).toBeDefined();
+    }
+    expect(broadRoot("/srv/www", { HOME: "/srv/www/me" })).toBeDefined();
+    expect(broadRoot(src)).toBeUndefined();
+    expect(broadRoot(join(homedir(), "src"))).toBeUndefined();
+    expect(broadRoot("/tmp/project")).toBeUndefined();
+  });
+
+  it("H3: the nested repositories and .p2p-private folders below a covering share are listed, bounded", () => {
+    const top = join(d, "scan");
+    gitRepo(join(top, "a", "repo1"));
+    mkdirSync(join(top, "b", "c"), { recursive: true });
+    writeFileSync(join(top, "b", PRIVATE_MARKER), "");
+    const bare = join(top, "b", "c", "bare.git");
+    mkdirSync(join(bare, "objects"), { recursive: true });
+    mkdirSync(join(bare, "refs"), { recursive: true });
+    writeFileSync(join(bare, "HEAD"), "ref: refs/heads/main\n");
+    const n = nestedBoundaries(top);
+    expect(n.repos.sort()).toEqual([join(top, "a", "repo1"), bare].sort());
+    expect(n.private).toEqual([join(top, "b")]);
+    expect(n.capped).toBe(false);
+    const wide = join(d, "wide");
+    mkdirSync(wide, { recursive: true });
+    for (let i = 0; i <= NESTED_SCAN_ENTRIES; i++) writeFileSync(join(wide, `f${i}`), "");
+    expect(nestedBoundaries(wide).capped).toBe(true);
+  });
+});
+
 describe("folder projects and private reasons, end to end", () => {
   let relay: TestRelay;
   let ann: User;
@@ -167,7 +260,7 @@ describe("folder projects and private reasons, end to end", () => {
     await cat.ok(["accept", (await ann.ok(["invite", "--link"])).link]);
     await ann.ok(["friends"]);
     // The non-git folder ~/src, shared with the circle and with cat.
-    await inDir(ann, src).ok(["project", "share", team, "--person", cats.id]);
+    await inDir(ann, src).ok(["project", "share", team, "--person", cats.id, "--subfolders"]);
     // Cat's own live session, shared with ann.
     const catDir = gitRepo(join(root, "cat-work"), "git@github.com:cat/work.git");
     await cat.ok(["friends"]);
@@ -187,6 +280,39 @@ describe("folder projects and private reasons, end to end", () => {
     const st = await inDir(ann, join(src, "tmp"), [join(src, "hooks"), join(src, "types")]).ok(["status", "--session", "f1", "--state", "busy", "--label", "f"]);
     expect(st.project).toMatchObject({ policy: "shared", circles: [team], projects: [{ name: "src" }] });
     expect(st.project.projects).toHaveLength(1);
+  });
+
+  it("H3: covering is opt-in (--subfolders); refused for a temporary or system folder; nested repositories are listed", async () => {
+    // Shared without --subfolders: that folder alone, as before; a session in a subfolder stays private.
+    const exact = join(root, "exact");
+    mkdirSync(join(exact, "sub"), { recursive: true });
+    const shared = await inDir(ann, exact).ok(["project", "share", team]);
+    expect(shared.project.covers).toBeUndefined();
+    expect((await inDir(ann, join(exact, "sub")).ok(["status", "--session", "ex1", "--state", "busy", "--label", "e"])).project.policy).toBe("private");
+    expect((await inDir(ann, exact).ok(["status", "--session", "ex2", "--state", "busy", "--label", "e"])).project.policy).toBe("shared");
+    // --subfolders on a folder that holds the temporary folder, or a system one: refused, nothing stored.
+    for (const dir of ["/tmp", "/usr"]) {
+      const r = await ann.run(["project", "share", team, "--subfolders", "--dir", dir]);
+      expect([dir, r.code, r.json.error]).toEqual([dir, 1, "usage"]);
+      expect(r.json.message ?? r.json.reason ?? "").toMatch(/can't cover its subfolders/);
+    }
+    // The nested repositories and .p2p-private folders below are named in a warning.
+    const wide = join(root, "wide");
+    gitRepo(join(wide, "inner-repo"));
+    mkdirSync(join(wide, "quiet"), { recursive: true });
+    writeFileSync(join(wide, "quiet", PRIVATE_MARKER), "");
+    const w = await inDir(ann, wide).ok(["project", "share", team, "--subfolders"]);
+    expect(w.project.covers).toBe(true);
+    expect(w.warnings.join("\n")).toContain(join(wide, "inner-repo"));
+    expect(w.warnings.join("\n")).toContain(join(wide, "quiet"));
+    // Widening: a session a covering share reached in a subfolder goes private when the share stops covering.
+    mkdirSync(join(wide, "sub"), { recursive: true });
+    expect((await inDir(ann, join(wide, "sub")).ok(["status", "--session", "cv1", "--state", "busy", "--label", "c"])).project.policy).toBe("shared");
+    await inDir(ann, wide).ok(["project", "share", team]);
+    expect((await inDir(ann, wide).ok(["status", "--session", "cv1", "--state", "busy", "--label", "c"])).project.policy).toBe("private");
+    // `--add` keeps the coverage it had.
+    await inDir(ann, wide).ok(["project", "share", team, "--subfolders"]);
+    expect((await inDir(ann, wide).ok(["project", "share", "--add", "--person", cats.id])).project.covers).toBe(true);
   });
 
   it("2>/dev/null is no project: no `dev`, and the session stays shared", async () => {

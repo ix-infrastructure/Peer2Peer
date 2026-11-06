@@ -44,6 +44,9 @@ import {
   sessionsText,
   REPO_PROBE,
   parseRepoProbe,
+  MARKER_PROBE,
+  parseMarkerProbe,
+  markerExtras,
   holdVerdict,
   groupedSection,
   identityHealth,
@@ -3107,7 +3110,19 @@ export const register: Register = on => {
       // $TMPDIR, which the sandbox changes for the commands it runs.
       const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
       const all = toolPathsAll(e, cwd, home, { vars: { CLAUDE_JOB_DIR: jobDir && isJobDir(jobDir) ? jobDir : undefined }, untrusted: S.run.isEnvUntrusted })
-      const paths = all.paths.map(x => (files.includes(x) ? dirOf(x) : x))
+      const named = all.paths.map(x => (files.includes(x) ? dirOf(x) : x))
+      // The repository (or .p2p-private) each new path is in, by its marker: bound too, so a shared folder
+      // above never covers it once its files are gone; and a program's word that names a file that exists.
+      // Once per path; never this session's own folder, nor a path inside its own repository (a shared folder
+      // never covers a repository, so its markers change nothing there), except a program's word.
+      const maybe = new Set(all.maybe ?? [])
+      const probed = [...new Set([...named, ...maybe])].filter(x => /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(x) && !S.run.projectDirs.has(x) && x !== S.sessionDir && (maybe.has(x) || !(S.root && isUnder(x, S.root))))
+      let extras: string[] = []
+      if (probed.length > 0) {
+        const probe = await $.process.run(['node', '-e', MARKER_PROBE, ...probed], { cwd: $.plugin.root, timeoutMs: 10_000 }).catch(() => null)
+        extras = markerExtras(probed, all.maybe ?? [], probe && probe.exitCode === 0 ? parseMarkerProbe(probe.stdout) : undefined)
+      }
+      const paths = [...named, ...extras]
       if (all.sticky && !S.run.isEnvUntrusted) {
         S.run.isEnvUntrusted = true
         saveDirs(S, $, S.run)
