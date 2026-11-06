@@ -34,6 +34,7 @@
 //   relayInfo the relays' /.well-known/p2p-relay.json (features and frames), as last fetched
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
+//   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";
@@ -378,6 +379,8 @@ type Docs = {
   projects: ProjectsDoc;
   /** Which projects each session has worked in (projects.ts), by sid: sticky until the session ends. */
   sessionProjects: SessionProjectsDoc;
+  /** When this device showed the one-time notice that new installs turn the Ix extension on (ix-local.ts). */
+  ixNotice: { at: number };
 };
 
 export const sessKey = (own: string, sid: string) => `${own}|${sid}`;

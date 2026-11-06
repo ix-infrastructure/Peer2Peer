@@ -24,7 +24,7 @@ export {
 } from "./subgraph.js";
 export { IMPACT_KIND, parseImpactBody, buildImpact, renderImpact, impactFallback, type ImpactBody, type ImpactInput, type ImpactSymbol, type ImpactComponent } from "./impact.js";
 export { semanticConflicts, ixNeighbourhood, parseAround, type SemanticConflict, type PeerChanges, type Neighbourhood, type NeighbourhoodFn, type Relation, type ConflictOptions } from "./conflicts.js";
-export { ixRunner, ixAvailable, ixJson, type IxRunner, type IxResult } from "./ix.js";
+export { ixRunner, ixAvailable, ixJson, ixEnv, guardRunner, refuseForTarget, checkedTarget, localTarget, isLoopbackEndpoint, IX_ENV_ALLOW, LOCAL_IX_COMMANDS, DEFAULT_IX_ENDPOINT, type IxRunner, type IxResult, type IxTarget } from "./ix.js";
 export { normalizeRemote, parseRepo, localRepo, compareRepo, type RepoRef, type LocalRepo } from "./repo.js";
 export { SPEC_VERSION, MAX_BODY_BYTES, LIMITS, NOTE_TAGS, RISK_LEVELS, InvalidBody, IxExtError, toRepoRelative, scrubPaths, type NoteTag, type RiskLevel } from "./text.js";
 export {

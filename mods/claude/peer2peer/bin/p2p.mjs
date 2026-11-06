@@ -8491,31 +8491,31 @@ function parseCircleInviteLink(link) {
   parseCircleVersion(jws);
   return jws;
 }
-function decideOpenJoin(chain, join22, book, limiter, opts) {
+function decideOpenJoin(chain, join23, book, limiter, opts) {
   const now = opts.now ?? nowSec();
   const head = chain.head;
-  if (join22.cid !== chain.cid)
+  if (join23.cid !== chain.cid)
     return { decision: "ignore", reason: "other-circle" };
-  if (opts.isBlocked?.(join22.iss))
+  if (opts.isBlocked?.(join23.iss))
     return { decision: "ignore", reason: "blocked" };
-  if (join22.op !== "join" || join22.at === void 0)
+  if (join23.op !== "join" || join23.at === void 0)
     return { decision: "ignore", reason: "not-a-join" };
-  const cur = book[join22.iss];
-  if (cur && cur.hash !== join22.hash && compareMembership(join22, cur) >= 0)
+  const cur = book[join23.iss];
+  if (cur && cur.hash !== join23.hash && compareMembership(join23, cur) >= 0)
     return { decision: "ignore", reason: "not-current" };
-  if (!chain.hasAncestor(join22.at))
+  if (!chain.hasAncestor(join23.at))
     return { decision: "ignore", reason: "unknown-version" };
-  if (head.members.includes(join22.iss))
+  if (head.members.includes(join23.iss))
     return { decision: "ignore", reason: "already-member" };
   if (circlePolicy(head) !== "open")
     return { decision: "hold", reason: "not-open" };
-  if (!joinCapFitsPolicy(join22.joinCap, "open"))
+  if (!joinCapFitsPolicy(join23.joinCap, "open"))
     return { decision: "ignore", reason: "cap-too-long" };
   const removed = opts.removed instanceof Set ? opts.removed : new Set(opts.removed);
-  if (removed.has(join22.iss))
+  if (removed.has(join23.iss))
     return { decision: "hold", reason: "previously-removed" };
-  const wasMember = chain.versions.some((v) => v.members.includes(join22.iss));
-  const prior = cur && cur.hash !== join22.hash ? cur : void 0;
+  const wasMember = chain.versions.some((v) => v.members.includes(join23.iss));
+  const prior = cur && cur.hash !== join23.hash ? cur : void 0;
   if (wasMember && (!prior || prior.op === "join"))
     return { decision: "hold", reason: "previously-removed" };
   const recent = limiter.acceptedAt.filter((t2) => now - t2 < HOUR);
@@ -10575,20 +10575,20 @@ async function storeOfferedCircle(store2, versions, opts = {}) {
   await store2.updateCircle(chain.cid, (cur) => cur ? { result: void 0 } : { next: { cid: chain.cid, chain: chain.toStored(), statements: {}, joinedByMe: false }, result: void 0 });
   return chain;
 }
-async function recordOwnJoin(store2, self, join22) {
-  if (join22.iss !== self)
-    fail("cert-mismatch", `the join is ${join22.iss}'s, not this user's`);
-  if (join22.op !== "join" || join22.at === void 0)
+async function recordOwnJoin(store2, self, join23) {
+  if (join23.iss !== self)
+    fail("cert-mismatch", `the join is ${join23.iss}'s, not this user's`);
+  if (join23.op !== "join" || join23.at === void 0)
     fail("malformed", "not a join statement");
-  await store2.updateCircle(join22.cid, (cur) => {
+  await store2.updateCircle(join23.cid, (cur) => {
     if (!cur)
-      return fail("circle-gap", `circle ${join22.cid} is not held`);
+      return fail("circle-gap", `circle ${join23.cid} is not held`);
     const chain = CircleChain.fromStored(cur.chain);
-    if (!chain.hasAncestor(join22.at))
+    if (!chain.hasAncestor(join23.at))
       fail("circle-invalid", "join names a version not on the held chain");
     const statements = { ...cur.statements };
-    applyMembership(statements, membershipFact(join22));
-    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join22.n) }, result: void 0 };
+    applyMembership(statements, membershipFact(join23));
+    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join23.n) }, result: void 0 };
   });
 }
 async function recordOwnLeave(store2, self, leave) {
@@ -10786,13 +10786,13 @@ function circleOwners(versions) {
   }
   return [...out];
 }
-async function decideOpenJoinFor(store2, join22, opts = {}) {
-  const blocked = await store2.isBlocked(join22.iss);
-  return store2.updateCircle(join22.cid, (cur) => {
+async function decideOpenJoinFor(store2, join23, opts = {}) {
+  const blocked = await store2.isBlocked(join23.iss);
+  return store2.updateCircle(join23.cid, (cur) => {
     if (!cur)
       return { result: { decision: "ignore", reason: "other-circle" } };
     const limiter = { acceptedAt: [...cur.openJoins?.acceptedAt ?? []] };
-    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join22, cur.statements, limiter, {
+    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join23, cur.statements, limiter, {
       now: opts.now,
       maxPerHour: opts.maxPerHour,
       isBlocked: () => blocked,
@@ -12496,6 +12496,10 @@ function checkExtension(mod2, ns) {
   if (!ext || typeof ext !== "object") return { why: "exports no `extension`" };
   if (ext.api !== EXTENSION_API) return { why: `built for extension API ${String(ext.api)}, this p2p has ${EXTENSION_API}` };
   if (ext.ns !== ns) return { why: `declares namespace ${String(ext.ns)}, expected ${ns}` };
+  const need = REQUIRED_GRAPH_TARGETS[ns];
+  if (need !== void 0 && !(typeof ext.graphTargets === "number" && ext.graphTargets >= need)) {
+    return { why: `it predates graph targets (it would run Ix with your environment and config, which Ix Pro can route to the cloud): update ${extensionPackageName(ns)} (npm i -g ${extensionPackageName(ns)}@latest; the Claude Code mod ships a current copy)` };
+  }
   if (ext.receive !== void 0 && typeof ext.receive !== "function") return { why: "receive is not a function" };
   if (ext.state !== void 0) {
     if (typeof ext.state !== "object" || ext.state === null || Array.isArray(ext.state)) return { why: "state is malformed" };
@@ -12703,7 +12707,7 @@ function renderExtension(reg, input) {
   }
   return out;
 }
-var EXTENSION_API, KNOWN_EXTENSIONS, MAX_RENDERED_BYTES, MAX_KEPT_BYTES, MAX_RENDERED_STRING, ExtensionRegistry, ExtResolveError, SEEN_FILE;
+var EXTENSION_API, KNOWN_EXTENSIONS, MAX_RENDERED_BYTES, MAX_KEPT_BYTES, MAX_RENDERED_STRING, ExtensionRegistry, REQUIRED_GRAPH_TARGETS, ExtResolveError, SEEN_FILE;
 var init_extensions = __esm({
   "packages/p2p/src/extensions.ts"() {
     "use strict";
@@ -12729,6 +12733,7 @@ var init_extensions = __esm({
         return [...this.byNs.values()];
       }
     };
+    REQUIRED_GRAPH_TARGETS = { ix: 1 };
     ExtResolveError = class extends Error {
     };
     SEEN_FILE = "extension-locations.json";
@@ -19578,6 +19583,122 @@ var init_codes = __esm({
   }
 });
 
+// packages/p2p/src/ix-local.ts
+import { execFile as execFile4 } from "node:child_process";
+import { accessSync, constants, statSync as statSync2 } from "node:fs";
+import { delimiter as delimiter3, isAbsolute as isAbsolute8, join as join15 } from "node:path";
+function whichAbsolute(name2, env = process.env, platform = process.platform) {
+  const runnable = (p) => {
+    try {
+      if (!statSync2(p).isFile()) return false;
+      if (platform !== "win32") accessSync(p, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (isAbsolute8(name2)) return runnable(name2) ? name2 : void 0;
+  if (/[\\/]/.test(name2)) return void 0;
+  const win = platform === "win32";
+  const sep3 = win ? ";" : delimiter3;
+  const path2 = env.PATH ?? env.Path ?? "";
+  const exts = win ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
+  const hasExt = win && exts.some((e) => name2.toLowerCase().endsWith(e.toLowerCase()));
+  for (const dir of path2.split(sep3)) {
+    const d = dir.trim().replace(/^"|"$/g, "");
+    if (d === "" || !isAbsolute8(d)) continue;
+    for (const ext of hasExt ? [""] : exts) {
+      const p = join15(d, name2 + ext);
+      if (runnable(p)) return p;
+    }
+  }
+  return void 0;
+}
+function ixBinary(env) {
+  const name2 = env.IX_BIN?.trim() || "ix";
+  return whichAbsolute(name2, env);
+}
+function ixChildEnv(env, target) {
+  const allow = new Set(IX_CHILD_ALLOW);
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = k.toUpperCase() === "PATH" ? absolutePath(v) : v;
+  out.IX_ENDPOINT = target.endpoint;
+  out.IX_MAP_BACKGROUND_REFRESH = "0";
+  out.IX_NO_UPDATE_CHECK = "1";
+  return out;
+}
+function absolutePath(v, platform = process.platform) {
+  const sep3 = platform === "win32" ? ";" : delimiter3;
+  return v.split(sep3).filter((d) => {
+    const x = d.trim().replace(/^"|"$/g, "");
+    return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute8(x));
+  }).join(sep3);
+}
+function runIx(bin, argv, o) {
+  return new Promise((resolve4) => {
+    execFile4(bin, [...argv], { cwd: o.cwd, env: ixChildEnv(o.env, o.target), timeout: o.timeoutMs, killSignal: "SIGKILL", maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
+      const e = err;
+      resolve4({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
+    });
+  });
+}
+async function ixVersion(bin, env, target, timeoutMs) {
+  const r = await runIx(bin, ["--version"], { env, target, timeoutMs });
+  if (r.code !== 0) return void 0;
+  const v = sanitizePeerText(r.stdout.split("\n")[0]?.trim() ?? "", 64);
+  return v || void 0;
+}
+function extIxInstalled(env) {
+  for (const dir of extensionDirs(env, import.meta.url)) {
+    try {
+      if (resolveIn(dir, extensionPackageName("ix"))) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+async function setupIx(app, created) {
+  const found = ixBinary(app.env) !== void 0;
+  const { enabled } = enabledNamespaces(app.env, app.file);
+  if (enabled.includes("ix")) return { found, enabled: true };
+  if (!found) return { found, enabled: false, hint: INSTALL_IX };
+  if (!extIxInstalled(app.env)) return { found, enabled: false, hint: INSTALL_EXT };
+  const chose = Array.isArray(app.file.extensions);
+  if (!created || chose || envDecides(app.env) || !personHere(app)) {
+    return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+  }
+  if (app.front !== true) {
+    const yes = app.confirmTty ? await app.confirmTty("Ix is installed. Turn on the Ix extension, so your sessions can share Ix context with the people you share a project with? (Ix calls stay on this machine.)").catch(() => false) : false;
+    if (!yes) return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+  }
+  setExtensionEnabled(app.home, "ix", true);
+  return { found, enabled: true, enabledNow: true };
+}
+async function ixNotice(app) {
+  if (envDecides(app.env)) return void 0;
+  if (enabledNamespaces(app.env, app.file).enabled.includes("ix")) return void 0;
+  if ((await app.state.get("ixNotice"))?.at !== void 0) return void 0;
+  if (!ixBinary(app.env)) return void 0;
+  const shown = await app.state.update("ixNotice", (cur) => cur?.at !== void 0 ? { result: false } : { next: { at: Date.now() }, result: true });
+  if (!shown) return void 0;
+  const how = extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`";
+  return `Ix: new installs now turn the Ix extension on when Ix is installed, so sessions can share Ix context. Yours wasn't changed; to turn it on, run ${how}. Ix calls stay on this machine (\`p2p doctor\` shows each project's graph: local only)`;
+}
+var IX_INSTALL_URL, IX_CHILD_ALLOW, envDecides, INSTALL_IX, INSTALL_EXT;
+var init_ix_local = __esm({
+  "packages/p2p/src/ix-local.ts"() {
+    "use strict";
+    init_v3();
+    init_extensions();
+    init_projects();
+    IX_INSTALL_URL = "https://github.com/ix-infrastructure/Ix";
+    IX_CHILD_ALLOW = ["PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TERM", "NO_COLOR", "IX_HOME", "IX_TOKEN"];
+    envDecides = (env) => env.P2P_EXTENSIONS !== void 0 && env.P2P_EXTENSIONS.trim() !== "config";
+    INSTALL_IX = `Ix (the local code graph peers' agents point into) isn't installed: get it from ${IX_INSTALL_URL}, then run \`p2p extensions enable ix\` (Peer2Peer works without it)`;
+    INSTALL_EXT = "Ix is installed, but the Ix extension isn't: `npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix` (the Claude Code mod ships it: `/peers setup` there turns it on)";
+  }
+});
+
 // packages/p2p/src/identity.ts
 var identity_exports = {};
 __export(identity_exports, {
@@ -19604,7 +19725,7 @@ __export(identity_exports, {
   whoami: () => whoami
 });
 import { chmod, readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 async function init(app, opts) {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
@@ -19651,8 +19772,13 @@ async function setup(app, opts) {
     created,
     ...pub ?? {}
   };
+  try {
+    out.ix = await setupIx(app, created);
+  } catch (e) {
+    out.ix = { found: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
+  }
   if (opts.backup === "file") {
-    const path2 = opts.backupFile ?? join15(app.home, BACKUP_FILE_NAME);
+    const path2 = opts.backupFile ?? join16(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
       await writeFile2(path2, `${phrase}
@@ -19975,8 +20101,8 @@ async function backupRestore(app, phrase, opts) {
         { home: app.home, cause: e instanceof CliError ? e.code : "error" }
       );
     }
-    await rm(join15(app.home, "cli"), { recursive: true, force: true });
-    await rm(join15(app.home, "v3"), { recursive: true, force: true });
+    await rm(join16(app.home, "cli"), { recursive: true, force: true });
+    await rm(join16(app.home, "v3"), { recursive: true, force: true });
     throw e;
   }
 }
@@ -20219,6 +20345,7 @@ var init_identity2 = __esm({
     init_sync();
     init_inbound();
     init_circle_ops();
+    init_ix_local();
     BACKUP_FILE_NAME = "backup-phrase.txt";
     MAGIC = [
       ["png", [137, 80, 78, 71]],
@@ -20264,7 +20391,7 @@ __export(rotation_exports, {
   untrustedImportSigner: () => untrustedImportSigner
 });
 import { copyFile, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 function stateBackend(home) {
   return new FileDocBackend(rotationDir(home));
 }
@@ -20276,7 +20403,7 @@ async function saveState(home, s2) {
   await b.withLock(() => b.write("state", s2));
 }
 async function dropState(home) {
-  await rm2(join16(rotationDir(home), "state.json"), { force: true });
+  await rm2(join17(rotationDir(home), "state.json"), { force: true });
   await rm2(newHomeOf(home), { recursive: true, force: true });
 }
 async function exists(p) {
@@ -20289,27 +20416,27 @@ async function exists(p) {
 }
 async function appAt(app, home) {
   await mkdir2(home, { recursive: true, mode: 448 });
-  if (await exists(join16(app.home, "config.json"))) await copyFile(join16(app.home, "config.json"), join16(home, "config.json"));
+  if (await exists(join17(app.home, "config.json"))) await copyFile(join17(app.home, "config.json"), join17(home, "config.json"));
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
-  const archive = join16(home, "rotated", tag);
+  const archive = join17(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
-  const srcHasState = await exists(join16(src, "cli"));
+  const srcHasState = await exists(join17(src, "cli"));
   for (const d of ["cli", "v3", "cursors"]) {
-    if (srcHasState && await exists(join16(home, d)) && !await exists(join16(archive, d))) await rename(join16(home, d), join16(archive, d));
+    if (srcHasState && await exists(join17(home, d)) && !await exists(join17(archive, d))) await rename(join17(home, d), join17(archive, d));
   }
   for (const d of ["cli", "v3"]) {
-    if (await exists(join16(src, d)) && !await exists(join16(home, d))) await rename(join16(src, d), join16(home, d));
+    if (await exists(join17(src, d)) && !await exists(join17(home, d))) await rename(join17(src, d), join17(home, d));
   }
   await rm2(src, { recursive: true, force: true });
-  for (const d of ["cli", "v3"]) await rm2(join16(archive, d, ".lock"), { force: true });
+  for (const d of ["cli", "v3"]) await rm2(join17(archive, d, ".lock"), { force: true });
   return archive;
 }
 async function adoptHome(app, src, tag) {
   await app.close();
   const home = app.home;
-  if (await exists(join16(home, "cli"))) await app.state.backend.withLock(async () => {
+  if (await exists(join17(home, "cli"))) await app.state.backend.withLock(async () => {
   });
   if (await exists(app.store.dir)) await new FileDocBackend(app.store.dir).withLock(async () => {
   });
@@ -20564,7 +20691,7 @@ async function rotate(app, opts = {}) {
   return finish(app, st);
 }
 async function writeBackup(app, ik, opts) {
-  const file = opts.backupFile ?? (opts.backupFileDefault ? join16(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
+  const file = opts.backupFile ?? (opts.backupFileDefault ? join17(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
   if (!file) return void 0;
   try {
     await writeFile3(file, `${backupPhraseFromSeed(ik.secretKey)}
@@ -21004,14 +21131,14 @@ async function rejoin(app, napp, cid, statement) {
   let nc = await loadCircle(napp.store, cid);
   if (nc.book[to]?.op !== "join") await signOwnJoin(napp, cid, nc.chain.head.hash);
   nc = await loadCircle(napp.store, cid);
-  const join22 = nc.book[to].jws;
+  const join23 = nc.book[to].jws;
   const c = await loadCircle(app.store, cid);
   const leave = await leaveAsOld(app, cid).catch((e) => {
     if (e instanceof P2PError) return void 0;
     throw e;
   });
   const owner = c.chain.head.owner;
-  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join22, leave] : [join22], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
+  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join23, leave] : [join23], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
   if (d.relays.length === 0) throw new CliError("undelivered", "the owner couldn't be reached");
   if (!leave) return;
   for (const m of c.chain.head.members) {
@@ -21026,7 +21153,7 @@ async function finish(app, st) {
     await saveState(app.home, st);
     await reload(app);
   } else if (st.step === "done" && st.archive === void 0) {
-    st.archive = join16(app.home, "rotated");
+    st.archive = join17(app.home, "rotated");
     await saveState(app.home, st);
   }
   return rotateReport(app, st);
@@ -21475,9 +21602,9 @@ async function swapMember(app, rot, cid, withAdmin) {
   await recordApproval(app, rot.from, { to: rot.to, kind: "circle", cid });
   return ownerPublish(app, cid, { members, admins }, { alsoTo: [rot.from] });
 }
-async function holdRotationJoin(app, env, at, from, rot, cid, join22, reason) {
+async function holdRotationJoin(app, env, at, from, rot, cid, join23, reason) {
   const c = await loadCircle(app.store, cid);
-  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join22, rotation: rot.statement, old: rot.from, reason });
+  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join23, rotation: rot.statement, old: rot.from, reason });
   await hold(app, item);
   return makeEvent(
     env,
@@ -21485,7 +21612,7 @@ async function holdRotationJoin(app, env, at, from, rot, cid, join22, reason) {
     at,
     { from, held: { id: item.id, type: item.type, cid, reason, old: { userId: rot.from, address: await app.addressOf(rot.from) }, ...reason === "conflict" ? { conflict: true } : {} } },
     {},
-    `${join22}|${reason}`
+    `${join23}|${reason}`
   );
 }
 async function onRotationJoin(app, env, at, from, statement, sender, joins) {
@@ -21636,14 +21763,14 @@ async function followHeld(app, idOrItem) {
     if (res.userId !== r.to) throw new CliError("wrong_identity", `the link joined ${res.userId}, not ${r.to}`);
     const old = app.userId;
     const tag = `${old.slice(4, 20)}-${Date.now()}`;
-    await writeFile3(join16(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
+    await writeFile3(join17(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
     app.io.err(`this device moved with your identity: it is now ${res.address} (${res.did})`);
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
   } catch (e) {
-    if (!await exists(join16(tmp, "linked.json"))) await rm2(tmp, { recursive: true, force: true }).catch(() => void 0);
+    if (!await exists(join17(tmp, "linked.json"))) await rm2(tmp, { recursive: true, force: true }).catch(() => void 0);
     if (e instanceof CliError && (e.code === "wrong_identity" || e.code === "keyholder")) throw e;
     throw new CliError(
       "follow_failed",
@@ -21661,11 +21788,11 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile4(join16(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile4(join17(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
-  if (!await exists(join16(tmp, "cli")) && await exists(join16(home, "cli"))) {
+  if (!await exists(join17(tmp, "cli")) && await exists(join17(home, "cli"))) {
     await rm2(tmp, { recursive: true, force: true });
     return false;
   }
@@ -21705,7 +21832,7 @@ async function relinkRotated(app, code2, opts = {}) {
         throw new CliError("wrong_identity", `that code links to ${res.userId}, which isn't where your identity moved (${[...targets].join(", ")})`);
       }
       const tag = `${old.slice(4, 20)}-${Date.now()}`;
-      await writeFile3(join16(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
+      await writeFile3(join17(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
       return { ...res, from: old };
@@ -21727,9 +21854,9 @@ var init_rotation = __esm({
     init_identity2();
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
-    rotationDir = (home) => join16(home, "rotation");
-    newHomeOf = (home) => join16(rotationDir(home), "new");
-    followHomeOf = (home) => join16(rotationDir(home), "follow");
+    rotationDir = (home) => join17(home, "rotation");
+    newHomeOf = (home) => join17(rotationDir(home), "new");
+    followHomeOf = (home) => join17(rotationDir(home), "follow");
     after = (s2, step2) => STEPS.indexOf(s2.step) >= STEPS.indexOf(step2);
     DEVICE_SEEN_WINDOW_SEC = 30 * 86400;
     RESEND_PER_HOUR = 50;
@@ -22859,8 +22986,8 @@ function parseCircleLink(link) {
 async function ownerHint(app, c) {
   const owner = c.chain.head.owner;
   const v = await app.view(owner);
-  const join22 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
-  return { ...v ? { doc: v.head.jws } : {}, ...join22 ? { join: join22 } : {} };
+  const join23 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
+  return { ...v ? { doc: v.head.jws } : {}, ...join23 ? { join: join23 } : {} };
 }
 async function circleLink(app, cidOrName) {
   const c = await resolveCircle(app, cidOrName);
@@ -24087,6 +24214,11 @@ var init_circle_ops = __esm({
 var projects_exports = {};
 __export(projects_exports, {
   AGENT_ENV_VARS: () => AGENT_ENV_VARS,
+  DEFAULT_IX_ENDPOINT: () => DEFAULT_IX_ENDPOINT,
+  GRAPH_LOCAL_ONLY: () => GRAPH_LOCAL_ONLY,
+  IX_CLOUD_ENV: () => IX_CLOUD_ENV,
+  IX_KEEP: () => IX_KEEP,
+  MAX_GRAPH_PATHS: () => MAX_GRAPH_PATHS,
   MAX_PROJECT_SHARES: () => MAX_PROJECT_SHARES,
   MAX_SESSION_CONSTRAINTS: () => MAX_SESSION_CONSTRAINTS,
   MAX_SESSION_DIRS: () => MAX_SESSION_DIRS,
@@ -24095,6 +24227,7 @@ __export(projects_exports, {
   PRIVATE_MARKER: () => PRIVATE_MARKER,
   PROJECT_NOTICE_PREFIX: () => PROJECT_NOTICE_PREFIX,
   SESSION_BINDING_TTL_MS: () => SESSION_BINDING_TTL_MS,
+  SHARED_GRAPHS: () => SHARED_GRAPHS,
   agentContext: () => agentContext,
   agentEnv: () => agentEnv,
   assertMayReach: () => assertMayReach,
@@ -24102,15 +24235,24 @@ __export(projects_exports, {
   bindSession: () => bindSession,
   ceilingAudience: () => ceilingAudience,
   defaultCircleNotice: () => defaultCircleNotice,
+  describeGraphTarget: () => describeGraphTarget,
   friendIds: () => friendIds,
+  graphPinnedEnv: () => graphPinnedEnv,
+  graphTarget: () => graphTarget,
+  graphTargetOf: () => graphTargetOf,
   isAgentProcess: () => isAgentProcess,
+  isLoopbackEndpoint: () => isLoopbackEndpoint,
   listProjects: () => listProjects,
+  localGraphEndpoint: () => localGraphEndpoint,
   makeProjectPrivate: () => makeProjectPrivate,
+  normalizeLoopbackEndpoint: () => normalizeLoopbackEndpoint,
   normalizeRemote: () => normalizeRemote,
+  normalizeSharedEndpoint: () => normalizeSharedEndpoint,
   personHere: () => personHere,
   personToken: () => personToken,
   personTokenFile: () => personTokenFile,
   personTokenOk: () => personTokenOk,
+  projectGraphTarget: () => projectGraphTarget,
   projectOf: () => projectOf,
   projectView: () => projectView,
   projectsDoc: () => projectsDoc,
@@ -24126,20 +24268,20 @@ __export(projects_exports, {
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash7, randomBytes as randomBytes13, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync3, lstatSync as lstatSync5, mkdirSync as mkdirSync9, readFileSync as readFileSync11, realpathSync as realpathSync5, statSync as statSync2, writeFileSync as writeFileSync9 } from "node:fs";
-import { basename as basename4, delimiter as delimiter3, dirname as dirname5, isAbsolute as isAbsolute8, join as join17, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync3, lstatSync as lstatSync5, mkdirSync as mkdirSync9, readFileSync as readFileSync11, realpathSync as realpathSync5, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { basename as basename4, delimiter as delimiter4, dirname as dirname5, isAbsolute as isAbsolute9, join as join18, resolve as resolve2 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
-  if (w && isAbsolute8(w)) {
+  if (w && isAbsolute9(w)) {
     try {
-      if (statSync2(w).isDirectory()) return w;
+      if (statSync3(w).isDirectory()) return w;
     } catch {
     }
   }
   return process.cwd();
 }
 function sessionDirs(env) {
-  const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter3).filter((x) => x.trim() !== "" && isAbsolute8(x.trim()));
+  const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter4).filter((x) => x.trim() !== "" && isAbsolute9(x.trim()));
   const over = extra.length > MAX_SESSION_DIRS || env.P2P_PROJECT_DIRS_OVER === "1";
   return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over };
 }
@@ -24158,7 +24300,7 @@ function existingDir(p) {
   let cur = resolve2(p);
   for (let i = 0; i < 4096; i++) {
     try {
-      const st = statSync2(cur);
+      const st = statSync3(cur);
       return real(st.isDirectory() ? cur : dirname5(cur));
     } catch {
       const up = dirname5(cur);
@@ -24217,7 +24359,7 @@ function remotesOf(config) {
 }
 function readSmall(file) {
   try {
-    const st = statSync2(file);
+    const st = statSync3(file);
     if (!st.isFile() || st.size > 256 * 1024) return void 0;
     return readFileSync11(file, "utf8");
   } catch {
@@ -24225,10 +24367,10 @@ function readSmall(file) {
   }
 }
 function projectOf(dir) {
-  const start = existingDir(isAbsolute8(dir) ? dir : resolve2(dir));
+  const start = existingDir(isAbsolute9(dir) ? dir : resolve2(dir));
   let cur = start;
   for (let i = 0; i < 4096; i++) {
-    const dotgit = join17(cur, ".git");
+    const dotgit = join18(cur, ".git");
     let present;
     try {
       lstatSync5(dotgit);
@@ -24239,7 +24381,7 @@ function projectOf(dir) {
     if (present) {
       let st;
       try {
-        st = statSync2(dotgit);
+        st = statSync3(dotgit);
       } catch {
         st = void 0;
       }
@@ -24255,10 +24397,10 @@ ${cur}`).slice(0, 24)}`, name: clean3(basename4(cur)) || "folder", kind: "dir", 
       }
       {
         let common = gitDir;
-        const cd = readSmall(join17(gitDir, "commondir"))?.trim();
+        const cd = readSmall(join18(gitDir, "commondir"))?.trim();
         if (cd) common = resolve2(gitDir, cd);
         common = real(common);
-        const urls = remotesOf(readSmall(join17(common, "config")) ?? "");
+        const urls = remotesOf(readSmall(join18(common, "config")) ?? "");
         const remote = urls.map(normalizeRemote).find((x) => x !== void 0);
         const main2 = basename4(common) === ".git" ? dirname5(common) : common;
         const name2 = clean3(remote ? remote.split("/").pop() ?? "" : basename4(main2)) || clean3(basename4(cur)) || "project";
@@ -24270,7 +24412,7 @@ ${common}`).slice(0, 24)}`,
           kind: "git",
           root: cur,
           ...remote ? { remote } : {},
-          ...existsSync3(join17(cur, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+          ...existsSync3(join18(cur, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
         };
       }
     }
@@ -24317,7 +24459,8 @@ async function projectView(app, ref, doc) {
     circles,
     people: people2,
     ...why ? { why } : {},
-    ...ref.repoPrivate ? { repoPrivate: true } : {}
+    ...ref.repoPrivate ? { repoPrivate: true } : {},
+    graph: projectGraphTarget(app, ref, d)
   };
 }
 async function shareProject(app, dir, targets) {
@@ -24371,7 +24514,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync3(join17(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync3(join18(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -24442,7 +24585,7 @@ function agentContext(env) {
   return agentEnv(env) || agentAncestor();
 }
 function personTokenFile(home) {
-  return join17(home, "cli", "person.key");
+  return join18(home, "cli", "person.key");
 }
 function personToken(home) {
   const f = personTokenFile(home);
@@ -24456,7 +24599,7 @@ function personToken(home) {
   };
   const have = read2();
   if (have) return have;
-  mkdirSync9(join17(home, "cli"), { recursive: true, mode: 448 });
+  mkdirSync9(join18(home, "cli"), { recursive: true, mode: 448 });
   const t2 = randomBytes13(32).toString("base64url");
   try {
     writeFileSync9(f, t2, { mode: 384, flag: "wx" });
@@ -24605,7 +24748,110 @@ async function defaultCircleNotice(app, sid) {
   const name2 = unmapped[0][1].name;
   return `project boundaries: sessions no longer follow your default circle (${def}). Each project is private until you share it, so this session in ${name2} is seen only by your own devices. To share ${name2} with that circle, run \`p2p project share ${def}\` in it (or /peers project share in Claude Code); \`p2p project ls\` lists what you shared`;
 }
-var PERSON_SESSION, PRIVATE_MARKER, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, sha, clean3, AGENT_ENV_VARS, TOKEN_RE, PROJECT_NOTICE_PREFIX;
+function trimSlashes(s2) {
+  let n = s2.length;
+  while (n > 0 && s2.charCodeAt(n - 1) === 47) n--;
+  return s2.slice(0, n);
+}
+function isLoopbackEndpoint(url) {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return false;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:" || u.username || u.password || u.search || u.hash) return false;
+  const h = u.hostname.toLowerCase();
+  return h === "localhost" || h === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+function normalizeLoopbackEndpoint(url) {
+  if (!isLoopbackEndpoint(url)) return void 0;
+  const u = new URL(url.trim());
+  return trimSlashes(u.origin + u.pathname);
+}
+function localGraphEndpoint(_env, file) {
+  return normalizeLoopbackEndpoint(typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : void 0) ?? DEFAULT_IX_ENDPOINT;
+}
+function graphTargetOf(inputs, o) {
+  const local = (why) => ({ kind: "local", endpoint: o.local, why });
+  if (inputs.length === 0) return local("no project: nothing is shared");
+  let circles;
+  for (const i of inputs) {
+    if (i.repoPrivate) return local(`${i.name} asks to stay private (${PRIVATE_MARKER})`);
+    if (i.share === "private" || typeof i.share !== "object") return local(`${i.name} is private`);
+    const cs = Array.isArray(i.share.circles) ? i.share.circles.filter((c) => typeof c === "string") : [];
+    circles = circles ? new Set(cs.filter((c) => circles.has(c))) : new Set(cs);
+  }
+  if (!circles || circles.size === 0) return local(inputs.length > 1 ? "its projects share no circle in common" : `${inputs[0].name} isn't shared with a circle`);
+  const graphs = o.sharedGraphs ?? SHARED_GRAPHS;
+  const withGraph = [...circles].filter((c) => {
+    const ep = graphs.get(c);
+    return normalizeSharedEndpoint(ep) !== void 0;
+  });
+  if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
+  if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
+  return { kind: "shared", circle: withGraph[0], endpoint: normalizeSharedEndpoint(graphs.get(withGraph[0])) };
+}
+function normalizeSharedEndpoint(url) {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return void 0;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return void 0;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || isLoopbackEndpoint(url)) return void 0;
+  return trimSlashes(u.origin + u.pathname);
+}
+async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
+  const lo = localGraphEndpoint(app.env, app.file);
+  const local = (why) => ({ kind: "local", endpoint: lo, why });
+  if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
+  const paths = o.paths ?? [];
+  if (paths.length > MAX_GRAPH_PATHS) return local(`a call named more than ${MAX_GRAPH_PATHS} paths`);
+  if (paths.some((p) => typeof p !== "string" || !isAbsolute9(p))) return local("a call named a path that isn't absolute");
+  const doc = await projectsDoc(app);
+  const inputs = [];
+  let registered = false;
+  if (o.sid !== void 0 && o.sid !== PERSON_SESSION) {
+    const b = await sessionBinding(app, o.sid);
+    registered = b?.registered === true;
+    const c = await sessionCeiling(app, o.sid, b ?? null);
+    if (c.kind === "private") return local(`session ${o.sid} is private: ${c.why}`);
+    if (c.kind === "none") return local(`session ${o.sid} isn't bound to a project yet`);
+    if (c.kind === "shared") inputs.push({ name: `session ${o.sid}`, share: { circles: c.circles, people: c.people } });
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const d of [...o.dirs ?? [], process.cwd(), ...paths]) {
+    if (typeof d !== "string" || d.trim() === "") continue;
+    const r = projectOf(d);
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    if (seen.size > MAX_SESSION_PROJECTS) return local(`it works in more than ${MAX_SESSION_PROJECTS} projects`);
+    inputs.push({ name: r.name, share: shareOf(doc, r.id), ...r.repoPrivate ? { repoPrivate: true } : {} });
+  }
+  const t2 = graphTargetOf(inputs, { local: lo, sharedGraphs });
+  if (t2.kind === "shared" && !registered) return local(o.sid ? `session ${o.sid} isn't registered by a front end of yours` : "no session: only a session your front end registered may reach a shared graph");
+  return t2;
+}
+function projectGraphTarget(app, ref, doc) {
+  const lo = localGraphEndpoint(app.env, app.file);
+  return graphTargetOf([{ name: ref.name, share: shareOf(doc, ref.id), ...ref.repoPrivate ? { repoPrivate: true } : {} }], { local: lo });
+}
+function describeGraphTarget(t2) {
+  return t2.kind === "local" ? `${GRAPH_LOCAL_ONLY} (${t2.endpoint})` : `the shared graph of circle ${t2.circle} (${t2.endpoint})`;
+}
+function graphPinnedEnv(env, target, base = process.env) {
+  const out = { ...env };
+  const keep = new Set(IX_KEEP);
+  for (const k of /* @__PURE__ */ new Set([...Object.keys(base), ...Object.keys(env)])) if (/^IX_/i.test(k) && !keep.has(k.toUpperCase())) out[k] = void 0;
+  out.IX_ENDPOINT = target.endpoint;
+  out.IX_MAP_BACKGROUND_REFRESH = "0";
+  out.IX_NO_UPDATE_CHECK = "1";
+  return out;
+}
+var PERSON_SESSION, PRIVATE_MARKER, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, sha, clean3, AGENT_ENV_VARS, TOKEN_RE, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -24636,6 +24882,12 @@ var init_projects = __esm({
     ];
     TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
     PROJECT_NOTICE_PREFIX = "project boundaries:";
+    GRAPH_LOCAL_ONLY = "local only";
+    DEFAULT_IX_ENDPOINT = "http://localhost:8090";
+    SHARED_GRAPHS = /* @__PURE__ */ new Map();
+    MAX_GRAPH_PATHS = 64;
+    IX_CLOUD_ENV = ["IX_ENDPOINT", "IX_PAT", "IX_ORG", "IX_ORG_ID", "IX_PUSH_ENDPOINT", "IX_PUSH_TOKEN", "IX_OAUTH_CLIENT_SECRET", "IX_AUTO_MAP_CLOUD", "IX_AUTO_MAP", "IX_KARTR_UI_URL", "IX_VIEW_BACKEND_URL", "IX_VIEW_BACKEND_TOKEN"];
+    IX_KEEP = ["IX_BIN", "IX_HOME", "IX_TOKEN"];
   }
 });
 
@@ -24778,7 +25030,7 @@ var init_version = __esm({
 
 // packages/p2p/src/app.ts
 import { hostname as hostname3, userInfo as userInfo2 } from "node:os";
-import { basename as basename5, join as join18 } from "node:path";
+import { basename as basename5, join as join19 } from "node:path";
 function branchesCovered(chain, tips) {
   if (tips.length < 2) return true;
   const ancestry = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
@@ -24973,8 +25225,8 @@ var init_app = __esm({
         this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
         this.readOnly = opts.readOnly === true;
         const lockOpts = this.progress.debug ? { onLock: lockLogger(this.progress), onLockWait: ({ dir, waitedMs, holderPid }) => debug(this.progress, `lock ${basename5(dir)}: still waiting after ${waitedMs}ms (held by pid ${holderPid ?? "?"})`) } : {};
-        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join18(this.home, "cli"))) : void 0, lockOpts);
-        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join18(this.home, "v3")) : new FileTrustStoreV3(join18(this.home, "v3"), lockOpts);
+        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join19(this.home, "cli"))) : void 0, lockOpts);
+        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join19(this.home, "v3")) : new FileTrustStoreV3(join19(this.home, "v3"), lockOpts);
         this.file = readFileConfig(this.home);
         this.transport = transportResolver(opts.env, this.file);
         this.tun = tunables(opts.env);
@@ -34357,7 +34609,7 @@ init_state2();
 init_xstate();
 import { createHash as createHash8, createHmac } from "node:crypto";
 import { mkdirSync as mkdirSync10, readFileSync as readFileSync12, renameSync as renameSync7, writeFileSync as writeFileSync10 } from "node:fs";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
   if (!secret) throw new CliError("no_identity", "no identity here yet: run `p2p init`");
@@ -34386,9 +34638,15 @@ function toExtEvent(e) {
   };
 }
 function extContext(app, ext, io2, json, confirm) {
+  const pinned = graphPinnedEnv(app.env, { kind: "local", endpoint: localGraphEndpoint(app.env, app.file), why: "" });
   return {
-    env: app.env,
+    env: pinned,
     cwd: extWorkdir(app.env),
+    graphTarget: async (o = {}) => {
+      const { dirs, over } = sessionDirs(app.env);
+      const paths = Array.isArray(o.paths) ? [...o.paths] : [];
+      return graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
+    },
     io: { err: (s2) => io2.err(s2), ...io2.readStdin ? { readStdin: io2.readStdin } : {} },
     json,
     interactive: !json && io2.prompt !== void 0,
@@ -34458,8 +34716,8 @@ function extContext(app, ext, io2, json, confirm) {
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
-  const dir = join19(home, "ext");
-  const file = join19(dir, `${ns}.json`);
+  const dir = join20(home, "ext");
+  const file = join20(dir, `${ns}.json`);
   const read2 = () => {
     try {
       const v = JSON.parse(readFileSync12(file, "utf8"));
@@ -34574,6 +34832,7 @@ init_inbound();
 init_rotation();
 init_sessions();
 init_projects();
+init_ix_local();
 init_tty_confirm();
 init_social();
 
@@ -34586,12 +34845,12 @@ init_sessions();
 init_errors2();
 import { watch as watchDir } from "node:fs";
 import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join20 } from "node:path";
+import { join as join21 } from "node:path";
 init_rotation();
 init_outbox();
 init_running();
 function cursorPath(app, sid) {
-  return join20(app.home, "cursors", `${sid}.cursor`);
+  return join21(app.home, "cursors", `${sid}.cursor`);
 }
 async function readCursor(app, sid) {
   try {
@@ -34603,7 +34862,7 @@ async function readCursor(app, sid) {
 }
 async function writeCursor(app, sid, c) {
   const p = cursorPath(app, sid);
-  await mkdir3(join20(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir3(join21(app.home, "cursors"), { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
   await writeFile4(tmp, JSON.stringify(c), { mode: 384 });
   await rename2(tmp, p);
@@ -34713,7 +34972,7 @@ async function watch(app, opts) {
   const offEvents = app.state.onEventsAdded(wake);
   let logWatcher;
   try {
-    logWatcher = watchDir(join20(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
+    logWatcher = watchDir(join21(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
       if (name2 === null || String(name2) === "events.json") wake();
     });
     logWatcher.on("error", () => {
@@ -34836,9 +35095,12 @@ init_config();
 init_errors2();
 init_relay_client();
 init_sessions();
-import { readdirSync as readdirSync2, statSync as statSync3 } from "node:fs";
+init_extensions();
+init_ix_local();
+init_projects();
+import { readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
 import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
-import { dirname as dirname6, join as join21 } from "node:path";
+import { dirname as dirname6, join as join22 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SKEW_OK_SEC = 30;
 var SKEW_FAIL_SEC = DEFAULT_SKEW_SEC;
@@ -34885,7 +35147,7 @@ async function httpProbe(url, timeoutMs, opts = {}) {
   t2.unref?.();
   const t0 = Date.now();
   try {
-    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" } });
+    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" }, ...opts.noRedirect ? { redirect: "error" } : {} });
     const t1 = Date.now();
     const date = res.headers.get("date");
     const serverMs = date ? Date.parse(date) : NaN;
@@ -34959,9 +35221,9 @@ function ownStatuses(app, peers) {
 function watchCursor(home) {
   let best;
   try {
-    for (const name2 of readdirSync2(join21(home, "cursors"))) {
+    for (const name2 of readdirSync2(join22(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
-      const at = statSync3(join21(home, "cursors", name2)).mtimeMs;
+      const at = statSync4(join22(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
     }
   } catch {
@@ -34975,7 +35237,7 @@ function findModRoot(app, given) {
   try {
     const here = dirname6(fileURLToPath3(import.meta.url));
     const root = dirname6(here);
-    statSync3(join21(root, ".claude-plugin", "plugin.json"));
+    statSync4(join22(root, ".claude-plugin", "plugin.json"));
     return root;
   } catch {
     return void 0;
@@ -34989,12 +35251,12 @@ async function readSmall2(path2) {
 async function modVersions(root) {
   const out = {};
   try {
-    const v = JSON.parse(await readSmall2(join21(root, ".claude-plugin", "plugin.json"))).version;
+    const v = JSON.parse(await readSmall2(join22(root, ".claude-plugin", "plugin.json"))).version;
     if (typeof v === "string") out.plugin = peer(v, 32);
   } catch {
   }
   try {
-    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join21(root, "bin", "p2p.mjs")));
+    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join22(root, "bin", "p2p.mjs")));
     if (m) out.bundled = peer(m[1], 32);
   } catch {
   }
@@ -35229,7 +35491,51 @@ async function deviceChecks(c, app, o, ms, reports) {
       "if messages from someone seem missing, ask them to send again; P2P_DEBUG=1 on `p2p ls` shows why one fails"
     );
   }
+  await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
+}
+var MAX_GRAPH_ROWS = 10;
+async function ixChecks(c, app, ms) {
+  const local = localGraphEndpoint(app.env, app.file);
+  const target = { endpoint: local };
+  const bin = ixBinary(app.env);
+  const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
+  if (!bin) {
+    c.add("ix", "unknown", "Ix", "the Ix CLI isn't installed (Peer2Peer works without it; peers' Ix items show as plain text)", `install Ix (${IX_INSTALL_URL}), then \`p2p extensions enable ix\``);
+  } else {
+    const v = (await bounded(ixVersion(bin, app.env, target, ms), ms + 500)).value;
+    if (v) c.add("ix", "ok", "Ix", `ix ${v} (${bin})`);
+    else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
+    if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
+    else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
+    const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
+    if (h.ok && h.status !== void 0 && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
+    else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
+    const here2 = projectOf(sessionWorkdir(app.env));
+    if (here2.kind === "git" && h.ok) {
+      const st = (await bounded(runIx(bin, ["status", "--format", "json", "--root", here2.root], { env: app.env, target, cwd: here2.root, timeoutMs: ms }), ms + 500)).value;
+      let mapped;
+      try {
+        const j = st && st.code === 0 ? JSON.parse(st.stdout) : void 0;
+        mapped = j ? j.graphCompleted === true : void 0;
+      } catch {
+        mapped = void 0;
+      }
+      if (mapped === true) c.add("ix-workspace", "ok", "Ix workspace", `${here2.name} is mapped`);
+      else if (mapped === false) c.add("ix-workspace", "unknown", "Ix workspace", `${here2.name} isn't mapped yet`, `run \`ix map\` in ${here2.root}`);
+      else c.add("ix-workspace", "unknown", "Ix workspace", `couldn't tell whether ${here2.name} is mapped`, "run `ix status` in it");
+    }
+  }
+  const doc = (await bounded(projectsDoc(app), ms)).value ?? { v: 1, projects: {} };
+  const here = projectOf(sessionWorkdir(app.env));
+  const rows = [{ id: here.id, name: here.name, ...here.repoPrivate ? { repoPrivate: true } : {} }];
+  const all = (await bounded(listProjects(app), ms)).value ?? [];
+  for (const p of all) if (!rows.some((r) => r.id === p.id)) rows.push({ id: p.id, name: p.name });
+  for (const r of rows.slice(0, MAX_GRAPH_ROWS)) {
+    const t2 = projectGraphTarget(app, r, doc);
+    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t2)}${t2.kind === "local" ? `: ${t2.why}` : ""}`);
+  }
+  if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
 }
 async function refreshCapped(app, userId, relays) {
   const allowed = new Set(relays.slice(0, MAX_PEER_RELAYS));
@@ -37235,14 +37541,14 @@ function daysLeft(exp, now) {
 function prettyInvite(r, p) {
   const st = styleOf(p);
   const now = nowOf(p);
-  const join22 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
+  const join23 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
   const what = r.circles.length ? `It makes them your friend and joins them to ${r.circles.map((c) => st.bold(`"${cell(c.name, 40)}"`)).join(", ")}.` : "It makes them your friend.";
   return [
     st.bold(`Your invite${r.label ? ` for ${cell(r.label, 40)}` : ""}`) + st.dim(`  (works once, for ${daysLeft(r.expiresAt, now)}${r.to ? `, only for ${cell(r.to.address, 48)}` : ""})`),
     "",
     `  ${st.cyan(st.bold(cell(r.web, 400)))}`,
     "",
-    st.dim(`  or the code: ${cell(r.code, 200)}   (${join22})`),
+    st.dim(`  or the code: ${cell(r.code, 200)}   (${join23})`),
     "",
     what,
     st.yellow("Send it over a channel you trust: ") + "anyone who sees it first can use it. They see who it's from and say yes before anything happens.",
@@ -37442,6 +37748,10 @@ function buildProgram(deps) {
       if (json) io2.out(safeJson(out.json));
       else if (deps.io.pretty && out.pretty) deps.io.out(safePretty(out.pretty(deps.io.pretty)));
       else if (out.human) io2.out(safeTerminal(out.human));
+      if (!json && !opts.readOnly && app.keys && deps.io.prompt && personHere(app) && cmd.name() !== "setup") {
+        const n = await ixNotice(app).catch(() => void 0);
+        if (n) io2.err(`p2p: ${n}`);
+      }
     } catch (e) {
       const j = toErrorJson(e);
       if (json) io2.out(safeJson(j));
@@ -37550,6 +37860,9 @@ Write these 24 words down and keep them offline. Anyone with them is you:
 ${r.backup.phrase}
 `);
         if (r.created && !r.backup) io2.err("warning: no backup yet: if you lose this device, the identity is gone. Run `p2p backup show`.");
+        if (r.ix?.enabledNow) lines.push("  ix      Ix found: the Ix extension is on (`p2p extensions disable ix` turns it off). Ix calls stay on this machine (graph: local only)");
+        else if (r.ix?.enabled) lines.push("  ix      the Ix extension is on (graph: local only)");
+        else if (r.ix?.hint) lines.push(`  ix      ${r.ix.hint}`);
         lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
         return { json: r, human: lines.join("\n") };
       },
@@ -38317,6 +38630,7 @@ ${formatRoster(r.roster)}`,
     if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
     for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
     for (const p of v.people) lines.push(`  ${p.address}`);
+    if (v.graph) lines.push(`  graph: ${describeGraphTarget(v.graph)}${v.graph.kind === "local" && v.graph.why ? `: ${v.graph.why}` : ""}`);
     return lines.join("\n");
   };
   project.command("share [circles...]").description("Share the project here with circles you joined (and friends with --person); on a terminal with none named, pick them").option("--person <user>", "A friend to share it with too (repeatable)", collect).option("--add", "Keep what it is shared with already (default: replace it)").option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)").option("--json", "JSON output").action(

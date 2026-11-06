@@ -6,7 +6,8 @@
 // (src/__tests__/harness.ts documents the file names).
 const fs = require("node:fs");
 const path = require("node:path");
-const dir = process.env.FAKE_IX_DIR;
+// Its data lives in IX_HOME (the one Ix state variable ext-ix passes on), or FAKE_IX_DIR when run directly.
+const dir = process.env.IX_HOME || process.env.FAKE_IX_DIR;
 const argv = process.argv.slice(2);
 let stdin = "";
 try { if (!process.stdin.isTTY) stdin = fs.readFileSync(0, "utf8"); } catch {}
