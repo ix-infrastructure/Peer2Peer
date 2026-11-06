@@ -39,6 +39,21 @@ export interface FileConfig {
   trust?: { users?: string[]; circles?: string[] };
   /** Publish this device's caps and version in the identity document (`dinfo`); off until step 2 (docs/compatibility.md). P2P_DEVICE_INFO wins. */
   deviceInfo?: boolean;
+  /**
+   * Messages from your own agent sessions skip the hold in a session that approves its own tool calls
+   * (`p2p own-agents deliver`, person only). Off by default: they are held like a peer's. No variable
+   * overrides it, so nothing an agent sets in its environment turns it on.
+   */
+  ownAgentsDeliver?: boolean;
+}
+
+/** Whether your own agent sessions' messages skip the hold (FileConfig.ownAgentsDeliver). */
+export function ownAgentsDeliver(home: string): boolean {
+  try {
+    return readFileConfig(home).ownAgentsDeliver === true;
+  } catch {
+    return false;
+  }
 }
 
 /**

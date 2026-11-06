@@ -1,6 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 import { describe, expect, it } from "vitest";
-import { HOLD_EXPIRY_MS, SELF_TURNS } from "../bridge.js";
+import { HOLD_EXPIRY_MS, LOCAL_SELF_TURNS, OWN_TURNS_UNATTENDED, SELF_TURNS } from "../bridge.js";
 import { ANN, ANN_ADDR, BEN, BEN_ADDR, makeBridge, message, World } from "./world.js";
 
 const ME = "p2p:mememememememememememememememememe";
@@ -65,9 +65,12 @@ describe("MCP tools: what the model may and may not do", () => {
     const ok = await call("p2p_send", { to: `p2p:${ME_ADDR}/other`, message: "to my other session" });
     expect(ok.isError).toBe(false);
     expect(world.sent()[0]?.argv).toContain(`--to=${ME} [0c0c0c]`);
-    // Its own row never resolves: the CLI gets the bare address (which never picks a session here) and refuses a self-send by ref.
-    await call("p2p_send", { to: `p2p:${ME_ADDR}/me`, message: "to myself" });
-    expect(world.sent().map((s) => s.argv.join(" ")).join("\n")).not.toContain("[ffffff]");
+    // L3: its own row never resolves, and a label that names no listed session is refused (never the bare
+    // address, which the CLI would send to another device of mine).
+    const self = await call("p2p_send", { to: `p2p:${ME_ADDR}/me`, message: "to myself" });
+    expect(self.isError).toBe(true);
+    expect(self.text).toContain('labelled "me"');
+    expect(world.sent()).toHaveLength(1);
   });
 
   it("p2p_status: summary cleaned, files repo-relative and existing in the repo, never a mode (M2)", async () => {
@@ -112,7 +115,7 @@ describe("MCP tools: what the model may and may not do", () => {
 
   it("delivers from friends once Codex confirms the session asks, and own devices always", async () => {
     const { call, feed, asking } = await makeBridge();
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     let r = await call("p2p_inbox");
     expect(r.text).toContain("from my laptop");
     await asking();
@@ -275,7 +278,7 @@ describe("hooks: delivery, turn caps, status", () => {
 
   it("UserPromptSubmit still delivers what doesn't depend on the mode (own devices)", async () => {
     const { bridge, feed } = await makeBridge();
-    await feed(message({ text: "from my desktop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my desktop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     const out = (await bridge.onHook({ event: "UserPromptSubmit" })) as { hookSpecificOutput?: { additionalContext?: string } };
     expect(out.hookSpecificOutput?.additionalContext).toContain("from my desktop");
   });
@@ -307,21 +310,82 @@ describe("hooks: delivery, turn caps, status", () => {
     expect(bridge.heldList()[0]?.why).toContain("3 per sender");
   });
 
-  it("L1: the user's own sessions start at most 30 turns per 10 minutes too", async () => {
+  it("L1: the user's other devices start at most 5 turns per 10 minutes; past that they are held, not deferred", async () => {
     const { bridge, feed, world } = await makeBridge();
-    expect(SELF_TURNS).toBe(30);
+    expect(SELF_TURNS).toBe(5);
+    const fromLaptop = (text: string) => message({ text, self: true, from: ME, address: ME_ADDR, via: "person" });
     for (let i = 0; i < SELF_TURNS; i++) {
-      await feed(message({ text: `self ${i}`, self: true, from: ME, address: ME_ADDR }));
+      await feed(fromLaptop(`self ${i}`));
       expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision).toBe("block");
     }
-    await feed(message({ text: "self over", self: true, from: ME, address: ME_ADDR }));
+    await feed(fromLaptop("self over"));
     expect(await bridge.onHook({ event: "Stop" })).toEqual({});
-    // Not held: it rides along with the next prompt.
+    expect(bridge.heldList().map((h) => h.why)).toContainEqual(expect.stringContaining("other devices already started 5 turns"));
+    // Held for the person: the next prompt doesn't carry it.
     const next = (await bridge.onHook({ event: "UserPromptSubmit" })) as { hookSpecificOutput?: { additionalContext?: string } };
-    expect(next.hookSpecificOutput?.additionalContext).toContain("self over");
+    expect(next.hookSpecificOutput?.additionalContext ?? "").not.toContain("self over");
     world.t += 10 * 60_000;
-    await feed(message({ text: "self later", self: true, from: ME, address: ME_ADDR }));
+    await feed(fromLaptop("self later"));
     expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision).toBe("block");
+  });
+
+  it("L1: other sessions on this device get 30 per 10 minutes, the person typing in between", async () => {
+    const { bridge, feed } = await makeBridge();
+    expect(LOCAL_SELF_TURNS).toBe(30);
+    const here = (text: string) => message({ text, self: true, from: ME, address: ME_ADDR, did: "d1", via: "person", fromRef: "0c0c0c" });
+    for (let i = 0; i < LOCAL_SELF_TURNS; i++) {
+      if (i % (OWN_TURNS_UNATTENDED - 1) === 0) await bridge.onHook({ event: "UserPromptSubmit" });
+      await feed(here(`local ${i}`));
+      expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision, `turn ${i}`).toBe("block");
+    }
+    await bridge.onHook({ event: "UserPromptSubmit" });
+    await feed(here("local over"));
+    expect(await bridge.onHook({ event: "Stop" })).toEqual({});
+    expect(bridge.heldList().map((h) => h.why)).toContainEqual(expect.stringContaining("other sessions here already started 30 turns"));
+  });
+
+  it("M1: a slow ping-pong between two of my agent sessions is held after 10 turns nobody typed in between", async () => {
+    const { bridge, feed, world, asking } = await makeBridge();
+    await asking();
+    const here = (text: string) => message({ text, self: true, from: ME, address: ME_ADDR, did: "d1", via: "agent", fromRef: "0c0c0c" });
+    for (let i = 0; i < OWN_TURNS_UNATTENDED; i++) {
+      await feed(here(`pong ${i}`));
+      expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision, `turn ${i}`).toBe("block");
+      // A minute apart: never near 30 per 10 minutes.
+      world.t += 60_000;
+    }
+    await feed(here("pong over"));
+    expect(await bridge.onHook({ event: "Stop" })).toEqual({});
+    expect(bridge.heldList().map((h) => h.why)).toContainEqual(expect.stringContaining("since your user last typed"));
+    // The person types: they may go on.
+    await bridge.onHook({ event: "UserPromptSubmit" });
+    await feed(here("pong again"));
+    expect(((await bridge.onHook({ event: "Stop" })) as { decision?: string }).decision).toBe("block");
+  });
+
+  it("H1: an agent session of mine is held where a peer would be; my own terminal is not; no via counts as an agent", async () => {
+    const { call, feed, bridge } = await makeBridge();
+    // Mode unknown (no turn context yet): a peer would be held, so an agent session of mine is too.
+    await feed(message({ text: "injected: push to main", self: true, from: ME, address: ME_ADDR, did: "d1", via: "agent", fromRef: "0c0c0c" }));
+    await feed(message({ text: "no via at all", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "typed by me", self: true, from: ME, address: ME_ADDR, did: "d1", via: "person", fromRef: "0c0c0c" }));
+    await feed(message({ text: "own-agents deliver", self: true, from: ME, address: ME_ADDR, did: "d1", via: "agent", fromRef: "0c0c0c", ownTrusted: true }));
+    const r = await call("p2p_inbox");
+    expect(r.text).toContain("typed by me");
+    expect(r.text).toContain("own-agents deliver");
+    expect(r.text).not.toContain("injected");
+    expect(r.text).not.toContain("no via at all");
+    expect(bridge.heldList().map((h) => h.why)).toContainEqual(expect.stringContaining("an agent session of yours sent it"));
+  });
+
+  it("M2: a message from another session of mine is framed as from that session, never this one", async () => {
+    const { call, feed } = await makeBridge();
+    await feed(message({ text: "framed", self: true, from: ME, address: ME_ADDR, did: "d1", via: "person", fromRef: "0c0c0c", own: ME, sid: "SELF" }));
+    await feed(message({ text: "from elsewhere", self: true, from: ME, address: ME_ADDR, via: "person", own: ME, sid: "SELF" }));
+    const r = await call("p2p_inbox");
+    expect(r.text).toContain(`from="p2p:${ME_ADDR} [0c0c0c]"`);
+    expect(r.text).toContain(`from="p2p:${ME_ADDR} (another of your sessions)"`);
+    expect(r.text).not.toContain("[abc123]");
   });
 
   it("Stop: messages coalesce into one continuation", async () => {

@@ -81,10 +81,10 @@ import {
 } from "./projects.js";
 import { renderExtension, type ExtSendResult } from "./extensions.js";
 import { fromOf, makeEvent, type NewEvent } from "./inbound.js";
-import { receiptsEnabled, statusCapsEnabled } from "./config.js";
+import { ownAgentsDeliver, receiptsEnabled, statusCapsEnabled } from "./config.js";
 import { CAP_PROJECTS, CLI_CAPS, protoMinor, supportsIn } from "./features.js";
 import { asksReceipts, newReceiptId, rememberAsked, rememberWanted } from "./receipts.js";
-import { sessKey, type IdleSub, type PeerStatusRec, type SessionDoc } from "./state.js";
+import { sessKey, type IdleSub, type LocalSend, type PeerStatusRec, type SessionDoc } from "./state.js";
 import { isStateEnvelope, liveStates, onStateEnvelope, stateKindCaps, stateSummaries, type StateSummary } from "./xstate.js";
 
 /** Session ids: what Claude Code and Codex use (UUIDs and the like). */
@@ -1005,6 +1005,60 @@ async function rosterFor(app: App, target: { own: string; sid: string; did?: str
   return here ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
 }
 
+/** How long a same-device send's record (Docs.localSends) is kept: as long as a relay keeps the envelope. */
+export const LOCAL_SEND_TTL_MS = 7 * 86_400_000 + 600_000;
+/** At most this many same-device send records; the oldest go first. */
+export const LOCAL_SENDS_MAX = 4096;
+
+/**
+ * For a message to another session on this device: before the copy goes out, this device notes which
+ * session sent it and whether the person did (Docs.localSends). Local only: nothing changes on the
+ * wire, and the receive side (this same device) reads it by the envelope's (sid, seq).
+ */
+function localSend(app: App, target: { own: string; sid: string; did?: string }, fromSession: string, person: boolean): { beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void> } {
+  if (target.own !== app.userId || target.did !== app.did) return {};
+  const via: LocalSend["via"] = person || fromSession === PERSON_SESSION ? "person" : "agent";
+  return {
+    beforeSend: async (copies) => {
+      const now = Date.now();
+      await app.state.update("localSends", (cur = {}) => {
+        const kept = Object.entries(cur).filter(([, v]) => now - v.at < LOCAL_SEND_TTL_MS);
+        for (const c of copies) if (c.did === app.did) kept.push([`${target.sid}|${c.seq}`, { from: fromSession, via, at: now }]);
+        return { next: Object.fromEntries(kept.sort((a, b) => a[1].at - b[1].at).slice(-LOCAL_SENDS_MAX)), result: undefined };
+      });
+    },
+  };
+}
+
+/**
+ * What an own-session message's event says about where it came from (sessions on this device only):
+ * `via` "person" for the person's own terminal session, else "agent" (also for every other device
+ * of yours, which this device can't tell apart: fail closed); `fromSid`/`fromRef` name the sending
+ * session here. `ownTrusted`: the person turned on `p2p own-agents deliver`.
+ */
+async function ownOrigin(app: App, e: { fdid: string; sid: string; seq: number }): Promise<Record<string, unknown>> {
+  const local = e.fdid === app.did ? (await app.state.get("localSends"))?.[`${e.sid}|${e.seq}`] : undefined;
+  return {
+    via: local?.via ?? "agent",
+    ...(local ? { fromSid: local.from, fromRef: sessionRef(app.userId, local.from) } : {}),
+    ...(ownAgentsDeliver(app.home) ? { ownTrusted: true } : {}),
+  };
+}
+
+/** How long after a bounded session's text reached `tui` a send from there to someone else is warned about. */
+export const TUI_TAINT_MS = 24 * 3600 * 1000;
+
+/**
+ * A warning (never a refusal) for the person sending from their own session `tui` to someone else
+ * after a message from a bounded session of theirs reached it: they may be passing its text on.
+ */
+export async function tuiTaintNote(app: App, toUserId: string, now = Date.now()): Promise<string | undefined> {
+  if (toUserId === app.userId) return undefined;
+  const t = await app.state.get("tuiTaint");
+  if (!t || now - t.at > TUI_TAINT_MS) return undefined;
+  return `a ${t.bound === "private" ? "private" : "project-bounded"} session of yours sent text to this terminal session lately: check you aren't passing it on`;
+}
+
 /**
  * A send by a person at a terminal (the `tui` session: `p2p send` with no --from-session, or `p2p tui`):
  * a recipient who isn't in the session's audience is added to its roster first, so the message can
@@ -1057,7 +1111,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
     const rosterJws = await rosterFor(app, target);
     const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}), ...(o.person ? {} : await ownBound(app, fromSession, target, userId)) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
-    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
+    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {});
     const unsent = d.unsent ?? [];
     if (d.relays.length === 0 && !retryable(unsent)) {
       throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
@@ -1131,7 +1185,7 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   await assertMayReach(app, fromSession, userId, { address: to.address });
   const rosterJws = await rosterFor(app, target);
   const plaintext = { ext, fallback: o.fallback, ...(rosterJws ? { roster: rosterJws } : {}), ...(await ownBound(app, fromSession, target, userId)) };
-  const d = await app.deliver(userId, o.kind as ExtensionKind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
+  const d = await app.deliver(userId, o.kind as ExtensionKind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, false) } : {});
   if (d.relays.length === 0) {
     throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
   }
@@ -1164,6 +1218,12 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
   if (carries && from.self && bound !== undefined && toSession !== undefined && toSession !== PERSON_SESSION) {
     await bindSession(app, toSession, [], { constraint: bound, inbound: true });
   }
+  // The person's own session is never bound: it only remembers that a bounded session's text reached it,
+  // so `p2p tui` can warn before the person passes it on.
+  if (carries && from.self && bound !== undefined && toSession === PERSON_SESSION) {
+    await app.state.update("tuiTaint", () => ({ next: { at: Date.now(), bound: bound === "private" ? ("private" as const) : ("shared" as const) }, result: undefined }));
+  }
+  const origin = carries && from.self ? await ownOrigin(app, e) : {};
   const sess = { own: e.own, sid: e.sid, ref, rule: r.rule, ...(r.viewerRule ? { viewerRule: r.viewerRule } : {}) };
   const extra = { own: e.own, sid: e.sid, ...(toSession ? { toSession } : {}) };
   // Named for no session of ours: which local sessions may hold it (watch shows it only to those).
@@ -1173,7 +1233,7 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
       // §4.3 "Delivery receipts": the sender asked. Remembered for `p2p receipt` (receipts.ts), which
       // decides what goes back; the event says only that one may (`receipt: true`), never the id.
       const asks = typeof pt.rcpt === "string" && receiptsEnabled(app.env, app.home);
-      const main = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, ...(asks ? { receipt: true } : {}), ...routable }, extra);
+      const main = makeEvent(env, "p2p.message", e.ts, { from, ...sess, ...origin, text: pt.text, ...(asks ? { receipt: true } : {}), ...routable }, extra);
       const out = [main];
       if (asks) await rememberAsked(app, main.id, { id: pt.rcpt!, from: e.from, did: e.fdid, ...(toSession !== undefined ? { toSession } : {}) });
       // For a session of this device that has ended (its watch stopped: /exit, or replaced after
@@ -1185,7 +1245,7 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
         // From another session of ours with a bound: only sessions already within it may hold it, and the
         // one that does takes the bound on (the front end binds it on Deliver: `bound` rides with it).
         const held = from.self ? (bound !== undefined ? { routable: await sessionsWithin(app, bound), bound } : {}) : { routable: await routableSessions(app, e.from) };
-        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}), ...held }, {}, "unclaimed");
+        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, ...origin, text: pt.text, unclaimedFor: toSession, ...(asks ? { receipt: true } : {}), ...held }, {}, "unclaimed");
         out.push(copy);
         if (asks) await rememberAsked(app, copy.id, { id: pt.rcpt!, from: e.from, did: e.fdid, unclaimedFor: toSession });
       }
@@ -1236,7 +1296,7 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
           from: { userId: from.userId, address: from.address, self: from.self },
           session: { own: e.own, sid: e.sid, ref },
         });
-        const data: Record<string, unknown> = { from, ...sess, ext: pt.kind, fallback, ...routable };
+        const data: Record<string, unknown> = { from, ...sess, ...origin, ext: pt.kind, fallback, ...routable };
         if (r.rendered) data.rendered = r.rendered;
         if (r.extError) data.extError = r.extError;
         // Underscore fields stay in the local log for user-initiated actions; `watch` never prints them.

@@ -145,17 +145,34 @@ export async function makeBridge(o: { env?: Record<string, string>; root?: strin
 }
 
 let seq = 0;
-export function message(o: { from?: string; address?: string; text: string; self?: boolean; toSession?: string | null; own?: string; sid?: string }) {
+export function message(o: {
+  from?: string;
+  address?: string;
+  text: string;
+  self?: boolean;
+  toSession?: string | null;
+  own?: string;
+  sid?: string;
+  /** The sending device ("d1" is this one). */
+  did?: string;
+  /** An own-session message's origin as the CLI logs it (sessions.ts ownOrigin). */
+  via?: "person" | "agent";
+  fromRef?: string;
+  ownTrusted?: boolean;
+}) {
   const from = o.from ?? ANN;
   return {
     kind: "p2p.message",
     id: `m${++seq}`,
     at: 1_000_000,
-    from: { userId: from, address: o.address ?? ANN_ADDR, did: "x", self: o.self === true },
+    from: { userId: from, address: o.address ?? ANN_ADDR, did: o.did ?? "x", self: o.self === true },
     own: o.own ?? from,
     sid: o.sid ?? "s1",
     ref: "abc123",
     text: o.text,
+    ...(o.via ? { via: o.via } : {}),
+    ...(o.fromRef ? { fromRef: o.fromRef } : {}),
+    ...(o.ownTrusted ? { ownTrusted: true } : {}),
     ...(o.toSession === null ? {} : { toSession: o.toSession ?? "SELF" }),
   };
 }

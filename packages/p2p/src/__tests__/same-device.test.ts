@@ -106,7 +106,9 @@ describe("same-device sends", () => {
     const inS2 = await got(ann, "s2", "s1 to s2");
     expect(inS2).toHaveLength(1);
     expect(inS2[0].data.from).toMatchObject({ userId: ids.ann, self: true });
-    expect(inS2[0].data).toMatchObject({ own: ids.ann, sid: "s2" });
+    // Where it came from, from this device's own record (nothing on the wire): an agent session, s1.
+    expect(inS2[0].data).toMatchObject({ own: ids.ann, sid: "s2", via: "agent", fromSid: "s1", fromRef: sessionRef(ids.ann, "s1") });
+    expect(inS2[0].data.ownTrusted).toBeUndefined();
     const b = await inDir(ann, repo.S).ok(["send", "--from-session", "s2", "--to", `${ids.ann} [${sessionRef(ids.ann, "s1")}]`, "--stdin"], { stdin: "s2 back to s1" });
     expect(b).toMatchObject({ delivered: true, to: { sid: "s1" } });
     expect(await got(ann, "s1", "s2 back to s1")).toHaveLength(1);
@@ -123,7 +125,9 @@ describe("same-device sends", () => {
     process.exitCode = 0;
     expect(code, err.join("\n")).toBe(0);
     expect(out.join("\n")).toMatch(new RegExp(`Sent to .*\\[${sessionRef(ids.ann, "s2")}\\]: delivered via 1 relay`));
-    expect(await got(ann, "s2", "from the terminal")).toHaveLength(1);
+    const [ev] = await got(ann, "s2", "from the terminal");
+    // The person's own terminal: `via: "person"`, the one own-session origin an auto-approving session delivers.
+    expect(ev?.data).toMatchObject({ via: "person", fromSid: "tui", fromRef: sessionRef(ids.ann, "tui") });
   });
 
   it("a bare --to <you> never fans out to this device's sessions: it goes where it went before", async () => {
@@ -219,5 +223,52 @@ describe("same-device sends", () => {
     const idle = (await events(ann)).filter((e) => e.kind === "p2p.idle" && e.toSession === "s1" && e.data.sid === "s4");
     expect(idle).toHaveLength(1);
     expect(idle[0].data).toMatchObject({ reason: "idle", from: { userId: ids.ann, self: true } });
+  });
+
+  it("L1: a receipt is reported only by the session's front end, never an agent's shell", async () => {
+    const agent = inDir(ann, repo.S, { P2P_PERSON_TOKEN: "", CLAUDECODE: "1" });
+    const r = await agent.run(["receipt", "p2p.message:whatever", "--from-session", "s2", "--outcome", "shown"]);
+    expect(r.json).toMatchObject({ error: "refused" });
+    // Outside an agent, without the token: a session a front end registered is still its alone.
+    const script = inDir(ann, repo.S, { P2P_PERSON_TOKEN: "" });
+    expect((await script.run(["receipt", "p2p.message:whatever", "--from-session", "s2", "--outcome", "shown"])).json).toMatchObject({ error: "refused" });
+    // The front end (its token): goes on (nothing asked for this id, so nothing is sent).
+    expect(await inDir(ann, repo.S).ok(["receipt", "p2p.message:whatever", "--from-session", "s2", "--outcome", "shown"])).toMatchObject({ sent: false, reason: "not-asked" });
+  });
+
+  it("H1: `p2p own-agents deliver` is the person's alone; once on, own-session messages say so", async () => {
+    const agent = inDir(ann, repo.S, { P2P_PERSON_TOKEN: "", CLAUDECODE: "1" });
+    expect((await agent.run(["own-agents", "deliver"])).json).toMatchObject({ error: "refused" });
+    expect((await ann.ok(["own-agents"])).ownAgents).toBe("hold");
+    expect((await ann.ok(["own-agents", "deliver"])).ownAgents).toBe("deliver");
+    try {
+      await inDir(ann, repo.S).ok(["send", "--from-session", "s1", "--to", `${ids.ann}/s2`, "--stdin"], { stdin: "trusted agent" });
+      const [ev] = await got(ann, "s2", "trusted agent");
+      expect(ev?.data).toMatchObject({ via: "agent", ownTrusted: true });
+      // Turning it back off never needs the person.
+      expect((await agent.run(["own-agents", "hold"])).json).toMatchObject({ ownAgents: "hold" });
+    } finally {
+      await ann.ok(["own-agents", "hold"]);
+    }
+  });
+
+  it("L4: after a private session's text reached your terminal session, a send from there to someone else warns", async () => {
+    await inDir(ann, repo.P).ok(["status", "--session", "p3", "--state", "idle", "--label", "p3"]);
+    const app = await ann.app();
+    await app.load();
+    try {
+      // The person's terminal posts statuses as `tui` (p2p tui does): live here.
+      await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [`${app.userId}|tui`]: { own: app.userId, sid: "tui", did: app.did, ts: Date.now(), status: { state: "idle", label: "tui" }, self: true } }, result: undefined }));
+    } finally {
+      await app.close();
+    }
+    await inDir(ann, repo.P).ok(["send", "--from-session", "p3", "--to", `${ids.ann}/tui`, "--stdin"], { stdin: "private notes" });
+    await got(ann, "tui", "private notes");
+    const out: string[] = [];
+    const code = await main(["send", "--to", `${ids.ben}/bs1`, "passing it on"], { env: inDir(ann, repo.S).env, io: { out: (l) => out.push(l), err: () => {}, select: async () => [], prompt: async () => "" } });
+    process.exitCode = 0;
+    expect(code).toBe(0);
+    // A warning, never a refusal: the person decides.
+    expect(out.join("\n")).toMatch(/note: a private session of yours sent text to this terminal session lately/);
   });
 });

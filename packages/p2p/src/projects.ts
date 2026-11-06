@@ -616,6 +616,21 @@ export async function assertPersonForWidening(app: Pick<App, "env"> & { front?: 
   }
 }
 
+/**
+ * For an act on a session that binds nothing (a delivery receipt): the session's front end (its
+ * token); or, outside any agent's session, a caller acting for a session no front end registered.
+ * An agent's own shell never may, as for statuses and sends (bindSession).
+ */
+export async function assertSpeaksFor(app: App, sid: string): Promise<void> {
+  if (app.front === true) return;
+  if (agentContext(app.env)) {
+    throw new CliError("refused", `session ${sid}: inside an agent's session only its front end speaks for a session (the Claude mod, the Codex bridge), never the shell`);
+  }
+  if ((await sessionBinding(app, sid))?.registered) {
+    throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
+  }
+}
+
 /** Whether a person-only path (session `tui`) may run here: the person's front end, or no agent in sight (then a terminal "yes" too). */
 export function personHere(app: Pick<App, "env"> & { front?: boolean }): boolean {
   return app.front === true || !agentContext(app.env);

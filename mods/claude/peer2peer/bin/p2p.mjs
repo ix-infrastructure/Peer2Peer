@@ -12740,6 +12740,13 @@ import { mkdirSync as mkdirSync8, readFileSync as readFileSync10, renameSync as 
 import { homedir as homedir4 } from "node:os";
 import { join as join14 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+function ownAgentsDeliver(home) {
+  try {
+    return readFileConfig(home).ownAgentsDeliver === true;
+  } catch {
+    return false;
+  }
+}
 function deviceInfoEnabled(env, home) {
   const v = env.P2P_DEVICE_INFO?.trim().toLowerCase();
   if (v === "1" || v === "true") return true;
@@ -13417,6 +13424,8 @@ __export(sessions_exports, {
   CLI_STATUS_CAPS: () => CLI_STATUS_CAPS,
   CODE_JOIN_NO_FOLLOW: () => CODE_JOIN_NO_FOLLOW,
   IDLE_SUB_TTL_MS: () => IDLE_SUB_TTL_MS,
+  LOCAL_SENDS_MAX: () => LOCAL_SENDS_MAX,
+  LOCAL_SEND_TTL_MS: () => LOCAL_SEND_TTL_MS,
   MAX_EXT_PLAINTEXT_BYTES: () => MAX_EXT_PLAINTEXT_BYTES,
   MAX_FILES: () => MAX_FILES,
   MAX_STATUS_PATHS: () => MAX_STATUS_PATHS,
@@ -13427,6 +13436,7 @@ __export(sessions_exports, {
   SID_RE: () => SID_RE,
   STATUS_FANOUT: () => STATUS_FANOUT,
   STATUS_SOFT_MAX_BYTES: () => STATUS_SOFT_MAX_BYTES,
+  TUI_TAINT_MS: () => TUI_TAINT_MS,
   bindBound: () => bindBound,
   bindFromEnv: () => bindFromEnv,
   buildStatus: () => buildStatus,
@@ -13452,6 +13462,7 @@ __export(sessions_exports, {
   sessionRef: () => sessionRef,
   sessionsWithin: () => sessionsWithin,
   statusWithoutAgents: () => statusWithoutAgents,
+  tuiTaintNote: () => tuiTaintNote,
   understandsAgents: () => understandsAgents,
   withoutAgentCount: () => withoutAgentCount
 });
@@ -13972,6 +13983,34 @@ async function rosterFor(app, target) {
   const here = target.own === app.userId && (target.did === void 0 || target.did === app.did);
   return here ? (await getSession(app, target.sid)).jws : (await app.store.getRoster(target.own, target.sid))?.jws;
 }
+function localSend(app, target, fromSession, person) {
+  if (target.own !== app.userId || target.did !== app.did) return {};
+  const via = person || fromSession === PERSON_SESSION ? "person" : "agent";
+  return {
+    beforeSend: async (copies) => {
+      const now = Date.now();
+      await app.state.update("localSends", (cur = {}) => {
+        const kept = Object.entries(cur).filter(([, v]) => now - v.at < LOCAL_SEND_TTL_MS);
+        for (const c of copies) if (c.did === app.did) kept.push([`${target.sid}|${c.seq}`, { from: fromSession, via, at: now }]);
+        return { next: Object.fromEntries(kept.sort((a, b) => a[1].at - b[1].at).slice(-LOCAL_SENDS_MAX)), result: void 0 };
+      });
+    }
+  };
+}
+async function ownOrigin(app, e) {
+  const local = e.fdid === app.did ? (await app.state.get("localSends"))?.[`${e.sid}|${e.seq}`] : void 0;
+  return {
+    via: local?.via ?? "agent",
+    ...local ? { fromSid: local.from, fromRef: sessionRef(app.userId, local.from) } : {},
+    ...ownAgentsDeliver(app.home) ? { ownTrusted: true } : {}
+  };
+}
+async function tuiTaintNote(app, toUserId, now = Date.now()) {
+  if (toUserId === app.userId) return void 0;
+  const t2 = await app.state.get("tuiTaint");
+  if (!t2 || now - t2.at > TUI_TAINT_MS) return void 0;
+  return `a ${t2.bound === "private" ? "private" : "project-bounded"} session of yours sent text to this terminal session lately: check you aren't passing it on`;
+}
 async function sendSharing(app, o) {
   const sid = checkSid(o.fromSession, "--from-session");
   const uid = await app.resolveUser(o.to.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/\/[^/]*$/, ""));
@@ -14008,7 +14047,7 @@ async function sendMessage(app, o) {
     const rosterJws = await rosterFor(app, target);
     const plaintext = { text: o.text, ...rcpt ? { rcpt } : {}, ...rosterJws ? { roster: rosterJws } : {}, ...o.person ? {} : await ownBound(app, fromSession, target, userId) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
-    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
+    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {});
     const unsent = d.unsent ?? [];
     if (d.relays.length === 0 && !retryable(unsent)) {
       throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
@@ -14054,7 +14093,7 @@ async function sendExtension(app, o) {
   await assertMayReach(app, fromSession, userId, { address: to.address });
   const rosterJws = await rosterFor(app, target);
   const plaintext = { ext, fallback: o.fallback, ...rosterJws ? { roster: rosterJws } : {}, ...await ownBound(app, fromSession, target, userId) };
-  const d = await app.deliver(userId, o.kind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did] } : {});
+  const d = await app.deliver(userId, o.kind, target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, false) } : {});
   if (d.relays.length === 0) {
     throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
   }
@@ -14078,18 +14117,22 @@ async function onSessionEnvelope(app, env, r) {
   if (carries && from.self && bound !== void 0 && toSession !== void 0 && toSession !== PERSON_SESSION) {
     await bindSession(app, toSession, [], { constraint: bound, inbound: true });
   }
+  if (carries && from.self && bound !== void 0 && toSession === PERSON_SESSION) {
+    await app.state.update("tuiTaint", () => ({ next: { at: Date.now(), bound: bound === "private" ? "private" : "shared" }, result: void 0 }));
+  }
+  const origin = carries && from.self ? await ownOrigin(app, e) : {};
   const sess = { own: e.own, sid: e.sid, ref, rule: r.rule, ...r.viewerRule ? { viewerRule: r.viewerRule } : {} };
   const extra = { own: e.own, sid: e.sid, ...toSession ? { toSession } : {} };
   const routable = carries && toSession === void 0 && !from.self ? { routable: await routableSessions(app, e.from) } : {};
   switch (pt.kind) {
     case "msg": {
       const asks = typeof pt.rcpt === "string" && receiptsEnabled(app.env, app.home);
-      const main2 = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, ...asks ? { receipt: true } : {}, ...routable }, extra);
+      const main2 = makeEvent(env, "p2p.message", e.ts, { from, ...sess, ...origin, text: pt.text, ...asks ? { receipt: true } : {}, ...routable }, extra);
       const out = [main2];
       if (asks) await rememberAsked(app, main2.id, { id: pt.rcpt, from: e.from, did: e.fdid, ...toSession !== void 0 ? { toSession } : {} });
       if (toSession !== void 0 && sessionEnded(app, toSession)) {
         const held2 = from.self ? bound !== void 0 ? { routable: await sessionsWithin(app, bound), bound } : {} : { routable: await routableSessions(app, e.from) };
-        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, text: pt.text, unclaimedFor: toSession, ...asks ? { receipt: true } : {}, ...held2 }, {}, "unclaimed");
+        const copy = makeEvent(env, "p2p.message", e.ts, { from, ...sess, ...origin, text: pt.text, unclaimedFor: toSession, ...asks ? { receipt: true } : {}, ...held2 }, {}, "unclaimed");
         out.push(copy);
         if (asks) await rememberAsked(app, copy.id, { id: pt.rcpt, from: e.from, did: e.fdid, unclaimedFor: toSession });
       }
@@ -14136,7 +14179,7 @@ async function onSessionEnvelope(app, env, r) {
           from: { userId: from.userId, address: from.address, self: from.self },
           session: { own: e.own, sid: e.sid, ref }
         });
-        const data = { from, ...sess, ext: pt.kind, fallback, ...routable };
+        const data = { from, ...sess, ...origin, ext: pt.kind, fallback, ...routable };
         if (r2.rendered) data.rendered = r2.rendered;
         if (r2.extError) data.extError = r2.extError;
         if (r2.kept) data._kept = r2.kept;
@@ -14248,7 +14291,7 @@ async function expireSubs(app, now = Date.now()) {
   }
   await app.state.addEvents(events);
 }
-var SID_RE, MAX_TEXT_BYTES, MAX_FILES, IDLE_SUB_TTL_MS, CLI_STATUS_CAPS, MAX_STATUS_PATHS, STATUS_SOFT_MAX_BYTES, OPEN_CIRCLE_SHARED, CODE_JOIN_NO_FOLLOW, OPEN_CIRCLE_NO_FOLLOW, AGENT_STATE, isDone, STATUS_FANOUT, OFFLINE_TARGET_MS, MAX_EXT_PLAINTEXT_BYTES;
+var SID_RE, MAX_TEXT_BYTES, MAX_FILES, IDLE_SUB_TTL_MS, CLI_STATUS_CAPS, MAX_STATUS_PATHS, STATUS_SOFT_MAX_BYTES, OPEN_CIRCLE_SHARED, CODE_JOIN_NO_FOLLOW, OPEN_CIRCLE_NO_FOLLOW, AGENT_STATE, isDone, STATUS_FANOUT, OFFLINE_TARGET_MS, LOCAL_SEND_TTL_MS, LOCAL_SENDS_MAX, TUI_TAINT_MS, MAX_EXT_PLAINTEXT_BYTES;
 var init_sessions = __esm({
   "packages/p2p/src/sessions.ts"() {
     "use strict";
@@ -14287,6 +14330,9 @@ var init_sessions = __esm({
     isDone = (a) => a.state === "done" || a.state === "failed";
     STATUS_FANOUT = 8;
     OFFLINE_TARGET_MS = 24 * 3600 * 1e3;
+    LOCAL_SEND_TTL_MS = 7 * 864e5 + 6e5;
+    LOCAL_SENDS_MAX = 4096;
+    TUI_TAINT_MS = 24 * 3600 * 1e3;
     MAX_EXT_PLAINTEXT_BYTES = MAX_TEXT_BYTES;
   }
 });
@@ -24109,6 +24155,7 @@ __export(projects_exports, {
   agentEnv: () => agentEnv,
   assertMayReach: () => assertMayReach,
   assertPersonForWidening: () => assertPersonForWidening,
+  assertSpeaksFor: () => assertSpeaksFor,
   bindSession: () => bindSession,
   ceilingAudience: () => ceilingAudience,
   defaultCircleNotice: () => defaultCircleNotice,
@@ -24506,6 +24553,15 @@ async function assertPersonForWidening(app, what, confirm) {
   }
   if (!await confirm(`p2p ${what} changes who reaches you.`)) {
     throw new CliError("refused", `\`p2p ${what}\` changes who reaches you: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
+  }
+}
+async function assertSpeaksFor(app, sid) {
+  if (app.front === true) return;
+  if (agentContext(app.env)) {
+    throw new CliError("refused", `session ${sid}: inside an agent's session only its front end speaks for a session (the Claude mod, the Codex bridge), never the shell`);
+  }
+  if ((await sessionBinding(app, sid))?.registered) {
+    throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
   }
 }
 function personHere(app) {
@@ -25706,6 +25762,7 @@ var init_app = __esm({
           }
         }
         const seqs = ready.length > 0 ? await this.state.nextSeqs(session.own, session.sid, ready.length) : [];
+        if (opts.beforeSend && ready.length > 0) await opts.beforeSend(ready.map((r, i) => ({ did: r.d, seq: seqs[i] })));
         const targets = relays.map((r) => ({ relay: r, cap: caps.get(r) })).filter((t2) => t2.cap !== void 0 || kind === "contact");
         const outgoing = [];
         for (const [i, { d, kpk }] of ready.entries()) {
@@ -25832,13 +25889,28 @@ function resolveTarget(to, peers, ownSid) {
     return { kind: "peer", to: `${only.own} [${only.ref}]`, peer: only };
   if (hits.length > 1)
     return { kind: "ambiguous", candidates: hits };
+  if (parsed.label !== void 0 && parsed.ref === void 0) {
+    return { kind: "refused", code: "no-label", reason: `No session of ${inertMax(parsed.user, 80)} labelled "${inertMax(parsed.label, 40)}" is listed right now: p2p_list_peers shows the live ones.` };
+  }
   return { kind: "cli", to: parsed.ref ? `${parsed.user} [${parsed.ref}]` : parsed.user };
 }
 function eventAddress(event, peers) {
+  if (event.from.self === true) {
+    const ref = typeof event.fromRef === "string" && REF_RE.test(event.fromRef) ? event.fromRef : void 0;
+    if (ref === void 0)
+      return `${sessionAddress({ address: event.from.address })} (another of your sessions)`;
+    const known3 = peers.find((p) => p.own === event.from.userId && p.ref === ref);
+    return sessionAddress({ address: event.from.address, ref, ...known3 ? { label: known3.label } : {} });
+  }
   if (event.own !== event.from.userId)
     return sessionAddress({ address: event.from.address });
   const known2 = peers.find((p) => p.own === event.own && p.sid === event.sid);
   return sessionAddress({ address: event.from.address, ref: event.ref, ...known2 ? { label: known2.label } : {} });
+}
+function replyToOf(event) {
+  if (event.from.self === true)
+    return typeof event.fromRef === "string" && REF_RE.test(event.fromRef) ? `${event.from.userId} [${event.fromRef}]` : "";
+  return event.own === event.from.userId ? `${event.from.userId} [${event.ref}]` : event.from.userId;
 }
 var ASKING_APPROVALS = /* @__PURE__ */ new Set(["untrusted", "on-request", "on-failure"]);
 var ASKING_PERMISSION_MODES = /* @__PURE__ */ new Set(["default", "plan"]);
@@ -25896,10 +25968,11 @@ function capHeld(list) {
   const kept = [];
   for (let i = list.length - 1; i >= 0; i--) {
     const item = list[i];
-    const n = counts.get(item.from.userId) ?? 0;
+    const key = item.bucket ?? item.from.userId;
+    const n = counts.get(key) ?? 0;
     if (n >= HELD_PER_SENDER || kept.length >= HELD_TOTAL)
       continue;
-    counts.set(item.from.userId, n + 1);
+    counts.set(key, n + 1);
     kept.push(item);
   }
   return kept.reverse();
@@ -26038,6 +26111,7 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "project share",
   "project private"
 ]);
+var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
 function shellWords(segment) {
   return shellTokens(segment);
 }
@@ -26077,6 +26151,8 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
       if (MUTATING_TWO.has(two))
         return two;
     }
+    if (MUTATING_FIRST.has(plain[0] ?? ""))
+      return plain[0];
     for (const w of after2)
       if (MUTATING_ONE.has(w))
         return w;
@@ -26187,6 +26263,13 @@ function classifyMode(o) {
 function screenMessage(o) {
   if (o.refused)
     return { deliver: false, reason: "auto", why: `held: ${o.refused}` };
+  if (o.ownAgent === true) {
+    if (o.mode === "asking")
+      return { deliver: true };
+    if (o.mode === "auto")
+      return { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
+    return { deliver: false, reason: "unknown", why: "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet" };
+  }
   if (o.fromSelf || isAutoDeliver(o.autoDeliver, o.fromUserId) || o.mode === "asking")
     return { deliver: true };
   if (o.mode === "auto")
@@ -27524,7 +27607,9 @@ var BUSY_WITHOUT_HOOKS_MS = 2 * 6e4;
 var WATCH_BACKOFF_MS = [1e3, 2e3, 5e3, 1e4, 3e4];
 var WATCH_STABLE_MS = 1e4;
 var QUEUE_DEBOUNCE_MS = 500;
-var SELF_TURNS = 30;
+var SELF_TURNS = 5;
+var LOCAL_SELF_TURNS = 30;
+var OWN_TURNS_UNATTENDED = 10;
 var FINAL_STATUS_TIMEOUT_MS = 8e3;
 var realClock = {
   now: () => Date.now(),
@@ -27630,6 +27715,8 @@ var Bridge = class {
   seenEdits = /* @__PURE__ */ new Set();
   /** Turns this user's own devices started (L1: at most 5 per 10 minutes). */
   selfTurns = [];
+  /** Turns your own sessions started since the person last typed a prompt here. */
+  ownSinceTyped = 0;
   threadId;
   hooksSeen = false;
   activeAt = 0;
@@ -28200,15 +28287,15 @@ var Bridge = class {
           return;
         if (e.toSession !== void 0 && e.toSession !== this.sid)
           return;
-        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref }, this.peers);
+        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref, fromRef: e.fromRef }, this.peers);
         const item = {
           id: e.id,
           kind: "message",
           from: { userId: e.from.userId, address },
-          fromSelf: e.from.self === true,
+          ...this.ownOf(e),
           text: cleanBody(e.text).slice(0, 64e3),
           at: typeof e.at === "number" ? e.at : this.clock.now(),
-          replyTo: e.own === e.from.userId ? `${e.from.userId} [${e.ref}]` : e.from.userId,
+          replyTo: replyToOf({ from: e.from, own: e.own, ref: e.ref, fromRef: e.fromRef }),
           state: "pending"
         };
         if (this.inbox.some((one) => one.id === item.id))
@@ -28231,12 +28318,14 @@ var Bridge = class {
       case "p2p.idle": {
         if (!isSessionEvent || e.toSession !== this.sid || typeof e.reason !== "string")
           return;
-        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref }, this.peers);
+        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref, fromRef: e.fromRef }, this.peers);
         const item = {
           id: e.id,
           kind: "notice",
           from: { userId: e.from.userId, address },
-          fromSelf: e.from.self === true,
+          // An idle notice is the bridge's own line, never a sender's instruction: not held as an agent's, but it counts as an own turn.
+          ...this.ownOf(e),
+          ownAgent: false,
           text: idleNotice(address, e.reason),
           at: this.clock.now(),
           replyTo: e.from.userId,
@@ -28262,11 +28351,27 @@ var Bridge = class {
         return;
     }
   }
+  /**
+   * What an event says of an own-session origin (the CLI's local record, never the wire): `via` is
+   * "person" for the person's own terminal session, anything else (or nothing: another device, an
+   * older client) counts as an agent session's. `ownTrusted`: the person ran `p2p own-agents deliver`.
+   */
+  ownOf(e) {
+    if (e.from?.self !== true)
+      return { fromSelf: false };
+    const ref = typeof e.fromRef === "string" && /^[0-9a-f]{6}$/.test(e.fromRef) ? e.fromRef : "elsewhere";
+    return {
+      fromSelf: true,
+      ownAgent: e.via !== "person" && e.ownTrusted !== true,
+      local: this.who !== null && e.from.did === this.who.did,
+      bucket: `${e.from.userId}/${ref}`
+    };
+  }
   /** Applies the hold rule to one new item, by this session's own mode as it stands now. */
   screenNow(item) {
     if (item.state !== "pending")
       return;
-    const verdict = screenMessage({ fromSelf: item.fromSelf, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
+    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
     if (!verdict.deliver)
       this.hold(item, verdict.why, verdict.reason);
   }
@@ -28293,7 +28398,7 @@ var Bridge = class {
     }
   }
   async notice(item, what) {
-    if (item.kind !== "message" || !this.isOnline)
+    if (item.kind !== "message" || !this.isOnline || item.replyTo === "")
       return;
     await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => void 0);
   }
@@ -28329,7 +28434,7 @@ var Bridge = class {
       const isRescreen = item.state === "held" && item.holdKind === "unknown";
       if (item.state !== "pending" && !isRescreen)
         continue;
-      const verdict = screenMessage({ fromSelf: item.fromSelf, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
+      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
       if (verdict.deliver)
         ready.push(item);
       else if (verdict.reason === "unknown" && o.confirmed === false && item.state === "pending")
@@ -28342,13 +28447,20 @@ var Bridge = class {
     let out = ready;
     if (o.startsTurn) {
       const now = this.clock.now();
-      this.selfTurns = this.selfTurns.filter((at) => now - at < TURN_WINDOW_MS);
+      this.selfTurns = this.selfTurns.filter((one) => now - one.at < TURN_WINDOW_MS);
       const own = out.filter((one) => one.fromSelf && one.state !== "released");
       if (own.length > 0) {
-        if (this.selfTurns.length >= SELF_TURNS)
+        const used = (local) => this.selfTurns.filter((one) => one.local === local).length;
+        const why = this.ownSinceTyped >= OWN_TURNS_UNATTENDED ? `your own sessions already started ${OWN_TURNS_UNATTENDED} turns here since your user last typed` : own.some((one) => !one.local) && used(false) >= SELF_TURNS ? `your other devices already started ${SELF_TURNS} turns here in 10 minutes` : own.some((one) => one.local) && used(true) >= LOCAL_SELF_TURNS ? `your other sessions here already started ${LOCAL_SELF_TURNS} turns in 10 minutes` : void 0;
+        if (why !== void 0) {
+          for (const one of own)
+            this.hold(one, why, "cap");
           out = out.filter((one) => !own.includes(one));
-        else
-          this.selfTurns.push(now);
+        } else {
+          for (const local of new Set(own.map((one) => one.local === true)))
+            this.selfTurns.push({ at: now, local });
+          this.ownSinceTyped += 1;
+        }
       }
       const capped = out.filter((one) => one.state !== "released" && !one.fromSelf);
       const senders = [...new Set(capped.map((one) => one.from.userId))];
@@ -28478,6 +28590,7 @@ var Bridge = class {
       }
       case "UserPromptSubmit": {
         this.activeAt = this.clock.now();
+        this.ownSinceTyped = 0;
         this.deps.onChange?.();
         this.setStatus("busy");
         const items = this.takeDeliverable({ startsTurn: false, confirmed: false });
@@ -28653,7 +28766,7 @@ function makeTools(bridge, onMeta) {
         if (message.length > MAX_MESSAGE_CHARS)
           return text(`The message is too long (${message.length} characters; at most ${MAX_MESSAGE_CHARS}).`, true);
         let target = resolveTarget(to, bridge.peers, bridge.sid);
-        if (target.kind === "cli" || target.kind === "ambiguous") {
+        if (target.kind === "cli" || target.kind === "ambiguous" || target.kind === "refused" && target.code === "no-label") {
           await bridge.refreshPeers();
           target = resolveTarget(to, bridge.peers, bridge.sid);
         }
@@ -36901,7 +37014,8 @@ var Tui = class {
             const note2 = shared ? ` Shared session ${clean4(this.data.session)} with ${clean4(shared.address)}.` : "";
             const here = await showProject(this.app, sessionWorkdir(this.app.env)).catch(() => void 0);
             const boundary = here ? ` Project ${clean4(here.name)} here is ${here.policy}: this send was yours.` : "";
-            this.flash(`${r.queued ? `Queued for ${clean4(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean4(r.to.address)} [${r.to.ref}].`}${note2}${boundary}`);
+            const taint = await tuiTaintNote(this.app, r.to.userId).catch(() => void 0);
+            this.flash(`${r.queued ? `Queued for ${clean4(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean4(r.to.address)} [${r.to.ref}].`}${note2}${boundary}${taint ? ` Note: ${taint}.` : ""}`);
           } catch (err) {
             Object.assign(row2, { state: "failed", note: clean4(toErrorJson(err).reason) });
             throw err;
@@ -38254,8 +38368,10 @@ or, for a browser: ${r2.web}` };
     const here = person ? await ops.showProject(app, sessionWorkdir(app.env)).catch(() => void 0) : void 0;
     const boundary = here ? `
 project ${here.name} here is ${here.policy === "private" ? "private (agent sessions in it reach only your own devices)" : "shared"}; this send was yours, from your terminal` : "";
+    const taint = fromTui ? await ops.tuiTaintNote(app, r.to.userId).catch(() => void 0) : void 0;
     const from = fromTui ? `
-sent from session tui; replies show in \`p2p tui\`${boundary}` : "";
+sent from session tui; replies show in \`p2p tui\`${boundary}${taint ? `
+note: ${taint}` : ""}` : "";
     if (r.queued && r.state === "outbox") {
       return { json: r, human: `${shared}Queued for ${where}: this device can't reach a relay right now; it goes out when one is back (${until(r.expiresAt)})${tail}.${from}` };
     }
@@ -38266,9 +38382,26 @@ sent from session tui; replies show in \`p2p tui\`${boundary}` : "";
   }, { sends: true });
   program2.command("receipt <event>").description("Send a delivery receipt for a message this session has (§4.3; the front end that shows messages reports the outcome)").requiredOption("--from-session <sid>", "The session that has the message").requiredOption("--outcome <outcome>", "shown | held | declined | expired | ended").option("--json", "JSON output").action(
     run(async (app, event, o) => {
-      const r = await sendReceipt(app, { eventId: event, fromSession: checkSid(o.fromSession, "--from-session"), outcome: o.outcome });
+      const sid = checkSid(o.fromSession, "--from-session");
+      await assertSpeaksFor(app, sid);
+      const r = await sendReceipt(app, { eventId: event, fromSession: sid, outcome: o.outcome });
       return { json: r, human: r.sent ? `Receipt sent: ${r.outcome}.` : `No receipt sent (${r.reason}).` };
     })
+  );
+  program2.command("own-agents [state]").description("Whether messages from your own agent sessions skip the hold in a session that approves its own tool calls: `hold` (the default) or `deliver` (you only)").option("--json", "JSON output").action(
+    run(
+      async (app, state) => {
+        if (state !== void 0 && state !== "hold" && state !== "deliver") throw new CliError("usage", "p2p own-agents [hold|deliver]");
+        if (state === "deliver") await assertPersonForWidening(app, "own-agents deliver", app.confirmTty);
+        if (state !== void 0) await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: state === "deliver", result: void 0 }));
+        const on = ownAgentsDeliver(app.home);
+        return {
+          json: { ownAgents: on ? "deliver" : "hold" },
+          human: on ? "Messages from your own agent sessions reach a session that approves its own tool calls without the hold." : "Messages from your own agent sessions wait for Deliver in a session that approves its own tool calls (your own terminal's are delivered)."
+        };
+      },
+      { requireIdentity: false }
+    )
   );
   program2.command("receipts [state]").description("Whether this user sends delivery receipts: `on` or `off` sets it (config.json; P2P_RECEIPTS overrides)").option("--json", "JSON output").action(
     run(

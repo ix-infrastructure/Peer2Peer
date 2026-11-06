@@ -117,7 +117,7 @@ export function makeTools(bridge: Bridge, onMeta?: (meta: unknown) => void): Too
         if (message.length > MAX_MESSAGE_CHARS) return text(`The message is too long (${message.length} characters; at most ${MAX_MESSAGE_CHARS}).`, true);
         // Another session on this device is a target like any other listed one; this session itself never is.
         let target = resolveTarget(to, bridge.peers, bridge.sid);
-        if (target.kind === "cli" || target.kind === "ambiguous") {
+        if (target.kind === "cli" || target.kind === "ambiguous" || (target.kind === "refused" && target.code === "no-label")) {
           await bridge.refreshPeers();
           target = resolveTarget(to, bridge.peers, bridge.sid);
         }

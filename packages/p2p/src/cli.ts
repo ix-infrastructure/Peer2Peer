@@ -14,7 +14,7 @@ import type { Readable, Writable } from "node:stream";
 import * as codex from "@peer2peer/codex-bridge";
 import { Command, CommanderError, Option } from "commander";
 import { App, type Io } from "./app.js";
-import { readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
+import { ownAgentsDeliver, readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
 import { receiptsSetting, sendReceipt } from "./receipts.js";
 import * as trustOps from "./trust.js";
 import { CliError, toErrorJson } from "./errors.js";
@@ -1327,7 +1327,8 @@ export function buildProgram(deps: ProgramDeps): Command {
         // The person's own sends cross no project boundary, but say which one this folder has (projects.ts).
         const here = person ? await ops.showProject(app, projects.sessionWorkdir(app.env)).catch(() => undefined) : undefined;
         const boundary = here ? `\nproject ${here.name} here is ${here.policy === "private" ? "private (agent sessions in it reach only your own devices)" : "shared"}; this send was yours, from your terminal` : "";
-        const from = fromTui ? `\nsent from session tui; replies show in \`p2p tui\`${boundary}` : "";
+        const taint = fromTui ? await ops.tuiTaintNote(app, r.to.userId).catch(() => undefined) : undefined;
+        const from = fromTui ? `\nsent from session tui; replies show in \`p2p tui\`${boundary}${taint ? `\nnote: ${taint}` : ""}` : "";
         if (r.queued && r.state === "outbox") {
           return { json: r, human: `${shared}Queued for ${where}: this device can't reach a relay right now; it goes out when one is back (${until(r.expiresAt!)})${tail}.${from}` };
         }
@@ -1344,9 +1345,34 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--json", "JSON output")
     .action(
       run(async (app, event: string, o: { fromSession: string; outcome: string }) => {
-        const r = await sendReceipt(app, { eventId: event, fromSession: sessions.checkSid(o.fromSession, "--from-session"), outcome: o.outcome });
+        const sid = sessions.checkSid(o.fromSession, "--from-session");
+        // Only the session's front end (or, outside an agent, a caller for an unregistered session) reports for it.
+        await projects.assertSpeaksFor(app, sid);
+        const r = await sendReceipt(app, { eventId: event, fromSession: sid, outcome: o.outcome });
         return { json: r, human: r.sent ? `Receipt sent: ${r.outcome}.` : `No receipt sent (${r.reason}).` };
       }),
+    );
+  program
+    .command("own-agents [state]")
+    .description("Whether messages from your own agent sessions skip the hold in a session that approves its own tool calls: `hold` (the default) or `deliver` (you only)")
+    .option("--json", "JSON output")
+    .action(
+      run(
+        async (app, state: string | undefined) => {
+          if (state !== undefined && state !== "hold" && state !== "deliver") throw new CliError("usage", "p2p own-agents [hold|deliver]");
+          // Turning the hold off widens what drives a session: the person only, never an agent. Turning it back on never asks.
+          if (state === "deliver") await projects.assertPersonForWidening(app, "own-agents deliver", app.confirmTty);
+          if (state !== undefined) await updateFileConfigField(app, "ownAgentsDeliver", () => ({ next: state === "deliver", result: undefined }));
+          const on = ownAgentsDeliver(app.home);
+          return {
+            json: { ownAgents: on ? "deliver" : "hold" },
+            human: on
+              ? "Messages from your own agent sessions reach a session that approves its own tool calls without the hold."
+              : "Messages from your own agent sessions wait for Deliver in a session that approves its own tool calls (your own terminal's are delivered).",
+          };
+        },
+        { requireIdentity: false },
+      ),
     );
   program
     .command("receipts [state]")

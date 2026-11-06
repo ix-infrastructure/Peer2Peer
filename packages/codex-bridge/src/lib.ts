@@ -144,7 +144,7 @@ export function reachable(peers: readonly PeerRow[], ownSid?: string): PeerRow[]
   return peers.filter((p) => !(p.thisDevice && (ownSid === undefined || p.sid === ownSid)));
 }
 
-export type Target = { kind: "peer"; to: string; peer: PeerRow } | { kind: "cli"; to: string } | { kind: "ambiguous"; candidates: PeerRow[] } | { kind: "refused"; reason: string };
+export type Target = { kind: "peer"; to: string; peer: PeerRow } | { kind: "cli"; to: string } | { kind: "ambiguous"; candidates: PeerRow[] } | { kind: "refused"; reason: string; code?: "no-label" };
 
 /**
  * What `--to` the CLI gets for a model's `to`. Only a `p2p:` address or a
@@ -169,6 +169,11 @@ export function resolveTarget(to: string, peers: readonly PeerRow[], ownSid?: st
   const only = hits[0];
   if (hits.length === 1 && only) return { kind: "peer", to: `${only.own} [${only.ref}]`, peer: only };
   if (hits.length > 1) return { kind: "ambiguous", candidates: hits };
+  // A label alone names a listed session or nothing: never the user's bare address, which the CLI
+  // would send to another of their sessions (or, for this session's own label, another device of yours).
+  if (parsed.label !== undefined && parsed.ref === undefined) {
+    return { kind: "refused", code: "no-label", reason: `No session of ${inertMax(parsed.user, 80)} labelled "${inertMax(parsed.label, 40)}" is listed right now: p2p_list_peers shows the live ones.` };
+  }
   return { kind: "cli", to: parsed.ref ? `${parsed.user} [${parsed.ref}]` : parsed.user };
 }
 
@@ -176,10 +181,28 @@ export function resolveTarget(to: string, peers: readonly PeerRow[], ownSid?: st
  * The `from` address of a received message: the sender's own session (with
  * label and ref) when it came from one, else the user's address alone.
  */
-export function eventAddress(event: { from: { userId: string; address: string }; own: string; sid: string; ref: string }, peers: readonly PeerRow[]): string {
+export function eventAddress(event: { from: { userId: string; address: string; self?: boolean }; own: string; sid: string; ref: string; fromRef?: unknown }, peers: readonly PeerRow[]): string {
+  // One of this user's own sessions: own/sid name the session it went INTO (this one), never the sender.
+  // The sending session when the CLI knows it (this device), else no session at all.
+  if (event.from.self === true) {
+    const ref = typeof event.fromRef === "string" && REF_RE.test(event.fromRef) ? event.fromRef : undefined;
+    if (ref === undefined) return `${sessionAddress({ address: event.from.address })} (another of your sessions)`;
+    const known = peers.find((p) => p.own === event.from.userId && p.ref === ref);
+    return sessionAddress({ address: event.from.address, ref, ...(known ? { label: known.label } : {}) });
+  }
   if (event.own !== event.from.userId) return sessionAddress({ address: event.from.address });
   const known = peers.find((p) => p.own === event.own && p.sid === event.sid);
   return sessionAddress({ address: event.from.address, ref: event.ref, ...(known ? { label: known.label } : {}) });
+}
+
+/**
+ * Where a delivery notice to a received message goes: a peer's own session by its ref, else the peer;
+ * one of this user's own sessions only by the sending session's ref (this device's record), else
+ * nowhere ("": never this session's own address, never the bare address).
+ */
+export function replyToOf(event: { from: { userId: string; self?: boolean }; own: string; ref: string; fromRef?: unknown }): string {
+  if (event.from.self === true) return typeof event.fromRef === "string" && REF_RE.test(event.fromRef) ? `${event.from.userId} [${event.fromRef}]` : "";
+  return event.own === event.from.userId ? `${event.from.userId} [${event.ref}]` : event.from.userId;
 }
 
 // ── who may start work: the hold rule ───────────────────────────────────────
@@ -288,14 +311,16 @@ export const HELD_PER_SENDER = 5;
 export const HELD_TOTAL = 50;
 
 /** The held list capped per sender and in total, oldest dropped (the list is oldest first). */
-export function capHeld<T extends { from: { userId: string } }>(list: readonly T[]): T[] {
+export function capHeld<T extends { from: { userId: string }; bucket?: string }>(list: readonly T[]): T[] {
   const counts = new Map<string, number>();
   const kept: T[] = [];
   for (let i = list.length - 1; i >= 0; i--) {
     const item = list[i] as T;
-    const n = counts.get(item.from.userId) ?? 0;
+    // Your own sessions each get their own bucket (`bucket`), not one shared by all of them.
+    const key = item.bucket ?? item.from.userId;
+    const n = counts.get(key) ?? 0;
     if (n >= HELD_PER_SENDER || kept.length >= HELD_TOTAL) continue;
-    counts.set(item.from.userId, n + 1);
+    counts.set(key, n + 1);
     kept.push(item);
   }
   return kept.reverse();
@@ -491,6 +516,11 @@ const MUTATING_TWO = new Set([
   "project share",
   "project private",
 ]);
+/**
+ * Verbs refused only as the subcommand itself (common words in message text): `receipt` reports for a
+ * session (its front end's job), `own-agents` decides whether your agent sessions skip the hold (yours).
+ */
+const MUTATING_FIRST = new Set(["receipt", "own-agents"]);
 
 /** Shell words of one simple command (shellTokens: linear, quote-aware, adjacent parts joined). */
 function shellWords(segment: string): string[] {
@@ -544,6 +574,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       const two = `${plain[i]} ${plain[i + 1] ?? ""}`;
       if (MUTATING_TWO.has(two)) return two;
     }
+    if (MUTATING_FIRST.has(plain[0] ?? "")) return plain[0] as string;
     for (const w of after) if (MUTATING_ONE.has(w)) return w;
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
@@ -695,9 +726,16 @@ export type Screen = { deliver: true } | { deliver: false; reason: "auto" | "unk
  * auto-approving one holds for the person; an unknown one holds until the
  * mode is known (and then delivers only if it asks).
  */
-export function screenMessage(o: { fromSelf: boolean; fromUserId: string; mode: ModeClass; autoDeliver: AutoDeliver; refused?: string | undefined }): Screen {
+export function screenMessage(o: { fromSelf: boolean; fromUserId: string; mode: ModeClass; autoDeliver: AutoDeliver; refused?: string | undefined; ownAgent?: boolean }): Screen {
   // The bridge's settings or trusted files sit where a project could plant them: nothing goes out by itself.
   if (o.refused) return { deliver: false, reason: "auto", why: `held: ${o.refused}` };
+  // One of your own agent sessions (a peer may have told it what to send): held like a peer's where a
+  // peer's would be, so an injected instruction can't drive this session unattended. P2P_AUTO_DELIVER doesn't apply.
+  if (o.ownAgent === true) {
+    if (o.mode === "asking") return { deliver: true };
+    if (o.mode === "auto") return { deliver: false, reason: "auto", why: "an agent session of yours sent it, and this Codex session runs actions without asking you (`p2p own-agents deliver` in your own terminal skips this)" };
+    return { deliver: false, reason: "unknown", why: "an agent session of yours sent it, and this Codex session's approval mode isn't confirmed yet" };
+  }
   if (o.fromSelf || isAutoDeliver(o.autoDeliver, o.fromUserId) || o.mode === "asking") return { deliver: true };
   if (o.mode === "auto") return { deliver: false, reason: "auto", why: "this Codex session runs actions without asking you" };
   return { deliver: false, reason: "unknown", why: "this Codex session's approval mode isn't confirmed yet" };

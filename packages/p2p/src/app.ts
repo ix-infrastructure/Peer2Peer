@@ -1036,7 +1036,14 @@ export class App {
     kind: EnvelopeKindV3,
     session: { own: string; sid: string },
     plaintext: object,
-    opts: { refresh?: boolean; extraCaps?: readonly string[]; hint?: readonly string[]; onlyDevices?: readonly string[] } = {},
+    opts: {
+      refresh?: boolean;
+      extraCaps?: readonly string[];
+      hint?: readonly string[];
+      onlyDevices?: readonly string[];
+      /** Called with each copy's device and seq once they are known, before any copy goes out. */
+      beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void>;
+    } = {},
   ): Promise<Delivery> {
     const pool = this.pool ?? (await this.connect());
     const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
@@ -1065,6 +1072,7 @@ export class App {
       }
     }
     const seqs = ready.length > 0 ? await this.state.nextSeqs(session.own, session.sid, ready.length) : [];
+    if (opts.beforeSend && ready.length > 0) await opts.beforeSend(ready.map((r, i) => ({ did: r.d, seq: seqs[i] })));
     const targets = relays.map((r) => ({ relay: r, cap: caps.get(r) })).filter((t) => t.cap !== undefined || kind === "contact");
     const outgoing: { d: string; env: string }[] = [];
     for (const [i, { d, kpk }] of ready.entries()) {

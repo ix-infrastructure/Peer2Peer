@@ -54,6 +54,10 @@ describe('H1: who may start work', () => {
     expect(holdVerdict({ fromSelf: false, fromUserId: BEN_ID, mode: 'bypassPermissions', autoDeliver: none }).isHeld).toBe(true)
     expect(holdVerdict({ fromSelf: false, fromUserId: BEN_ID, mode: null, autoDeliver: none }).isHeld).toBe(true)
     expect(holdVerdict({ fromSelf: true, fromUserId: BEN_ID, mode: 'bypassPermissions', autoDeliver: none })).toEqual({ isHeld: false })
+    // One of your own agent sessions: held like a peer where a peer would be, even with yourself in P2P_AUTO_DELIVER.
+    expect(holdVerdict({ fromSelf: false, ownAgent: true, fromUserId: BEN_ID, mode: 'bypassPermissions', autoDeliver: ben }).isHeld).toBe(true)
+    expect(holdVerdict({ fromSelf: false, ownAgent: true, fromUserId: BEN_ID, mode: null, autoDeliver: none }).isHeld).toBe(true)
+    expect(holdVerdict({ fromSelf: false, ownAgent: true, fromUserId: BEN_ID, mode: 'default', autoDeliver: none })).toEqual({ isHeld: false })
     expect(holdVerdict({ fromSelf: false, fromUserId: BEN_ID, mode: 'auto', autoDeliver: ben })).toEqual({ isHeld: false })
     expect(holdVerdict({ fromSelf: false, fromUserId: ANA_ID, mode: 'auto', autoDeliver: ben }).isHeld).toBe(true)
   })
@@ -138,6 +142,9 @@ describe('L1: the held queue is bounded', () => {
     const items = Array.from({ length: 9 }, (_, i) => ({ id: `b${i}`, from: { userId: BEN_ID } }))
     expect(capHeld(items).map(one => one.id)).toEqual(['b4', 'b5', 'b6', 'b7', 'b8'])
     expect(HELD_PER_SENDER).toBe(5)
+    // Your own sessions each have their own bucket: one busy session can't push another's out.
+    const mine = [...Array.from({ length: 7 }, (_, i) => ({ id: `a${i}`, from: { userId: BEN_ID }, bucket: `${BEN_ID}/aaaaaa` })), { id: 'c0', from: { userId: BEN_ID }, bucket: `${BEN_ID}/cccccc` }]
+    expect(capHeld(mine).map(one => one.id)).toEqual(['a2', 'a3', 'a4', 'a5', 'a6', 'c0'])
     const crowd = Array.from({ length: 70 }, (_, i) => ({ id: `u${i}`, from: { userId: `p2p:${'q'.repeat(40)}${i}` } }))
     const kept = capHeld(crowd)
     expect(kept.length).toBe(HELD_TOTAL)
