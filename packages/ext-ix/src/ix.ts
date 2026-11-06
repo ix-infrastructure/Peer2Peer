@@ -21,6 +21,7 @@
 
 import { execFile } from "node:child_process";
 import { IxExtError } from "./text.js";
+import { delimiter, isAbsolute, resolve as resolvePath } from "node:path";
 import { whichAbsolute } from "./which.js";
 
 export interface IxResult {
@@ -69,10 +70,33 @@ export function isLoopbackEndpoint(url: unknown): url is string {
   return h === "localhost" || h === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
-/** The local target a library caller (or a p2p from before graph targets) gets: a loopback IX_ENDPOINT, else Ix's default. */
-export function localTarget(env: Record<string, string | undefined> = process.env): IxTarget {
-  const e = env.IX_ENDPOINT?.trim();
-  return { kind: "local", endpoint: isLoopbackEndpoint(e) ? trimSlashes(e) : DEFAULT_IX_ENDPOINT };
+/** A loopback endpoint as `origin + pathname`, trailing slashes dropped; undefined when it isn't one. */
+export function normalizeLoopbackEndpoint(url: unknown): string | undefined {
+  if (!isLoopbackEndpoint(url)) return undefined;
+  const u = new URL(url);
+  return trimSlashes(u.origin + u.pathname);
+}
+
+/** A shared graph's endpoint as `origin + pathname`: https, off this machine, no credentials, query or fragment. */
+export function normalizeSharedEndpoint(url: unknown): string | undefined {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url) || isLoopbackEndpoint(url)) return undefined;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash) return undefined;
+  return trimSlashes(u.origin + u.pathname);
+}
+
+/**
+ * The local target a library caller (or a p2p from before graph targets) gets: Ix's default
+ * backend. Never from the environment (IX_ENDPOINT is exactly what an agent or a Pro login sets):
+ * a person's other local port comes from p2p's config.json, through the host's target.
+ */
+export function localTarget(_env?: Record<string, string | undefined>): IxTarget {
+  return { kind: "local", endpoint: DEFAULT_IX_ENDPOINT };
 }
 
 /**
@@ -82,11 +106,10 @@ export function localTarget(env: Record<string, string | undefined> = process.en
  */
 export function checkedTarget(t: unknown): IxTarget {
   const x = t as Partial<{ kind: string; endpoint: unknown; circle: unknown; token: unknown; why: unknown }> | null;
-  if (x && x.kind === "local" && isLoopbackEndpoint(x.endpoint)) return { kind: "local", endpoint: trimSlashes(x.endpoint), ...(typeof x.why === "string" ? { why: x.why } : {}) };
-  const ep: string = typeof x?.endpoint === "string" ? String(x.endpoint) : "";
-  if (x && x.kind === "shared" && typeof x.circle === "string" && /^https:\/\/[^\s]+$/i.test(ep) && !isLoopbackEndpoint(ep)) {
-    return { kind: "shared", circle: x.circle, endpoint: trimSlashes(String(ep)), ...(typeof x.token === "string" && /^[\x21-\x7e]{1,4096}$/.test(x.token) ? { token: x.token } : {}) };
-  }
+  const lo = x && x.kind === "local" ? normalizeLoopbackEndpoint(x.endpoint) : undefined;
+  if (lo) return { kind: "local", endpoint: lo, ...(typeof x!.why === "string" ? { why: x!.why } : {}) };
+  const sh = x && x.kind === "shared" && typeof x.circle === "string" ? normalizeSharedEndpoint(x.endpoint) : undefined;
+  if (sh) return { kind: "shared", circle: x!.circle as string, endpoint: sh, ...(typeof x!.token === "string" && /^[\x21-\x7e]{1,4096}$/.test(x!.token) ? { token: x!.token } : {}) };
   return { kind: "local", endpoint: DEFAULT_IX_ENDPOINT };
 }
 
@@ -110,12 +133,59 @@ export const IX_ENV_ALLOW: readonly string[] = ["PATH", "PATHEXT", "HOME", "USER
 export function ixEnv(env: Record<string, string | undefined>, target: IxTarget): NodeJS.ProcessEnv {
   const allow = new Set(IX_ENV_ALLOW);
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = k.toUpperCase() === "PATH" ? absolutePath(v) : v;
   out.IX_ENDPOINT = target.endpoint;
   if (target.kind === "shared" && target.token) out.IX_PAT = target.token;
   out.IX_MAP_BACKGROUND_REFRESH = "0";
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
+}
+
+/** PATH with its relative and empty entries dropped (they mean the current directory: a repository's own `node`). */
+export function absolutePath(v: string, platform: NodeJS.Platform = process.platform): string {
+  const sep = platform === "win32" ? ";" : delimiter;
+  return v
+    .split(sep)
+    .filter((d) => {
+      const x = d.trim().replace(/^"|"$/g, "");
+      return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute(x));
+    })
+    .join(sep);
+}
+
+/** What one `ix` call is for its graph target: its argv and the folder it runs in. */
+export interface IxCall {
+  argv: readonly string[];
+  cwd: string;
+}
+
+/** Resolves the target of one call. */
+export type TargetFn = (call: IxCall) => Promise<IxTarget>;
+
+/** At most this many paths one call names for its target (p2p refuses more: local). */
+const MAX_CALL_PATHS = 32;
+
+/**
+ * The paths an `ix` call names, absolute: the folder it runs in, its positional target (a file, a
+ * `file:start-end` range, a directory or a symbol, resolved against the cwd: a symbol only names
+ * the cwd's project again), and the values of `--path` and `--root`. Every one's project is
+ * intersected into the call's graph target, so a call can't reach past a private project it names.
+ */
+export function callPaths(call: IxCall): string[] {
+  const out = [call.cwd];
+  const add = (v: string | undefined) => {
+    if (typeof v !== "string" || v === "" || v.startsWith("-")) return;
+    const p = v.replace(/:\d{1,9}(?:-\d{1,9})?$/, "");
+    out.push(isAbsolute(p) ? p : resolvePath(call.cwd, p));
+  };
+  const a = call.argv;
+  if (a[0] && !a[0].startsWith("-")) add(a[1]);
+  for (let i = 1; i < a.length; i++) {
+    const m = /^--(path|root)(?:=(.*))?$/.exec(a[i]);
+    if (!m) continue;
+    add(m[2] !== undefined ? m[2] : a[++i]);
+  }
+  return [...new Set(out)].slice(0, MAX_CALL_PATHS);
 }
 
 /**
@@ -137,37 +207,35 @@ export function refuseForTarget(argv: readonly string[], target: IxTarget): IxEx
   return new IxExtError("graph_target", `ext-ix doesn't run \`ix ${cmd.slice(0, 40)}\` against a shared graph yet`);
 }
 
-/** Wraps a runner so every call is checked against the target first (refuseForTarget). */
-export function guardRunner(inner: IxRunner, target: () => Promise<IxTarget>): IxRunner {
+/** Wraps a runner so every call is checked against its target first (refuseForTarget). `cwd`: the folder a call runs in when it names none. */
+export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<IxTarget>), cwd: string = process.cwd()): IxRunner {
   return {
     run: async (argv, o) => {
-      const refused = refuseForTarget(argv, await target());
+      const refused = refuseForTarget(argv, await (target as TargetFn)({ argv, cwd: o?.cwd ?? cwd }));
       if (refused) throw refused;
       return inner.run(argv, o);
     },
   };
 }
 
-export function ixRunner(opts: { env?: Record<string, string | undefined>; cwd?: string; target?: IxTarget | (() => Promise<IxTarget>) } = {}): IxRunner {
+export function ixRunner(opts: { env?: Record<string, string | undefined>; cwd?: string; target?: IxTarget | TargetFn } = {}): IxRunner {
   // The merged view is read for IX_BIN and PATH only; the child gets ixEnv's allowlist.
   const view = { ...process.env, ...opts.env } as Record<string, string | undefined>;
   const name = view.IX_BIN?.trim() || "ix";
   // Absolute, from PATH's absolute entries: never a program planted in the repo (cwd).
   const bin = whichAbsolute(name, view);
-  let resolved: Promise<IxTarget> | undefined;
-  const target = () =>
-    (resolved ??= (async () => {
-      const t = opts.target;
-      if (t === undefined) return localTarget(view);
-      try {
-        return checkedTarget(typeof t === "function" ? await t() : t);
-      } catch {
-        return localTarget(view);
-      }
-    })());
+  const target = async (call: IxCall): Promise<IxTarget> => {
+    const t = opts.target;
+    if (t === undefined) return localTarget();
+    try {
+      return checkedTarget(typeof t === "function" ? await t(call) : t);
+    } catch {
+      return localTarget();
+    }
+  };
   return {
     run: (argv, o = {}) =>
-      target().then(
+      target({ argv, cwd: o.cwd ?? opts.cwd ?? process.cwd() }).then(
         (t) =>
           new Promise((resolve, reject) => {
             if (!bin) return reject(new IxExtError("ix_missing", `Ix isn't installed (no \`${name}\` on PATH): https://github.com/ix-infrastructure/Ix`));

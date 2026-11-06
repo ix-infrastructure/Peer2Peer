@@ -7,7 +7,7 @@
 // env injection (NODE_OPTIONS, P2P_PERSON_TOKEN, proxies) doesn't pass; and the commands that can
 // reach Ix Pro's cloud whatever IX_ENDPOINT says (`ix note`, `ix map`) are refused for a local target.
 
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -47,11 +47,16 @@ describe("targets are checked again in ext-ix", () => {
       expect(checkedTarget(bad), JSON.stringify(bad)).toEqual({ kind: "local", endpoint: DEFAULT_IX_ENDPOINT });
     }
     expect(checkedTarget({ kind: "shared", circle: "c1", endpoint: "https://graph.example/", token: "tok" })).toEqual({ kind: "shared", circle: "c1", endpoint: "https://graph.example", token: "tok" });
+    // The default never comes from the environment, loopback or not.
     expect(localTarget({ IX_ENDPOINT: CLOUD })).toEqual({ kind: "local", endpoint: DEFAULT_IX_ENDPOINT });
-    expect(localTarget({ IX_ENDPOINT: "http://localhost:9999" })).toEqual({ kind: "local", endpoint: "http://localhost:9999" });
+    expect(localTarget({ IX_ENDPOINT: "http://localhost:9999" })).toEqual({ kind: "local", endpoint: DEFAULT_IX_ENDPOINT });
+    // Normalised to origin + path.
+    expect(checkedTarget({ kind: "local", endpoint: "HTTP://LOCALHOST:80/ix//" })).toEqual({ kind: "local", endpoint: "http://localhost/ix" });
+    expect(checkedTarget({ kind: "shared", circle: "c", endpoint: "https://Graph.Example:443/g/" })).toEqual({ kind: "shared", circle: "c", endpoint: "https://graph.example/g" });
   });
 
   it("ixEnv: an allowlist plus the pinned endpoint; a shared target's token only from the target", () => {
+    expect(ixEnv({ PATH: "/bin::./x:node_modules/.bin:/usr/bin" }, { kind: "local", endpoint: DEFAULT_IX_ENDPOINT }).PATH).toBe("/bin:/usr/bin");
     const env = ixEnv({ PATH: "/bin", HOME: "/h", ...PRO_LOGIN, IX_HOME: "/ixh", IX_TOKEN: "lt", NODE_OPTIONS: "--require /evil.js", P2P_PERSON_TOKEN: "secret", HTTPS_PROXY: "http://proxy", DYLD_INSERT_LIBRARIES: "/x" }, { kind: "local", endpoint: DEFAULT_IX_ENDPOINT });
     expect(env).toEqual({ PATH: "/bin", HOME: "/h", IX_HOME: "/ixh", IX_TOKEN: "lt", IX_ENDPOINT: DEFAULT_IX_ENDPOINT, IX_MAP_BACKGROUND_REFRESH: "0", IX_NO_UPDATE_CHECK: "1" });
     const shared = ixEnv({ PATH: "/bin", IX_PAT: "kpat_from_shell" }, { kind: "shared", circle: "c1", endpoint: "https://graph.example", token: "kpat_from_target" });
@@ -106,10 +111,32 @@ describe.skipIf(process.platform === "win32")("a real `ix` child sees only the c
   it("the session id goes to the chokepoint; an agent's env can't pick the endpoint", async () => {
     const asked: unknown[] = [];
     await runner(ctx({ IX_BIN: bin, IX_ENDPOINT: "https://attacker.example" }, async (o) => (asked.push(o), { kind: "local", endpoint: "http://127.0.0.1:8123", why: "" })), {}, "sess-9").run(["impact", "x"]);
-    expect(asked).toEqual([{ sid: "sess-9" }]);
+    expect(asked).toEqual([{ sid: "sess-9", paths: [dir, join(dir, "x")] }]);
     expect(seen().env.IX_ENDPOINT).toBe("http://127.0.0.1:8123");
-    // A library caller (the Claude mod's conflicts) with no target: local, a loopback IX_ENDPOINT honoured, a cloud one not.
-    await ixRunner({ env: { IX_BIN: bin, IX_ENDPOINT: CLOUD } }).run(["status"]);
+    // A library caller (the Claude mod's conflicts) with no target: the default local endpoint, whatever IX_ENDPOINT says.
+    for (const e of [CLOUD, "http://localhost:9999"]) {
+      await ixRunner({ env: { IX_BIN: bin, IX_ENDPOINT: e } }).run(["status"]);
+      expect(seen().env.IX_ENDPOINT).toBe(DEFAULT_IX_ENDPOINT);
+    }
+  });
+
+  it("every call's target sees the paths it names, the folder it runs in and the command's own paths", async () => {
+    const asked: { sid?: string; paths?: readonly string[] }[] = [];
+    const c = ctx({ IX_BIN: bin }, async (o) => (asked.push(o ?? {}), { kind: "local", endpoint: DEFAULT_IX_ENDPOINT, why: "" }));
+    const wt = join(dir, "wt");
+    mkdirSync(wt, { recursive: true });
+    const r = runner(c, {}, "s1", ["src/changed.ts", "/abs/other.ts"]);
+    await r.run(["around", "src/a.ts:3-9", "--format", "json"], { cwd: wt });
+    await r.run(["inventory", "--kind", "file", "--path", "/private/repo/lib", "--format", "llm"]);
+    await r.run(["status", "--format", "json", "--root=/other/root"]);
+    expect(asked[0]).toEqual({ sid: "s1", paths: [join(dir, "src/changed.ts"), "/abs/other.ts", wt, join(wt, "src/a.ts")] });
+    expect(asked[1].paths).toEqual(expect.arrayContaining([dir, "/private/repo/lib", "/abs/other.ts"]));
+    expect(asked[2].paths).toEqual(expect.arrayContaining([dir, "/other/root"]));
+    // A target that came back local for a private path refuses a cloud command there; reads still run.
+    const t = runner(ctx({ IX_BIN: bin }, async (o) => (o?.paths?.some((p) => p.startsWith("/private")) ? { kind: "local", endpoint: DEFAULT_IX_ENDPOINT, why: "private" } : { kind: "shared", circle: "c1", endpoint: "https://graph.example" })), {});
+    await t.run(["impact", "/private/x.ts", "--format", "json"]);
     expect(seen().env.IX_ENDPOINT).toBe(DEFAULT_IX_ENDPOINT);
+    await t.run(["impact", join(wt, "x.ts"), "--format", "json"], { cwd: wt });
+    expect(seen().env.IX_ENDPOINT).toBe("https://graph.example");
   });
 });

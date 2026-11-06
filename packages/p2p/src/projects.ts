@@ -807,18 +807,21 @@ export function isLoopbackEndpoint(url: unknown): url is string {
   return h === "localhost" || h === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
+/** A loopback endpoint as one canonical string: `origin + pathname`, trailing slashes dropped. Undefined when it isn't one. */
+export function normalizeLoopbackEndpoint(url: unknown): string | undefined {
+  if (!isLoopbackEndpoint(url)) return undefined;
+  const u = new URL(url.trim());
+  return trimSlashes(u.origin + u.pathname);
+}
+
 /**
- * The local Ix endpoint every `local` target names: IX_ENDPOINT when it is a loopback URL (a person
- * running their backend on another local port), else `ixEndpoint` in config.json when loopback, else
- * Ix's default. Never a non-loopback URL, wherever it was set: env injection can at most pick another
- * port on this machine.
+ * The local Ix endpoint every `local` target names: `ixEndpoint` in config.json (the person's own
+ * file) when it is a loopback URL, else Ix's default. Never from the environment (an agent or a
+ * project config can set that), and never a non-loopback URL. On a shared machine another user can
+ * listen on a loopback port first (threat model, "Graph targets").
  */
-export function localGraphEndpoint(env: Record<string, string | undefined>, file?: { ixEndpoint?: unknown }): string {
-  const e = env.IX_ENDPOINT?.trim();
-  if (isLoopbackEndpoint(e)) return trimSlashes(e);
-  const f = typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : undefined;
-  if (isLoopbackEndpoint(f)) return trimSlashes(f);
-  return DEFAULT_IX_ENDPOINT;
+export function localGraphEndpoint(_env: Record<string, string | undefined>, file?: { ixEndpoint?: unknown }): string {
+  return normalizeLoopbackEndpoint(typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : undefined) ?? DEFAULT_IX_ENDPOINT;
 }
 
 /**
@@ -856,11 +859,24 @@ export function graphTargetOf(inputs: readonly GraphShareInput[], o: { local: st
   const graphs = o.sharedGraphs ?? SHARED_GRAPHS;
   const withGraph = [...circles].filter((c) => {
     const ep = graphs.get(c);
-    return typeof ep === "string" && /^https:\/\//i.test(ep) && !isLoopbackEndpoint(ep);
+    return normalizeSharedEndpoint(ep) !== undefined;
   });
   if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
   if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
-  return { kind: "shared", circle: withGraph[0], endpoint: trimSlashes(graphs.get(withGraph[0])!) };
+  return { kind: "shared", circle: withGraph[0], endpoint: normalizeSharedEndpoint(graphs.get(withGraph[0]))! };
+}
+
+/** A shared graph's endpoint as `origin + pathname` (https, off this machine, no credentials, query or fragment), else undefined. */
+export function normalizeSharedEndpoint(url: unknown): string | undefined {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return undefined;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || isLoopbackEndpoint(url)) return undefined;
+  return trimSlashes(u.origin + u.pathname);
 }
 
 /**
@@ -869,24 +885,38 @@ export function graphTargetOf(inputs: readonly GraphShareInput[], o: { local: st
  * or both may reach. A session bound to a private project, or one whose ceiling is private for any
  * reason (an unregistered agent session, too many projects, a private session's message), is local.
  * The folders' own projects are intersected in, so a session can't name a shared sibling to widen
- * a private repository it works in. A named session that isn't bound yet is local. Read only:
- * binds nothing.
+ * a private repository it works in. The process's own cwd and every path the call names (`paths`:
+ * its targets, `--path`, `--changed`, the child's cwd) are intersected in as well. A named session
+ * that isn't bound yet is local, and a `shared` result needs a session a front end registered (its
+ * person token). Read only: binds nothing.
  */
-export async function graphTarget(app: App, o: { sid?: string; dirs?: readonly string[]; over?: boolean } = {}, sharedGraphs: ReadonlyMap<string, string> = SHARED_GRAPHS): Promise<GraphTarget> {
+export async function graphTarget(
+  app: App,
+  o: { sid?: string; dirs?: readonly string[]; paths?: readonly string[]; over?: boolean } = {},
+  sharedGraphs: ReadonlyMap<string, string> = SHARED_GRAPHS,
+): Promise<GraphTarget> {
   const lo = localGraphEndpoint(app.env, app.file);
   const local = (why: string): GraphTarget => ({ kind: "local", endpoint: lo, why });
   if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
+  // The paths a call names (its targets, --path, --changed, the child's cwd): absolute only, capped.
+  const paths = o.paths ?? [];
+  if (paths.length > MAX_GRAPH_PATHS) return local(`a call named more than ${MAX_GRAPH_PATHS} paths`);
+  if (paths.some((p) => typeof p !== "string" || !isAbsolute(p))) return local("a call named a path that isn't absolute");
   const doc = await projectsDoc(app);
   const inputs: GraphShareInput[] = [];
+  let registered = false;
   if (o.sid !== undefined && o.sid !== PERSON_SESSION) {
-    const c = await sessionCeiling(app, o.sid);
+    const b = await sessionBinding(app, o.sid);
+    registered = b?.registered === true;
+    const c = await sessionCeiling(app, o.sid, b ?? null);
     if (c.kind === "private") return local(`session ${o.sid} is private: ${c.why}`);
     // A session no front end has bound yet has no ceiling to intersect: fail closed.
     if (c.kind === "none") return local(`session ${o.sid} isn't bound to a project yet`);
     if (c.kind === "shared") inputs.push({ name: `session ${o.sid}`, share: { circles: c.circles, people: c.people } });
   }
   const seen = new Set<string>();
-  for (const d of o.dirs ?? []) {
+  // The process's real cwd always counts too: P2P_WORKDIR replaces it for display, never for the boundary.
+  for (const d of [...(o.dirs ?? []), process.cwd(), ...paths]) {
     if (typeof d !== "string" || d.trim() === "") continue;
     const r = projectOf(d);
     if (seen.has(r.id)) continue;
@@ -894,8 +924,14 @@ export async function graphTarget(app: App, o: { sid?: string; dirs?: readonly s
     if (seen.size > MAX_SESSION_PROJECTS) return local(`it works in more than ${MAX_SESSION_PROJECTS} projects`);
     inputs.push({ name: r.name, share: shareOf(doc, r.id), ...(r.repoPrivate ? { repoPrivate: true as const } : {}) });
   }
-  return graphTargetOf(inputs, { local: lo, sharedGraphs });
+  const t = graphTargetOf(inputs, { local: lo, sharedGraphs });
+  // A shared graph only for a session a front end of this user registered (its token), never a bare call.
+  if (t.kind === "shared" && !registered) return local(o.sid ? `session ${o.sid} isn't registered by a front end of yours` : "no session: only a session your front end registered may reach a shared graph");
+  return t;
 }
+
+/** At most this many paths one Ix call may name for its graph target; past it, local. */
+export const MAX_GRAPH_PATHS = 64;
 
 /** One project's graph target (`p2p project show`, `p2p doctor`). */
 export function projectGraphTarget(app: Pick<App, "env" | "file">, ref: Pick<ProjectRef, "id" | "name" | "repoPrivate">, doc: ProjectsDoc): GraphTarget {

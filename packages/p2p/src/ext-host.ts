@@ -72,7 +72,8 @@ export function extContext(app: App, ext: P2PExtension, io: Io, json: boolean, c
     cwd: extWorkdir(app.env),
     graphTarget: async (o = {}) => {
       const { dirs, over } = sessionDirs(app.env);
-      return graphTarget(app, { ...(typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}), dirs, over });
+      const paths = Array.isArray(o.paths) ? [...o.paths] : [];
+      return graphTarget(app, { ...(typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}), dirs, paths, over });
     },
     io: { err: (s) => io.err(s), ...(io.readStdin ? { readStdin: io.readStdin } : {}) },
     json,

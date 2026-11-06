@@ -12496,6 +12496,10 @@ function checkExtension(mod2, ns) {
   if (!ext || typeof ext !== "object") return { why: "exports no `extension`" };
   if (ext.api !== EXTENSION_API) return { why: `built for extension API ${String(ext.api)}, this p2p has ${EXTENSION_API}` };
   if (ext.ns !== ns) return { why: `declares namespace ${String(ext.ns)}, expected ${ns}` };
+  const need = REQUIRED_GRAPH_TARGETS[ns];
+  if (need !== void 0 && !(typeof ext.graphTargets === "number" && ext.graphTargets >= need)) {
+    return { why: `it predates graph targets (it would run Ix with your environment and config, which Ix Pro can route to the cloud): update ${extensionPackageName(ns)} (npm i -g ${extensionPackageName(ns)}@latest; the Claude Code mod ships a current copy)` };
+  }
   if (ext.receive !== void 0 && typeof ext.receive !== "function") return { why: "receive is not a function" };
   if (ext.state !== void 0) {
     if (typeof ext.state !== "object" || ext.state === null || Array.isArray(ext.state)) return { why: "state is malformed" };
@@ -12703,7 +12707,7 @@ function renderExtension(reg, input) {
   }
   return out;
 }
-var EXTENSION_API, KNOWN_EXTENSIONS, MAX_RENDERED_BYTES, MAX_KEPT_BYTES, MAX_RENDERED_STRING, ExtensionRegistry, ExtResolveError, SEEN_FILE;
+var EXTENSION_API, KNOWN_EXTENSIONS, MAX_RENDERED_BYTES, MAX_KEPT_BYTES, MAX_RENDERED_STRING, ExtensionRegistry, REQUIRED_GRAPH_TARGETS, ExtResolveError, SEEN_FILE;
 var init_extensions = __esm({
   "packages/p2p/src/extensions.ts"() {
     "use strict";
@@ -12729,6 +12733,7 @@ var init_extensions = __esm({
         return [...this.byNs.values()];
       }
     };
+    REQUIRED_GRAPH_TARGETS = { ix: 1 };
     ExtResolveError = class extends Error {
     };
     SEEN_FILE = "extension-locations.json";
@@ -19616,11 +19621,18 @@ function ixBinary(env) {
 function ixChildEnv(env, target) {
   const allow = new Set(IX_CHILD_ALLOW);
   const out = {};
-  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = k.toUpperCase() === "PATH" ? absolutePath(v) : v;
   out.IX_ENDPOINT = target.endpoint;
   out.IX_MAP_BACKGROUND_REFRESH = "0";
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
+}
+function absolutePath(v, platform = process.platform) {
+  const sep3 = platform === "win32" ? ";" : delimiter3;
+  return v.split(sep3).filter((d) => {
+    const x = d.trim().replace(/^"|"$/g, "");
+    return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute8(x));
+  }).join(sep3);
 }
 function runIx(bin, argv, o) {
   return new Promise((resolve4) => {
@@ -19645,7 +19657,7 @@ function extIxInstalled(env) {
   }
   return false;
 }
-function setupIx(app, created) {
+async function setupIx(app, created) {
   const found = ixBinary(app.env) !== void 0;
   const { enabled } = enabledNamespaces(app.env, app.file);
   if (enabled.includes("ix")) return { found, enabled: true };
@@ -19654,6 +19666,10 @@ function setupIx(app, created) {
   const chose = Array.isArray(app.file.extensions);
   if (!created || chose || envDecides(app.env) || !personHere(app)) {
     return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+  }
+  if (app.front !== true) {
+    const yes = app.confirmTty ? await app.confirmTty("Ix is installed. Turn on the Ix extension, so your sessions can share Ix context with the people you share a project with? (Ix calls stay on this machine.)").catch(() => false) : false;
+    if (!yes) return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
   }
   setExtensionEnabled(app.home, "ix", true);
   return { found, enabled: true, enabledNow: true };
@@ -19757,7 +19773,7 @@ async function setup(app, opts) {
     ...pub ?? {}
   };
   try {
-    out.ix = setupIx(app, created);
+    out.ix = await setupIx(app, created);
   } catch (e) {
     out.ix = { found: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
   }
@@ -24202,6 +24218,7 @@ __export(projects_exports, {
   GRAPH_LOCAL_ONLY: () => GRAPH_LOCAL_ONLY,
   IX_CLOUD_ENV: () => IX_CLOUD_ENV,
   IX_KEEP: () => IX_KEEP,
+  MAX_GRAPH_PATHS: () => MAX_GRAPH_PATHS,
   MAX_PROJECT_SHARES: () => MAX_PROJECT_SHARES,
   MAX_SESSION_CONSTRAINTS: () => MAX_SESSION_CONSTRAINTS,
   MAX_SESSION_DIRS: () => MAX_SESSION_DIRS,
@@ -24228,7 +24245,9 @@ __export(projects_exports, {
   listProjects: () => listProjects,
   localGraphEndpoint: () => localGraphEndpoint,
   makeProjectPrivate: () => makeProjectPrivate,
+  normalizeLoopbackEndpoint: () => normalizeLoopbackEndpoint,
   normalizeRemote: () => normalizeRemote,
+  normalizeSharedEndpoint: () => normalizeSharedEndpoint,
   personHere: () => personHere,
   personToken: () => personToken,
   personTokenFile: () => personTokenFile,
@@ -24746,12 +24765,13 @@ function isLoopbackEndpoint(url) {
   const h = u.hostname.toLowerCase();
   return h === "localhost" || h === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
-function localGraphEndpoint(env, file) {
-  const e = env.IX_ENDPOINT?.trim();
-  if (isLoopbackEndpoint(e)) return trimSlashes(e);
-  const f = typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : void 0;
-  if (isLoopbackEndpoint(f)) return trimSlashes(f);
-  return DEFAULT_IX_ENDPOINT;
+function normalizeLoopbackEndpoint(url) {
+  if (!isLoopbackEndpoint(url)) return void 0;
+  const u = new URL(url.trim());
+  return trimSlashes(u.origin + u.pathname);
+}
+function localGraphEndpoint(_env, file) {
+  return normalizeLoopbackEndpoint(typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : void 0) ?? DEFAULT_IX_ENDPOINT;
 }
 function graphTargetOf(inputs, o) {
   const local = (why) => ({ kind: "local", endpoint: o.local, why });
@@ -24767,26 +24787,43 @@ function graphTargetOf(inputs, o) {
   const graphs = o.sharedGraphs ?? SHARED_GRAPHS;
   const withGraph = [...circles].filter((c) => {
     const ep = graphs.get(c);
-    return typeof ep === "string" && /^https:\/\//i.test(ep) && !isLoopbackEndpoint(ep);
+    return normalizeSharedEndpoint(ep) !== void 0;
   });
   if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
   if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
-  return { kind: "shared", circle: withGraph[0], endpoint: trimSlashes(graphs.get(withGraph[0])) };
+  return { kind: "shared", circle: withGraph[0], endpoint: normalizeSharedEndpoint(graphs.get(withGraph[0])) };
+}
+function normalizeSharedEndpoint(url) {
+  if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return void 0;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return void 0;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || isLoopbackEndpoint(url)) return void 0;
+  return trimSlashes(u.origin + u.pathname);
 }
 async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
   const lo = localGraphEndpoint(app.env, app.file);
   const local = (why) => ({ kind: "local", endpoint: lo, why });
   if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
+  const paths = o.paths ?? [];
+  if (paths.length > MAX_GRAPH_PATHS) return local(`a call named more than ${MAX_GRAPH_PATHS} paths`);
+  if (paths.some((p) => typeof p !== "string" || !isAbsolute9(p))) return local("a call named a path that isn't absolute");
   const doc = await projectsDoc(app);
   const inputs = [];
+  let registered = false;
   if (o.sid !== void 0 && o.sid !== PERSON_SESSION) {
-    const c = await sessionCeiling(app, o.sid);
+    const b = await sessionBinding(app, o.sid);
+    registered = b?.registered === true;
+    const c = await sessionCeiling(app, o.sid, b ?? null);
     if (c.kind === "private") return local(`session ${o.sid} is private: ${c.why}`);
     if (c.kind === "none") return local(`session ${o.sid} isn't bound to a project yet`);
     if (c.kind === "shared") inputs.push({ name: `session ${o.sid}`, share: { circles: c.circles, people: c.people } });
   }
   const seen = /* @__PURE__ */ new Set();
-  for (const d of o.dirs ?? []) {
+  for (const d of [...o.dirs ?? [], process.cwd(), ...paths]) {
     if (typeof d !== "string" || d.trim() === "") continue;
     const r = projectOf(d);
     if (seen.has(r.id)) continue;
@@ -24794,7 +24831,9 @@ async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
     if (seen.size > MAX_SESSION_PROJECTS) return local(`it works in more than ${MAX_SESSION_PROJECTS} projects`);
     inputs.push({ name: r.name, share: shareOf(doc, r.id), ...r.repoPrivate ? { repoPrivate: true } : {} });
   }
-  return graphTargetOf(inputs, { local: lo, sharedGraphs });
+  const t2 = graphTargetOf(inputs, { local: lo, sharedGraphs });
+  if (t2.kind === "shared" && !registered) return local(o.sid ? `session ${o.sid} isn't registered by a front end of yours` : "no session: only a session your front end registered may reach a shared graph");
+  return t2;
 }
 function projectGraphTarget(app, ref, doc) {
   const lo = localGraphEndpoint(app.env, app.file);
@@ -24812,7 +24851,7 @@ function graphPinnedEnv(env, target, base = process.env) {
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
 }
-var PERSON_SESSION, PRIVATE_MARKER, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, sha, clean3, AGENT_ENV_VARS, TOKEN_RE, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, IX_CLOUD_ENV, IX_KEEP;
+var PERSON_SESSION, PRIVATE_MARKER, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, sha, clean3, AGENT_ENV_VARS, TOKEN_RE, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -24846,6 +24885,7 @@ var init_projects = __esm({
     GRAPH_LOCAL_ONLY = "local only";
     DEFAULT_IX_ENDPOINT = "http://localhost:8090";
     SHARED_GRAPHS = /* @__PURE__ */ new Map();
+    MAX_GRAPH_PATHS = 64;
     IX_CLOUD_ENV = ["IX_ENDPOINT", "IX_PAT", "IX_ORG", "IX_ORG_ID", "IX_PUSH_ENDPOINT", "IX_PUSH_TOKEN", "IX_OAUTH_CLIENT_SECRET", "IX_AUTO_MAP_CLOUD", "IX_AUTO_MAP", "IX_KARTR_UI_URL", "IX_VIEW_BACKEND_URL", "IX_VIEW_BACKEND_TOKEN"];
     IX_KEEP = ["IX_BIN", "IX_HOME", "IX_TOKEN"];
   }
@@ -34604,7 +34644,8 @@ function extContext(app, ext, io2, json, confirm) {
     cwd: extWorkdir(app.env),
     graphTarget: async (o = {}) => {
       const { dirs, over } = sessionDirs(app.env);
-      return graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, over });
+      const paths = Array.isArray(o.paths) ? [...o.paths] : [];
+      return graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
     },
     io: { err: (s2) => io2.err(s2), ...io2.readStdin ? { readStdin: io2.readStdin } : {} },
     json,
@@ -35106,7 +35147,7 @@ async function httpProbe(url, timeoutMs, opts = {}) {
   t2.unref?.();
   const t0 = Date.now();
   try {
-    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" } });
+    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" }, ...opts.noRedirect ? { redirect: "error" } : {} });
     const t1 = Date.now();
     const date = res.headers.get("date");
     const serverMs = date ? Date.parse(date) : NaN;
@@ -35467,7 +35508,7 @@ async function ixChecks(c, app, ms) {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
-    const h = await httpProbe(`${local}/v1/health`, ms);
+    const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== void 0 && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
     else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
     const here2 = projectOf(sessionWorkdir(app.env));

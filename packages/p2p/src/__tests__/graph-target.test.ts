@@ -80,10 +80,14 @@ describe("graphTargetOf: intersection semantics (pure)", () => {
     for (const u of [CLOUD, "http://localhost.evil.example", "http://127.0.0.1@evil.example", "http://user:pw@localhost:8090", "http://10.0.0.5:8090", "file:///etc/passwd", "http://localhost:8090/?x=1", "ws://localhost:8090"]) {
       expect(isLoopbackEndpoint(u), u).toBe(false);
     }
+    // Never from the environment (an agent or a project config sets it), loopback or not.
     expect(localGraphEndpoint({ IX_ENDPOINT: CLOUD })).toBe(DEFAULT_IX_ENDPOINT);
-    expect(localGraphEndpoint({ IX_ENDPOINT: "http://127.0.0.1:9999/" })).toBe("http://127.0.0.1:9999");
+    expect(localGraphEndpoint({ IX_ENDPOINT: "http://127.0.0.1:9999/" })).toBe(DEFAULT_IX_ENDPOINT);
+    // Only the person's config.json, loopback only, normalised to origin + path.
     expect(localGraphEndpoint({}, { ixEndpoint: "https://evil.example" })).toBe(DEFAULT_IX_ENDPOINT);
     expect(localGraphEndpoint({}, { ixEndpoint: "http://localhost:7000" })).toBe("http://localhost:7000");
+    expect(localGraphEndpoint({}, { ixEndpoint: "HTTP://LOCALHOST:7000/ix//" })).toBe("http://localhost:7000/ix");
+    expect(localGraphEndpoint({}, { ixEndpoint: "http://127.0.0.1:80/" })).toBe("http://127.0.0.1");
     expect(describeGraphTarget({ kind: "local", endpoint: DEFAULT_IX_ENDPOINT, why: "x" })).toBe(`local only (${DEFAULT_IX_ENDPOINT})`);
   });
 });
@@ -118,6 +122,8 @@ describe("graphTarget: the chokepoint, with real projects and a session", () => 
     await ann.ok(["project", "share", team, "--dir", repo.S]);
     await ann.ok(["project", "share", team, other, "--dir", repo.Q]);
     await ann.ok(["project", "share", team, "--dir", repo.C]);
+    // The test process's own cwd is always intersected too (projects.ts graphTarget): shared with the team here.
+    await ann.ok(["project", "share", team, "--dir", process.cwd()]);
     writeFileSync(join(repo.C, PRIVATE_MARKER), "");
   }, 60_000);
 
@@ -138,16 +144,25 @@ describe("graphTarget: the chokepoint, with real projects and a session", () => 
     }
   });
 
-  it("with a shared graph for the circle: a shared project reaches it, but not alongside a private one or a session bound to one", async () => {
+  it("with a shared graph for the circle: a registered session in a shared project reaches it, but not alongside a private one or a session bound to one", async () => {
     const reg = new Map([[team, GRAPH]]);
     const a = await app();
     try {
-      expect(await graphTarget(a, { dirs: [repo.S] }, reg)).toEqual({ kind: "shared", circle: team, endpoint: GRAPH });
+      // No session, or one no front end registered: never shared.
+      expect(local(await graphTarget(a, { dirs: [repo.S] }, reg)).why).toMatch(/only a session your front end registered/);
+      await bindSession(a, "g0", [repo.S]);
+      expect(await graphTarget(a, { sid: "g0", dirs: [repo.S] }, reg)).toEqual({ kind: "shared", circle: team, endpoint: GRAPH });
       // Two projects, one shared with two circles: the intersection is the team.
-      expect(await graphTarget(a, { dirs: [repo.S, repo.Q] }, reg)).toEqual({ kind: "shared", circle: team, endpoint: GRAPH });
+      expect(await graphTarget(a, { sid: "g0", dirs: [repo.S, repo.Q] }, reg)).toEqual({ kind: "shared", circle: team, endpoint: GRAPH });
       // Mixed with a private project: local, whichever order.
-      local(await graphTarget(a, { dirs: [repo.S, repo.P] }, reg));
-      local(await graphTarget(a, { dirs: [repo.P, repo.S] }, reg));
+      local(await graphTarget(a, { sid: "g0", dirs: [repo.S, repo.P] }, reg));
+      local(await graphTarget(a, { sid: "g0", dirs: [repo.P, repo.S] }, reg));
+      // A path argument in a private project (a target file, --path, --changed): local.
+      local(await graphTarget(a, { sid: "g0", dirs: [repo.S], paths: [join(repo.P, "src", "keys.ts")] }, reg));
+      expect((await graphTarget(a, { sid: "g0", dirs: [repo.S], paths: [join(repo.S, "src", "a.ts"), join(repo.Q, "lib")] }, reg)).kind).toBe("shared");
+      // A relative path, or too many: local (fail closed).
+      expect(local(await graphTarget(a, { sid: "g0", dirs: [repo.S], paths: ["src/a.ts"] }, reg)).why).toMatch(/isn't absolute/);
+      local(await graphTarget(a, { sid: "g0", dirs: [repo.S], paths: Array.from({ length: 65 }, (_, i) => join(repo.S, `f${i}`)) }, reg));
       // A session that once worked in the private project stays local, even run from the shared one.
       await bindSession(a, "g1", [repo.S, repo.P]);
       expect(local(await graphTarget(a, { sid: "g1", dirs: [repo.S] }, reg)).why).toMatch(/session g1 is private/);
@@ -158,6 +173,22 @@ describe("graphTarget: the chokepoint, with real projects and a session", () => 
       // Too many folders: local.
       local(await graphTarget(a, { sid: "g2", dirs: [repo.S], over: true }, reg));
     } finally {
+      await a.close();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("P2P_WORKDIR doesn't replace the process's real cwd: a private cwd keeps it local", async () => {
+    const reg = new Map([[team, GRAPH]]);
+    const a = await app();
+    const was = process.cwd();
+    try {
+      await bindSession(a, "g3", [repo.S]);
+      process.chdir(repo.P);
+      local(await graphTarget(a, { sid: "g3", dirs: [repo.S] }, reg));
+      process.chdir(repo.S);
+      expect((await graphTarget(a, { sid: "g3", dirs: [repo.S] }, reg)).kind).toBe("shared");
+    } finally {
+      process.chdir(was);
       await a.close();
     }
   });
@@ -234,6 +265,10 @@ describe("the env the CLI's own `ix` calls get (setup, doctor)", () => {
   });
   afterAll(() => rmSync(d, { recursive: true, force: true }));
 
+  it("PATH keeps only absolute entries (a relative or empty one means the repository's cwd)", () => {
+    expect(ixChildEnv({ PATH: ["/usr/bin", "", ".", "node_modules/.bin", "/opt/ix/bin"].join(":") }, { endpoint: DEFAULT_IX_ENDPOINT }).PATH).toBe(process.platform === "win32" ? "" : "/usr/bin:/opt/ix/bin");
+  });
+
   it("an allowlist, with the target's endpoint pinned: no IX_PAT, IX_ENDPOINT, NODE_OPTIONS or P2P_*", () => {
     const env = ixChildEnv({ PATH: "/bin", HOME: "/h", IX_ENDPOINT: CLOUD, IX_PAT: "kpat_x", IX_ORG: "o", IX_HOME: "/ix", IX_TOKEN: "local", NODE_OPTIONS: "--require /x.js", P2P_PERSON_TOKEN: "secret", HTTPS_PROXY: "http://p" }, { endpoint: DEFAULT_IX_ENDPOINT });
     expect(env).toEqual({ PATH: "/bin", HOME: "/h", IX_HOME: "/ix", IX_TOKEN: "local", IX_ENDPOINT: DEFAULT_IX_ENDPOINT, IX_MAP_BACKGROUND_REFRESH: "0", IX_NO_UPDATE_CHECK: "1" });
@@ -262,18 +297,52 @@ describe("Ix on by default (setupIx)", () => {
 
   const fakeApp = (env: Record<string, string | undefined>, file: Record<string, unknown> = {}) => ({ env, file, home: join(d, "home"), front: false }) as unknown as App;
 
-  it("no Ix: says how to get it, enables nothing", () => {
-    const r = setupIx(fakeApp({ PATH: join(d, "empty") }), true);
+  it("no Ix: says how to get it, enables nothing", async () => {
+    const r = await setupIx(fakeApp({ PATH: join(d, "empty") }), true);
     expect(r).toMatchObject({ found: false, enabled: false, hint: expect.stringMatching(/github\.com\/ix-infrastructure\/Ix/) });
   });
 
-  it.skipIf(process.platform === "win32")("Ix present but ext-ix not installed: the install hint; an agent's shell never enables it", () => {
+  it.skipIf(process.platform === "win32")("Ix present: enabled only with ext-ix installed and the person's yes (or front end); never from an agent", async () => {
     const bin = join(d, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "ix"), "#!/bin/sh\necho 0.12.1\n");
     chmodSync(join(bin, "ix"), 0o755);
-    expect(setupIx(fakeApp({ PATH: bin }), true)).toMatchObject({ found: true, enabled: false, hint: expect.stringMatching(/npm i -g @peer2peer\/ext-ix/) });
+    expect(await setupIx(fakeApp({ PATH: bin }), true)).toMatchObject({ found: true, enabled: false, hint: expect.stringMatching(/npm i -g @peer2peer\/ext-ix/) });
     // Already chosen in config.json: left alone.
-    expect(setupIx(fakeApp({ PATH: bin }, { extensions: ["ix"] }), true)).toMatchObject({ found: true, enabled: true });
+    expect(await setupIx(fakeApp({ PATH: bin }, { extensions: ["ix"] }), true)).toMatchObject({ found: true, enabled: true });
+    // ext-ix installed (P2P_EXTENSION_PATH): asks on the terminal; "no", an agent, or an existing install change nothing.
+    const extDir = join(d, "ext");
+    const pkg = join(extDir, "node_modules", "@peer2peer", "ext-ix");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@peer2peer/ext-ix", main: "index.js" }));
+    writeFileSync(join(pkg, "index.js"), "export const extension = {};\n");
+    const home = join(d, "home");
+    mkdirSync(home, { recursive: true });
+    const env = { PATH: bin, P2P_EXTENSION_PATH: extDir };
+    const asked: string[] = [];
+    const mk = (o: { yes?: boolean; front?: boolean; env?: Record<string, string> } = {}) =>
+      ({ env: { ...env, ...o.env }, file: {}, home, front: o.front === true, confirmTty: async (q: string) => (asked.push(q), o.yes === true) }) as unknown as App;
+    expect(await setupIx(mk({ yes: false }), true)).toMatchObject({ enabled: false });
+    expect(asked).toHaveLength(1);
+    expect(await setupIx(mk({ yes: true, env: { CLAUDECODE: "1" } }), true)).toMatchObject({ enabled: false });
+    expect(asked).toHaveLength(1);
+    expect(await setupIx(mk({ yes: true }), false)).toMatchObject({ enabled: false });
+    expect(await setupIx(mk({ yes: true }), true)).toMatchObject({ enabled: true, enabledNow: true });
+    expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).extensions).toEqual(["ix"]);
+    rmSync(join(home, "config.json"));
+    // The person's front end (its token: the mod's typed /peers setup) needs no terminal.
+    expect(await setupIx(mk({ front: true }), true)).toMatchObject({ enabled: true, enabledNow: true });
+  });
+});
+
+describe("an ext-ix from before graph targets isn't loaded", () => {
+  it("the ix namespace needs graphTargets >= 1; other namespaces don't", async () => {
+    const { checkExtension } = await import("../extensions.js");
+    const old = { api: 1, ns: "ix", name: "@peer2peer/ext-ix", version: "0.1.0", commands: [] };
+    expect(checkExtension({ extension: old }, "ix")).toMatchObject({ why: expect.stringMatching(/predates graph targets.*update @peer2peer\/ext-ix/) });
+    expect(checkExtension({ extension: { ...old, graphTargets: 0 } }, "ix").ext).toBeUndefined();
+    expect(checkExtension({ extension: { ...old, graphTargets: "1" } }, "ix").ext).toBeUndefined();
+    expect(checkExtension({ extension: { ...old, graphTargets: 1 } }, "ix").ext).toBeDefined();
+    expect(checkExtension({ extension: { ...old, ns: "kartr", name: "@peer2peer/ext-kartr" } }, "kartr").ext).toBeDefined();
   });
 });

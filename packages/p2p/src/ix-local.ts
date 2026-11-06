@@ -71,11 +71,23 @@ const IX_CHILD_ALLOW = ["PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "
 export function ixChildEnv(env: Record<string, string | undefined>, target: Pick<GraphTarget, "endpoint">): NodeJS.ProcessEnv {
   const allow = new Set(IX_CHILD_ALLOW);
   const out: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (typeof v === "string" && allow.has(k.toUpperCase())) out[k] = k.toUpperCase() === "PATH" ? absolutePath(v) : v;
   out.IX_ENDPOINT = target.endpoint;
   out.IX_MAP_BACKGROUND_REFRESH = "0";
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
+}
+
+/** PATH with its relative and empty entries dropped (they mean the current directory: a repository's own `node`). */
+export function absolutePath(v: string, platform: NodeJS.Platform = process.platform): string {
+  const sep = platform === "win32" ? ";" : delimiter;
+  return v
+    .split(sep)
+    .filter((d) => {
+      const x = d.trim().replace(/^"|"$/g, "");
+      return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute(x));
+    })
+    .join(sep);
 }
 
 export interface IxRun {
@@ -134,13 +146,15 @@ const INSTALL_IX = `Ix (the local code graph peers' agents point into) isn't ins
 const INSTALL_EXT = "Ix is installed, but the Ix extension isn't: `npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix` (the Claude Code mod ships it: `/peers setup` there turns it on)";
 
 /**
- * Ix on by default, for `p2p setup`. A new install (`created`) run by the person (their front end's
- * token, or a terminal outside any agent's session) gets the `ix` extension enabled when the Ix CLI
- * and ext-ix are both there. Otherwise nothing changes: an existing install is never switched
- * silently (it gets the one-time notice, ixNotice), an agent's shell never enables an extension,
- * and P2P_EXTENSIONS, when set, decides alone.
+ * Ix on by default, for `p2p setup`. A new install (`created`) gets the `ix` extension enabled when
+ * the Ix CLI and ext-ix are both there and the person agrees: their front end's token (the Claude
+ * mod's typed `/peers setup`), or, outside any agent's session (its environment or a Claude Code or
+ * Codex ancestor), their "yes" typed on the controlling terminal, as for every other person-only
+ * action (projects.ts). Otherwise nothing changes: an existing install is never switched silently
+ * (it gets the one-time notice, ixNotice), an agent never enables an extension, and
+ * P2P_EXTENSIONS, when set, decides alone.
  */
-export function setupIx(app: App, created: boolean): SetupIx {
+export async function setupIx(app: App, created: boolean): Promise<SetupIx> {
   const found = ixBinary(app.env) !== undefined;
   const { enabled } = enabledNamespaces(app.env, app.file);
   if (enabled.includes("ix")) return { found, enabled: true };
@@ -149,6 +163,10 @@ export function setupIx(app: App, created: boolean): SetupIx {
   const chose = Array.isArray(app.file.extensions);
   if (!created || chose || envDecides(app.env) || !personHere(app)) {
     return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+  }
+  if (app.front !== true) {
+    const yes = app.confirmTty ? await app.confirmTty("Ix is installed. Turn on the Ix extension, so your sessions can share Ix context with the people you share a project with? (Ix calls stay on this machine.)").catch(() => false) : false;
+    if (!yes) return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
   }
   setExtensionEnabled(app.home, "ix", true);
   return { found, enabled: true, enabledNow: true };

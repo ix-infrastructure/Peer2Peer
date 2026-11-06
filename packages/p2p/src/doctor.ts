@@ -169,13 +169,13 @@ export interface HttpProbe {
 }
 
 /** One bounded GET (the relay's document API), with its latency and the server's Date header. */
-export async function httpProbe(url: string, timeoutMs: number, opts: { maxBody?: number } = {}): Promise<HttpProbe> {
+export async function httpProbe(url: string, timeoutMs: number, opts: { maxBody?: number; noRedirect?: boolean } = {}): Promise<HttpProbe> {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   t.unref?.();
   const t0 = Date.now();
   try {
-    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" } });
+    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" }, ...(opts.noRedirect ? { redirect: "error" as const } : {}) });
     const t1 = Date.now();
     const date = res.headers.get("date");
     const serverMs = date ? Date.parse(date) : NaN;
@@ -624,7 +624,8 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
-    const h = await httpProbe(`${local}/v1/health`, ms);
+    // Never followed elsewhere: a loopback listener that redirects is not the local backend.
+    const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== undefined && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
     else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
     const here = projectOf(sessionWorkdir(app.env));

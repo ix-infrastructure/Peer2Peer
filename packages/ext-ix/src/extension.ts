@@ -24,7 +24,7 @@ import { audienceOf } from "./overlap-command.js";
 import { FOOTPRINT_KIND, FOOTPRINT_TTL, parseFootprintBody } from "./footprint.js";
 import { footprintCommands } from "./footprint-command.js";
 import { buildImpact, IMPACT_KIND, impactFallback, parseImpactBody, renderImpact } from "./impact.js";
-import { checkedTarget, guardRunner, refuseForTarget, ixAvailable, ixJson, ixRunner, localTarget, type IxRunner, type IxTarget } from "./ix.js";
+import { callPaths, checkedTarget, guardRunner, refuseForTarget, ixAvailable, ixJson, ixRunner, localTarget, type IxRunner, type IxTarget, type TargetFn } from "./ix.js";
 import { buildNote, NOTE_KIND, parseNoteBody, renderNote, type NoteBody } from "./note.js";
 import { compareRepo, localRepo, normalizeRemote, type RepoRef } from "./repo.js";
 import { buildSubgraph, describeSelector, parseSubgraphBody, renderSubgraph, resolveArgv, SUBGRAPH_KIND, type Selector } from "./subgraph.js";
@@ -131,23 +131,36 @@ export interface Deps {
  * only place an `ix` endpoint comes from. A p2p from before graph targets has none to give: local.
  * Any failure is local too.
  */
-export function targetOf(ctx: ExtContext, sid?: string): () => Promise<IxTarget> {
-  let p: Promise<IxTarget> | undefined;
-  return () =>
-    (p ??= (async () => {
-      if (!ctx.graphTarget) return localTarget(ctx.env);
-      try {
-        return checkedTarget(await ctx.graphTarget(sid ? { sid } : {}));
-      } catch {
-        return localTarget(ctx.env);
-      }
-    })());
+export function targetOf(ctx: ExtContext, sid?: string, extra: readonly string[] = []): TargetFn {
+  const memo = new Map<string, Promise<IxTarget>>();
+  const more = extra.filter((p) => typeof p === "string" && p !== "").map((p) => (isAbsolute(p) ? p : resolvePath(ctx.cwd, p)));
+  return (call) => {
+    const paths = [...new Set([...more, ...callPaths(call)])];
+    const key = JSON.stringify(paths);
+    let p = memo.get(key);
+    if (!p) {
+      p = (async () => {
+        if (!ctx.graphTarget) return localTarget();
+        try {
+          return checkedTarget(await ctx.graphTarget({ ...(sid ? { sid } : {}), paths }));
+        } catch {
+          return localTarget();
+        }
+      })();
+      memo.set(key, p);
+    }
+    return p;
+  };
 }
 
-/** The `ix` a command runs: pinned to the graph target of session `sid` (when the command has one) and its folders, and limited to the commands that target allows. */
-export function runner(ctx: ExtContext, deps: Deps, sid?: string): IxRunner {
-  const target = targetOf(ctx, sid);
-  return guardRunner(deps.ix ? deps.ix(ctx) : ixRunner({ env: ctx.env, cwd: ctx.cwd, target }), target);
+/**
+ * The `ix` a command runs: each call pinned to the graph target of session `sid` (when the command
+ * has one), its folders, the paths the call names (callPaths) and `extra` (the command's own path
+ * arguments: --changed, --file), and limited to the commands that target allows.
+ */
+export function runner(ctx: ExtContext, deps: Deps, sid?: string, extra: readonly string[] = []): IxRunner {
+  const target = targetOf(ctx, sid, extra);
+  return guardRunner(deps.ix ? deps.ix(ctx) : ixRunner({ env: ctx.env, cwd: ctx.cwd, target }), target, ctx.cwd);
 }
 
 export interface Here {
@@ -377,7 +390,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
             if (!Number.isInteger(d) || d < 1 || d > 3) throw usage("--depth must be 1, 2 or 3");
             argv.push("--depth", String(d));
           }
-          ixOut = await ixJson(runner(ctx, deps, fromSession || undefined), argv);
+          ixOut = await ixJson(runner(ctx, deps, fromSession || undefined, (opts.changed as string[] | undefined) ?? []), argv);
         }
         const repo = opts.withoutRepo ? { roots: here.roots } : here;
         const changed = (opts.changed as string[] | undefined)?.map((r) => (isAbsolute(r) ? r : resolvePath(ctx.cwd, r)));
@@ -448,7 +461,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         const e = await findEvent(ctx, String(args[0]), NOTE_KIND);
         const b = keptBody(e, parseNoteBody);
         // `ix note` writes to Ix Pro's cloud memory: refused before anything is asked when the graph is local only.
-        const refused = refuseForTarget(["note"], await targetOf(ctx)());
+        const refused = refuseForTarget(["note"], await targetOf(ctx)({ argv: ["note"], cwd: ctx.cwd }));
         if (refused) throw refused;
         const tag = (opts.tag as string | undefined) ?? b.tag;
         if (!(NOTE_TAGS as readonly string[]).includes(tag)) throw usage(`--tag must be one of ${NOTE_TAGS.join(", ")}`);
@@ -533,7 +546,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         const mine = (opts.file as string[] | undefined) ?? own?.files ?? [];
         const repo = (opts.repo as string | undefined) ?? own?.repo;
         if (mine.length === 0) return { json: { conflicts: [], errors: [], checked: 0 }, human: "No files of yours to check (give --file, or --session with a posted status)." };
-        const ix = runner(ctx, deps, typeof opts.session === "string" ? opts.session : undefined);
+        const ix = runner(ctx, deps, typeof opts.session === "string" ? opts.session : undefined, mine);
         if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
         // For a session: only sessions its status reaches (project boundaries), and this user's own.
         const reach = typeof opts.session === "string" ? await audienceOf(ctx, opts.session, (await ctx.self()).userId) : undefined;
@@ -550,6 +563,8 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
 export function createIxExtension(deps: Deps = {}): P2PExtension {
   return {
     api: 1,
+    // Every Ix call takes its endpoint from ExtContext.graphTarget (p2p refuses an ext-ix without this).
+    graphTargets: 1,
     ns: "ix",
     name: "@peer2peer/ext-ix",
     version: VERSION,

@@ -150,7 +150,7 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     ...(pub ?? {}),
   };
   try {
-    out.ix = setupIx(app, created);
+    out.ix = await setupIx(app, created);
   } catch (e) {
     // Never fails a setup: Ix is optional.
     out.ix = { found: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
