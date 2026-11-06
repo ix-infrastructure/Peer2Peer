@@ -45,6 +45,13 @@ const NOISE = /^ix: failed to load [^\n]*$/gm;
  */
 export type IxTarget = { kind: "local"; endpoint: string; why?: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
 
+/** `s` without trailing slashes (a loop, not a regex: linear on any input). */
+function trimSlashes(s: string): string {
+  let n = s.length;
+  while (n > 0 && s.charCodeAt(n - 1) === 47) n--;
+  return s.slice(0, n);
+}
+
 /** Ix's own default backend (ix-cli DEFAULT_ENDPOINT). */
 export const DEFAULT_IX_ENDPOINT = "http://localhost:8090";
 
@@ -65,7 +72,7 @@ export function isLoopbackEndpoint(url: unknown): url is string {
 /** The local target a library caller (or a p2p from before graph targets) gets: a loopback IX_ENDPOINT, else Ix's default. */
 export function localTarget(env: Record<string, string | undefined> = process.env): IxTarget {
   const e = env.IX_ENDPOINT?.trim();
-  return { kind: "local", endpoint: isLoopbackEndpoint(e) ? e.replace(/\/+$/, "") : DEFAULT_IX_ENDPOINT };
+  return { kind: "local", endpoint: isLoopbackEndpoint(e) ? trimSlashes(e) : DEFAULT_IX_ENDPOINT };
 }
 
 /**
@@ -75,10 +82,10 @@ export function localTarget(env: Record<string, string | undefined> = process.en
  */
 export function checkedTarget(t: unknown): IxTarget {
   const x = t as Partial<{ kind: string; endpoint: unknown; circle: unknown; token: unknown; why: unknown }> | null;
-  if (x && x.kind === "local" && isLoopbackEndpoint(x.endpoint)) return { kind: "local", endpoint: x.endpoint.replace(/\/+$/, ""), ...(typeof x.why === "string" ? { why: x.why } : {}) };
+  if (x && x.kind === "local" && isLoopbackEndpoint(x.endpoint)) return { kind: "local", endpoint: trimSlashes(x.endpoint), ...(typeof x.why === "string" ? { why: x.why } : {}) };
   const ep: string = typeof x?.endpoint === "string" ? String(x.endpoint) : "";
   if (x && x.kind === "shared" && typeof x.circle === "string" && /^https:\/\/[^\s]+$/i.test(ep) && !isLoopbackEndpoint(ep)) {
-    return { kind: "shared", circle: x.circle, endpoint: String(ep).replace(/\/+$/, ""), ...(typeof x.token === "string" && /^[\x21-\x7e]{1,4096}$/.test(x.token) ? { token: x.token } : {}) };
+    return { kind: "shared", circle: x.circle, endpoint: trimSlashes(String(ep)), ...(typeof x.token === "string" && /^[\x21-\x7e]{1,4096}$/.test(x.token) ? { token: x.token } : {}) };
   }
   return { kind: "local", endpoint: DEFAULT_IX_ENDPOINT };
 }

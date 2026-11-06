@@ -24729,6 +24729,11 @@ async function defaultCircleNotice(app, sid) {
   const name2 = unmapped[0][1].name;
   return `project boundaries: sessions no longer follow your default circle (${def}). Each project is private until you share it, so this session in ${name2} is seen only by your own devices. To share ${name2} with that circle, run \`p2p project share ${def}\` in it (or /peers project share in Claude Code); \`p2p project ls\` lists what you shared`;
 }
+function trimSlashes(s2) {
+  let n = s2.length;
+  while (n > 0 && s2.charCodeAt(n - 1) === 47) n--;
+  return s2.slice(0, n);
+}
 function isLoopbackEndpoint(url) {
   if (typeof url !== "string" || url.length > 512 || /[\s\0]/.test(url)) return false;
   let u;
@@ -24743,9 +24748,9 @@ function isLoopbackEndpoint(url) {
 }
 function localGraphEndpoint(env, file) {
   const e = env.IX_ENDPOINT?.trim();
-  if (isLoopbackEndpoint(e)) return e.replace(/\/+$/, "");
+  if (isLoopbackEndpoint(e)) return trimSlashes(e);
   const f = typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : void 0;
-  if (isLoopbackEndpoint(f)) return f.replace(/\/+$/, "");
+  if (isLoopbackEndpoint(f)) return trimSlashes(f);
   return DEFAULT_IX_ENDPOINT;
 }
 function graphTargetOf(inputs, o) {
@@ -24766,7 +24771,7 @@ function graphTargetOf(inputs, o) {
   });
   if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
   if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
-  return { kind: "shared", circle: withGraph[0], endpoint: graphs.get(withGraph[0]).replace(/\/+$/, "") };
+  return { kind: "shared", circle: withGraph[0], endpoint: trimSlashes(graphs.get(withGraph[0])) };
 }
 async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
   const lo = localGraphEndpoint(app.env, app.file);

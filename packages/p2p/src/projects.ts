@@ -776,6 +776,13 @@ export const PROJECT_NOTICE_PREFIX = "project boundaries:";
  */
 export type GraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string };
 
+/** `s` without trailing slashes (a loop, not a regex: linear on any input). */
+function trimSlashes(s: string): string {
+  let n = s.length;
+  while (n > 0 && s.charCodeAt(n - 1) === 47) n--;
+  return s.slice(0, n);
+}
+
 /** What `p2p doctor` and `p2p project show` print for a local target. */
 export const GRAPH_LOCAL_ONLY = "local only";
 
@@ -808,9 +815,9 @@ export function isLoopbackEndpoint(url: unknown): url is string {
  */
 export function localGraphEndpoint(env: Record<string, string | undefined>, file?: { ixEndpoint?: unknown }): string {
   const e = env.IX_ENDPOINT?.trim();
-  if (isLoopbackEndpoint(e)) return e.replace(/\/+$/, "");
+  if (isLoopbackEndpoint(e)) return trimSlashes(e);
   const f = typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : undefined;
-  if (isLoopbackEndpoint(f)) return f.replace(/\/+$/, "");
+  if (isLoopbackEndpoint(f)) return trimSlashes(f);
   return DEFAULT_IX_ENDPOINT;
 }
 
@@ -853,7 +860,7 @@ export function graphTargetOf(inputs: readonly GraphShareInput[], o: { local: st
   });
   if (withGraph.length === 0) return local("no shared graph for its circle yet: Ix stays on this machine");
   if (withGraph.length > 1) return local("it is shared with more than one circle that has a shared graph: Ix stays on this machine");
-  return { kind: "shared", circle: withGraph[0], endpoint: graphs.get(withGraph[0])!.replace(/\/+$/, "") };
+  return { kind: "shared", circle: withGraph[0], endpoint: trimSlashes(graphs.get(withGraph[0])!) };
 }
 
 /**
