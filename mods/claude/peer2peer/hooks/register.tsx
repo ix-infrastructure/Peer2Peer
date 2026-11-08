@@ -81,6 +81,7 @@ import {
   routableOf,
   toolPathsAll,
   isJobDir,
+  scratchEnv,
   sessionShowText,
   PERSON_TOKEN_SCRIPT,
   parsePeersArgs,
@@ -241,6 +242,12 @@ const freshHealth = (): Health => ({ isCliMissing: false, identity: { state: 'un
 const newSess = () => ({
   /** The engine session (`$.session.id()`) this is; undefined only on an engine that names none. */
   engineSession: undefined as string | undefined,
+  /**
+   * Where Claude Code keeps this session's own folders (lib scratchEnv), for P2P_SESSION_SCRATCH, and
+   * the engine session it was read for: a path in them binds no project of its own.
+   */
+  scratch: undefined as string | undefined,
+  scratchFor: undefined as string | undefined,
   /** The person token (`<P2P_HOME>/cli/person.key`): this mod's p2p runs pass it as P2P_PERSON_TOKEN, the model's shell never has it. */
   personToken: undefined as string | undefined,
   /** This conversation was forked (`claude --resume … --fork-session`): its folders can't be traced, so private. */
@@ -481,6 +488,9 @@ const p2pEnv = (S: Sess, $: EngineInterface, dirs: readonly string[] = []): Reco
     ...(S.sessionDir ? { P2P_WORKDIR: S.sessionDir, P2P_EXTENSION_EXCLUDE: S.sessionDir } : {}),
     ...(dirs.length ? { P2P_PROJECT_DIRS: dirs.join(sep) } : {}),
     ...(over ? { P2P_PROJECT_DIRS_OVER: why || 'front' } : {}),
+    // This session's own folders in Claude Code (its tasks' output, saved tool results, its job folder):
+    // the CLI checks them on real paths, by this session's exact id, and binds no project for a path there.
+    ...(S.scratch ? { P2P_SESSION_SCRATCH: S.scratch } : {}),
     // This mod speaks for the person (their typed /peers, this session's own status and sends): the CLI
     // registers the session and lets typed /peers commands widen sharing. The model's shell has no token.
     ...(S.personToken ? { P2P_PERSON_TOKEN: S.personToken } : {}),
@@ -753,6 +763,25 @@ const restoreDirs = async (S: Sess, $: EngineInterface, current: Run) => {
     for (const w of why.length ? why : ['front']) markOver(current, w)
   }
   if (saved.untrusted === true) current.isEnvUntrusted = true
+}
+
+/**
+ * Where Claude Code keeps this engine session's own folders (lib scratchEnv), read from its
+ * environment once per engine session id (a /clear or resume has a new one).
+ */
+const refreshScratch = async (S: Sess, $: EngineInterface) => {
+  if (S.scratchFor !== undefined && S.scratchFor === S.engineSession) return
+  const val = (p: Promise<string | undefined>) => p.then(v => (typeof v === 'string' && v !== '' ? v : undefined), () => undefined)
+  const [config, home, profile, claudeTmp, tmp, job] = await Promise.all([
+    val($.env.get('CLAUDE_CONFIG_DIR')),
+    val($.env.get('HOME')),
+    val($.env.get('USERPROFILE')),
+    val($.env.get('CLAUDE_CODE_TMPDIR')),
+    val($.env.get('TMPDIR')),
+    val($.env.get('CLAUDE_JOB_DIR')),
+  ])
+  S.scratch = scratchEnv({ sid: S.engineSession, config, home: home ?? profile, tmp: [claudeTmp, tmp, '/tmp'], job })
+  S.scratchFor = S.engineSession
 }
 
 /** Private from now on (P2P_PROJECT_DIRS_OVER), and why. */
@@ -1852,6 +1881,7 @@ const startRun = async (S: Sess, $: EngineInterface) => {
     }
   }
   S.resolvedBin = await resolveBin(S, $)
+  await refreshScratch(S, $)
 
   const cwd = await $.session.cwd()
   const isAbsoluteCwd = /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(cwd)
@@ -3110,6 +3140,7 @@ export const register: Register = on => {
       // $TMPDIR, which the sandbox changes for the commands it runs.
       const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
       const all = toolPathsAll(e, cwd, home, { vars: { CLAUDE_JOB_DIR: jobDir && isJobDir(jobDir) ? jobDir : undefined }, untrusted: S.run.isEnvUntrusted })
+      await refreshScratch(S, $)
       const named = all.paths.map(x => (files.includes(x) ? dirOf(x) : x))
       // The repository (or .p2p-private) each new path is in, by its marker: bound too, so a shared folder
       // above never covers it once its files are gone; and a program's word that names a file that exists.

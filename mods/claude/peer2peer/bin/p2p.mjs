@@ -14152,7 +14152,8 @@ async function bindFromEnv(app, sid, extra = [], o = {}) {
   const { dirs, why } = sessionDirs(app.env);
   const over = /* @__PURE__ */ new Set([...why, ...o.over ?? []]);
   if (extra.length > MAX_SESSION_DIRS) over.add("folders");
-  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...o.person ? { person: true } : {}, ...over.size > 0 ? { over: [...over] } : {} });
+  const scratch = app.front === true ? sessionScratch(app.env[SCRATCH_ENV]) : void 0;
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...o.person ? { person: true } : {}, ...over.size > 0 ? { over: [...over] } : {}, ...scratch ? { scratch } : {} });
 }
 function overOf(v) {
   const out = v === true ? ["front"] : overWhys(Array.isArray(v) ? v.flatMap((x) => String(x).split(",")) : []);
@@ -24105,6 +24106,8 @@ __export(projects_exports, {
   PERSON_SESSION: () => PERSON_SESSION,
   PRIVATE_MARKER: () => PRIVATE_MARKER,
   PROJECT_NOTICE_PREFIX: () => PROJECT_NOTICE_PREFIX,
+  SCRATCH_ENV: () => SCRATCH_ENV,
+  SCRATCH_SCAN_ENTRIES: () => SCRATCH_SCAN_ENTRIES,
   SESSION_BINDING_TTL_MS: () => SESSION_BINDING_TTL_MS,
   agentContext: () => agentContext,
   agentEnv: () => agentEnv,
@@ -24133,10 +24136,12 @@ __export(projects_exports, {
   projectView: () => projectView,
   projectsDoc: () => projectsDoc,
   pseudoPath: () => pseudoPath,
+  scratchRoot: () => scratchRoot,
   sessionBinding: () => sessionBinding,
   sessionCeiling: () => sessionCeiling,
   sessionDirs: () => sessionDirs,
   sessionProjectView: () => sessionProjectView,
+  sessionScratch: () => sessionScratch,
   sessionWorkdir: () => sessionWorkdir,
   shareHint: () => shareHint,
   shareOf: () => shareOf,
@@ -24147,7 +24152,7 @@ __export(projects_exports, {
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash7, randomBytes as randomBytes13, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync12, realpathSync as realpathSync5, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync12, readlinkSync as readlinkSync2, realpathSync as realpathSync5, statSync as statSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
 import { basename as basename5, delimiter as delimiter3, dirname as dirname6, isAbsolute as isAbsolute8, join as join18, resolve as resolve3, sep as sep3 } from "node:path";
 function sessionWorkdir(env) {
@@ -24586,6 +24591,92 @@ async function showProject(app, dir) {
   const doc = await projectsDoc(app);
   return projectView(app, projectOf(dir, doc), doc);
 }
+function ownDir(p) {
+  if (!isAbsolute8(p)) return void 0;
+  try {
+    const st = lstatSync6(p);
+    if (!st.isDirectory() || st.isSymbolicLink()) return void 0;
+    const uid = process.getuid?.();
+    if (uid !== void 0 && st.uid !== uid) return void 0;
+    return real(p);
+  } catch {
+    return void 0;
+  }
+}
+function sessionScratch(raw) {
+  if (typeof raw !== "string" || raw === "" || raw.length > 16 * 1024) return void 0;
+  let o;
+  try {
+    const j = JSON.parse(raw);
+    if (!j || typeof j !== "object" || Array.isArray(j)) return void 0;
+    o = j;
+  } catch {
+    return void 0;
+  }
+  const sid = o.sid;
+  if (typeof sid !== "string" || !SCRATCH_SID_RE.test(sid)) return void 0;
+  const path2 = (v) => typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute8(v) ? resolve3(v) : void 0;
+  const bases = /* @__PURE__ */ new Set();
+  const jobs = /* @__PURE__ */ new Set();
+  const tmpName = `claude-${process.getuid?.() ?? 0}`;
+  for (const t2 of Array.isArray(o.tmp) ? o.tmp.slice(0, 4) : []) {
+    const at = path2(t2);
+    const b = at === void 0 ? void 0 : ownDir(join18(at, tmpName));
+    if (b) bases.add(b);
+  }
+  const config = path2(o.config);
+  if (config !== void 0) {
+    const projects = ownDir(join18(config, "projects"));
+    if (projects) bases.add(projects);
+    const job = path2(o.job);
+    const jobsDir = ownDir(join18(config, "jobs"));
+    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join18(config, "jobs")) {
+      const id2 = basename5(job);
+      const r = JOB_ID_RE.test(id2) && sid.startsWith(id2) ? ownDir(job) : void 0;
+      if (r && dirname6(r) === jobsDir) jobs.add(r);
+    }
+  }
+  return bases.size + jobs.size > 0 ? { sid, bases: [...bases], jobs: [...jobs] } : void 0;
+}
+function scratchRoot(dir, s2) {
+  for (const j of s2.jobs) if (within2(dir, j)) return j;
+  for (const b of s2.bases) {
+    if (dir === b || !within2(dir, b)) continue;
+    const parts = dir.slice(b.endsWith(sep3) ? b.length : b.length + 1).split(sep3);
+    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join18(b, parts[0], parts[1]);
+  }
+  return void 0;
+}
+function scratchLinks(root) {
+  const out = [];
+  const stack = [root];
+  let seen = 0;
+  while (stack.length > 0) {
+    const d = stack.pop();
+    let ents;
+    try {
+      ents = readdirSync2(d, { withFileTypes: true });
+    } catch {
+      return void 0;
+    }
+    for (const e of ents) {
+      if (++seen > SCRATCH_SCAN_ENTRIES) return void 0;
+      const p = join18(d, e.name);
+      if (e.isSymbolicLink()) {
+        try {
+          out.push(realpathSync5(p));
+        } catch {
+          try {
+            out.push(resolve3(d, readlinkSync2(p)));
+          } catch {
+            return void 0;
+          }
+        }
+      } else if (e.isDirectory()) stack.push(p);
+    }
+  }
+  return out;
+}
 async function bindSession(app, sid, dirs, o = {}) {
   if (sid === PERSON_SESSION) {
     if (o.person) return void 0;
@@ -24593,16 +24684,40 @@ async function bindSession(app, sid, dirs, o = {}) {
   }
   const doc = dirs.length > 0 ? await projectsDoc(app) : void 0;
   const refs = /* @__PURE__ */ new Map();
-  for (const d of dirs) {
-    if (typeof d !== "string" || d.trim() === "") continue;
-    if (pseudoPath(d)) continue;
-    const r = projectOf(d, doc);
+  const add2 = (d, r) => {
     const one = refs.get(r.id) ?? { ref: r, under: /* @__PURE__ */ new Set() };
     if (r.kind === "dir") {
       const at = existingDir(d);
       if (at !== r.root && within2(at, r.root)) one.under.add(at);
     }
     refs.set(r.id, one);
+  };
+  const scans = /* @__PURE__ */ new Map();
+  const scratchOf = (d, r) => {
+    const s2 = o.scratch;
+    if (!s2 || r.kind !== "dir" || r.repoPrivate || doc?.projects[r.id] !== void 0 || namedStop(resolve3(d)) !== void 0) return void 0;
+    return scratchRoot(r.root, s2);
+  };
+  const scanned = (root) => {
+    if (!scans.has(root)) {
+      const links = scratchLinks(root);
+      scans.set(root, links);
+      for (const t2 of links ?? []) {
+        if (pseudoPath(t2)) continue;
+        const tr = projectOf(t2, doc);
+        const at = scratchOf(t2, tr);
+        if (at === void 0 || !scanned(at)) add2(t2, tr);
+      }
+    }
+    return scans.get(root) !== void 0;
+  };
+  for (const d of dirs) {
+    if (typeof d !== "string" || d.trim() === "") continue;
+    if (pseudoPath(d)) continue;
+    const r = projectOf(d, doc);
+    const root = scratchOf(d, r);
+    if (root !== void 0 && scanned(root)) continue;
+    add2(d, r);
   }
   const front = app.front === true;
   if (!o.inbound && !front && agentContext(app.env)) {
@@ -24815,7 +24930,7 @@ async function sessionCeiling(app, sid, binding) {
   const ppl = [...people2 ?? []].filter((u) => !blocks.has(u) && u !== app.userId && friends2.has(u));
   if (joined.length + ppl.length === 0) {
     const names = [...new Set(shares.map((x) => x.name))];
-    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
+    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${nameList(names)}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
   }
   return { kind: "shared", circles: joined.sort(), people: ppl.sort() };
 }
@@ -24844,8 +24959,11 @@ async function ceilingAudience(app, c) {
   for (const u of [...out]) if (blocks.has(u)) out.delete(u);
   return out;
 }
+function nameList(names) {
+  return `${names.slice(0, MESSAGE_NAMES).join(", ")}${names.length > MESSAGE_NAMES ? ` and ${names.length - MESSAGE_NAMES} more` : ""}`;
+}
 function shareHint(names) {
-  const what = names.length === 1 ? `the project ${names[0]}` : `each of ${names.join(", ")}`;
+  const what = names.length === 1 ? `the project ${names[0]}` : `each of ${nameList(names)}`;
   return `only the person can widen this, by sharing ${what} themselves: \`p2p project share <circle or friend>\` run in it (or /peers project share in Claude Code)`;
 }
 async function assertMayReach(app, sid, userId, o = {}) {
@@ -24859,7 +24977,7 @@ async function assertMayReach(app, sid, userId, o = {}) {
   const who2 = o.address ?? await app.addressOf(userId);
   const why = c.kind === "private" ? c.why : `${who2} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
   const remedy = c.kind === "private" ? privateRemedy(c.causes, c.blocking?.length ? c.blocking : names) : shareHint(names);
-  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
+  throw new CliError("not_shared", `session ${sid} works in ${nameList(names) || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
     delivered: false,
     project: { names, policy: c.kind, ...c.kind === "private" ? { causes: c.causes, ...stickyPrivate(c) ? { sticky: true } : {} } : {} }
   });
@@ -24925,7 +25043,7 @@ async function defaultCircleNotice(app, sid) {
   const name2 = unmapped[0][1].name;
   return `project boundaries: sessions no longer follow your default circle (${def}). Each project is private until you share it, so this session in ${name2} is seen only by your own devices. To share ${name2} with that circle, run \`p2p project share ${def}\` in it (or /peers project share in Claude Code); \`p2p project ls\` lists what you shared`;
 }
-var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, AGENT_ENV_VARS, TOKEN_RE, OVER_TEXT, PROJECT_NOTICE_PREFIX;
+var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -24936,7 +25054,7 @@ var init_projects = __esm({
     PRIVATE_MARKER = ".p2p-private";
     OVER_WHYS = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints"]);
     MAX_SESSION_DIRS = 512;
-    MAX_SESSION_PROJECTS = 16;
+    MAX_SESSION_PROJECTS = 64;
     SESSION_BINDING_TTL_MS = 30 * 24 * 3600 * 1e3;
     MAX_PROJECT_SHARES = 32;
     MAX_SESSION_CONSTRAINTS = 16;
@@ -24947,6 +25065,10 @@ var init_projects = __esm({
     clean3 = (s2) => sanitizePeerText(s2, 64).replace(/[^\w.@+-]/g, "").slice(0, 64);
     NESTED_SCAN_DEPTH = 4;
     NESTED_SCAN_ENTRIES = 2e3;
+    SCRATCH_ENV = "P2P_SESSION_SCRATCH";
+    SCRATCH_SCAN_ENTRIES = 4096;
+    SCRATCH_SID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
+    JOB_ID_RE = /^[A-Za-z0-9][\w.-]{7,127}$/;
     AGENT_ENV_VARS = [
       // Claude Code (code.claude.com/docs/en/env-vars): its Bash, PowerShell and Monitor tools, hooks.
       "CLAUDECODE",
@@ -24969,6 +25091,7 @@ var init_projects = __esm({
       constraints: `more than ${MAX_SESSION_CONSTRAINTS} sessions of yours sent it messages`,
       "legacy-over": "it worked in more projects or folders than Peer2Peer keeps track of, or named a path Peer2Peer couldn't resolve"
     };
+    MESSAGE_NAMES = 16;
     PROJECT_NOTICE_PREFIX = "project boundaries:";
   }
 });
