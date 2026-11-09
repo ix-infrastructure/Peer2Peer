@@ -164,7 +164,7 @@ describe("cwd = ~ in a workspace-write session: the sandbox's reach holds everyt
     const { bridge, feed, call, home } = await inHome([userHome()]);
     expect(bridge.locationRefusal()).toContain(`this session's sandbox can write ${join(home, ".codex")}`);
     await feed(message({ text: "listed sender" }));
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     expect((await call("p2p_inbox")).text).not.toMatch(/listed sender|from my laptop/);
     expect(bridge.heldList()).toHaveLength(2);
     expect(bridge.releaseReach(join(home, ".p2p"))).toMatchObject({ ok: false });
@@ -178,7 +178,7 @@ describe("cwd = ~ in a workspace-write session: the sandbox's reach holds everyt
     for (const writable of [[], [join(userHome(), ".codex", "memories")], ["/somewhere/else"]]) {
       const { bridge, feed, call } = await inHome(writable);
       expect(bridge.locationRefusal()).toBeUndefined();
-      await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+      await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
       expect((await call("p2p_inbox")).text).toContain("from my laptop");
     }
   });
@@ -282,7 +282,7 @@ describe("sandboxReach fails closed once a turn context can't be relied on", () 
   it("writable folders unknown: everything held (own devices too), releases refused", async () => {
     const { bridge, feed, call } = await bridgeWith({ mode: { approval: "on-request", sandbox: "read-only", autoReview: false }, seq: 1, writable: "unknown" });
     expect(bridge.locationRefusal()).toContain("couldn't be read");
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     expect((await call("p2p_inbox")).text).not.toContain("from my laptop");
     expect(bridge.releaseReach("/Users/ann/.p2p")).toMatchObject({ ok: false });
   });
@@ -294,7 +294,7 @@ describe("sandboxReach fails closed once a turn context can't be relied on", () 
     bridge.noteToolCall({ threadId: "thread-1", mode: { sandbox: "read-only", autoReview: false } });
     await bridge.refreshTrusted();
     expect(bridge.locationRefusal()).toContain("two rollout files claim this thread");
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     expect((await call("p2p_inbox")).text).not.toContain("from my laptop");
     world.trusted = { mode: { approval: "on-request", sandbox: "read-only", autoReview: false }, seq: 2, writable: ["/somewhere/else"] } as never;
     await bridge.refreshTrusted();
@@ -304,7 +304,7 @@ describe("sandboxReach fails closed once a turn context can't be relied on", () 
   it("before the first turn context: the static checks alone (own devices delivered)", async () => {
     const { bridge, feed, call } = await bridgeWith(null);
     expect(bridge.locationRefusal()).toBeUndefined();
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     expect((await call("p2p_inbox")).text).toContain("from my laptop");
   });
 });

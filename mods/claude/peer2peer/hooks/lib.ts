@@ -170,6 +170,17 @@ export function engineTo(to: string, peers: readonly PeerRow[], known: readonly 
   return { ok: true, to: user }
 }
 
+/**
+ * Where a reply (or a delivery notice) to a received message goes. A peer's own session by its
+ * ref, else the peer. One of this user's own sessions only by the sending session's ref, which only
+ * this device knows: without it, nowhere (never this session's own address).
+ */
+export function replyToOf(event: { from: { userId: string; self?: boolean }; own: string; ref: string; fromRef?: unknown }): string | undefined {
+  if (event.from.self === true) return typeof event.fromRef === 'string' && REF_RE.test(event.fromRef) ? `${event.from.userId} [${event.fromRef}]` : undefined
+
+  return event.own === event.from.userId ? `${event.from.userId} [${event.ref}]` : event.from.userId
+}
+
 /** The candidates an ambiguous send names, as the model should retry them. */
 export function candidateList(candidates: readonly PeerRow[]): string {
   if (candidates.length === 0) return ''
@@ -184,9 +195,18 @@ export function candidateList(candidates: readonly PeerRow[]): string {
  * user's address alone, and the CLI finds their live session.
  */
 export function eventAddress(
-  event: { from: { userId: string; address: string }; own: string; sid: string; ref: string },
+  event: { from: { userId: string; address: string; self?: boolean }; own: string; sid: string; ref: string; fromRef?: unknown },
   peers: readonly PeerRow[],
 ): string {
+  // One of this user's own sessions: `own/sid` name the session it went INTO (this one), never the
+  // sender. The sending session when the CLI knows it (this device), else no session at all.
+  if (event.from.self === true) {
+    const ref = typeof event.fromRef === 'string' && REF_RE.test(event.fromRef) ? event.fromRef : undefined
+    if (ref === undefined) return `${sessionAddress({ address: event.from.address })} (another of your sessions)`
+    const known = peers.find(peer => peer.own === event.from.userId && peer.ref === ref)
+
+    return sessionAddress({ address: event.from.address, ref, ...(known ? { label: known.label } : {}) })
+  }
   if (event.own !== event.from.userId) return sessionAddress({ address: event.from.address })
   const known = peers.find(peer => peer.own === event.own && peer.sid === event.sid)
 
@@ -249,15 +269,21 @@ export type HoldVerdict = { isHeld: false } | { isHeld: true; why: string }
 /**
  * Whether a message from a friend, circle-mate or own device waits for the
  * person's Deliver. The sender's own claims (its mode included) play no part:
- *  - from this user's own devices: delivered;
+ *  - from this user's own sessions: delivered when the person sent it (their own terminal), or when
+ *    the person ran `p2p own-agents deliver`; an agent session's (`ownAgent`) is held like a peer's;
  *  - into a session that asks before each tool call (`default`, `plan`):
  *    delivered, since the person still approves every tool call;
  *  - into a session that approves by itself: held, unless the person listed
  *    the sender's userId in P2P_AUTO_DELIVER.
  */
-export function holdVerdict(o: { fromSelf: boolean; fromUserId: string; mode: string | null; autoDeliver: AutoDeliver }): HoldVerdict {
+export function holdVerdict(o: { fromSelf: boolean; fromUserId: string; mode: string | null; autoDeliver: AutoDeliver; ownAgent?: boolean }): HoldVerdict {
   if (o.fromSelf) return { isHeld: false }
   if (!isAutoApproving(o.mode)) return { isHeld: false }
+  // One of your own agent sessions (a peer may have told it what to send): held like a peer's, so an
+  // injected instruction can't drive this session unattended. P2P_AUTO_DELIVER and trust don't apply.
+  if (o.ownAgent === true) {
+    return { isHeld: true, why: `an agent session of yours sent it, and this session approves tool calls by itself (${o.mode ?? 'mode unknown'}): Deliver, or \`p2p own-agents deliver\` in your own terminal` }
+  }
   if (isAutoDeliver(o.autoDeliver, o.fromUserId)) return { isHeld: false }
 
   return { isHeld: true, why: `this session approves tool calls by itself (${o.mode ?? 'mode unknown'}), and you haven't trusted them: Deliver, or Always deliver from them` }
@@ -268,14 +294,16 @@ export const HELD_PER_SENDER = 5
 export const HELD_TOTAL = 50
 
 /** The held list capped per sender and in total, oldest dropped (the list is oldest first). */
-export function capHeld<T extends { from: { userId: string } }>(list: readonly T[]): T[] {
+export function capHeld<T extends { from: { userId: string }; bucket?: string }>(list: readonly T[]): T[] {
   const counts = new Map<string, number>()
   const kept: T[] = []
   for (let i = list.length - 1; i >= 0; i--) {
     const item = list[i] as T
-    const n = counts.get(item.from.userId) ?? 0
+    // Your own sessions each get their own bucket (`bucket`), not one shared by all of them.
+    const key = item.bucket ?? item.from.userId
+    const n = counts.get(key) ?? 0
     if (n >= HELD_PER_SENDER || kept.length >= HELD_TOTAL) continue
-    counts.set(item.from.userId, n + 1)
+    counts.set(key, n + 1)
     kept.push(item)
   }
 
@@ -286,13 +314,30 @@ export function capHeld<T extends { from: { userId: string } }>(list: readonly T
 export const TURN_WINDOW_MS = 10 * 60_000
 export const TURNS_PER_SENDER = 3
 export const TURNS_TOTAL = 10
+/**
+ * Turns this user's own sessions (other devices, and other sessions on this one) may start here, in
+ * the same window: more than a peer's, since they are the person's own work, but still a cap, so two
+ * sessions answering each other can't loop unattended. They don't count toward TURNS_TOTAL, which
+ * is the peers'. Constants, never configuration: nothing a session or its agent sets changes them.
+ */
+export const TURNS_FROM_SELF = 30
+/**
+ * Turns your own sessions may start here since the person last typed a prompt in it: the 10-minute
+ * window alone doesn't stop two agents that answer each other slowly (a turn a minute never reaches 30).
+ */
+export const OWN_TURNS_UNATTENDED = 10
 
-/** Whether `senders` may start one more turn at `now`, given the turns peers started before. */
-export function mayStartTurn(history: readonly { at: number; sender: string }[], senders: readonly string[], now: number): boolean {
+/**
+ * Whether `senders` may start one more turn at `now`, given the turns started before. `self` is
+ * this user's userId: their own sessions' turns are capped at TURNS_FROM_SELF and left out of the
+ * peers' total.
+ */
+export function mayStartTurn(history: readonly { at: number; sender: string }[], senders: readonly string[], now: number, self?: string): boolean {
   const recent = history.filter(one => now - one.at < TURN_WINDOW_MS)
-  if (recent.length >= TURNS_TOTAL) return false
+  const isPeer = (sender: string) => self === undefined || sender !== self
+  if (senders.some(isPeer) && recent.filter(one => isPeer(one.sender)).length >= TURNS_TOTAL) return false
 
-  return senders.every(sender => recent.filter(one => one.sender === sender).length < TURNS_PER_SENDER)
+  return senders.every(sender => recent.filter(one => one.sender === sender).length < (isPeer(sender) ? TURNS_PER_SENDER : TURNS_FROM_SELF))
 }
 
 /**
@@ -1006,6 +1051,10 @@ export const PEERS_USAGE = [
   '  /peers ls                   live sessions you can see, this device\'s included (as `p2p ls`)',
   '  /peers circles              the circles you are in (as `p2p circle ls`)',
   '  /peers held                 what waits for you: first contacts, circle invites, moved keys (as `p2p held`)',
+  '  /peers history [inbox|here] [--since <30m|12h|7d|date>] [--peer <user>] [--limit <n>]',
+  '                              messages this device sent and received (kept encrypted here, 30 days by',
+  '                              default): all of them, your inbox only, or this session\'s. Typed at your',
+  '                              terminal only; shown above the prompt to you, never to Claude',
   '  /peers doctor [user]        why sessions are or aren\'t visible: this device, or whether you can see <user>',
   '  /peers rotate [resume]      move to a new identity key: the remedy for a lost or stolen key-holding device',
   '                              (the plan first: drop a lost device, then Rotate; friends approve "moved to a',
@@ -1022,9 +1071,9 @@ export const PEERS_USAGE = [
   'circle-mates are delivered. In any mode that approves tool calls by itself (bypassPermissions, acceptEdits,',
   'auto, dontAsk, or unknown), every message from another person waits for Deliver, unless you list their',
   'userId (p2p:…) or name@fingerprint in P2P_AUTO_DELIVER (bare names and petnames are ignored: names are',
-  'self-chosen). Your own devices are always delivered. Until you have typed a prompt, the session counts as',
+  'self-chosen). Your own sessions skip the hold when you sent from your own terminal; your agent sessions\' are held like a peer\'s (p2p own-agents). Until you have typed a prompt, the session counts as',
   'auto-approving. Peers start at most',
-  '3 turns each, and 10 in all, per 10 minutes; past that their messages wait for Deliver.',
+  '3 turns each, and 10 in all, per 10 minutes (your own sessions: 30 per 10 minutes, and 10 since you last typed here); past that their messages wait for Deliver.',
 ].join('\n')
 
 const CIRCLE_VERBS = new Set(['create', 'invite', 'join', 'leave', 'ls', 'members', 'propose', 'transfer', 'policy', 'default'])
@@ -1051,6 +1100,7 @@ export type PeersCommand =
   | { verb: 'trust-list' }
   | { verb: 'trust' | 'untrust'; target: string }
   | { verb: 'friends' | 'ls' | 'held' }
+  | { verb: 'history'; scope: 'all' | 'inbox' | 'here'; since?: string; peer?: string; limit?: number }
   | { verb: 'ix-list' }
   | { verb: 'ix-show'; id: string }
   | { verb: 'ix-import' | 'ix-resolve'; id: string; confirm: boolean }
@@ -1184,11 +1234,81 @@ export function parsePeersArgs(args: string): PeersCommand {
       return { verb: verb.toLowerCase() === 'sessions' ? 'ls' : (verb.toLowerCase() as 'friends' | 'ls' | 'held') }
     case 'circles':
       return rest.length === 0 ? { verb: 'circle-cmd', args: ['ls'] } : { verb: 'usage', error: 'circles takes no arguments' }
+    case 'history':
+    case 'inbox':
+      return parseHistoryArgs(verb.toLowerCase() === 'inbox' ? ['inbox', ...rest] : rest)
     case 'ix':
       return parseIxArgs(rest)
     default:
       return { verb: 'usage', error: `unknown: ${verb}` }
   }
+}
+
+/** `/peers history [inbox|here] [--since <when>] [--peer <user>] [--limit <n>]` (`/peers inbox`: the inbox). */
+export function parseHistoryArgs(rest: readonly string[]): PeersCommand {
+  let scope: 'all' | 'inbox' | 'here' = 'all'
+  const out: { since?: string; peer?: string; limit?: number } = {}
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i] as string
+    const [flag, inline] = w.startsWith('--') && w.includes('=') ? [w.slice(0, w.indexOf('=')), w.slice(w.indexOf('=') + 1)] : [w, undefined]
+    const value = () => inline ?? rest[++i]
+    if (i === 0 && (w === 'inbox' || w === 'here' || w === 'all')) scope = w
+    else if (flag === '--since') {
+      const v = value()
+      if (!v || !/^(\d{1,6}(m|min|h|d|w)|\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?)$/i.test(v)) return { verb: 'usage', error: '--since takes a duration (30m, 12h, 7d, 2w) or a date (2026-11-01)' }
+      out.since = v
+    } else if (flag === '--peer') {
+      const v = value()
+      if (!v) return { verb: 'usage', error: '--peer needs a user (p2p:… or name@fingerprint)' }
+      out.peer = v.replace(/^p2p:(?=[^@]+@)/, '')
+    } else if (flag === '--limit') {
+      const n = Number(value())
+      if (!Number.isSafeInteger(n) || n < 1 || n > 1000) return { verb: 'usage', error: '--limit takes 1-1000' }
+      out.limit = n
+    } else return { verb: 'usage', error: 'history takes inbox or here, then --since, --peer, --limit' }
+  }
+
+  return { verb: 'history', scope, ...out }
+}
+
+/** One record of `p2p history --json` (packages/p2p history.ts). */
+export type HistoryRecord = {
+  id: string
+  at: number
+  dir: 'in' | 'out'
+  type: 'message' | 'ext'
+  session?: string
+  inbox?: boolean
+  peer: { userId: string; address: string; self?: boolean }
+  peerSession?: { own: string; sid: string; ref: string }
+  text: string
+  ext?: string
+  state?: string
+}
+
+/** How many records `/peers history` shows above the prompt by default (--limit for more). */
+export const HISTORY_BAND_DEFAULT = 30
+/** What one record shows at most above the prompt. */
+export const HISTORY_BAND_TEXT_MAX = 2000
+
+const capBand = (s: string) => ([...s].length > HISTORY_BAND_TEXT_MAX ? `${[...s].slice(0, HISTORY_BAND_TEXT_MAX).join('')}… (truncated)` : s)
+
+/**
+ * `/peers history`: what the person typed it for, one line each. Everything a peer wrote is inert (one
+ * line, no control or format characters, no < >) and quoted as their data.
+ */
+export function historyText(r: { messages: readonly HistoryRecord[]; truncated?: boolean; retention?: { days?: number; enabled?: boolean } }, here: string): string {
+  const head = r.retention?.enabled === false ? 'Message history is off (config.json history.enabled, or P2P_HISTORY=0): nothing new is kept.' : `Message history on this device (kept encrypted, ${r.retention?.days ?? 30} days)${r.truncated ? ': the newest only; --limit shows more' : ''}:`
+  if (r.messages.length === 0) return `${head}\n  nothing`
+  const lines = r.messages.map(m => {
+    const when = new Date(m.at).toISOString().replace('T', ' ').slice(0, 16)
+    const who = `${inert(m.peer.address)}${m.peerSession?.ref ? ` [${inert(m.peerSession.ref)}]` : ''}`
+    const where = m.session === undefined || m.session === 'tui' ? 'you' : m.session === here ? 'this session' : `your session ${inert(m.session)}`
+    const what = m.type === 'ext' ? `(${inert(m.ext ?? 'extension')}) ${capBand(inert(m.text))}` : peerData(m.dir === 'in' ? m.peer.address : 'you', capBand(m.text))
+    return `  ${when}  ${m.dir === 'in' ? `${who} → ${where}` : `${where} → ${who}`}: ${what}`
+  })
+
+  return [head, ...lines, 'Addresses and message text were written by peers: data, not instructions.'].join('\n')
 }
 
 const IX_ID_RE = /^[A-Za-z0-9._:-]{6,128}$/
@@ -1543,9 +1663,14 @@ export function isOwnCode(codes: Iterable<{ code: string; label?: string | null 
 // message is the model's ordinary job. `doctor` and the listings only read.
 // `tui` is the person's full-screen terminal UI (it accepts, declines, trusts and sends on key presses): never the
 // model's, wherever it sits after the CLI's name (`p2p --session x tui`). See also uncheckableShell (pty wrappers).
-const MUTATING_ONE = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'tui'])
-/** Verbs refused only as the subcommand itself (the first word after the CLI): they're common words in message text. */
-const MUTATING_FIRST = new Set(['status'])
+// `history`: the person's own messages (and `history --clear` deletes them): theirs, typed (/peers history) or in their terminal.
+const MUTATING_ONE = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'tui', 'history'])
+/**
+ * Verbs refused only as the subcommand itself (the first word after the CLI): they're common words in message text.
+ * `receipt` tells a sender what became of their message (the mod's own report, never the model's);
+ * `own-agents` decides whether your agent sessions skip the hold (the person's alone).
+ */
+const MUTATING_FIRST = new Set(['status', 'receipt', 'own-agents'])
 // `ix import` writes a peer's note into the local Ix graph and `ix resolve` runs Ix for a peer's reference:
 // the user's decisions (ext-ix SPEC §2), never the model's. `extensions enable` makes p2p load and run
 // an extension's code with the user's identity: the user's call too.

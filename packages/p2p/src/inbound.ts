@@ -16,6 +16,7 @@ import { decodeEnvelopeV3, jwsHash, P2PError, sanitizePeerText, verifyIncomingV3
 import type { App } from "./app.js";
 import { answerDeferredWants, onCircleEnvelope } from "./circle-ops.js";
 import { onSessionEnvelope } from "./sessions.js";
+import { recordEvents } from "./history.js";
 import { onReceipt } from "./receipts.js";
 import { onUnknownKind } from "./unknown-kinds.js";
 import { onContact, onUnfriendKind } from "./social.js";
@@ -186,7 +187,9 @@ async function processClaimed(app: App, env: string, relay: string, token: strin
       await r.releaseReplay?.({ uncount: true }).catch(() => undefined);
       return "keep";
     }
-    await app.state.addEvents(events);
+    const added = await app.state.addEvents(events);
+    // Message history (history.ts): the messages just logged, once each (a redelivery adds none).
+    await recordEvents(app, added);
   } catch (e) {
     const what = `applying ${sanitizePeerText(r.envelope.kind, 40)} from ${r.envelope.from} failed: ${sanitizePeerText((e as Error).message, 300)}`;
     if (!(e instanceof P2PError) && isTransient(e)) {

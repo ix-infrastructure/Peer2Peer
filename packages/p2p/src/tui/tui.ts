@@ -24,7 +24,8 @@ import type { App } from "../app.js";
 import { approveJoinRequest, circleMembers, joinFromHeld, listCircles } from "../circle-ops.js";
 import { doctor } from "../doctor.js";
 import { CliError, toErrorJson } from "../errors.js";
-import { listPeers, sendSharing } from "../sessions.js";
+import { listPeers, sendSharing, tuiTaintNote } from "../sessions.js";
+import { isPersonRecord, readHistory, type HistoryRec } from "../history.js";
 import { sessionWorkdir, showProject } from "../projects.js";
 import { accept, dropHeld, friends, getHeld, listHeld } from "../social.js";
 import { trustAdd } from "../trust.js";
@@ -241,6 +242,7 @@ export class Tui {
       ...(typeof e.sid === "string" ? { sid: e.sid } : {}),
       ...(typeof e.ref === "string" ? { ref: e.ref } : {}),
       text: clean(e.text),
+      inbox: forUs,
       ...(!forUs && typeof e.toSession === "string" ? { note: `for your session ${clean(e.toSession)}` } : {}),
     };
   }
@@ -320,7 +322,11 @@ export class Tui {
     this.draw();
   }
 
-  /** Received messages from the event log, and sent ones: this run's, receipts asked for, the outbox. */
+  /**
+   * Received messages from the event log, and sent ones: this run's, receipts asked for, the outbox;
+   * then the message history (history.ts) for what is older or was sent elsewhere. The TUI runs
+   * only on the person's own terminal (command.ts tuiRefusal), so it reads the person's view.
+   */
   async loadMessages(): Promise<void> {
     const app = this.app;
     const cutoff = this.now() - 7 * 86_400_000;
@@ -340,10 +346,24 @@ export class Tui {
     }
     for (const [id, w] of Object.entries(receipts)) {
       if (w.at < cutoff || out.some((m) => m.receiptId === id)) continue;
-      out.push({ id: `r:${id}`, dir: "out", at: w.at, who: await app.addressOf(w.to), userId: w.to, own: w.own, ref: w.ref, text: `(sent from session ${w.fromSession}; text not kept)`, state: "sent", receiptId: id, outcomes: w.outcomes.map((x) => x.outcome) });
+      out.push({ id: `r:${id}`, dir: "out", at: w.at, who: await app.addressOf(w.to), userId: w.to, own: w.own, ref: w.ref, text: `(sent from session ${w.fromSession}; text not kept)`, state: "sent", receiptId: id, outcomes: w.outcomes.map((x) => x.outcome), inbox: w.fromSession === this.data.session, ...(w.fromSession !== this.data.session ? { note: `from your session ${clean(w.fromSession)}` } : {}) });
     }
     for (const i of outbox) {
-      out.push({ id: `o:${i.id}`, dir: "out", at: i.queuedAt, who: i.dest.address, userId: i.dest.userId, own: i.dest.own, ref: i.dest.ref, text: `(sealed in the outbox, from session ${i.fromSession})`, state: "outbox" });
+      out.push({ id: `o:${i.id}`, dir: "out", at: i.queuedAt, who: i.dest.address, userId: i.dest.userId, own: i.dest.own, ref: i.dest.ref, text: `(sealed in the outbox, from session ${i.fromSession})`, state: "outbox", inbox: i.fromSession === this.data.session });
+    }
+    const hist = await readHistory(app, { person: true }, { limit: MESSAGES_MAX }, this.now()).catch(() => undefined);
+    for (const r of hist?.messages ?? []) {
+      if (r.dir === "in") {
+        if (!received.some((m) => m.id === r.id)) received.push(historyRow(r, this.data.session));
+        continue;
+      }
+      // A send already listed (this run's, a receipt's, the outbox's): the history fills in its text.
+      const same = out.find((m) => m.userId === r.peer.userId && Math.abs(m.at - r.at) < 60_000 && (m.text === r.text || m.text.startsWith("(")));
+      if (same) {
+        if (same.text.startsWith("(")) same.text = clean(r.text);
+        continue;
+      }
+      out.push(historyRow(r, this.data.session));
     }
     this.data.messages = [...received, ...out];
     this.capMessages();
@@ -532,7 +552,7 @@ export class Tui {
       case "send":
         await this.busy("sending", async () => {
           const at = this.now();
-          const row: MessageRow = { id: `s:${at}:${this.sent.length}`, dir: "out", at, who: e.label, text: e.text, state: "sent" };
+          const row: MessageRow = { id: `s:${at}:${this.sent.length}`, dir: "out", at, who: e.label, text: e.text, state: "sent", inbox: true };
           try {
             // As `p2p send` on a terminal: someone this session isn't shared with is added with the send
             // (undone if it fails), so it lands and their replies come here; and it says so.
@@ -551,7 +571,8 @@ export class Tui {
             // Your own send crosses no project boundary; it says which one this folder has (projects.ts).
             const here = await showProject(this.app, sessionWorkdir(this.app.env)).catch(() => undefined);
             const boundary = here ? ` Project ${clean(here.name)} here is ${here.policy}: this send was yours.` : "";
-            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}${boundary}`);
+            const taint = await tuiTaintNote(this.app, r.to.userId).catch(() => undefined);
+            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}${boundary}${taint ? ` Note: ${taint}.` : ""}`);
           } catch (err) {
             Object.assign(row, { state: "failed", note: clean(toErrorJson(err).reason) });
             throw err;
@@ -571,4 +592,23 @@ export class Tui {
   done(): Promise<void> {
     return (this.closed ??= new Promise((r) => (this.stop.signal.aborted ? r() : this.stop.signal.addEventListener("abort", () => r()))));
   }
+}
+
+/** A message history record as a row of the Messages screen (peer text cleaned for the terminal). */
+export function historyRow(r: HistoryRec, session: string): MessageRow {
+  const mine = isPersonRecord(r) || r.session === session;
+  const where = r.session === undefined ? "" : clean(r.session);
+  return {
+    id: r.id,
+    dir: r.dir,
+    at: r.at,
+    who: clean(r.peer.address) || "?",
+    userId: r.peer.userId,
+    ...(r.peerSession ? { own: r.peerSession.own, sid: r.peerSession.sid, ref: r.peerSession.ref } : {}),
+    text: clean(r.type === "ext" ? `${r.ext ?? "extension"}: ${r.text}` : r.text),
+    ...(r.dir === "out" ? { state: r.state === "outbox" ? ("outbox" as const) : r.state === "offline" ? ("offline" as const) : ("sent" as const) } : {}),
+    fromHistory: true,
+    inbox: mine,
+    ...(!mine ? { note: r.dir === "in" ? `for your session ${where}` : `from your session ${where}` } : {}),
+  };
 }

@@ -68,6 +68,15 @@ describe("addressing: bare names are refused", () => {
     expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", two).kind).toBe("ambiguous");
     expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web [def456]", two)).toMatchObject({ kind: "peer", to: `${ANN} [def456]` });
   });
+
+  it("resolveTarget: another session on this device resolves when this session's sid is given; this session never does", () => {
+    const here = [peer({ sid: "local-2", ref: "0c0c0c", thisDevice: true, self: true }), peer({ sid: "me", ref: "ffffff", thisDevice: true, self: true, label: "mine" })];
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", here, "me")).toMatchObject({ kind: "peer", to: `${ANN} [0c0c0c]` });
+    // A label that names no listed session (this one's own included) is refused, never sent to the bare address.
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/mine", here, "me")).toMatchObject({ kind: "refused", code: "no-label" });
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna/web", here)).toMatchObject({ kind: "refused", code: "no-label" });
+    expect(resolveTarget("p2p:ann@anna-nnan-nann-anna", here).kind).toBe("cli");
+  });
 });
 
 describe("the hold rule", () => {
@@ -160,6 +169,10 @@ describe("guards (PreToolUse backstop)", () => {
     expect(mutatingP2PVerb("p2p project share c_team")).toBe("project share");
     expect(mutatingP2PVerb("p2p project private")).toBe("project private");
     expect(mutatingP2PVerb("p2p project show")).toBe(null);
+    // L1: a receipt is the front end's report, and own-agents the person's choice; the words alone in text are fine.
+    expect(mutatingP2PVerb("p2p receipt p2p.message:abc --from-session s1 --outcome shown")).toBe("receipt");
+    expect(mutatingP2PVerb("p2p own-agents deliver")).toBe("own-agents");
+    expect(mutatingP2PVerb("p2p send --from-session s1 --to x receipt")).toBe(null);
     // send with no --from-session is the person's terminal path (it shares the tui session): refused.
     expect(mutatingP2PVerb("p2p send --to bob hi")).toBe("send (no --from-session)");
     expect(mutatingP2PVerb("p2p send")).toBe("send (no --from-session)");

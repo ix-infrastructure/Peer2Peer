@@ -112,6 +112,12 @@ export interface ExtCommand {
 
 export interface P2PExtension {
   api: number;
+  /**
+   * The graph-target contract this extension implements (1: every Ix call takes its endpoint only from
+   * ExtContext.graphTarget). Required of the `ix` namespace (REQUIRED_GRAPH_TARGETS): an ext-ix from
+   * before it would run Ix with the caller's environment and config, which Ix Pro routes to the cloud.
+   */
+  graphTargets?: number;
   /** Its §8.1 namespace: the package must be `@peer2peer/ext-<ns>`. */
   ns: string;
   name: string;
@@ -252,11 +258,25 @@ export interface ExtAudience {
   orgs?: number;
 }
 
+/**
+ * Which Ix graph a call may reach (projects.ts graphTarget, the chokepoint): this machine's backend,
+ * or one circle's shared graph. An extension that runs Ix takes the endpoint (and any token) only
+ * from here, never from its environment.
+ */
+export type ExtGraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
+
 /** What a command gets from `p2p`: no keys, no store, only these. */
 export interface ExtContext {
   env: Env;
   /** The user's working directory: P2P_WORKDIR (an existing absolute directory), else the process's. */
   cwd: string;
+  /**
+   * The graph target for a call made for session `sid` (when given), working in this context's folders
+   * (P2P_WORKDIR, P2P_PROJECT_DIRS and the process's cwd) and naming `paths` (absolute: the call's
+   * targets, `--path`, `--changed`, the child's cwd; every one is intersected in): projects.ts
+   * graphTarget. Absent on clients from before graph targets: an extension then treats every call as local.
+   */
+  graphTarget?(opts?: { sid?: string; paths?: readonly string[] }): Promise<ExtGraphTarget>;
   /** stdout lines are for `--json`-less output only; use the returned `human`. */
   io: { err(s: string): void; readStdin?: () => Promise<string> };
   /** Whether --json was given (no prompts then). */
@@ -346,6 +366,9 @@ export interface LoadOptions {
   selfUrl?: string;
 }
 
+/** Namespaces that run Ix, and the graph-target contract version each must declare to load. */
+export const REQUIRED_GRAPH_TARGETS: Readonly<Record<string, number>> = { ix: 1 };
+
 /** Validates what a module exports; undefined (with a reason) when it isn't a usable extension. */
 export function checkExtension(mod: unknown, ns: string): { ext?: P2PExtension; why?: string } {
   const m = mod as { extension?: unknown; default?: unknown } | null;
@@ -353,6 +376,10 @@ export function checkExtension(mod: unknown, ns: string): { ext?: P2PExtension; 
   if (!ext || typeof ext !== "object") return { why: "exports no `extension`" };
   if (ext.api !== EXTENSION_API) return { why: `built for extension API ${String(ext.api)}, this p2p has ${EXTENSION_API}` };
   if (ext.ns !== ns) return { why: `declares namespace ${String(ext.ns)}, expected ${ns}` };
+  const need = REQUIRED_GRAPH_TARGETS[ns];
+  if (need !== undefined && !(typeof ext.graphTargets === "number" && ext.graphTargets >= need)) {
+    return { why: `it predates graph targets (it would run Ix with your environment and config, which Ix Pro can route to the cloud): update ${extensionPackageName(ns)} (npm i -g ${extensionPackageName(ns)}@latest; the Claude Code mod ships a current copy)` };
+  }
   if (ext.receive !== undefined && typeof ext.receive !== "function") return { why: "receive is not a function" };
   if (ext.state !== undefined) {
     if (typeof ext.state !== "object" || ext.state === null || Array.isArray(ext.state)) return { why: "state is malformed" };

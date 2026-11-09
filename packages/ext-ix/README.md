@@ -20,7 +20,9 @@ p2p extensions                                 # → @peer2peer/ext-ix 0.1.0 (x:
 
 **Trust:** an extension runs inside `p2p` with your identity (it can read `~/.p2p` and your keys). Enable it only if you trust where it came from. `p2p` announces the first load from each new location.
 
-Ix itself comes from https://github.com/ix-infrastructure/Ix. Previewing what peers send needs only this package. Sending an impact report, resolving a reference, importing a note and conflict detection run your local `ix`. Notes use `ix note`, which the Ix Pro plugin provides.
+Ix itself comes from https://github.com/ix-infrastructure/Ix. Previewing what peers send needs only this package. Sending an impact report, resolving a reference, importing a note and conflict detection run your local `ix`. Notes use `ix note`, which the Ix Pro plugin provides and which reads and writes Ix Pro's cloud memory: ext-ix refuses it while the project's graph target is local only (every one is, today), so `import` and `note --ix-note` answer `graph_target`.
+
+**Graph targets:** every `ix` call takes its endpoint only from `p2p`'s chokepoint (`ExtContext.graphTarget`): a private project, or a session bound to one, is local only. `ix` runs with an allowlisted environment and `IX_ENDPOINT` pinned to that target, so an `IX_ENDPOINT`, `IX_PAT` or Ix Pro login in your shell never sends a private project to the cloud. See [SPEC.md §2.1](SPEC.md#21-graph-targets).
 
 You can also point `P2P_EXTENSION_PATH` at a directory whose `node_modules` holds it. Nothing else is searched: no parent directories, `NODE_PATH` or global folders. How `p2p` loads extensions is described in [packages/p2p/README.md](../p2p/README.md#extensions).
 

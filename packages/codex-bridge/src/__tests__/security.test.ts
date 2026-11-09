@@ -391,6 +391,22 @@ describe("M3: the trusted mode comes from the thread's own rollout file", () => 
     expect(second?.writableEver).toBe("all");
   });
 
+  it("M1: only prompts the person typed count (the rollout's user messages), never wrappers or the bridge's own queued pointer", async () => {
+    const home = tmp("codex-home-");
+    const day = join(home, "sessions", "2026", "11", "05");
+    mkdirSync(day, { recursive: true });
+    const thread = "019a0000-0000-7000-8000-0000000000b1";
+    const file = join(day, `rollout-x-${thread}.jsonl`);
+    const user = (text: string) => JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { type: "UserMessage", id: "u", content: [{ type: "text", text, text_elements: [] }] } } });
+    writeFileSync(file, `${sessionMeta(thread)}\n${turnContext("on-request", "read-only", "t1")}\n${user("fix the login form")}\n`);
+    const reader = new RolloutReader(home, thread);
+    expect((await reader.refresh())?.typed).toBe(1);
+    appendFileSync(file, [user("<environment_context>cwd</environment_context>"), user("<peer2peer-inbox>\nMessages from Peer2Peer</peer2peer-inbox>"), user("[Peer2Peer] 1 new message from p2p:me@meme. Call the p2p_inbox tool to read it"), JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "not counted twice" }] } })].join("\n") + "\n");
+    expect((await reader.refresh())?.typed).toBe(1);
+    appendFileSync(file, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "and the signup page" } })}\n`);
+    expect((await reader.refresh())?.typed).toBe(2);
+  });
+
   it("planted rollouts (low) are untrusted: two files for the thread, a foreign session_meta, a future or backwards timestamp", async () => {
     const thread = "019a0000-0000-7000-8000-00000000000a";
     const setup = (files: Record<string, string>) => {

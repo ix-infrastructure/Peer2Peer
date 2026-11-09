@@ -24,7 +24,7 @@ export function ago(sec: number): string {
 const HELP: Record<Screen, string> = {
   people: "↑↓ move · m message · d doctor · 1-5 screens · ? help · q quit",
   held: "↑↓ move · a accept/deliver · x decline · t always deliver · ? help · q quit",
-  messages: "↑↓ move · Enter open · r reply · 1-5 screens · ? help · q quit",
+  messages: "↑↓ move · Enter open · r reply · h inbox/all · 1-5 screens · ? help · q quit",
   send: "↑↓ pick · Enter write · then Enter send, Esc cancel, Ctrl-U clear · q quit",
   health: "r run doctor · d on People: one person · 1-5 screens · ? help · q quit",
 };
@@ -178,9 +178,9 @@ function outcomeText(m: MessageRow, now: number): { text: string; style?: Style 
 }
 
 function messages(ui: Ui, d: Data, cols: number, h: number, out: Line[], now: number): void {
-  const list = messagesSorted(d);
+  const list = messagesSorted(d, ui);
   if (list.length === 0) {
-    out.push(new Line(cols).add("No messages yet. Messages to this TUI's session, replies and your sends appear here.", DIM));
+    out.push(new Line(cols).add(ui.inboxOnly ? "Nothing in your inbox yet (h shows every session's messages)." : "No messages yet. Messages to this TUI's session, replies and your sends appear here.", DIM));
     return;
   }
   const [a, b] = window(list.length, ui.sel.messages, Math.floor(h / 2));
@@ -195,6 +195,7 @@ function messages(ui: Ui, d: Data, cols: number, h: number, out: Line[], now: nu
     if (m.dir === "out") {
       const o = outcomeText(m, now);
       l.add(o.text, o.style);
+      if (m.note) l.gap(2).add(m.note, DIM);
     } else {
       if (m.note) l.add(m.note, DIM).gap(2);
     }
@@ -275,7 +276,7 @@ function overlay(f: Frame, ui: Ui, cols: number, rows: number): void {
       "↑/↓ or j/k move, PgUp/PgDn, g/G first/last",
       "People: m or Enter message a person or session; d doctor for them",
       "Held: a accept (invites, joins) or deliver (held messages); x decline; t always deliver from the sender (asks first)",
-      "Messages: Enter opens one; r replies (this window sends no read receipts)",
+      "Messages: Enter opens one; r replies (this window sends no read receipts); h your inbox only or every session (history: kept encrypted on this device, 30 days by default)",
       "Send: pick, write, Enter sends; Esc cancels",
       "Health: r runs the doctor again",
       "q or Ctrl-C quits. Nothing is accepted, sent or trusted except on your key press.",
