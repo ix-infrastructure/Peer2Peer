@@ -1,6 +1,6 @@
 {
   "name": "@peer2peer/codex-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Peer2Peer for OpenAI Codex: an MCP server, Codex hooks and an installer over the `p2p` CLI",
   "keywords": [
     "peer2peer",

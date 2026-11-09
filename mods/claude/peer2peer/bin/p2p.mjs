@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.0 17f1f12f2f753fc9
+// @peer2peer/core 0.1.1 17f1f12f2f753fc9
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -25931,7 +25931,7 @@ var VERSION;
 var init_version = __esm({
   "packages/p2p/src/version.ts"() {
     "use strict";
-    VERSION = "0.1.0";
+    VERSION = "0.1.1";
   }
 });
 
@@ -31270,7 +31270,7 @@ var RolloutReader = class {
 };
 
 // packages/codex-bridge/dist/server.js
-var BRIDGE_VERSION = "0.1.0";
+var BRIDGE_VERSION = "0.1.1";
 function childWatch(env, extra = {}) {
   return (argv, onLine, signal) => new Promise((resolve5, reject) => {
     const child = spawn2(argv[0], argv.slice(1), { env: childEnv(env, extra), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });

@@ -9,7 +9,7 @@
       "name": "peer2peer",
       "source": "./mods/claude/peer2peer",
       "description": "Claude sessions on the account-free Peer2Peer v3 network: friends' and circle-mates' sessions in ListAgents, SendMessage reaches them end-to-end encrypted, working-on status and conflict flags. No login.",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
