@@ -319,7 +319,10 @@ export interface ExtAudience {
  * or one circle's shared graph. An extension that runs Ix takes the endpoint (and any token) only
  * from here, never from its environment.
  */
-export type ExtGraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
+export type ExtGraphTarget =
+  /** `trustRootListener`: the person set `ixTrustRootListener: true` in config.json (a root-owned listener on the port, Docker's proxy on Linux, is theirs). */
+  | { kind: "local"; endpoint: string; why: string; trustRootListener?: true }
+  | { kind: "shared"; circle: string; endpoint: string; token?: string };
 
 /** What a command gets from `p2p`: no keys, no store, only these. */
 export interface ExtContext {

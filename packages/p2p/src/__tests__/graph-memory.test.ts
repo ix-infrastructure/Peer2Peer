@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { App } from "../app.js";
-import { mayShareSessionContext } from "../ext-host.js";
+import { extContext, mayShareSessionContext } from "../ext-host.js";
 import { ExtensionRegistry, memoryOf, type ExtMemory, type ExtMemoryItem, type P2PExtension } from "../extensions.js";
 import { drainGraphMemory, gather, gatherGraphMemory, GRAPH_MEMORY_QUEUE_MAX, graphMemoryLoop, type GraphMemoryDoc } from "../graph-memory.js";
 import { parseIxMemorySupport } from "../ix-local.js";
@@ -286,6 +286,66 @@ describe("draining, with real state and the chokepoint", () => {
       await putStatus(a, "s1", { summary: "now private", files: ["x.ts"] }, {}, false);
       await gatherGraphMemory(a);
       expect(JSON.stringify((await a.state.get("graphMemory"))!.queue)).not.toMatch(/now private|x\.ts/);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("re-review 3: a session that turns private between gathering and writing is dropped as not_shared, never handed over", async () => {
+    const a = await app();
+    try {
+      await reset(a);
+      const priv = join(root, "private-repo-3");
+      mkdirSync(priv, { recursive: true });
+      const f = fakeMemory();
+      await putStatus(a, "turn", { summary: "was shared" });
+      await gatherGraphMemory(a);
+      await bindSession(a, "turn", [priv]);
+      expect(await drainGraphMemory(a, f.ext, f.mem)).toEqual({ written: 0, dropped: 2 });
+      expect(f.writes).toEqual([]);
+      expect((await a.state.get("graphMemory"))!.dropped.not_shared).toBe(2);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("re-review 5: a writer that ignores the abort is given up on after the settle bound; its lease stays until it expires", async () => {
+    const a = await app();
+    try {
+      await reset(a);
+      const f = fakeMemory({ write: () => new Promise(() => {}) });
+      await putStatus(a, "hang", { summary: "never settles" });
+      await gatherGraphMemory(a);
+      const t0 = Date.now();
+      expect(await drainGraphMemory(a, f.ext, f.mem, { deadlineMs: 50, settleMs: 50 })).toEqual({ written: 0, dropped: 2 });
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      const d = (await a.state.get("graphMemory"))!;
+      expect(d.dropped.timeout).toBe(2);
+      // Kept: no other drain writes this session while the abandoned writer might still.
+      expect(d.leases?.hang).toBeGreaterThan(Date.now());
+      await putStatus(a, "hang", { summary: "more" });
+      await gatherGraphMemory(a);
+      const other = fakeMemory();
+      await drainGraphMemory(a, other.ext, other.mem);
+      expect(other.writes).toEqual([]);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("re-review M: the root-listener opt-in reaches an extension only from config.json, never the environment", async () => {
+    const a = await app({ IX_TRUST_ROOT_LISTENER: "1", P2P_IX_TRUST_ROOT_LISTENER: "1", ixTrustRootListener: "true" });
+    try {
+      const ext = { api: 1, graphTargets: 1, ns: "ix", name: "@peer2peer/ext-ix", version: "0" } as P2PExtension;
+      const ctx = () => extContext(a, ext, { out: () => {}, err: () => {} }, true, async () => false);
+      expect(await ctx().graphTarget!({})).not.toHaveProperty("trustRootListener");
+      const was = a.file;
+      (a as unknown as { file: unknown }).file = { ...was, ixTrustRootListener: true };
+      try {
+        expect(await ctx().graphTarget!({})).toMatchObject({ kind: "local", trustRootListener: true });
+      } finally {
+        (a as unknown as { file: unknown }).file = was;
+      }
     } finally {
       await a.close();
     }

@@ -122,7 +122,7 @@ An ext-ix declares `graphTargets: 1` in its `P2PExtension`; p2p refuses to load 
 
   It has no positional text, no other flag or subcommand, and no flag twice.
 - `ix --help` shows the OSS commands, asked once per command or batch (`memorySupport`). With Pro loaded, the help has a "Pro:" section and no "Memory:" one; an Ix before #916 has neither. Both are refused before any write: Pro with "Ix Pro is installed … cloud org", the older Ix with "upgrade Ix". This is a capability check, never a trial write.
-- The target's port is held only by this user's (or root's) process, on every loopback or wildcard address (listener.ts: `/proc/net/tcp{,6}` on Linux; `netstat -an` matched by `lsof` on macOS). This is checked once per command or batch. Otherwise the call fails with `ix_listener`, and so does any other platform.
+- The target's port is held only by this user's process, on every loopback or wildcard address (listener.ts: `/proc/net/tcp{,6}` on Linux; `netstat -an` matched by `lsof` on macOS). A root-owned listener counts only when the host's local target carries `trustRootListener` (the person's `ixTrustRootListener: true` in config.json). Docker's port proxy on Linux is root's. This is checked before every write, and once per command for a read. Otherwise the call fails with `ix_listener`, and so does any other platform.
 - `ix --help` is asked again right before every `ix session create`.
 - After a write, stderr says `→ local backend <the target's endpoint>`, as the OSS commands print it. Otherwise the call fails with `ix_unconfirmed`, **whatever the exit code**.
 - `ix session --json show <ref>` (a read) is also allowed: graph memory uses it to check that a remembered session still exists.
@@ -758,8 +758,13 @@ never created twice.
 
 `write` gets an `AbortSignal`. When the host's deadline for the batch
 passes, it aborts. The writer checks the signal before every write and
-writes nothing after it fires, and the host waits for the writer to settle
-before going on.
+writes nothing after it fires. The host then waits at most 30 s for the
+writer to settle. If it doesn't, the host gives up on it, keeps that
+session's lease until the lease expires, and counts the items as `timeout`.
+Before handing over each session's batch, the host checks again that the
+session's ceiling is still shared, and drops the batch as `not_shared` if
+not. The extension's store is MACed with `localMac` when the host offers
+it, and a store that doesn't verify counts as empty.
 
 `p2p ix note --ix-note <id> --from-session B` refuses a record of another
 session A (`not_shared`), unless `ExtContext.mayShareSessionContext(A, B)`

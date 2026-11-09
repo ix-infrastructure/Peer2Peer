@@ -118,13 +118,37 @@ export function memoryText(i: ExtMemoryItem): string | undefined {
   return body === undefined ? undefined : `${MEMORY_PREFIX}\n${body}`;
 }
 
+/** The store's sessions in one canonical form, for its MAC. */
+function canon(sessions: MemoryKv["sessions"]): string {
+  return JSON.stringify(
+    Object.keys(sessions)
+      .sort()
+      .map((k) => [k, sessions[k].id, sessions[k].endpoint, sessions[k].at]),
+  );
+}
+
+/**
+ * The store (`<home>/ext/ix.json`, key `memory`), MACed with the device's key when the host offers
+ * one (ExtContext.localMac): anything that can write files in P2P_HOME without the keys (a model's
+ * file tools) can't plant a mapping from a session to another Ix session. A MAC that doesn't verify
+ * means no record at all: sessions are made again, and recordOf traces nothing through it.
+ */
 async function loadKv(ctx: ExtContext): Promise<MemoryKv> {
-  const v = (await ctx.kv.get(KV_KEY)) as Partial<MemoryKv> | undefined;
+  const v = (await ctx.kv.get(KV_KEY)) as (Partial<MemoryKv> & { mac?: unknown }) | undefined;
   const sessions: MemoryKv["sessions"] = {};
   if (v && typeof v.sessions === "object" && v.sessions !== null) {
     for (const [sid, s] of Object.entries(v.sessions)) {
       if (s && typeof s.id === "string" && IX_SESSION_REF_RE.test(s.id) && typeof s.endpoint === "string" && typeof s.at === "number") sessions[sid] = { id: s.id, endpoint: s.endpoint, at: s.at };
     }
+  }
+  if (typeof ctx.localMac === "function") {
+    let ok: boolean;
+    try {
+      ok = typeof v?.mac === "string" && v.mac === ctx.localMac(canon(sessions));
+    } catch {
+      ok = false;
+    }
+    if (!ok) return { sessions: {} };
   }
   return { sessions };
 }
@@ -133,7 +157,14 @@ async function saveKv(ctx: ExtContext, kv: MemoryKv): Promise<void> {
   const kept = Object.entries(kv.sessions)
     .sort((a, b) => a[1].at - b[1].at)
     .slice(-MAX_MEMORY_SESSIONS);
-  await ctx.kv.set(KV_KEY, { sessions: Object.fromEntries(kept) });
+  const sessions = Object.fromEntries(kept);
+  let mac: string | undefined;
+  try {
+    mac = typeof ctx.localMac === "function" ? ctx.localMac(canon(sessions)) : undefined;
+  } catch {
+    mac = undefined;
+  }
+  await ctx.kv.set(KV_KEY, { sessions, ...(mac ? { mac } : {}) });
 }
 
 /**
@@ -186,7 +217,7 @@ async function localOf(ctx: ExtContext, sid?: string): Promise<Extract<IxTarget,
  * (extension.ts runner: pinned to that session's graph target, OSS-only for note and session, the
  * port's listener checked). `listener` is the same check, for available().
  */
-export function ixMemory(runner: (ctx: ExtContext, sid?: string) => IxRunner, listener: ListenerCheck = (e) => checkLoopbackListener(e)): ExtMemory {
+export function ixMemory(runner: (ctx: ExtContext, sid?: string) => IxRunner, listener: ListenerCheck = (e, o) => checkLoopbackListener(e, { trustRoot: o?.trustRoot === true })): ExtMemory {
   return {
     v: 1,
     available: async (ctx) => {
@@ -196,7 +227,7 @@ export function ixMemory(runner: (ctx: ExtContext, sid?: string) => IxRunner, li
       if (s !== "oss") return unavailable(s, true);
       const t = await localOf(ctx);
       if (!t) return { ok: false, reason: "not_local", message: "graph memory goes to the local graph only" };
-      const v = await listener(t.endpoint).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
+      const v = await listener(t.endpoint, { trustRoot: t.trustRootListener === true }).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
       return v.ok ? { ok: true } : { ok: false, reason: "ix_listener", message: `the local Ix endpoint ${t.endpoint} isn't one Peer2Peer can trust: ${v.why}` };
     },
     write: async (ctx, batch): Promise<ExtMemoryResult> => {

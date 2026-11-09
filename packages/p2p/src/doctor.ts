@@ -681,7 +681,15 @@ async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { end
     const total = dropped.reduce((a, [, n]) => a + n, 0);
     c.add("ix-memory-dropped", "unknown", "Ix graph memory dropped", `${total} item${total === 1 ? "" : "s"} not written (${dropped.map(([r, n]) => `${peer(r)}: ${n}`).join(", ")})`, "best effort: each reason is counted; the queue holds 64 items");
   }
-  if (doc?.unavailable && support === "oss") c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`);
+  if (doc?.unavailable && support === "oss") {
+    // Who holds the local endpoint's port wasn't this user (ext-ix listener.ts): say what to do.
+    const fix =
+      doc.unavailable.reason === "ix_listener"
+        ? `start your Ix backend (\`ix docker start\`); if another user's process holds the port, use a port of yours (\`ixEndpoint\` in config.json). On Linux, Docker's port proxy runs as root: if this machine's Docker is only yours, set "ixTrustRootListener": true in config.json (by hand)`
+        : undefined;
+    c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
+  }
+  if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
 }
 
 // ---------------------------------------------------------------------------

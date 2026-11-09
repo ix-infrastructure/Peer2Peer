@@ -490,7 +490,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         const support = await memorySupport(ix);
         if (support !== "oss") throw memoryRefusal(support, target);
         // And the local endpoint's port must be this user's (listener.ts): checked again by the guard.
-        const held = await (deps.listener ?? ((e: string) => checkLoopbackListener(e)))(target.endpoint).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
+        const held = await (deps.listener ?? ((e: string, o?: { trustRoot?: boolean }) => checkLoopbackListener(e, { trustRoot: o?.trustRoot === true })))(target.endpoint, { trustRoot: target.kind === "local" && target.trustRootListener === true }).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
         if (!held.ok) throw new IxExtError("ix_listener", `the local Ix endpoint ${target.endpoint} isn't one Peer2Peer can trust: ${held.why}`);
         const text = `Shared by ${address} over Peer2Peer${b.title ? `: ${b.title}` : ""}\n\n${b.text}`;
         // M1: consent covers exactly what is written. Either the full title and text are shown here

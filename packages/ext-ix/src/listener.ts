@@ -11,8 +11,10 @@
 //   - macOS: `netstat -an` lists every user's listening sockets (without owners), and
 //     `lsof -iTCP:<port> -sTCP:LISTEN` lists the ones this user's processes hold (a non-root lsof
 //     can't see other users'). Every listener netstat shows must be matched by one of this user's.
-// Every such listener must be this user's, or root's (root can read this user's files anyway, and
-// Docker's port proxy runs as root on Linux), and there must be at least one. Anything else, or an
+// Every such listener must be this user's, and there must be at least one. A root-owned one
+// (Docker's port proxy on Linux runs as root whoever started the container, so on a machine whose
+// Docker others use it may be a teammate's backend) counts only when the person said so:
+// `ixTrustRootListener: true` in p2p's config.json (the host passes it on the graph target). Anything else, or an
 // answer that can't be read, or another platform, means "no": graph writes stay off. This narrows
 // the window; it can't close it (a listener can appear between the check and the write).
 
@@ -20,8 +22,11 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 export type ListenerVerdict = { ok: true } | { ok: false; why: string };
-/** Checks the listener of a loopback endpoint (http(s) URL). */
-export type ListenerCheck = (endpoint: string) => Promise<ListenerVerdict>;
+/** Checks the listener of a loopback endpoint (http(s) URL); `trustRoot`: a root-owned listener counts. */
+export type ListenerCheck = (endpoint: string, opts?: { trustRoot?: boolean }) => Promise<ListenerVerdict>;
+
+/** What the person can do about a root-owned listener. */
+export const ROOT_HINT = 'root holds it: on Linux that is Docker\'s port proxy, whoever started the container. If this machine\'s Docker is only yours, set "ixTrustRootListener": true in p2p\'s config.json';
 
 export interface Listener {
   /** The local address, normalized: an IPv4 dotted quad, or IPv6 in lower-case hex groups. */
@@ -133,12 +138,12 @@ export function parseLsof(text: string): Listener[] {
 
 /**
  * macOS: every listener on `port` that netstat shows (all users) must be matched, address for
- * address, by one this user's (or root's) lsof shows; one left over belongs to someone lsof can't see.
+ * address, by one this user's lsof shows (root's too, with trustRoot); one left over belongs to someone lsof can't see.
  */
-export function judgeDarwin(all: readonly Listener[], mine: readonly Listener[], port: number, uid: number): ListenerVerdict {
+export function judgeDarwin(all: readonly Listener[], mine: readonly Listener[], port: number, uid: number, trustRoot = false): ListenerVerdict {
   const want = all.filter((l) => l.port === port && reachesLoopback(l.addr));
   if (want.length === 0) return { ok: false, why: `nothing listens on port ${port} (is the Ix backend running?)` };
-  const have = mine.filter((l) => l.port === port && (l.uid === uid || l.uid === 0));
+  const have = mine.filter((l) => l.port === port && (l.uid === uid || (l.uid === 0 && trustRoot)));
   const left = new Map<string, number>();
   for (const l of have) left.set(l.addr, (left.get(l.addr) ?? 0) + 1);
   for (const l of want) {
@@ -149,13 +154,14 @@ export function judgeDarwin(all: readonly Listener[], mine: readonly Listener[],
   return { ok: true };
 }
 
-/** The verdict for the listeners on `port`: all owned by `uid` (or root), and at least one. */
-export function judgeListeners(listeners: readonly Listener[], port: number, uid: number): ListenerVerdict {
+/** The verdict for the listeners on `port`: all owned by `uid` (or root, with `trustRoot`), and at least one. */
+export function judgeListeners(listeners: readonly Listener[], port: number, uid: number, trustRoot = false): ListenerVerdict {
   const mine = listeners.filter((l) => l.port === port && reachesLoopback(l.addr));
   if (mine.length === 0) return { ok: false, why: `nothing listens on port ${port} (is the Ix backend running?)` };
   for (const l of mine) {
     if (typeof l.uid !== "number") return { ok: false, why: `couldn't tell who listens on port ${port}` };
-    if (l.uid !== uid && l.uid !== 0) return { ok: false, why: `port ${port} is held by another user (uid ${l.uid}), not your Ix backend` };
+    if (l.uid === 0 && uid !== 0 && !trustRoot) return { ok: false, why: `port ${port}: ${ROOT_HINT}` };
+    if (l.uid !== uid && !(l.uid === 0 && trustRoot)) return { ok: false, why: `port ${port} is held by another user (uid ${l.uid}), not your Ix backend` };
   }
   return { ok: true };
 }
@@ -173,7 +179,8 @@ export interface ListenerDeps {
 }
 
 /** The real check (see the top of this file). */
-export async function checkLoopbackListener(endpoint: string, d: ListenerDeps = {}): Promise<ListenerVerdict> {
+export async function checkLoopbackListener(endpoint: string, d: ListenerDeps & { trustRoot?: boolean } = {}): Promise<ListenerVerdict> {
+  const trustRoot = d.trustRoot === true;
   const port = endpointPort(endpoint);
   if (port === undefined) return { ok: false, why: "the local endpoint has no port" };
   const platform = d.platform ?? process.platform;
@@ -185,14 +192,14 @@ export async function checkLoopbackListener(endpoint: string, d: ListenerDeps = 
     if (platform === "linux") {
       const texts = await Promise.all(["/proc/net/tcp", "/proc/net/tcp6"].map((p) => read(p).catch(() => "")));
       if (texts.every((t) => t === "")) return { ok: false, why: "couldn't read /proc/net/tcp" };
-      return judgeListeners(texts.flatMap(parseProcNet), port, uid);
+      return judgeListeners(texts.flatMap(parseProcNet), port, uid, trustRoot);
     }
     if (platform === "darwin") {
       const all = parseNetstat(await exec("/usr/sbin/netstat", ["-an"]));
       if (!all) return { ok: false, why: "couldn't read netstat's sockets" };
       // lsof exits 1 when it finds nothing: no socket of this user's.
       const mine = parseLsof(await exec("/usr/sbin/lsof", ["-nP", "-a", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpun"]).catch(() => ""));
-      return judgeDarwin(all, mine, port, uid);
+      return judgeDarwin(all, mine, port, uid, trustRoot);
     }
   } catch {
     return { ok: false, why: `couldn't tell who listens on port ${port}` };

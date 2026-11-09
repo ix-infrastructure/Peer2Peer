@@ -16,8 +16,8 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ExtContext } from "@peer2peer/cli";
 import { createIxExtension, runner } from "../extension.js";
-import { confirmsLocalWrite, DEFAULT_IX_ENDPOINT, guardRunner, memoryCall, parseMemorySupport, refuseForTarget, type IxRunner } from "../ix.js";
-import { memoryActor, memoryPurpose, memorySessionName, memoryText } from "../memory.js";
+import { checkedTarget, confirmsLocalWrite, DEFAULT_IX_ENDPOINT, guardRunner, memoryCall, parseMemorySupport, refuseForTarget, type IxRunner } from "../ix.js";
+import { memoryActor, memoryPurpose, memorySessionName, memoryText, recordOf } from "../memory.js";
 import { checkLoopbackListener } from "../listener.js";
 import { cleanupTmp, fakeIx, OSS_HELP, PRO_HELP, tmp } from "./harness.js";
 
@@ -431,6 +431,47 @@ describe("review fixes (M1, M2, L3-L6)", () => {
     await memory.write(ctx, { sid: "k2", items: [{ kind: "status", at: 6, summary: "six" }] });
     expect(ix.sessions().at(-1)!.argv[3]).toBe("p2p-k2");
     expect(store.get("memory")).toMatchObject({ sessions: { k2: { id: "sess-k2", endpoint: EP } } });
+  });
+
+  it("re-review 2: the listener is asked before every write (a read once per guard); trustRoot only from the target", async () => {
+    const asked: { endpoint: string; trustRoot?: boolean }[] = [];
+    const listener = async (endpoint: string, o?: { trustRoot?: boolean }) => (asked.push({ endpoint, trustRoot: o?.trustRoot }), { ok: true as const });
+    const g = guardRunner(ossInner([]), async () => local, undefined, { listener });
+    await g.run(["note", "--json", "show", "n1"]);
+    await g.run(["note", "--json", "show", "n2"]);
+    await g.run(["note", "--tag=note", "--json"], { stdin: "a" });
+    await g.run(["note", "--tag=note", "--json"], { stdin: "b" });
+    expect(asked).toHaveLength(3); // one read check, then one per write
+    expect(asked.every((a) => a.trustRoot === false)).toBe(true);
+    // A target that carries the person's opt-in passes it on; a forged field on a non-local target can't.
+    const g2 = guardRunner(ossInner([]), async () => ({ ...local, trustRootListener: true as const }), undefined, { listener });
+    await g2.run(["note", "--tag=note", "--json"], { stdin: "c" });
+    expect(asked.at(-1)!.trustRoot).toBe(true);
+    expect(checkedTarget({ kind: "local", endpoint: "http://localhost:8090", trustRootListener: true })).toMatchObject({ trustRootListener: true });
+    expect(checkedTarget({ kind: "local", endpoint: "http://localhost:8090", trustRootListener: "yes" })).not.toHaveProperty("trustRootListener");
+    expect(checkedTarget({ kind: "shared", circle: "c", endpoint: "https://g.example", trustRootListener: true })).not.toHaveProperty("trustRootListener");
+  });
+
+  it("re-review 4: the store is MACed with the device's key; a planted or altered mapping counts as no record", async () => {
+    const ix = fakeIx();
+    ix.set("help.txt", OSS_HELP);
+    const { ctx, store } = memCtx(ix);
+    const mac = (d: string) => `mac:${d.length}:${d.slice(0, 40)}`;
+    (ctx as unknown as { localMac: (d: string) => string }).localMac = mac;
+    await memory.write(ctx, { sid: "m1", items: [{ kind: "status", at: 1, summary: "one" }] });
+    const saved = store.get("memory") as { sessions: Record<string, { id: string }>; mac: string };
+    expect(saved.mac).toMatch(/^mac:/);
+    // Reused while the MAC verifies.
+    await memory.write(ctx, { sid: "m1", items: [{ kind: "status", at: 2, summary: "two" }] });
+    expect(ix.sessions()).toHaveLength(1);
+    // A model's file tools rewrite the store (point m1 at someone else's session): no record, made again.
+    store.set("memory", { ...saved, sessions: { ...saved.sessions, m1: { ...saved.sessions.m1, id: "sess-attacker" } } });
+    await memory.write(ctx, { sid: "m1", items: [{ kind: "status", at: 3, summary: "three" }] });
+    expect(ix.sessions()).toHaveLength(2);
+    expect(ix.written().at(-1)!.argv).toContain("--session=sess-m1");
+    // And recordOf traces nothing through a planted mapping.
+    store.set("memory", { sessions: { X: { id: "sess-X", endpoint: EP, at: 1 } }, mac: "forged" });
+    expect(await recordOf(ctx, { sessionId: "sess-X", sessionName: "renamed", text: "plain" })).toBeUndefined();
   });
 
   describe("M2: `--ix-note` won't pass on another session's Peer2Peer record", () => {

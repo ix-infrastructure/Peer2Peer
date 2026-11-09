@@ -36432,7 +36432,8 @@ function extContext(app, ext, io2, json, confirm) {
     graphTarget: async (o = {}) => {
       const { dirs, over } = sessionDirs(app.env);
       const paths = Array.isArray(o.paths) ? [...o.paths] : [];
-      return graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
+      const t2 = await graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
+      return t2.kind === "local" && app.file.ixTrustRootListener === true ? { ...t2, trustRootListener: true } : t2;
     },
     io: { err: (s2) => io2.err(s2), ...io2.readStdin ? { readStdin: io2.readStdin } : {} },
     json,
@@ -36772,6 +36773,7 @@ async function noteAvailability(app, u) {
     return { next: d, result: void 0 };
   });
 }
+var GRAPH_MEMORY_SETTLE_MS = 3e4;
 var GRAPH_MEMORY_LEASE_MS = 2 * GRAPH_MEMORY_DRAIN_MS + 6e4;
 async function take(app, now = Date.now()) {
   return app.state.update("graphMemory", (cur) => {
@@ -36801,13 +36803,14 @@ var within3 = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(
 async function drainGraphMemory(app, ext, mem, deps = {}) {
   const batch = await take(app);
   if (batch.length === 0) return { written: 0, dropped: 0 };
+  const abandoned2 = /* @__PURE__ */ new Set();
   try {
-    return await drainBatch(app, ext, mem, batch, deps);
+    return await drainBatch(app, ext, mem, batch, deps, abandoned2);
   } finally {
-    await release(app, [...new Set(batch.map((i) => i.sid))]).catch(() => void 0);
+    await release(app, [...new Set(batch.map((i) => i.sid))].filter((s2) => !abandoned2.has(s2))).catch(() => void 0);
   }
 }
-async function drainBatch(app, ext, mem, batch, deps) {
+async function drainBatch(app, ext, mem, batch, deps, abandoned2) {
   const ctx = extContext(app, ext, { out: () => {
   }, err: (s2) => deps.log?.(s2) }, true, async () => false);
   const target = deps.target ?? ((sid) => {
@@ -36832,12 +36835,23 @@ async function drainBatch(app, ext, mem, batch, deps) {
       dropped += items.length;
       continue;
     }
+    if ((await sessionCeiling(app, sid).catch(() => ({ kind: "private" }))).kind !== "shared") {
+      await countDropped(app, "not_shared", items.length);
+      dropped += items.length;
+      continue;
+    }
     const stop = new AbortController();
     const writing = Promise.resolve().then(() => mem.write(ctx, { sid, items, signal: stop.signal })).catch(() => void 0);
     let r = await within3(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
     if (r === "timeout") {
       stop.abort();
-      const late = await writing;
+      const late = await within3(writing, deps.settleMs ?? GRAPH_MEMORY_SETTLE_MS);
+      if (late === "timeout") {
+        abandoned2.add(sid);
+        await countDropped(app, "timeout", items.length);
+        dropped += items.length;
+        continue;
+      }
       const lateOk = late && typeof late === "object" ? Math.max(0, Math.min(items.length, Number(late.written) || 0)) : 0;
       r = { written: lateOk, failed: [{ reason: "timeout", n: items.length - lateOk }] };
     }
@@ -37633,7 +37647,11 @@ async function graphMemoryChecks(c, app, bin, target, ms) {
     const total = dropped.reduce((a, [, n]) => a + n, 0);
     c.add("ix-memory-dropped", "unknown", "Ix graph memory dropped", `${total} item${total === 1 ? "" : "s"} not written (${dropped.map(([r, n]) => `${peer(r)}: ${n}`).join(", ")})`, "best effort: each reason is counted; the queue holds 64 items");
   }
-  if (doc?.unavailable && support === "oss") c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`);
+  if (doc?.unavailable && support === "oss") {
+    const fix = doc.unavailable.reason === "ix_listener" ? `start your Ix backend (\`ix docker start\`); if another user's process holds the port, use a port of yours (\`ixEndpoint\` in config.json). On Linux, Docker's port proxy runs as root: if this machine's Docker is only yours, set "ixTrustRootListener": true in config.json (by hand)` : void 0;
+    c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
+  }
+  if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
 }
 async function refreshCapped(app, userId, relays) {
   const allowed = new Set(relays.slice(0, MAX_PEER_RELAYS));

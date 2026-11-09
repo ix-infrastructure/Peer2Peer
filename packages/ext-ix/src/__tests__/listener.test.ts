@@ -2,8 +2,10 @@
 //
 // Who listens on the local Ix endpoint's port (listener.ts, review M1), adversarially: another
 // user's listener on a loopback or wildcard address is refused, on Linux (/proc/net/tcp{,6}) and on
-// macOS (netstat, matched against this user's lsof); root's (Docker's proxy) is allowed; one on a
-// LAN address doesn't count; nothing listening, an unreadable answer or another platform is "no".
+// macOS (netstat, matched against this user's lsof); root's (Docker's proxy on Linux, maybe a
+// teammate's backend) only with the person's opt-in (trustRoot, from `ixTrustRootListener` in
+// config.json); one on a LAN address doesn't count; nothing listening, an unreadable answer or
+// another platform is "no".
 
 import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
@@ -31,7 +33,11 @@ describe("reading /proc/net/tcp{,6}", () => {
   it("verdicts: only this user's or root's listeners on loopback or wildcard addresses", () => {
     const j = (rows: string) => judgeListeners(parseProcNet(HEAD + rows), 8090, ME);
     expect(j(row("0100007F:1F9A", "0A", ME))).toEqual({ ok: true });
-    expect(j(row("00000000:1F9A", "0A", 0))).toEqual({ ok: true }); // docker-proxy as root
+    // docker-proxy holds it as root, whoever started the container: refused, with what to do; allowed only when the person opted in.
+    expect(j(row("00000000:1F9A", "0A", 0))).toMatchObject({ ok: false, why: expect.stringMatching(/root holds it.*Docker.*ixTrustRootListener/) });
+    expect(judgeListeners(parseProcNet(HEAD + row("00000000:1F9A", "0A", 0)), 8090, ME, true)).toEqual({ ok: true });
+    // The opt-in trusts root, not other users.
+    expect(judgeListeners(parseProcNet(HEAD + row("00000000:1F9A", "0A", 0) + row("0100007F:1F9A", "0A", 1001)), 8090, ME, true)).toMatchObject({ ok: false, why: expect.stringMatching(/uid 1001/) });
     // Another user, on loopback, the wildcard, ::1, ::, or a v4-mapped loopback: refused.
     for (const local of ["0100007F:1F9A", "0101007F:1F9A", "00000000:1F9A", "00000000000000000000000001000000:1F9A", "00000000000000000000000000000000:1F9A", "0000000000000000FFFF00000100007F:1F9A"]) {
       expect(j(row("0100007F:1F9A", "0A", ME) + row(local, "0A", 1001)), local).toMatchObject({ ok: false, why: expect.stringMatching(/another user \(uid 1001\)/) });
@@ -79,8 +85,10 @@ describe("macOS: netstat (all users) matched by this user's lsof", () => {
     // Two sockets at one address, only one ours (SO_REUSEPORT): refused.
     const dup = parseNetstat(NETSTAT([L("tcp4", "127.0.0.1.8090"), L("tcp4", "127.0.0.1.8090")]))!;
     expect(judgeDarwin(dup, parseLsof("p1\nu501\nn127.0.0.1:8090\n"), 8090, 501)).toMatchObject({ ok: false });
-    // lsof naming another uid doesn't vouch.
+    // lsof naming another uid doesn't vouch; root's only with the opt-in.
     expect(judgeDarwin(all, parseLsof("p1\nu777\nn127.0.0.1:8090\n"), 8090, 501)).toMatchObject({ ok: false });
+    expect(judgeDarwin(all, parseLsof("p1\nu0\nn127.0.0.1:8090\n"), 8090, 501)).toMatchObject({ ok: false });
+    expect(judgeDarwin(all, parseLsof("p1\nu0\nn127.0.0.1:8090\n"), 8090, 501, true)).toEqual({ ok: true });
     expect(judgeDarwin([], [], 8090, 501)).toMatchObject({ ok: false, why: expect.stringMatching(/nothing listens/) });
   });
 });
@@ -90,6 +98,8 @@ describe("checkLoopbackListener", () => {
     const linux = (text: string) => checkLoopbackListener("http://localhost:8090", { platform: "linux", uid: ME, readFile: async (p) => (p.endsWith("6") ? "" : HEAD + text) });
     expect(await linux(row("0100007F:1F9A", "0A", ME))).toEqual({ ok: true });
     expect(await linux(row("0100007F:1F9A", "0A", 4242))).toMatchObject({ ok: false });
+    expect(await linux(row("0100007F:1F9A", "0A", 0))).toMatchObject({ ok: false });
+    expect(await checkLoopbackListener("http://localhost:8090", { platform: "linux", uid: ME, trustRoot: true, readFile: async (p) => (p.endsWith("6") ? "" : HEAD + row("0100007F:1F9A", "0A", 0)) })).toEqual({ ok: true });
     expect(await checkLoopbackListener("http://localhost:8090", { platform: "linux", uid: ME, readFile: async () => Promise.reject(new Error("EACCES")) })).toMatchObject({ ok: false, why: expect.stringMatching(/couldn't read/) });
     const darwin = (net: string, lsof: string | Error) =>
       checkLoopbackListener("http://127.0.0.1:8090", { platform: "darwin", uid: 501, exec: async (c) => (c.endsWith("netstat") ? net : lsof instanceof Error ? Promise.reject(lsof) : lsof) });

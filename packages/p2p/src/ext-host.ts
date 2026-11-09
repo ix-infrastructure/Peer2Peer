@@ -73,7 +73,9 @@ export function extContext(app: App, ext: P2PExtension, io: Io, json: boolean, c
     graphTarget: async (o = {}) => {
       const { dirs, over } = sessionDirs(app.env);
       const paths = Array.isArray(o.paths) ? [...o.paths] : [];
-      return graphTarget(app, { ...(typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}), dirs, paths, over });
+      const t = await graphTarget(app, { ...(typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}), dirs, paths, over });
+      // From config.json only (the person's file), never the environment.
+      return t.kind === "local" && app.file.ixTrustRootListener === true ? { ...t, trustRootListener: true as const } : t;
     },
     io: { err: (s) => io.err(s), ...(io.readStdin ? { readStdin: io.readStdin } : {}) },
     json,

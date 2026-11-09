@@ -219,7 +219,12 @@ export interface DrainDeps {
   log?: (msg: string) => void;
   /** One session's time to write (tests); default GRAPH_MEMORY_DRAIN_MS. */
   deadlineMs?: number;
+  /** After the abort, how long to wait for the writer to settle (tests); default GRAPH_MEMORY_SETTLE_MS. */
+  settleMs?: number;
 }
+
+/** After a timed-out batch is aborted, how long the drain waits for the writer to settle before giving up on it. */
+export const GRAPH_MEMORY_SETTLE_MS = 30_000;
 
 /** How long a session's lease lasts: past every drain's own bound, then free again (a crashed writer). */
 export const GRAPH_MEMORY_LEASE_MS = 2 * GRAPH_MEMORY_DRAIN_MS + 60_000;
@@ -266,14 +271,17 @@ const within = <T>(p: Promise<T>, ms: number): Promise<T | "timeout"> =>
 export async function drainGraphMemory(app: App, ext: P2PExtension, mem: ExtMemory, deps: DrainDeps = {}): Promise<{ written: number; dropped: number; unavailable?: ExtMemoryUnavailable }> {
   const batch = await take(app);
   if (batch.length === 0) return { written: 0, dropped: 0 };
+  // A writer that never settled after its abort keeps its session's lease until it expires (no one
+  // else writes that session meanwhile); every other lease goes back now.
+  const abandoned = new Set<string>();
   try {
-    return await drainBatch(app, ext, mem, batch, deps);
+    return await drainBatch(app, ext, mem, batch, deps, abandoned);
   } finally {
-    await release(app, [...new Set(batch.map((i) => i.sid))]).catch(() => undefined);
+    await release(app, [...new Set(batch.map((i) => i.sid))].filter((s) => !abandoned.has(s))).catch(() => undefined);
   }
 }
 
-async function drainBatch(app: App, ext: P2PExtension, mem: ExtMemory, batch: GraphMemoryItem[], deps: DrainDeps): Promise<{ written: number; dropped: number; unavailable?: ExtMemoryUnavailable }> {
+async function drainBatch(app: App, ext: P2PExtension, mem: ExtMemory, batch: GraphMemoryItem[], deps: DrainDeps, abandoned: Set<string>): Promise<{ written: number; dropped: number; unavailable?: ExtMemoryUnavailable }> {
   const ctx = extContext(app, ext, { out: () => {}, err: (s) => deps.log?.(s) }, true, async () => false);
   const target =
     deps.target ??
@@ -300,6 +308,12 @@ async function drainBatch(app: App, ext: P2PExtension, mem: ExtMemory, batch: Gr
       dropped += items.length;
       continue;
     }
+    // Gathered while shared; written only if it still is (a session can turn private in between).
+    if ((await sessionCeiling(app, sid).catch(() => ({ kind: "private" as const }))).kind !== "shared") {
+      await countDropped(app, "not_shared", items.length);
+      dropped += items.length;
+      continue;
+    }
     // A real deadline: past it the writer is told to stop (it checks the signal before every write),
     // and this waits for it to settle, so no write overlaps the next batch or follows the timeout.
     const stop = new AbortController();
@@ -309,7 +323,14 @@ async function drainBatch(app: App, ext: P2PExtension, mem: ExtMemory, batch: Gr
     let r = await within(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
     if (r === "timeout") {
       stop.abort();
-      const late = await writing;
+      // Bounded: a writer that ignores the abort is given up on (its lease runs out; nothing else waits for it).
+      const late = await within(writing, deps.settleMs ?? GRAPH_MEMORY_SETTLE_MS);
+      if (late === "timeout") {
+        abandoned.add(sid);
+        await countDropped(app, "timeout", items.length);
+        dropped += items.length;
+        continue;
+      }
       // What it wrote before it stopped still counts; the rest timed out.
       const lateOk = late && typeof late === "object" ? Math.max(0, Math.min(items.length, Number(late.written) || 0)) : 0;
       r = { written: lateOk, failed: [{ reason: "timeout", n: items.length - lateOk }] };

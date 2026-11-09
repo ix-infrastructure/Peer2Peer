@@ -47,7 +47,7 @@ const NOISE = /^ix: failed to load [^\n]*$/gm;
  * Where an `ix` call may go: the graph target p2p's chokepoint gave (ExtContext.graphTarget,
  * packages/p2p/src/projects.ts graphTarget). Never taken from the environment.
  */
-export type IxTarget = { kind: "local"; endpoint: string; why?: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
+export type IxTarget = { kind: "local"; endpoint: string; why?: string; trustRootListener?: true } | { kind: "shared"; circle: string; endpoint: string; token?: string };
 
 /** `s` without trailing slashes (a loop, not a regex: linear on any input). */
 function trimSlashes(s: string): string {
@@ -108,9 +108,9 @@ export function localTarget(_env?: Record<string, string | undefined>): IxTarget
  * is the default local target.
  */
 export function checkedTarget(t: unknown): IxTarget {
-  const x = t as Partial<{ kind: string; endpoint: unknown; circle: unknown; token: unknown; why: unknown }> | null;
+  const x = t as Partial<{ kind: string; endpoint: unknown; circle: unknown; token: unknown; why: unknown; trustRootListener: unknown }> | null;
   const lo = x && x.kind === "local" ? normalizeLoopbackEndpoint(x.endpoint) : undefined;
-  if (lo) return { kind: "local", endpoint: lo, ...(typeof x!.why === "string" ? { why: x!.why } : {}) };
+  if (lo) return { kind: "local", endpoint: lo, ...(typeof x!.why === "string" ? { why: x!.why } : {}), ...(x!.trustRootListener === true ? { trustRootListener: true as const } : {}) };
   const sh = x && x.kind === "shared" && typeof x.circle === "string" ? normalizeSharedEndpoint(x.endpoint) : undefined;
   if (sh) return { kind: "shared", circle: x!.circle as string, endpoint: sh, ...(typeof x!.token === "string" && /^[\x21-\x7e]{1,4096}$/.test(x!.token) ? { token: x!.token } : {}) };
   return { kind: "local", endpoint: DEFAULT_IX_ENDPOINT };
@@ -344,8 +344,9 @@ export function refuseForTarget(argv: readonly string[], target: IxTarget): IxEx
 /**
  * Wraps a runner so every call is checked against its target first (refuseForTarget). `cwd`: the
  * folder a call runs in when it names none. A memory call (`ix note`, `ix session`) also needs:
- *   - the target's port to be held by this user's (or root's) process only (listener.ts), checked
- *     once per guard (a guard lives for one command or one batch), else `ix_listener`;
+ *   - the target's port to be held by this user's process only (root's too only with the person's
+ *     `ixTrustRootListener`, listener.ts), checked before every write and once per guard for a read,
+ *     else `ix_listener`;
  *   - the OSS commands (memorySupport): asked once per guard, and again right before every
  *     `ix session create`;
  *   - for a write, stderr saying it went to the target's local endpoint, whatever the exit code:
@@ -354,7 +355,7 @@ export function refuseForTarget(argv: readonly string[], target: IxTarget): IxEx
 export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<IxTarget>), cwd: string = process.cwd(), opts: { listener?: ListenerCheck } = {}): IxRunner {
   let support: Promise<MemorySupport> | undefined;
   const listeners = new Map<string, Promise<ListenerVerdict>>();
-  const listener = opts.listener ?? ((e: string) => checkLoopbackListener(e));
+  const listener: ListenerCheck = opts.listener ?? ((e, o) => checkLoopbackListener(e, { trustRoot: o?.trustRoot === true }));
   return {
     run: async (argv, o) => {
       const t = await (target as TargetFn)({ argv, cwd: o?.cwd ?? cwd });
@@ -362,10 +363,13 @@ export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<I
       if (refused) throw refused;
       const memory = memoryCall(argv);
       if (memory === undefined || memory === "help") return inner.run(argv, o);
-      let held = listeners.get(t.endpoint);
+      const trustRoot = t.kind === "local" && t.trustRootListener === true;
+      const ask = () => listener(t.endpoint, { trustRoot }).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
+      // Every write asks again (a listener can change between writes); reads ask once per guard.
+      let held = WRITES.has(memory) ? undefined : listeners.get(`${t.endpoint}|${trustRoot}`);
       if (!held) {
-        held = listener(t.endpoint).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
-        listeners.set(t.endpoint, held);
+        held = ask();
+        if (!WRITES.has(memory)) listeners.set(`${t.endpoint}|${trustRoot}`, held);
       }
       const v = await held;
       if (!v.ok) throw new IxExtError("ix_listener", `the local Ix endpoint ${t.endpoint} isn't one Peer2Peer can trust: ${v.why}; it writes nothing to Ix until it is`);

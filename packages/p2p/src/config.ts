@@ -41,6 +41,13 @@ export interface FileConfig {
   deviceInfo?: boolean;
   /** The local Ix backend (projects.ts localGraphEndpoint): honoured only as a loopback URL. Default http://localhost:8090. */
   ixEndpoint?: string;
+  /**
+   * Trust a root-owned listener on the local Ix endpoint's port (ext-ix listener.ts): Docker's port
+   * proxy on Linux runs as root whoever started the container, so on a machine whose Docker others
+   * use too it may be a teammate's backend. Off by default; only this file turns it on (hand-edited:
+   * no command writes it, and no environment variable overrides it).
+   */
+  ixTrustRootListener?: boolean;
   /** Message history (history.ts): on by default, kept `retentionDays` (30) and at most `maxBytes` (8 MiB). P2P_HISTORY=0 turns recording off. */
   history?: { enabled?: boolean; retentionDays?: number; maxBytes?: number };
   /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
