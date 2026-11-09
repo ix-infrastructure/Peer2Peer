@@ -10895,7 +10895,7 @@ async function verifyOrThrow(jws, ctx) {
     checkDeviceListed(sender, { iss: view.iss, ik: view.ik, devices: view.devices });
   verifyEnvelopeV3Signature(jws, sender.signingPublicKey);
   let commit;
-  let release;
+  let release2;
   let attempt;
   if (ctx.replayClaim) {
     const { claimant, isAlive: isAlive2 } = ctx.replayClaim;
@@ -10908,7 +10908,7 @@ async function verifyOrThrow(jws, ctx) {
       fail("replay-in-progress", `seq ${p.seq} from ${p.fdid} is being handled by another process`);
     attempt = c.attempt;
     commit = () => store2.commitReplay(p.fdid, p, nowMs, claimant.token);
-    release = (o) => store2.releaseReplay(p.fdid, p, claimant.token, o);
+    release2 = (o) => store2.releaseReplay(p.fdid, p, claimant.token, o);
   } else {
     const admitted = await store2.admitReplay(p.fdid, p, nowMs);
     if (admitted)
@@ -10917,10 +10917,10 @@ async function verifyOrThrow(jws, ctx) {
   if (!commit)
     return finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec);
   try {
-    return { ...await finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec), commitReplay: commit, releaseReplay: release, ...attempt !== void 0 ? { attempt } : {} };
+    return { ...await finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec), commitReplay: commit, releaseReplay: release2, ...attempt !== void 0 ? { attempt } : {} };
   } catch (e) {
     if (!(e instanceof P2PError) && ctx.replayClaim?.retryable?.(e))
-      await release().catch(() => void 0);
+      await release2().catch(() => void 0);
     else
       await commit().catch(() => void 0);
     throw e;
@@ -35306,6 +35306,7 @@ function extContext(app, ext, io2, json, confirm) {
       });
     },
     audience: (sid) => sessionAudience(app, sid),
+    mayShareSessionContext: (ofSid, fromSid) => mayShareSessionContext(app, ofSid, fromSid),
     localMac: (data) => localMac(app, ext.ns, data),
     ownStatus: async (sid) => {
       const rec = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
@@ -35314,6 +35315,18 @@ function extContext(app, ext, io2, json, confirm) {
       return { ...rec.status.repo ? { repo: rec.status.repo } : {}, files: rec.status.files ?? [], ...d.caps ? { caps: d.caps } : {}, ...d.agents ? { agents: d.agents } : {} };
     }
   };
+}
+async function mayShareSessionContext(app, ofSid, fromSid) {
+  if (typeof ofSid !== "string" || typeof fromSid !== "string" || ofSid === "" || fromSid === "") return false;
+  if (ofSid === fromSid) return true;
+  if (ofSid === PERSON_SESSION || fromSid === PERSON_SESSION) return false;
+  const [of, from] = await Promise.all([sessionCeiling(app, ofSid), sessionCeiling(app, fromSid)]);
+  if (of.kind !== "shared" || from.kind !== "shared") return false;
+  const [ofAud, fromAud] = await Promise.all([ceilingAudience(app, of), ceilingAudience(app, from)]);
+  if (!ofAud || !fromAud) return false;
+  for (const u of fromAud) if (!ofAud.has(u)) return false;
+  const [a, b] = await Promise.all([graphTarget(app, { sid: ofSid }), graphTarget(app, { sid: fromSid })]);
+  return a.kind === b.kind && a.endpoint === b.endpoint && (a.kind !== "shared" || b.kind === "shared" && a.circle === b.circle);
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
@@ -35477,7 +35490,8 @@ function docOf(cur) {
     dropped: cur.dropped && typeof cur.dropped === "object" ? { ...cur.dropped } : {},
     ...cur.lastWriteAt ? { lastWriteAt: cur.lastWriteAt } : {},
     ...cur.lastDropAt ? { lastDropAt: cur.lastDropAt } : {},
-    ...cur.unavailable ? { unavailable: cur.unavailable } : {}
+    ...cur.unavailable ? { unavailable: cur.unavailable } : {},
+    ...cur.leases && typeof cur.leases === "object" ? { leases: { ...cur.leases } } : {}
   };
 }
 var short = (s2, max) => typeof s2 === "string" ? sanitizePeerText(s2, max).trim() : "";
@@ -35487,7 +35501,7 @@ function statusFiles(rec) {
   for (const a of rec.status.agents ?? []) for (const f of a.files ?? []) if (typeof f === "string") out.add(f);
   return [...out];
 }
-function gather(doc, recs, ended, now = Date.now()) {
+function gather(doc, recs, ended, now = Date.now(), recordable = () => true) {
   const next = docOf(doc);
   let queued = 0;
   let dropped = 0;
@@ -35503,6 +35517,7 @@ function gather(doc, recs, ended, now = Date.now()) {
   };
   for (const rec of recs) {
     const sid = rec.sid;
+    if (!recordable(sid)) continue;
     let s2 = next.sessions[sid];
     const isEnded = ended(sid);
     if (!s2) {
@@ -35540,9 +35555,11 @@ async function ownRecs(app) {
 async function gatherGraphMemory(app, now = Date.now()) {
   const recs = await ownRecs(app);
   if (recs.length === 0) return { queued: 0, dropped: 0 };
+  const shared = /* @__PURE__ */ new Set();
+  for (const r of recs) if ((await sessionCeiling(app, r.sid).catch(() => ({ kind: "private" }))).kind === "shared") shared.add(r.sid);
   return app.state.update("graphMemory", (cur) => {
     const before = docOf(cur);
-    const r = gather(before, recs, (sid) => sessionEnded(app, sid), now);
+    const r = gather(before, recs, (sid) => sessionEnded(app, sid), now, (sid) => shared.has(sid));
     const changed2 = JSON.stringify(r.doc) !== JSON.stringify(before);
     return { ...changed2 ? { next: r.doc } : {}, result: { queued: r.queued, dropped: r.dropped } };
   });
@@ -35568,18 +35585,42 @@ async function noteAvailability(app, u) {
     return { next: d, result: void 0 };
   });
 }
-async function take(app) {
+var GRAPH_MEMORY_LEASE_MS = 2 * GRAPH_MEMORY_DRAIN_MS + 6e4;
+async function take(app, now = Date.now()) {
   return app.state.update("graphMemory", (cur) => {
     const d = docOf(cur);
     if (d.queue.length === 0) return { result: [] };
-    const batch = d.queue.splice(0, GRAPH_MEMORY_BATCH);
+    const leases = Object.fromEntries(Object.entries(d.leases ?? {}).filter(([, until]) => typeof until === "number" && until > now));
+    const batch = [];
+    const rest = [];
+    for (const it of d.queue) (batch.length < GRAPH_MEMORY_BATCH && !leases[it.sid] ? batch : rest).push(it);
+    if (batch.length === 0) return { result: [] };
+    for (const it of batch) leases[it.sid] = now + GRAPH_MEMORY_LEASE_MS;
+    d.queue = rest;
+    d.leases = leases;
     return { next: d, result: batch };
+  });
+}
+async function release(app, sids) {
+  await app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    if (!d.leases) return { result: void 0 };
+    for (const sid of sids) delete d.leases[sid];
+    if (Object.keys(d.leases).length === 0) delete d.leases;
+    return { next: d, result: void 0 };
   });
 }
 var within2 = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), ms).unref())]);
 async function drainGraphMemory(app, ext, mem, deps = {}) {
   const batch = await take(app);
   if (batch.length === 0) return { written: 0, dropped: 0 };
+  try {
+    return await drainBatch(app, ext, mem, batch, deps);
+  } finally {
+    await release(app, [...new Set(batch.map((i) => i.sid))]).catch(() => void 0);
+  }
+}
+async function drainBatch(app, ext, mem, batch, deps) {
   const ctx = extContext(app, ext, { out: () => {
   }, err: (s2) => deps.log?.(s2) }, true, async () => false);
   const target = deps.target ?? ((sid) => {
@@ -35590,7 +35631,9 @@ async function drainGraphMemory(app, ext, mem, deps = {}) {
   let dropped = 0;
   const bySid = /* @__PURE__ */ new Map();
   for (const { sid, ...item } of batch) bySid.set(sid, [...bySid.get(sid) ?? [], item]);
-  for (const [sid, items] of bySid) {
+  const groups = [...bySid];
+  for (let g = 0; g < groups.length; g++) {
+    const [sid, items] = groups[g];
     let t2;
     try {
       t2 = await target(sid);
@@ -35602,14 +35645,17 @@ async function drainGraphMemory(app, ext, mem, deps = {}) {
       dropped += items.length;
       continue;
     }
-    let r;
-    try {
-      r = await within2(mem.write(ctx, { sid, items }), GRAPH_MEMORY_DRAIN_MS);
-    } catch {
-      r = void 0;
+    const stop = new AbortController();
+    const writing = Promise.resolve().then(() => mem.write(ctx, { sid, items, signal: stop.signal })).catch(() => void 0);
+    let r = await within2(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
+    if (r === "timeout") {
+      stop.abort();
+      const late = await writing;
+      const lateOk = late && typeof late === "object" ? Math.max(0, Math.min(items.length, Number(late.written) || 0)) : 0;
+      r = { written: lateOk, failed: [{ reason: "timeout", n: items.length - lateOk }] };
     }
-    if (r === "timeout" || r === void 0 || typeof r !== "object") {
-      await countDropped(app, r === "timeout" ? "timeout" : "ext_failed", items.length);
+    if (r === void 0 || typeof r !== "object") {
+      await countDropped(app, "ext_failed", items.length);
       dropped += items.length;
       continue;
     }
@@ -35630,7 +35676,9 @@ async function drainGraphMemory(app, ext, mem, deps = {}) {
     }
     if (r.unavailable) {
       await noteAvailability(app, r.unavailable);
-      return { written, dropped, unavailable: r.unavailable };
+      const left = groups.slice(g + 1).reduce((a, [, its]) => a + its.length, 0);
+      await countDropped(app, short(r.unavailable.reason, 32) || "unavailable", left);
+      return { written, dropped: dropped + left, unavailable: r.unavailable };
     }
   }
   return { written, dropped };

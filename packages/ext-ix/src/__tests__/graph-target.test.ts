@@ -75,7 +75,7 @@ describe("targets are checked again in ext-ix", () => {
     const calls: string[][] = [];
     // An `ix` from before #916: no local `ix note`, so a write is refused after the help probe alone.
     const inner: IxRunner = { run: async (argv) => (calls.push([...argv]), { code: 0, stdout: argv[0] === "--help" ? "Usage: ix\n" : "{}", stderr: "" }) };
-    const g = guardRunner(inner, async () => t);
+    const g = guardRunner(inner, async () => t, undefined, { listener: async () => ({ ok: true }) });
     await expect(g.run(["note", "--tag=note", "--json"], { stdin: "private text" })).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(/upgrade Ix/) });
     await g.run(["impact", "x", "--format", "json"]);
     expect(calls).toEqual([["--help"], ["impact", "x", "--format", "json"]]);
@@ -96,7 +96,7 @@ describe.skipIf(process.platform === "win32")("a real `ix` child sees only the c
       expect(s.env.P2P_PERSON_TOKEN).toBeUndefined();
       // And `ix note` never runs for it unless the `ix` is the OSS one (this one's help lists no
       // "Memory:"): only the help probe ran, with the same pinned endpoint.
-      await expect(runner(c, {}, "s1").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target" });
+      await expect(runner(c, { listener: async () => ({ ok: true }) }, "s1").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target" });
       expect(seen().argv).toEqual(["--help"]);
       expect(seen().env.IX_ENDPOINT).toBe(DEFAULT_IX_ENDPOINT);
     } finally {

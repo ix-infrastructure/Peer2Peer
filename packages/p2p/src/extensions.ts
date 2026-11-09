@@ -178,7 +178,11 @@ export interface ExtMemory {
   v: 1;
   /** Whether the writes can go to the local graph at all (asked before anything is gathered). */
   available(ctx: ExtContext): Promise<{ ok: true } | ExtMemoryUnavailable>;
-  write(ctx: ExtContext, batch: { sid: string; items: ExtMemoryItem[] }): Promise<ExtMemoryResult>;
+  /**
+   * Writes one session's items. `signal` aborts when the host's time for the batch is up: the writer
+   * must check it before every write and write nothing after it fires (the host waits for it to settle).
+   */
+  write(ctx: ExtContext, batch: { sid: string; items: ExtMemoryItem[]; signal?: AbortSignal }): Promise<ExtMemoryResult>;
 }
 
 /** `ext.memory` when it is a usable v1 memory writer; undefined otherwise (absent or malformed: never asked). */
@@ -370,6 +374,13 @@ export interface ExtContext {
    * file tools): store the MAC with the setting and honour the setting only when it verifies.
    */
   localMac?(data: string): string;
+  /**
+   * Whether session `fromSid` may pass on context recorded for session `ofSid` (graph memory's
+   * records, ExtMemory): the same session, or both bound to projects whose ceilings are shared, with
+   * `fromSid`'s audience within `ofSid`'s and the same graph target. Absent on older clients: a
+   * caller then refuses anything but the same session.
+   */
+  mayShareSessionContext?(ofSid: string, fromSid: string): Promise<boolean>;
   /** Own sessions' last posted statuses on this device. */
   ownStatus(sid: string): Promise<{ repo?: string; files: string[]; caps?: string[]; agents?: StatusAgent[] } | undefined>;
 }

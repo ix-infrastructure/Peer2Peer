@@ -11,15 +11,39 @@
 //   - A write that doesn't confirm the local backend on stderr stops the batch (ix_unconfirmed).
 
 import { chmodSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ExtContext } from "@peer2peer/cli";
 import { createIxExtension, runner } from "../extension.js";
 import { confirmsLocalWrite, DEFAULT_IX_ENDPOINT, guardRunner, memoryCall, parseMemorySupport, refuseForTarget, type IxRunner } from "../ix.js";
 import { memoryActor, memoryPurpose, memorySessionName, memoryText } from "../memory.js";
+import { checkLoopbackListener } from "../listener.js";
 import { cleanupTmp, fakeIx, OSS_HELP, PRO_HELP, tmp } from "./harness.js";
 
-afterAll(() => cleanupTmp());
+// A real loopback listener this test process owns: the local endpoint every writer test uses, so the
+// real listener check (listener.ts) runs against it and passes.
+let server: Server;
+let EP = "";
+/**
+ * Whether this machine lets the test see its own listener (a sandbox can hide the socket tables
+ * from child processes; the check then fails closed). Required in CI, where the real check runs.
+ */
+let observable = false;
+beforeAll(async () => {
+  server = createServer(() => {});
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  EP = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  observable = (await checkLoopbackListener(EP)).ok;
+  if (!observable && process.env.CI) throw new Error("the listener check can't see this test's own listener in CI");
+  if (!observable) console.warn("listener check: this environment hides the socket tables; the writer tests stand in for it");
+  memory = createIxExtension(observable ? {} : { listener: async () => ({ ok: true }) }).memory!;
+});
+afterAll(async () => {
+  await new Promise((r) => server.close(r));
+  cleanupTmp();
+});
+const here = () => ({ kind: "local" as const, endpoint: EP, why: "x is private" });
 
 const CLOUD = "https://prod.cloud.ix-infra.com";
 const PRO_ENV = { IX_ENDPOINT: CLOUD, IX_PAT: "kpat_abcdefghijkl", IX_ORG: "acme", IX_PUSH_ENDPOINT: CLOUD, NODE_OPTIONS: "--require /evil.js", P2P_PERSON_TOKEN: "secret" };
@@ -113,7 +137,7 @@ describe("which `ix note` answers: from `ix --help`, never by trying", () => {
     for (const [help, msg] of [[PRO_HELP, /Ix Pro is installed/], ["Usage: ix\n", /upgrade Ix/]] as const) {
       const calls: string[][] = [];
       const inner: IxRunner = { run: async (argv) => (calls.push([...argv]), { code: 0, stdout: argv[0] === "--help" ? help : "{}", stderr: "" }) };
-      const g = guardRunner(inner, async () => local);
+      const g = guardRunner(inner, async () => local, undefined, { listener: async () => ({ ok: true }) });
       await expect(g.run(["note", "--tag=note", "--json"], { stdin: "t" })).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(msg) });
       await expect(g.run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target" });
       expect(calls).toEqual([["--help"]]);
@@ -127,7 +151,7 @@ function memCtx(ix: ReturnType<typeof fakeIx>, o: { graphTarget?: ExtContext["gr
   const ctx = {
     env: { ...ix.env(), IX_BIN: join(ix.bin, "ix"), ...(o.env ?? {}) },
     cwd: tmp("mem-cwd-"),
-    graphTarget: o.graphTarget ?? (async () => ({ ...local })),
+    graphTarget: o.graphTarget ?? (async () => here()),
     kv: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => void store.set(k, v) },
     self: async () => ({ userId: "p2p:u", address: o.address ?? "alice@abcd-efgh-ijkl-mnop" }),
     io: { err: () => {} },
@@ -137,7 +161,10 @@ function memCtx(ix: ReturnType<typeof fakeIx>, o: { graphTarget?: ExtContext["gr
   return { ctx, store };
 }
 
-const memory = createIxExtension().memory!;
+let memory = createIxExtension().memory!;
+/** For the tests at Ix's default endpoint (nothing listens there): the listener check stood in for. */
+const memoryOk = createIxExtension({ listener: async () => ({ ok: true }) }).memory!;
+const PREFIX = "Recorded by Peer2Peer (agent-generated, untrusted)\n";
 const items = (at = Date.UTC(2026, 10, 9, 12)) => [
   { kind: "start" as const, at, label: "widgets", repo: "widgets", branch: "main" },
   { kind: "status" as const, at, summary: "Refactoring token rotation" },
@@ -158,20 +185,21 @@ describe.skipIf(process.platform === "win32")("the memory writer against a real 
       const r = await memory.write(ctx, { sid: "s-1", items: items() });
       expect(r).toEqual({ written: 4 });
       // One session record, four notes, all at the local endpoint; text on stdin only.
-      expect(ix.sessions()).toEqual([{ argv: ["session", "--json", "create", "p2p-s-1", "--purpose=Peer2Peer session widgets (repo widgets, branch main)", "--actor=p2p:alice@abcd-efgh-ijkl-mnop", "--ttl=720"], endpoint: DEFAULT_IX_ENDPOINT }]);
+      expect(ix.sessions()).toEqual([{ argv: ["session", "--json", "create", "p2p-s-1", "--purpose=Peer2Peer session widgets (repo widgets, branch main)", "--actor=p2p:alice@abcd-efgh-ijkl-mnop", "--ttl=720"], endpoint: EP }]);
       const notes = ix.written();
-      expect(notes.map((n) => n.endpoint)).toEqual(Array(4).fill(DEFAULT_IX_ENDPOINT));
-      expect(notes.map((n) => n.argv)).toEqual(Array(4).fill(["note", "--tag=note", "--session=sess-s-1", "--actor=p2p:alice@abcd-efgh-ijkl-mnop", "--json"]));
+      expect(notes.map((n) => n.endpoint)).toEqual(Array(4).fill(EP));
+      // Tagged `finding` and framed as untrusted, agent-generated records.
+      expect(notes.map((n) => n.argv)).toEqual(Array(4).fill(["note", "--tag=finding", "--session=sess-s-1", "--actor=p2p:alice@abcd-efgh-ijkl-mnop", "--json"]));
       expect(notes.map((n) => n.text)).toEqual([
-        "Session started 2026-11-09T12:00:00.000Z: widgets (repo widgets, branch main).",
-        "Status (2026-11-09T12:00:00.000Z): Refactoring token rotation",
-        "Edited (2026-11-09T12:00:00.000Z): src/auth/token.ts, src/a.ts",
-        "Session ended 2026-11-09T12:00:00.000Z.",
+        `${PREFIX}Session started 2026-11-09T12:00:00.000Z: widgets (repo widgets, branch main).`,
+        `${PREFIX}Status (2026-11-09T12:00:00.000Z): Refactoring token rotation`,
+        `${PREFIX}Edited (2026-11-09T12:00:00.000Z): src/auth/token.ts, src/a.ts`,
+        `${PREFIX}Session ended 2026-11-09T12:00:00.000Z.`,
       ]);
       // Every child (help probes included) saw the pinned endpoint and no Pro variable.
       for (const c of ix.calls()) expect(c.argv.join(" ")).not.toContain(CLOUD);
       // The Ix session id is remembered: the next batch writes no second record.
-      expect(store.get("memory")).toMatchObject({ sessions: { "s-1": { id: "sess-s-1" } } });
+      expect(store.get("memory")).toMatchObject({ sessions: { "s-1": { id: "sess-s-1", endpoint: EP } } });
       await memory.write(ctx, { sid: "s-1", items: [{ kind: "status", at: 1, summary: "next" }] });
       expect(ix.sessions()).toHaveLength(1);
     } finally {
@@ -194,7 +222,7 @@ describe.skipIf(process.platform === "win32")("the memory writer against a real 
     const envs = (await import("node:fs")).readFileSync(seen, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, string>);
     expect(envs.length).toBeGreaterThanOrEqual(3); // --version, --help, session create, note
     for (const e of envs) {
-      expect(e.IX_ENDPOINT).toBe(DEFAULT_IX_ENDPOINT);
+      expect(e.IX_ENDPOINT).toBe(EP);
       expect(Object.keys(e).filter((k) => /^IX_/.test(k)).sort()).toEqual(["IX_ENDPOINT", "IX_HOME", "IX_MAP_BACKGROUND_REFRESH", "IX_NO_UPDATE_CHECK"]);
       expect(e.NODE_OPTIONS).toBeUndefined();
       expect(e.P2P_PERSON_TOKEN).toBeUndefined();
@@ -208,10 +236,10 @@ describe.skipIf(process.platform === "win32")("the memory writer against a real 
     ix.set("config.yaml", PRO_CONFIG);
     const { ctx } = memCtx(ix, { env: PRO_ENV });
     ix.set("help.txt", PRO_HELP);
-    await expect(runner(ctx, {}, "s").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(/Ix Pro/) });
+    await expect(runner(ctx, observable ? {} : { listener: async () => ({ ok: true }) }, "s").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(/Ix Pro/) });
     expect(ix.calls().map((c) => c.argv[0])).toEqual(["--help"]);
     ix.set("help.txt", OSS_HELP);
-    const r = await runner(ctx, {}, "s").run(["note", "--json", "show", "n1"]);
+    const r = await runner(ctx, observable ? {} : { listener: async () => ({ ok: true }) }, "s").run(["note", "--json", "show", "n1"]);
     expect(JSON.parse(r.stdout)).toMatchObject({ text: "local note" });
     expect(ix.calls().map((c) => c.argv)).toEqual([["--help"], ["--help"], ["note", "--json", "show", "n1"]]);
   });
@@ -246,10 +274,10 @@ describe.skipIf(process.platform === "win32")("the memory writer against a real 
     expect(ix.calls()).toHaveLength(0);
     // A host naming a cloud URL "local" is checked again: the default local endpoint.
     const widened = memCtx(ix, { graphTarget: async () => ({ kind: "local", endpoint: CLOUD, why: "" }) });
-    expect((await memory.write(widened.ctx, { sid: "s-6", items: [{ kind: "end", at: 1 }] })).written).toBe(1);
+    expect((await memoryOk.write(widened.ctx, { sid: "s-6", items: [{ kind: "end", at: 1 }] })).written).toBe(1);
     expect(ix.written().map((n) => n.endpoint)).toEqual([DEFAULT_IX_ENDPOINT]);
     const throwing = memCtx(ix, { graphTarget: async () => Promise.reject(new Error("boom")) });
-    expect((await memory.write(throwing.ctx, { sid: "s-7", items: [{ kind: "end", at: 1 }] })).written).toBe(1);
+    expect((await memoryOk.write(throwing.ctx, { sid: "s-7", items: [{ kind: "end", at: 1 }] })).written).toBe(1);
     expect(ix.written().at(-1)!.endpoint).toBe(DEFAULT_IX_ENDPOINT);
   });
 
@@ -288,7 +316,7 @@ describe("what memory writes", () => {
   it("one-line, bounded text; files repo-relative only; names and actors safe", () => {
     expect(memoryText({ kind: "status", at: 0, summary: "a\nb\u202ec\u0007d" })).toMatch(/: a b c d$/);
     expect(memoryText({ kind: "status", at: 0, summary: "  " })).toBeUndefined();
-    expect(memoryText({ kind: "status", at: 0, summary: "x".repeat(1000) })!.length).toBeLessThan(360);
+    expect(memoryText({ kind: "status", at: 0, summary: "x".repeat(1000) })!.length).toBeLessThan(420);
     expect(memoryText({ kind: "files", at: 0, files: ["../x", "/etc/passwd", "a/./b", "ok.ts", "ok.ts"] })).toMatch(/: ok\.ts$/);
     expect(memoryText({ kind: "files", at: 0, files: ["../x"] })).toBeUndefined();
     expect(memoryText({ kind: "files", at: 0, files: Array.from({ length: 60 }, (_, i) => `f${i}.ts`) })).toMatch(/and 10 more$/);
@@ -304,5 +332,160 @@ describe("what memory writes", () => {
       const argv = ["session", "--json", "create", memorySessionName("s"), `--purpose=${memoryPurpose({ label, repo: "r\nr", branch: "b" })}`, `--actor=${memoryActor("bad name")}`, "--ttl=720"];
       expect(memoryCall(argv), label).toBe("session-create");
     }
+  });
+});
+
+describe("review fixes (M1, M2, L3-L6)", () => {
+  const ok = async () => ({ ok: true as const });
+  const ossInner = (calls: string[][], o: { help?: () => string; note?: (argv: readonly string[]) => { code: number; stdout: string; stderr: string } } = {}): IxRunner => ({
+    run: async (argv) => {
+      calls.push([...argv]);
+      if (argv[0] === "--help") return { code: 0, stdout: o.help ? o.help() : OSS_HELP, stderr: "" };
+      if (argv[0] === "--version") return { code: 0, stdout: "0.14.0", stderr: "" };
+      if (o.note) return o.note(argv);
+      return { code: 0, stdout: "{}", stderr: `→ local backend ${DEFAULT_IX_ENDPOINT}` };
+    },
+  });
+
+  it("M1: a port held by someone else: no memory call runs at all (writes, reads, import), and memory reports ix_listener", async () => {
+    const calls: string[][] = [];
+    const no = async () => ({ ok: false as const, why: "port 8090 is held by another user (uid 1001), not your Ix backend" });
+    const g = guardRunner(ossInner(calls), async () => local, undefined, { listener: no });
+    for (const argv of [["note", "--tag=note", "--json"], ["note", "--json", "show", "n1"], ["session", "--json", "create", "p2p-s", "--purpose=x", "--actor=p2p", "--ttl=720"], ["session", "--json", "show", "s"]]) {
+      await expect(g.run(argv, { stdin: "secret status" })).rejects.toMatchObject({ code: "ix_listener", message: expect.stringMatching(/held by another user/) });
+    }
+    expect(calls).toEqual([]);
+    // Reads of the graph (#44's) are unaffected.
+    await g.run(["status", "--format", "json"]);
+    const ix = fakeIx();
+    ix.set("help.txt", OSS_HELP);
+    const m = createIxExtension({ listener: no }).memory!;
+    const { ctx } = memCtx(ix);
+    expect(await m.available(ctx)).toMatchObject({ ok: false, reason: "ix_listener" });
+    expect(await m.write(ctx, { sid: "l1", items: items() })).toMatchObject({ written: 0, unavailable: { reason: "ix_listener" } });
+    expect(ix.written()).toEqual([]);
+    expect(ix.sessions()).toEqual([]);
+  });
+
+  it("L3: a write without the local-backend line is ix_unconfirmed whatever its exit code; Pro is asked again right before session create", async () => {
+    for (const code of [0, 1, 2]) {
+      const g = guardRunner(ossInner([], { note: () => ({ code, stdout: "", stderr: "Error: fetch failed" }) }), async () => local, undefined, { listener: ok });
+      await expect(g.run(["note", "--tag=note", "--json"], { stdin: "t" })).rejects.toMatchObject({ code: "ix_unconfirmed" });
+    }
+    // OSS at first, Pro by the time a session is created: refused, and the note read before was fine.
+    let n = 0;
+    const calls: string[][] = [];
+    const g = guardRunner(ossInner(calls, { help: () => (n++ === 0 ? OSS_HELP : PRO_HELP), note: () => ({ code: 0, stdout: "{}", stderr: "" }) }), async () => local, undefined, { listener: ok });
+    await g.run(["note", "--json", "show", "n1"]);
+    await expect(g.run(["session", "--json", "create", "p2p-s", "--purpose=x", "--actor=p2p", "--ttl=720"])).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(/Ix Pro/) });
+    expect(calls.map((c) => c[0] + (c[2] ? ` ${c[2]}` : ""))).toEqual(["--help", "note show", "--help"]);
+  });
+
+  it("L4: an aborted batch writes nothing more; aborting mid-batch stops before the next write", async () => {
+    const ix = fakeIx();
+    ix.set("help.txt", OSS_HELP);
+    const { ctx } = memCtx(ix);
+    const pre = new AbortController();
+    pre.abort();
+    expect(await memory.write(ctx, { sid: "a1", items: items(), signal: pre.signal })).toMatchObject({ written: 0, failed: [{ reason: "aborted", n: 4 }] });
+    expect(ix.calls()).toEqual([]);
+    // A runner that aborts once the first note is written.
+    const stop = new AbortController();
+    const m = createIxExtension({
+      listener: ok,
+      ix: (c) => {
+        const inner = runner(c, { listener: ok });
+        return { run: async (argv, o) => { const r = await inner.run(argv, o); if (argv[0] === "note") stop.abort(); return r; } };
+      },
+    }).memory!;
+    // Deps.ix replaces the guarded runner's inner: the guard still wraps it.
+    const r = await m.write(ctx, { sid: "a2", items: items(), signal: stop.signal });
+    expect(r).toMatchObject({ written: 1, failed: [{ reason: "aborted", n: 3 }] });
+    expect(ix.written()).toHaveLength(1);
+  });
+
+  it("L5: records are framed and tagged; file names with spaces, controls or past 200 characters are dropped", () => {
+    const t = memoryText({ kind: "files", at: 0, files: ["ok.ts", "has space.ts", "tab\there.ts", "nl\nx.ts", "bidi‮.ts", `${"d/".repeat(120)}x.ts`, "src/fine-name_1.ts"] })!;
+    expect(t.split("\n")[0]).toBe("Recorded by Peer2Peer (agent-generated, untrusted)");
+    expect(t.split("\n")[1]).toMatch(/: ok\.ts, src\/fine-name_1\.ts$/);
+    expect(t.split("\n")).toHaveLength(2);
+  });
+
+  it("L6: a remembered session is checked; gone, or created at another endpoint, it is made again; never twice in a batch", async () => {
+    const ix = fakeIx();
+    ix.set("help.txt", OSS_HELP);
+    const { ctx, store } = memCtx(ix);
+    await memory.write(ctx, { sid: "k1", items: [{ kind: "status", at: 1, summary: "one" }, { kind: "status", at: 2, summary: "two" }] });
+    expect(ix.sessions()).toHaveLength(1);
+    // Next batch: checked with `session show` once, reused.
+    await memory.write(ctx, { sid: "k1", items: [{ kind: "status", at: 3, summary: "three" }, { kind: "end", at: 4 }] });
+    expect(ix.sessions()).toHaveLength(1);
+    expect(ix.calls().filter((c) => c.argv[0] === "session" && c.argv[2] === "show")).toHaveLength(1);
+    // The backend lost it: made again.
+    ix.set("gone.txt", "sess-k1");
+    await memory.write(ctx, { sid: "k1", items: [{ kind: "status", at: 5, summary: "five" }] });
+    expect(ix.sessions()).toHaveLength(2);
+    // Remembered for another endpoint: not used there, made again here.
+    ix.set("gone.txt", "");
+    store.set("memory", { sessions: { k2: { id: "sess-k2", endpoint: "http://127.0.0.1:1", at: 1 } } });
+    await memory.write(ctx, { sid: "k2", items: [{ kind: "status", at: 6, summary: "six" }] });
+    expect(ix.sessions().at(-1)!.argv[3]).toBe("p2p-k2");
+    expect(store.get("memory")).toMatchObject({ sessions: { k2: { id: "sess-k2", endpoint: EP } } });
+  });
+
+  describe("M2: `--ix-note` won't pass on another session's Peer2Peer record", () => {
+    const noteCmd = createIxExtension().commands!.find((c) => c.name === "note")!;
+    const send = { calls: 0 };
+    function noteCtx(note: Record<string, unknown>, o: { may?: (a: string, b: string) => Promise<boolean>; kv?: unknown } = {}) {
+      const ixDeps = { listener: ok, ix: () => ossInner([], { note: () => ({ code: 0, stdout: JSON.stringify(note), stderr: "" }) }) };
+      const store = new Map<string, unknown>(o.kv ? [["memory", o.kv]] : []);
+      const ctx = {
+        env: {},
+        cwd: tmp("ixnote-"),
+        graphTarget: async () => ({ ...local }),
+        kv: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => void store.set(k, v) },
+        self: async () => ({ userId: "p2p:u", address: "me@abcd" }),
+        send: async () => (send.calls++, { delivered: true, to: { userId: "u2", address: "bob@x", own: "u2", sid: "b1", ref: "r" }, relays: 1, devices: 1, kind: "x:ix.note", bytes: 10 }),
+        io: { err: () => {} },
+        json: true,
+        interactive: false,
+        ...(o.may ? { mayShareSessionContext: o.may } : {}),
+      } as unknown as ExtContext;
+      const cmd = createIxExtension(ixDeps).commands!.find((c) => c.name === "note")!;
+      return (from: string) => cmd.run(ctx, [], { fromSession: from, to: "bob", ixNote: "n1" });
+    }
+    const rec = (session: Record<string, unknown>) => ({ id: "n1", text: "Recorded by Peer2Peer (agent-generated, untrusted)\nStatus: secret plan", tag: "finding", at: "2026-11-09T00:00:00Z", ...session });
+
+    it("its own session's record goes out; another's only when p2p says that session's context may (shared, wider)", async () => {
+      expect(noteCmd).toBeDefined();
+      const before = send.calls;
+      await noteCtx(rec({ sessionName: "p2p-A" }))("A");
+      expect(send.calls).toBe(before + 1);
+      const asked: string[][] = [];
+      await noteCtx(rec({ sessionName: "p2p-A" }), { may: async (a, b) => (asked.push([a, b]), true) })("B");
+      expect(asked).toEqual([["A", "B"]]);
+      expect(send.calls).toBe(before + 2);
+    });
+
+    it("refused: a private (or narrower) session's record, an older p2p, a hashed name, a record with no session, an id from the store", async () => {
+      const before = send.calls;
+      for (const [note, o] of [
+        [rec({ sessionName: "p2p-A" }), { may: async () => false }],
+        [rec({ sessionName: "p2p-A" }), { may: async () => Promise.reject(new Error("x")) }],
+        [rec({ sessionName: "p2p-A" }), {}], // a p2p without mayShareSessionContext
+        [rec({ sessionName: `p2p-${"a".repeat(32)}` }), { may: async () => true }], // can't be traced back
+        [rec({}), { may: async () => true }], // the prefix alone marks it
+        [rec({ sessionId: "sess-X", sessionName: "renamed" }), { kv: { sessions: { X: { id: "sess-X", endpoint: EP, at: 1 } } }, may: async () => false }],
+      ] as const) {
+        await expect(noteCtx(note, o as never)("B")).rejects.toMatchObject({ code: "not_shared" });
+      }
+      expect(send.calls).toBe(before);
+    });
+
+    it("the person's own notes go out as before", async () => {
+      const before = send.calls;
+      await noteCtx({ id: "n1", text: "my own decision", tag: "decision", at: "2026-11-09T00:00:00Z", sessionName: "sprint-23" })("B");
+      expect(send.calls).toBe(before + 1);
+    });
   });
 });

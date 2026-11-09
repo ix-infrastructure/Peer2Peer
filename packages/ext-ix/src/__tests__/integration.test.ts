@@ -8,7 +8,7 @@
 //   `p2p ix conflicts` flags a semantic conflict from a stubbed Ix graph.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cleanupTmp, extensionDir, fakeIx, gitRepo, OSS_HELP, PRO_HELP, startRelay, User, type FakeIx, type TestRelay } from "./harness.js";
+import { cleanupTmp, extensionDir, fakeIx, gitRepo, OSS_HELP, ownedEndpoint, PRO_HELP, setIxEndpoint, startRelay, User, type FakeIx, type TestRelay } from "./harness.js";
 
 const R = "wss://relay.ext-ix.test/v3";
 const REMOTE = "https://github.com/Acme/Widgets.git";
@@ -19,6 +19,7 @@ let alice: User;
 let bob: User;
 let carol: User;
 let repo: { root: string; rev: string };
+let owned: Awaited<ReturnType<typeof ownedEndpoint>>;
 const ids: Record<string, string> = {};
 
 async function befriend(a: User, b: User): Promise<void> {
@@ -38,6 +39,9 @@ describe("ext-ix end to end", () => {
     carol = new User("carol", transport, { ...ix.env() });
     repo = gitRepo(REMOTE);
     await bob.ok(["extensions", "enable", "ix"]); // bob opts in through config.json
+    // bob's local Ix endpoint: a loopback port this test process holds (listener.ts checks who does).
+    owned = await ownedEndpoint();
+    setIxEndpoint(bob.home, owned.endpoint);
     for (const u of [alice, bob, carol]) ids[u.name] = (await u.ok(["init", "--name", u.name, "--relay", R, "--yes"])).userId;
     await befriend(alice, bob);
     await befriend(alice, carol);
@@ -56,6 +60,7 @@ describe("ext-ix end to end", () => {
 
   afterAll(async () => {
     await relay?.close().catch(() => {});
+    await owned?.close();
     cleanupTmp();
   });
 
@@ -153,6 +158,13 @@ describe("ext-ix end to end", () => {
     // a Pro-like login in config.yaml (its cloud `endpoint`) doesn't move it: the child's endpoint is
     // pinned to the local graph.
     ix.set("help.txt", OSS_HELP);
+    // Where this machine hides the socket tables from child processes, the listener check fails
+    // closed and nothing below can be written: then it must refuse (ix_listener). Required in CI.
+    if (!owned.observable) {
+      if (process.env.CI) throw new Error("the listener check can't see this test's own listener in CI");
+      expect((await bob.run(["ix", "import", id], { json: false, answer: "y" })).err).toContain("ix_listener");
+      return;
+    }
     ix.set("config.yaml", 'endpoint: "https://prod.cloud.ix-infra.com"\nactive: acme\ncluster: prod\n');
     expect((await bob.run(["ix", "import", id, "--yes"])).json.error).toBe("consent_required");
     expect(ix.written()).toHaveLength(0);
@@ -161,7 +173,7 @@ describe("ext-ix end to end", () => {
     expect(yes.out).toMatch(/Imported into your Ix graph as note note-42/);
     const w = ix.written();
     expect(w).toHaveLength(1);
-    expect(w[0].endpoint).toBe("http://localhost:8090");
+    expect(w[0].endpoint).toBe(owned.endpoint);
     expect(w[0].argv).toEqual(["note", "--tag=decision", expect.stringMatching(/^--actor=p2p:alice@/), "--json"]);
     expect(w[0].text).toMatch(/^Shared by alice@[a-z2-7-]+ over Peer2Peer: Token rotation\n\nAuth tokens/);
     // A client that showed it vouches with the hash.

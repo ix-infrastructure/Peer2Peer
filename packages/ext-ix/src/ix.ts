@@ -25,6 +25,7 @@ import { execFile } from "node:child_process";
 import { IxExtError } from "./text.js";
 import { delimiter, isAbsolute, resolve as resolvePath } from "node:path";
 import { whichAbsolute } from "./which.js";
+import { checkLoopbackListener, type ListenerCheck, type ListenerVerdict } from "./listener.js";
 
 export interface IxResult {
   code: number;
@@ -218,7 +219,7 @@ export const MAX_PURPOSE = 200;
 /** Longest session TTL ext-ix asks for, in hours (a year). */
 export const MAX_TTL_HOURS = 8760;
 
-export type MemoryCall = "help" | "note-create" | "note-show" | "session-create";
+export type MemoryCall = "help" | "note-create" | "note-show" | "session-create" | "session-show";
 
 /** One line of printable text: no control or format characters, no line or paragraph separators. */
 const isOneLine = (s: string) => !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s);
@@ -229,6 +230,7 @@ const isOneLine = (s: string) => !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s);
  * only ever goes on stdin, never into argv where `ps` shows it):
  *   ix --help                                                         which commands answer (memorySupport)
  *   ix note --json show <id>                                          read a note (--ix-note)
+ *   ix session --json show <ref>                                      is a remembered session still there
  *   ix note --tag=<t> [--session=<ref>] [--actor=<a>] --json          write a note, text on stdin
  *   ix session --json create <p2p-name> --purpose=<p> --actor=<a> --ttl=<h>   a session record
  */
@@ -249,6 +251,7 @@ export function memoryCall(argv: readonly string[]): MemoryCall | undefined {
     }
     return seen.has("json") && seen.has("tag") ? "note-create" : undefined;
   }
+  if (a[0] === "session" && a.length === 4 && a[1] === "--json" && a[2] === "show" && IX_SESSION_REF_RE.test(a[3])) return "session-show";
   if (a[0] === "session" && a.length === 7 && a[1] === "--json" && a[2] === "create" && IX_SESSION_NAME_RE.test(a[3])) {
     const purpose = /^--purpose=(.+)$/s.exec(a[4])?.[1];
     const actor = /^--actor=(.+)$/s.exec(a[5])?.[1];
@@ -340,13 +343,18 @@ export function refuseForTarget(argv: readonly string[], target: IxTarget): IxEx
 
 /**
  * Wraps a runner so every call is checked against its target first (refuseForTarget). `cwd`: the
- * folder a call runs in when it names none. A memory call (`ix note`, `ix session`) also needs the
- * OSS commands (memorySupport, asked once per guard: a guard lives for one command or one batch),
- * and a write must then say on stderr that it went to the target's local endpoint, or it fails
- * with `ix_unconfirmed` (whatever answered was not the OSS command against that backend).
+ * folder a call runs in when it names none. A memory call (`ix note`, `ix session`) also needs:
+ *   - the target's port to be held by this user's (or root's) process only (listener.ts), checked
+ *     once per guard (a guard lives for one command or one batch), else `ix_listener`;
+ *   - the OSS commands (memorySupport): asked once per guard, and again right before every
+ *     `ix session create`;
+ *   - for a write, stderr saying it went to the target's local endpoint, whatever the exit code:
+ *     else `ix_unconfirmed` (whatever answered was not the OSS command against that backend).
  */
-export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<IxTarget>), cwd: string = process.cwd()): IxRunner {
+export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<IxTarget>), cwd: string = process.cwd(), opts: { listener?: ListenerCheck } = {}): IxRunner {
   let support: Promise<MemorySupport> | undefined;
+  const listeners = new Map<string, Promise<ListenerVerdict>>();
+  const listener = opts.listener ?? ((e: string) => checkLoopbackListener(e));
   return {
     run: async (argv, o) => {
       const t = await (target as TargetFn)({ argv, cwd: o?.cwd ?? cwd });
@@ -354,12 +362,21 @@ export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<I
       if (refused) throw refused;
       const memory = memoryCall(argv);
       if (memory === undefined || memory === "help") return inner.run(argv, o);
+      let held = listeners.get(t.endpoint);
+      if (!held) {
+        held = listener(t.endpoint).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
+        listeners.set(t.endpoint, held);
+      }
+      const v = await held;
+      if (!v.ok) throw new IxExtError("ix_listener", `the local Ix endpoint ${t.endpoint} isn't one Peer2Peer can trust: ${v.why}; it writes nothing to Ix until it is`);
+      // Right before a session record is created, ask again: Ix Pro may have been installed since.
+      if (memory === "session-create") support = memorySupport(inner);
       support ??= memorySupport(inner);
       const s = await support;
       if (s !== "oss") throw memoryRefusal(s, t);
       const r = await inner.run(argv, o);
-      if (r.code === 0 && WRITES.has(memory) && !confirmsLocalWrite(r.stderr, t.endpoint)) {
-        throw new IxExtError("ix_unconfirmed", `\`ix ${argv[0]}\` didn't say it wrote to the local backend (${t.endpoint}): Peer2Peer stops writing to Ix until it does (is Ix Pro installed now?)`);
+      if (WRITES.has(memory) && !confirmsLocalWrite(r.stderr, t.endpoint)) {
+        throw new IxExtError("ix_unconfirmed", `\`ix ${argv[0]}\` didn't say it wrote to the local backend (${t.endpoint}): Peer2Peer stops writing to Ix until it does (is Ix Pro installed now, or is the backend down?)`, { exit: r.code });
       }
       return r;
     },

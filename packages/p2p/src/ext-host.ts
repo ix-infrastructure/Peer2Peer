@@ -27,7 +27,7 @@ import {
   type ExtStateValue,
   type P2PExtension,
 } from "./extensions.js";
-import { graphPinnedEnv, graphTarget, localGraphEndpoint, sessionDirs, sessionWorkdir } from "./projects.js";
+import { ceilingAudience, graphPinnedEnv, graphTarget, localGraphEndpoint, PERSON_SESSION, sessionCeiling, sessionDirs, sessionWorkdir } from "./projects.js";
 import { listPeers, sendExtension, sessionAudience, sessionRef } from "./sessions.js";
 import { sessKey, type EventRec, type XStateRec } from "./state.js";
 import { declaredState, expiresAt, keptCopy, liveStates, publishExtensionState } from "./xstate.js";
@@ -136,6 +136,7 @@ export function extContext(app: App, ext: P2PExtension, io: Io, json: boolean, c
       });
     },
     audience: (sid) => sessionAudience(app, sid),
+    mayShareSessionContext: (ofSid, fromSid) => mayShareSessionContext(app, ofSid, fromSid),
     localMac: (data) => localMac(app, ext.ns, data),
     ownStatus: async (sid) => {
       const rec = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
@@ -145,6 +146,24 @@ export function extContext(app: App, ext: P2PExtension, io: Io, json: boolean, c
       return { ...(rec.status.repo ? { repo: rec.status.repo } : {}), files: rec.status.files ?? [], ...(d.caps ? { caps: d.caps } : {}), ...(d.agents ? { agents: d.agents } : {}) };
     },
   };
+}
+
+/**
+ * ExtContext.mayShareSessionContext: context recorded for `ofSid` may go out from `fromSid` only when
+ * they're the same session, or both ceilings are shared, everyone `fromSid` reaches is also reached
+ * by `ofSid`, and their graph targets are the same. Fails closed: anything private, unbound or unknown is no.
+ */
+export async function mayShareSessionContext(app: App, ofSid: string, fromSid: string): Promise<boolean> {
+  if (typeof ofSid !== "string" || typeof fromSid !== "string" || ofSid === "" || fromSid === "") return false;
+  if (ofSid === fromSid) return true;
+  if (ofSid === PERSON_SESSION || fromSid === PERSON_SESSION) return false;
+  const [of, from] = await Promise.all([sessionCeiling(app, ofSid), sessionCeiling(app, fromSid)]);
+  if (of.kind !== "shared" || from.kind !== "shared") return false;
+  const [ofAud, fromAud] = await Promise.all([ceilingAudience(app, of), ceilingAudience(app, from)]);
+  if (!ofAud || !fromAud) return false;
+  for (const u of fromAud) if (!ofAud.has(u)) return false;
+  const [a, b] = await Promise.all([graphTarget(app, { sid: ofSid }), graphTarget(app, { sid: fromSid })]);
+  return a.kind === b.kind && a.endpoint === b.endpoint && (a.kind !== "shared" || (b.kind === "shared" && a.circle === b.circle));
 }
 
 /** ExtContext.kv: <home>/ext/<ns>.json, written atomically, 0600. */

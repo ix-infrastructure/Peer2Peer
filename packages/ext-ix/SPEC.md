@@ -122,7 +122,10 @@ An ext-ix declares `graphTargets: 1` in its `P2PExtension`; p2p refuses to load 
 
   It has no positional text, no other flag or subcommand, and no flag twice.
 - `ix --help` shows the OSS commands, asked once per command or batch (`memorySupport`). With Pro loaded, the help has a "Pro:" section and no "Memory:" one; an Ix before #916 has neither. Both are refused before any write: Pro with "Ix Pro is installed … cloud org", the older Ix with "upgrade Ix". This is a capability check, never a trial write.
-- After a write, stderr says `→ local backend <the target's endpoint>`, as the OSS commands print it. Otherwise the call fails with `ix_unconfirmed`.
+- The target's port is held only by this user's (or root's) process, on every loopback or wildcard address (listener.ts: `/proc/net/tcp{,6}` on Linux; `netstat -an` matched by `lsof` on macOS). This is checked once per command or batch. Otherwise the call fails with `ix_listener`, and so does any other platform.
+- `ix --help` is asked again right before every `ix session create`.
+- After a write, stderr says `→ local backend <the target's endpoint>`, as the OSS commands print it. Otherwise the call fails with `ix_unconfirmed`, **whatever the exit code**.
+- `ix session --json show <ref>` (a read) is also allowed: graph memory uses it to check that a remembered session still exists.
 
 So `p2p ix import` and `p2p ix note --ix-note` work against the local graph with an OSS `ix note`, and stay refused with Ix Pro or an older Ix. The threat model ("Graph targets") says why.
 
@@ -722,7 +725,9 @@ ext-ix has none, and an older p2p never asks. It has two calls:
 `available(ctx)` and `write(ctx, {sid, items})`.
 
 The host (packages/p2p/src/graph-memory.ts) gathers the items in
-`p2p watch`, from the statuses this device posted for its own sessions.
+`p2p watch`, from the statuses this device posted for its own sessions,
+**only for sessions whose project ceiling is shared**. A private, unmapped,
+`.p2p-private` or unbound session is never gathered.
 They are never a peer's, another device's or a message's. It queues them
 (at most 64; `p2p doctor` counts drops) and hands them over in batches of
 one session each, off the hook path. Before each batch it checks that the
@@ -736,18 +741,37 @@ session's graph target is local. A batch for a shared target is dropped as
 | `files` (repo-relative paths new since the last batch) | a note `Edited (<ISO>): a, b, …` (at most 50 named) |
 | `end` | a note `Session ended <ISO>.` |
 
-Each note is `ix note --tag=note --session=<the record's id> --actor=… --json`,
-with the text on stdin. It runs through the guarded runner (§2.1), so the
+Each note is `ix note --tag=finding --session=<the record's id> --actor=… --json`,
+with the text on stdin. The text's first line is `Recorded by Peer2Peer
+(agent-generated, untrusted)`. A file name is dropped if it has whitespace
+or a control character, or is longer than 200 characters. It runs through the guarded runner (§2.1), so the
 target must be local, the call must be one of the exact forms, Ix must
 answer with the OSS commands, and stderr must confirm the local backend.
 Text is one line, with control and format characters removed, and capped.
 A path that isn't repo-relative is dropped. The extension's store
 (`memory`) keeps the Ix session id of each Peer2Peer session, for the
-newest 50.
+newest 50, with the endpoint it was created at. In a new batch, a remembered
+id is checked once with `ix session --json show` and made again if it is
+gone or belongs to another endpoint. The host leases each session to one
+drain at a time, across processes, under its state lock, so a record is
+never created twice.
 
-`available` answers `{ok: true}` only for an Ix with the OSS `ix note`.
-Otherwise it answers `ix_missing`, `ix_pro` (Ix Pro answers: the cloud) or
-`ix_upgrade` (an Ix before #916). The host then gathers nothing, and asks
+`write` gets an `AbortSignal`. When the host's deadline for the batch
+passes, it aborts. The writer checks the signal before every write and
+writes nothing after it fires, and the host waits for the writer to settle
+before going on.
+
+`p2p ix note --ix-note <id> --from-session B` refuses a record of another
+session A (`not_shared`), unless `ExtContext.mayShareSessionContext(A, B)`
+says yes. That needs both ceilings shared, B's audience within A's, and the
+same graph target. A record is recognised by its Ix session (one in the
+store, or a `p2p-<sid>` name) or by its first line. One whose session can't
+be traced back, or any record on a host without that call, is refused.
+
+`available` answers `{ok: true}` only for an Ix with the OSS `ix note`
+and a port held by this user. Otherwise it answers `ix_missing`, `ix_pro`
+(Ix Pro answers: the cloud), `ix_upgrade` (an Ix before #916) or
+`ix_listener`. The host then gathers nothing, and asks
 again every 5 minutes. A write the guard refuses (`graph_target`), or one
 that doesn't confirm the local backend (`ix_unconfirmed`), stops the batch
 and reports `unavailable` the same way.

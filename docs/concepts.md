@@ -80,8 +80,8 @@ These checks are best effort against an agent with your shell; [sandbox your age
 
 **Graph targets.** Each project also has a graph target: where Ix calls made for it may go. Today it is always `local`, this machine's Ix backend ("local only" in `p2p project show` and `p2p doctor`). A session's target is the intersection of its projects', like its ceiling, so one private project keeps it local. Shared graphs (a circle's graph in the cloud) come later, and only a project shared with that circle will reach one. See the [threat model](security/threat-model.md#graph-targets-ix).
 
-**Graph memory.** With the Ix extension on and an Ix that has the open-source `ix note` (Ix after 0.13.0, without Ix Pro), your sessions' context is written into your **local** Ix graph as they run.
-- **What it writes.** Each session gets an Ix session record named `p2p-<session id>`, with its label, repository and branch, and notes for:
+**Graph memory.** With the Ix extension on and an Ix that has the open-source `ix note` (Ix after 0.13.0, without Ix Pro), your sessions in **shared** projects have their context written into your **local** Ix graph as they run. A session in a private project is never recorded.
+- **What it writes.** Each session gets an Ix session record named `p2p-<session id>`, with its label, repository and branch. Its notes are tagged `finding` and start with "Recorded by Peer2Peer (agent-generated, untrusted)", one each for:
   - its start;
   - each new status line;
   - the files it edits (repo-relative, as its status lists them);
@@ -89,6 +89,8 @@ These checks are best effort against an agent with your shell; [sandbox your age
 - **What it never writes.** Message bodies (message history stays in its own encrypted store), peers' statuses and other devices' sessions. A note a peer shares goes in only when you import it with `p2p ix import`, as before.
 - **How it runs.** `p2p watch` does the writing in the background, from the statuses your session already posted, so the hook path never waits on Ix. The writes are best effort: at most 64 items wait in the queue, and `p2p doctor` counts anything dropped.
 - **Local only.** Every batch goes through the graph-target chokepoint and must be `local`. A shared target is refused. With Ix Pro installed, whose `ix note` writes to your cloud org, nothing is written at all. With an older Ix, the doctor says to upgrade.
+- **Only to your own backend.** Before writing, ext-ix checks that the local endpoint's port is held by your own process (or root's). If another user's process holds it, or the check can't tell, memory stays off and the doctor says why. On a machine other people log in to, turn it off.
+- **Records stay with their session.** `p2p ix note --ix-note` won't send another session's record unless that session's context may go where this one's does.
 - **Turning it off.** Set `"ixMemory": false` in config.json, or `P2P_IX_MEMORY=0`.
 
 ## Message history

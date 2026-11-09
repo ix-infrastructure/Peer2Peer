@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { App } from "../app.js";
+import { mayShareSessionContext } from "../ext-host.js";
 import { ExtensionRegistry, memoryOf, type ExtMemory, type ExtMemoryItem, type P2PExtension } from "../extensions.js";
 import { drainGraphMemory, gather, gatherGraphMemory, GRAPH_MEMORY_QUEUE_MAX, graphMemoryLoop, type GraphMemoryDoc } from "../graph-memory.js";
 import { parseIxMemorySupport } from "../ix-local.js";
@@ -107,8 +108,11 @@ describe("draining, with real state and the chokepoint", () => {
     await a.load();
     return a;
   };
-  const putStatus = (a: App, sid: string, status: Partial<PeerStatusRec["status"]>, o: Partial<PeerStatusRec> = {}) =>
-    a.state.update("peers", (cur = {}) => ({ next: { ...cur, [`${o.own ?? a.userId}|${sid}`]: { own: a.userId, sid, did: a.did, ts: Date.now(), self: true, status: { state: "busy", label: "widgets", ...status }, ...o } as PeerStatusRec }, result: undefined }));
+  /** An own status; the session is bound to the shared project unless `bind` names other folders (or none). */
+  const putStatus = async (a: App, sid: string, status: Partial<PeerStatusRec["status"]>, o: Partial<PeerStatusRec> = {}, bind: string[] | false = [shared]) => {
+    if (bind) await bindSession(a, sid, bind);
+    await a.state.update("peers", (cur = {}) => ({ next: { ...cur, [`${o.own ?? a.userId}|${sid}`]: { own: a.userId, sid, did: a.did, ts: Date.now(), self: true, status: { state: "busy", label: "widgets", ...status }, ...o } as PeerStatusRec }, result: undefined }));
+  };
   const reset = async (a: App) => {
     await a.state.update("graphMemory", () => ({ next: empty(), result: undefined }));
     await a.state.update("peers", () => ({ next: {}, result: undefined }));
@@ -258,6 +262,117 @@ describe("draining, with real state and the chokepoint", () => {
       await graphMemoryLoop(a).tick();
       expect(yes.writes.map((w) => w.sid)).toEqual(["o2"]);
       expect((await a.state.get("graphMemory"))!.unavailable).toBeUndefined();
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("M2: a session whose project ceiling isn't shared is never gathered; one that turns private stops being recorded", async () => {
+    const a = await app();
+    try {
+      await reset(a);
+      const priv = join(root, "private-repo");
+      mkdirSync(priv, { recursive: true });
+      await putStatus(a, "p1", { summary: "private plans", files: ["secret.ts"] }, {}, [priv]); // an unshared project: private
+      await putStatus(a, "p2", { summary: "mixed" }, {}, [shared, priv]); // shared + private: private
+      await putStatus(a, "p3", { summary: "unbound" }, {}, false); // not bound yet: no ceiling
+      await putStatus(a, "s1", { summary: "shared work" });
+      await gatherGraphMemory(a);
+      const d = (await a.state.get("graphMemory"))!;
+      expect([...new Set(d.queue.map((i) => i.sid))]).toEqual(["s1"]);
+      expect(JSON.stringify(d)).not.toMatch(/private plans|secret\.ts|mixed|unbound/);
+      // s1 then works in the private project too: nothing more of it is gathered.
+      await bindSession(a, "s1", [priv]);
+      await putStatus(a, "s1", { summary: "now private", files: ["x.ts"] }, {}, false);
+      await gatherGraphMemory(a);
+      expect(JSON.stringify((await a.state.get("graphMemory"))!.queue)).not.toMatch(/now private|x\.ts/);
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("L4: a writer past its deadline is told to stop, waited for, and writes nothing after it", async () => {
+    const a = await app();
+    try {
+      await reset(a);
+      const log: string[] = [];
+      let settled = false;
+      const f = fakeMemory({
+        write: async (_ctx, b) => {
+          const signal = b.signal!;
+          let n = 0;
+          for (const it of b.items) {
+            if (signal.aborted) break;
+            log.push(it.kind);
+            n++;
+            // The first write is slow: past the deadline.
+            if (n === 1) await new Promise<void>((r) => signal.addEventListener("abort", () => setTimeout(r, 50), { once: true }));
+          }
+          settled = true;
+          return { written: n };
+        },
+      });
+      await putStatus(a, "t1", { summary: "slow", files: ["a.ts"] });
+      await gatherGraphMemory(a);
+      const r = await drainGraphMemory(a, f.ext, f.mem, { deadlineMs: 100 });
+      // The drain returned only after the writer settled, and nothing was written after the abort.
+      expect(settled).toBe(true);
+      expect(log).toEqual(["start"]);
+      expect(r).toEqual({ written: 1, dropped: 2 });
+      expect((await a.state.get("graphMemory"))!.dropped.timeout).toBe(2);
+      // The lease is given back.
+      expect((await a.state.get("graphMemory"))!.leases).toBeUndefined();
+    } finally {
+      await a.close();
+    }
+  });
+
+  it("L6: one writer per session at a time across drains (a lease under the state lock)", async () => {
+    const a = await app();
+    const b = await app();
+    try {
+      await reset(a);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const seen: string[] = [];
+      const slow = fakeMemory({ write: async (_c, x) => (seen.push(`a:${x.sid}`), await gate, { written: x.items.length }) });
+      const fast = fakeMemory({ write: async (_c, x) => (seen.push(`b:${x.sid}`), { written: x.items.length }) });
+      await putStatus(a, "L1", { summary: "one" });
+      await gatherGraphMemory(a);
+      const first = drainGraphMemory(a, slow.ext, slow.mem);
+      await new Promise((r) => setTimeout(r, 100));
+      // More for L1, and another session, while a's drain holds L1.
+      await putStatus(a, "L1", { summary: "two" });
+      await putStatus(a, "L2", { summary: "other" });
+      await gatherGraphMemory(a);
+      await drainGraphMemory(b, fast.ext, fast.mem);
+      expect(seen).toEqual(["a:L1", "b:L2"]);
+      release();
+      await first;
+      // Once released, L1's later item goes to whoever drains next.
+      await drainGraphMemory(b, fast.ext, fast.mem);
+      expect(seen).toEqual(["a:L1", "b:L2", "b:L1"]);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it("M2: mayShareSessionContext: the same session; otherwise both shared, the sender's audience within, the same target", async () => {
+    const a = await app();
+    try {
+      const priv = join(root, "private-repo-2");
+      mkdirSync(priv, { recursive: true });
+      await bindSession(a, "A", [shared]);
+      await bindSession(a, "B", [shared]);
+      await bindSession(a, "P", [priv]);
+      expect(await mayShareSessionContext(a, "P", "P")).toBe(true);
+      expect(await mayShareSessionContext(a, "A", "B")).toBe(true);
+      expect(await mayShareSessionContext(a, "P", "A")).toBe(false); // a private session's context
+      expect(await mayShareSessionContext(a, "A", "P")).toBe(false); // to a private session
+      expect(await mayShareSessionContext(a, "A", "nobody")).toBe(false); // unbound
+      expect(await mayShareSessionContext(a, "tui", "A")).toBe(false);
+      expect(await mayShareSessionContext(a, "", "A")).toBe(false);
     } finally {
       await a.close();
     }

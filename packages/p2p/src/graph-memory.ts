@@ -28,7 +28,7 @@ import type { App } from "./app.js";
 import { graphMemoryEnabled } from "./config.js";
 import { extContext } from "./ext-host.js";
 import { memoryOf, type ExtMemory, type ExtMemoryItem, type ExtMemoryUnavailable, type P2PExtension } from "./extensions.js";
-import { graphTarget, sessionDirs, type GraphTarget } from "./projects.js";
+import { graphTarget, sessionCeiling, sessionDirs, type GraphTarget } from "./projects.js";
 import { sessionEnded } from "./running.js";
 import type { PeerStatusRec } from "./state.js";
 
@@ -74,6 +74,11 @@ export interface GraphMemoryDoc {
   lastDropAt?: number;
   /** Why memory is off now (no Ix, an Ix without local notes, Ix Pro), as the extension said it. */
   unavailable?: { reason: string; message: string; at: number };
+  /**
+   * Sessions a drain is writing now, until when (ms): one writer per session at a time, across
+   * every process (take() skips them), so a session's record is never created twice.
+   */
+  leases?: Record<string, number>;
 }
 
 const emptyDoc = (): GraphMemoryDoc => ({ v: 1, sessions: {}, queue: [], written: 0, dropped: {} });
@@ -89,6 +94,7 @@ function docOf(cur: GraphMemoryDoc | undefined): GraphMemoryDoc {
     ...(cur.lastWriteAt ? { lastWriteAt: cur.lastWriteAt } : {}),
     ...(cur.lastDropAt ? { lastDropAt: cur.lastDropAt } : {}),
     ...(cur.unavailable ? { unavailable: cur.unavailable } : {}),
+    ...(cur.leases && typeof cur.leases === "object" ? { leases: { ...cur.leases } } : {}),
   };
 }
 
@@ -105,9 +111,12 @@ function statusFiles(rec: PeerStatusRec): string[] {
 /**
  * What changed in this device's own sessions since the last look, as items, queued (pure, for
  * tests: `ended` says whether a session's watch is gone). Returns the next doc and how many were
- * queued and dropped.
+ * queued and dropped. Only sessions `recordable` says yes to are gathered: a session whose project
+ * ceiling isn't shared (a private or unmapped project, `.p2p-private`, not bound yet) is never
+ * recorded, and one that becomes so stops being recorded (fail closed: its context never reaches a
+ * graph that a shared session's agent could read and pass on).
  */
-export function gather(doc: GraphMemoryDoc, recs: readonly PeerStatusRec[], ended: (sid: string) => boolean, now = Date.now()): { doc: GraphMemoryDoc; queued: number; dropped: number } {
+export function gather(doc: GraphMemoryDoc, recs: readonly PeerStatusRec[], ended: (sid: string) => boolean, now = Date.now(), recordable: (sid: string) => boolean = () => true): { doc: GraphMemoryDoc; queued: number; dropped: number } {
   const next = docOf(doc);
   let queued = 0;
   let dropped = 0;
@@ -123,6 +132,7 @@ export function gather(doc: GraphMemoryDoc, recs: readonly PeerStatusRec[], ende
   };
   for (const rec of recs) {
     const sid = rec.sid;
+    if (!recordable(sid)) continue;
     let s = next.sessions[sid];
     const isEnded = ended(sid);
     if (!s) {
@@ -166,9 +176,12 @@ async function ownRecs(app: App): Promise<PeerStatusRec[]> {
 export async function gatherGraphMemory(app: App, now = Date.now()): Promise<{ queued: number; dropped: number }> {
   const recs = await ownRecs(app);
   if (recs.length === 0) return { queued: 0, dropped: 0 };
+  // Only sessions whose project ceiling is shared (projects.ts sessionCeiling): private ones never.
+  const shared = new Set<string>();
+  for (const r of recs) if ((await sessionCeiling(app, r.sid).catch(() => ({ kind: "private" as const }))).kind === "shared") shared.add(r.sid);
   return app.state.update("graphMemory", (cur) => {
     const before = docOf(cur);
-    const r = gather(before, recs, (sid) => sessionEnded(app, sid), now);
+    const r = gather(before, recs, (sid) => sessionEnded(app, sid), now, (sid) => shared.has(sid));
     // Unchanged: nothing written (this runs every few seconds).
     const changed = JSON.stringify(r.doc) !== JSON.stringify(before);
     return { ...(changed ? { next: r.doc } : {}), result: { queued: r.queued, dropped: r.dropped } };
@@ -204,18 +217,45 @@ export interface DrainDeps {
   /** The graph target of a session's batch (default: the chokepoint, projects.ts graphTarget). */
   target?: (sid: string) => Promise<GraphTarget>;
   log?: (msg: string) => void;
+  /** One session's time to write (tests); default GRAPH_MEMORY_DRAIN_MS. */
+  deadlineMs?: number;
 }
 
-/** One batch: up to GRAPH_MEMORY_BATCH items taken off the queue (they are the taker's now). */
-async function take(app: App): Promise<GraphMemoryItem[]> {
+/** How long a session's lease lasts: past every drain's own bound, then free again (a crashed writer). */
+export const GRAPH_MEMORY_LEASE_MS = 2 * GRAPH_MEMORY_DRAIN_MS + 60_000;
+
+/**
+ * One batch: up to GRAPH_MEMORY_BATCH items taken off the queue (they are the taker's now), of
+ * sessions no other drain holds a lease on; their leases are taken with them, under the state lock.
+ */
+async function take(app: App, now = Date.now()): Promise<GraphMemoryItem[]> {
   return app.state.update("graphMemory", (cur) => {
     const d = docOf(cur);
     if (d.queue.length === 0) return { result: [] };
-    const batch = d.queue.splice(0, GRAPH_MEMORY_BATCH);
+    const leases = Object.fromEntries(Object.entries(d.leases ?? {}).filter(([, until]) => typeof until === "number" && until > now));
+    const batch: GraphMemoryItem[] = [];
+    const rest: GraphMemoryItem[] = [];
+    for (const it of d.queue) (batch.length < GRAPH_MEMORY_BATCH && !leases[it.sid] ? batch : rest).push(it);
+    if (batch.length === 0) return { result: [] };
+    for (const it of batch) leases[it.sid] = now + GRAPH_MEMORY_LEASE_MS;
+    d.queue = rest;
+    d.leases = leases;
     return { next: d, result: batch };
   });
 }
 
+/** Gives the leases of `sids` back. */
+async function release(app: App, sids: readonly string[]): Promise<void> {
+  await app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    if (!d.leases) return { result: undefined };
+    for (const sid of sids) delete d.leases[sid];
+    if (Object.keys(d.leases).length === 0) delete d.leases;
+    return { next: d, result: undefined };
+  });
+}
+
+/** `p`, or "timeout" after `ms` (the work goes on: the caller aborts it and waits for it to settle). */
 const within = <T>(p: Promise<T>, ms: number): Promise<T | "timeout"> =>
   Promise.race([p, new Promise<"timeout">((r) => setTimeout(() => r("timeout"), ms).unref())]);
 
@@ -226,6 +266,14 @@ const within = <T>(p: Promise<T>, ms: number): Promise<T | "timeout"> =>
 export async function drainGraphMemory(app: App, ext: P2PExtension, mem: ExtMemory, deps: DrainDeps = {}): Promise<{ written: number; dropped: number; unavailable?: ExtMemoryUnavailable }> {
   const batch = await take(app);
   if (batch.length === 0) return { written: 0, dropped: 0 };
+  try {
+    return await drainBatch(app, ext, mem, batch, deps);
+  } finally {
+    await release(app, [...new Set(batch.map((i) => i.sid))]).catch(() => undefined);
+  }
+}
+
+async function drainBatch(app: App, ext: P2PExtension, mem: ExtMemory, batch: GraphMemoryItem[], deps: DrainDeps): Promise<{ written: number; dropped: number; unavailable?: ExtMemoryUnavailable }> {
   const ctx = extContext(app, ext, { out: () => {}, err: (s) => deps.log?.(s) }, true, async () => false);
   const target =
     deps.target ??
@@ -237,7 +285,9 @@ export async function drainGraphMemory(app: App, ext: P2PExtension, mem: ExtMemo
   let dropped = 0;
   const bySid = new Map<string, ExtMemoryItem[]>();
   for (const { sid, ...item } of batch) bySid.set(sid, [...(bySid.get(sid) ?? []), item]);
-  for (const [sid, items] of bySid) {
+  const groups = [...bySid];
+  for (let g = 0; g < groups.length; g++) {
+    const [sid, items] = groups[g];
     let t: GraphTarget;
     try {
       t = await target(sid);
@@ -250,14 +300,22 @@ export async function drainGraphMemory(app: App, ext: P2PExtension, mem: ExtMemo
       dropped += items.length;
       continue;
     }
-    let r;
-    try {
-      r = await within(mem.write(ctx, { sid, items }), GRAPH_MEMORY_DRAIN_MS);
-    } catch {
-      r = undefined;
+    // A real deadline: past it the writer is told to stop (it checks the signal before every write),
+    // and this waits for it to settle, so no write overlaps the next batch or follows the timeout.
+    const stop = new AbortController();
+    const writing = Promise.resolve()
+      .then(() => mem.write(ctx, { sid, items, signal: stop.signal }))
+      .catch(() => undefined);
+    let r = await within(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
+    if (r === "timeout") {
+      stop.abort();
+      const late = await writing;
+      // What it wrote before it stopped still counts; the rest timed out.
+      const lateOk = late && typeof late === "object" ? Math.max(0, Math.min(items.length, Number(late.written) || 0)) : 0;
+      r = { written: lateOk, failed: [{ reason: "timeout", n: items.length - lateOk }] };
     }
-    if (r === "timeout" || r === undefined || typeof r !== "object") {
-      await countDropped(app, r === "timeout" ? "timeout" : "ext_failed", items.length);
+    if (r === undefined || typeof r !== "object") {
+      await countDropped(app, "ext_failed", items.length);
       dropped += items.length;
       continue;
     }
@@ -277,9 +335,12 @@ export async function drainGraphMemory(app: App, ext: P2PExtension, mem: ExtMemo
       dropped += n;
     }
     if (r.unavailable) {
-      // Whatever is still queued would meet the same answer: off until it is asked again.
+      // Whatever is still queued would meet the same answer: off until it is asked again. This
+      // batch's other sessions are dropped (counted), never handed over.
       await noteAvailability(app, r.unavailable);
-      return { written, dropped, unavailable: r.unavailable };
+      const left = groups.slice(g + 1).reduce((a, [, its]) => a + its.length, 0);
+      await countDropped(app, short(r.unavailable.reason, 32) || "unavailable", left);
+      return { written, dropped: dropped + left, unavailable: r.unavailable };
     }
   }
   return { written, dropped };

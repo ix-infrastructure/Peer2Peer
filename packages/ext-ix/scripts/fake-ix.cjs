@@ -53,6 +53,14 @@ if (cmd === "note") {
   console.log(JSON.stringify({ id: "note-42", text: stdin, tag: (argv.find((a) => a.startsWith("--tag=")) || "--tag=note").slice(6), nodeIds: [], at: "2026-10-21T00:00:00Z", stale: false }));
   process.exit(0);
 }
+// `ix session --json show <ref>`: a session this fake created (sessions-written.jsonl), unless gone.txt names it.
+if (cmd === "session" && argv[2] === "show") {
+  const made = (file("sessions-written.jsonl") ?? "").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const id = argv[3];
+  if ((file("gone.txt") ?? "").split("\n").includes(id) || !made.some((m) => "sess-" + String(m.argv[3]).slice(4, 40) === id)) { console.error(`Error: session '${id}' not found`); process.exit(1); }
+  console.log(JSON.stringify({ sessionId: id, name: "p2p-x", purpose: "p", actor: "p2p", actors: ["p2p"], ttlHours: 720, createdAt: "2026-11-09T00:00:00Z", lastLoadedAt: null }));
+  process.exit(0);
+}
 if (cmd === "session" && argv[2] === "create") {
   fs.appendFileSync(path.join(dir, "sessions-written.jsonl"), JSON.stringify({ argv, endpoint: endpoint() }) + "\n");
   reportWrite();

@@ -25,7 +25,8 @@ import { FOOTPRINT_KIND, FOOTPRINT_TTL, parseFootprintBody } from "./footprint.j
 import { footprintCommands } from "./footprint-command.js";
 import { buildImpact, IMPACT_KIND, impactFallback, parseImpactBody, renderImpact } from "./impact.js";
 import { callPaths, checkedTarget, guardRunner, refuseForTarget, ixAvailable, ixJson, ixRunner, IX_NOTE_ID_RE, localTarget, memoryRefusal, memorySupport, type IxRunner, type IxTarget, type TargetFn } from "./ix.js";
-import { ixMemory } from "./memory.js";
+import { ixMemory, recordOf } from "./memory.js";
+import { checkLoopbackListener, type ListenerCheck } from "./listener.js";
 import { buildNote, NOTE_KIND, parseNoteBody, renderNote, type NoteBody } from "./note.js";
 import { compareRepo, localRepo, normalizeRemote, type RepoRef } from "./repo.js";
 import { buildSubgraph, describeSelector, parseSubgraphBody, renderSubgraph, resolveArgv, SUBGRAPH_KIND, type Selector } from "./subgraph.js";
@@ -125,6 +126,8 @@ export interface Deps {
   ix?: (ctx: ExtContext) => IxRunner;
   /** The clock (footprint debounce and timestamps). */
   now?: () => number;
+  /** Who listens on the local endpoint's port (listener.ts); tests stand in for the operating system. */
+  listener?: ListenerCheck;
 }
 
 /**
@@ -161,7 +164,7 @@ export function targetOf(ctx: ExtContext, sid?: string, extra: readonly string[]
  */
 export function runner(ctx: ExtContext, deps: Deps, sid?: string, extra: readonly string[] = []): IxRunner {
   const target = targetOf(ctx, sid, extra);
-  return guardRunner(deps.ix ? deps.ix(ctx) : ixRunner({ env: ctx.env, cwd: ctx.cwd, target }), target, ctx.cwd);
+  return guardRunner(deps.ix ? deps.ix(ctx) : ixRunner({ env: ctx.env, cwd: ctx.cwd, target }), target, ctx.cwd, deps.listener ? { listener: deps.listener } : {});
 }
 
 export interface Here {
@@ -253,8 +256,16 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         let at: string | undefined;
         if (typeof opts.ixNote === "string") {
           if (!IX_NOTE_ID_RE.test(opts.ixNote)) throw usage("--ix-note must be a note id");
-          const n = (await ixJson(runner(ctx, deps, fromSession), ["note", "--json", "show", opts.ixNote])) as Partial<{ text: string; tag: string; at: string }>;
+          const n = (await ixJson(runner(ctx, deps, fromSession), ["note", "--json", "show", opts.ixNote])) as Partial<{ text: string; tag: string; at: string; sessionId: string; sessionName: string }>;
           if (typeof n?.text !== "string") throw new IxExtError("ix_failed", "ix note show returned no text");
+          // Graph memory's own records (memory.ts) hold a session's context: they go out only from that
+          // session, or from one whose reach is no wider than its (both shared, and p2p says so). A
+          // private project's record, one whose session can't be told, or an older p2p: refused.
+          const rec = await recordOf(ctx, n);
+          if (rec && rec.sid !== fromSession) {
+            const ok = rec.sid !== undefined && typeof ctx.mayShareSessionContext === "function" && (await ctx.mayShareSessionContext(rec.sid, fromSession).catch(() => false)) === true;
+            if (!ok) throw new IxExtError("not_shared", "that Ix note is a Peer2Peer record of another session's context, which this session may not pass on (share it from that session, or write your own note)");
+          }
           text = n.text;
           tag ??= typeof n.tag === "string" && (NOTE_TAGS as readonly string[]).includes(n.tag) ? n.tag : undefined;
           at = typeof n.at === "string" ? n.at : undefined;
@@ -478,6 +489,9 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
         const support = await memorySupport(ix);
         if (support !== "oss") throw memoryRefusal(support, target);
+        // And the local endpoint's port must be this user's (listener.ts): checked again by the guard.
+        const held = await (deps.listener ?? ((e: string) => checkLoopbackListener(e)))(target.endpoint).catch(() => ({ ok: false as const, why: "couldn't tell who listens on its port" }));
+        if (!held.ok) throw new IxExtError("ix_listener", `the local Ix endpoint ${target.endpoint} isn't one Peer2Peer can trust: ${held.why}`);
         const text = `Shared by ${address} over Peer2Peer${b.title ? `: ${b.title}` : ""}\n\n${b.text}`;
         // M1: consent covers exactly what is written. Either the full title and text are shown here
         // and the user agrees, or --yes after the user read this very note with `p2p ix show` at a terminal.
@@ -580,7 +594,7 @@ export function createIxExtension(deps: Deps = {}): P2PExtension {
     // x:ix.footprint is a state kind: published to the session's status audience, kept latest-wins.
     state: { [FOOTPRINT_KIND]: { ttl: FOOTPRINT_TTL } },
     // Graph memory (SPEC §10): this device's own sessions' context, into the local graph only.
-    memory: ixMemory((ctx, sid) => runner(ctx, deps, sid)),
+    memory: ixMemory((ctx, sid) => runner(ctx, deps, sid), deps.listener),
   };
 }
 
