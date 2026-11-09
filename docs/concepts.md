@@ -78,6 +78,8 @@ These checks are best effort against an agent with your shell; [sandbox your age
 
 **Moving from the default circle.** Before project boundaries, new sessions followed your default circle. They don't any more: the default circle now only says what invites join and what `p2p project share` with no circle shares. The first time a session of yours is private only because its project was never shared, `p2p status` says so once (the mod shows it as a toast) and names the command that shares the project with your default circle. Nothing is ever widened for you.
 
+**Graph targets.** Each project also has a graph target: where Ix calls made for it may go. Today it is always `local`, this machine's Ix backend ("local only" in `p2p project show` and `p2p doctor`). A session's target is the intersection of its projects', like its ceiling, so one private project keeps it local. Shared graphs (a circle's graph in the cloud) come later, and only a project shared with that circle will reach one. See the [threat model](security/threat-model.md#graph-targets-ix).
+
 ## Message history
 
 Messages to you (in `p2p tui`, or with no session named) and to your agent sessions only show live, so each device also keeps a **message history**: what it sent and received, to look back at with `p2p history` (the TUI's Messages screen, `/peers history` in Claude Code, `p2p_history` in Codex).

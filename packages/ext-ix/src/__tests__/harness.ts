@@ -88,7 +88,7 @@ export function fakeIx(): FakeIx {
     set: (name, content) => writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content)),
     calls: () => lines("calls.jsonl"),
     written: () => lines("notes-written.jsonl"),
-    env: () => ({ PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_IX_DIR: dir }),
+    env: () => ({ PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_IX_DIR: dir, IX_HOME: dir }),
   };
 }
 

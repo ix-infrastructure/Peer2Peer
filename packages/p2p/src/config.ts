@@ -39,6 +39,8 @@ export interface FileConfig {
   trust?: { users?: string[]; circles?: string[] };
   /** Publish this device's caps and version in the identity document (`dinfo`); off until step 2 (docs/compatibility.md). P2P_DEVICE_INFO wins. */
   deviceInfo?: boolean;
+  /** The local Ix backend (projects.ts localGraphEndpoint): honoured only as a loopback URL. Default http://localhost:8090. */
+  ixEndpoint?: string;
   /** Message history (history.ts): on by default, kept `retentionDays` (30) and at most `maxBytes` (8 MiB). P2P_HISTORY=0 turns recording off. */
   history?: { enabled?: boolean; retentionDays?: number; maxBytes?: number };
 }

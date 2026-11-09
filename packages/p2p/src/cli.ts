@@ -29,6 +29,7 @@ import { receiving } from "./inbound.js";
 import * as rotation from "./rotation.js";
 import * as sessions from "./sessions.js";
 import * as projects from "./projects.js";
+import * as ixLocal from "./ix-local.js";
 import * as history from "./history.js";
 import { confirmOnTty } from "./tty-confirm.js";
 import * as social from "./social.js";
@@ -226,6 +227,11 @@ export function buildProgram(deps: ProgramDeps): Command {
         if (json) io.out(safeJson(out.json));
         else if (deps.io.pretty && out.pretty) deps.io.out(pretty.safePretty(out.pretty(deps.io.pretty)));
         else if (out.human) io.out(safeTerminal(out.human));
+        // Ix on by default for new installs; an existing one hears it once, at a terminal, from the person (ix-local.ts).
+        if (!json && !opts.readOnly && app.keys && deps.io.prompt && projects.personHere(app) && cmd.name() !== "setup") {
+          const n = await ixLocal.ixNotice(app).catch(() => undefined);
+          if (n) io.err(`p2p: ${n}`);
+        }
       } catch (e) {
         const j = toErrorJson(e);
         if (json) io.out(safeJson(j));
@@ -355,6 +361,9 @@ export function buildProgram(deps: ProgramDeps): Command {
           }
           if (r.backup?.phrase) lines.push(`\nWrite these 24 words down and keep them offline. Anyone with them is you:\n\n${r.backup.phrase}\n`);
           if (r.created && !r.backup) io.err("warning: no backup yet: if you lose this device, the identity is gone. Run `p2p backup show`.");
+          if (r.ix?.enabledNow) lines.push("  ix      Ix found: the Ix extension is on (`p2p extensions disable ix` turns it off). Ix calls stay on this machine (graph: local only)");
+          else if (r.ix?.enabled) lines.push("  ix      the Ix extension is on (graph: local only)");
+          else if (r.ix?.hint) lines.push(`  ix      ${r.ix.hint}`);
           lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
           return { json: r, human: lines.join("\n") };
         },
@@ -1485,6 +1494,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
     for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
     for (const p of v.people) lines.push(`  ${p.address}`);
+    if (v.graph) lines.push(`  graph: ${projects.describeGraphTarget(v.graph)}${v.graph.kind === "local" && v.graph.why ? `: ${v.graph.why}` : ""}`);
     return lines.join("\n");
   };
   project

@@ -160,7 +160,7 @@ A device that holds your identity key can sign for you even after you revoke it.
 
 ## Ix items (optional)
 
-With the Ix extension, peers' sessions can share Ix context: a session note, a reference to part of the graph ("look at `src/auth/*`"), or a blast-radius report. The plugin ships a copy of `@peer2peer/ext-ix` in `ext/` and passes `<plugin>/ext` to `p2p` in `P2P_EXTENSION_PATH` (ahead of yours), so there's nothing to install. **It stays off until you enable it**, once per machine, in a terminal:
+With the Ix extension, peers' sessions can share Ix context: a session note, a reference to part of the graph ("look at `src/auth/*`"), or a blast-radius report. The plugin ships a copy of `@peer2peer/ext-ix` in `ext/` and passes `<plugin>/ext` to `p2p` in `P2P_EXTENSION_PATH` (ahead of yours), so there's nothing to install. **On a new install, `/peers setup` turns it on when Ix is installed** (Ix itself is never installed for you: setup says where to get it). An existing install isn't changed: you get a one-time notice in a terminal, and you enable it once per machine:
 
 ```
 node <plugin>/bin/p2p.mjs extensions enable ix     # or: p2p extensions enable ix
