@@ -1,0 +1,67 @@
+# Changelog
+
+All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
+
+## 0.1.1
+
+Nothing changes on the wire. 0.1.1 and 0.1.0 clients interoperate in both directions. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against v0.1.0 and 70b86c7, as committed at their tags and as npm installs them.
+
+### Upgrade together
+
+- **Update `@peer2peer/cli` and `@peer2peer/ext-ix` together.** The 0.1.1 CLI won't load an `ix` extension unless it declares the graph-target contract (`graphTargets: 1`), and ext-ix 0.1.0 doesn't. With 0.1.1 CLI and 0.1.0 ext-ix, the `ix` namespace is refused with "update @peer2peer/ext-ix". ext-ix 0.1.1's optional peer range on the CLI is `^0.1.1`. Run `npm i -g @peer2peer/cli@0.1.1 @peer2peer/ext-ix@0.1.1`. The Claude Code mod already ships matching copies of both.
+- Each package depends on exactly `0.1.1` of the others. `@peer2peer/core` has no code changes since 0.1.0.
+
+### Behaviour changes
+
+- **Your own sessions' messages can be held.** In a session that approves its own tool calls (or whose mode is unknown), a message from one of your own **agent** sessions now waits for Deliver, as a peer's does. A peer could otherwise tell one of your agents what to send to another. A message you typed in your own terminal (`p2p tui`, `p2p send`) is still delivered.
+  - Messages from **your other devices** are held in such sessions too. Another device can't yet say whether you typed the message or an agent sent it; [RFC #48](https://github.com/ix-infrastructure/Peer2Peer/issues/48) proposes the wire field for that.
+  - To turn the hold off, run `p2p own-agents deliver` yourself, in your own terminal; it is refused inside an agent's session. `p2p own-agents deliver --devices <did…>` or `--devices all-other` lets through only your other devices' sessions (agents included), never this device's agents. `p2p own-agents hold` turns the hold back on. The Claude mod and the Codex bridge read the setting when a message arrives, so a change applies at once.
+  - Your own sessions are now turn-capped: at most 30 turns per 10 minutes in a session, and at most 10 since you last typed a prompt there. In Codex, your other devices' sessions keep their cap of 5 per 10 minutes. Past a cap, messages wait for Deliver (in Codex, they ride along with the next prompt), and a sender that asked for receipts gets `held`. Before, the Claude mod didn't cap your own sessions at all.
+- **A session goes private when it changes to a folder that can't be placed.** Front ends now read the folders a command moves to: `cd`, `pushd`, `chdir`, `git -C`/`--git-dir`/`--work-tree`, `make -C`, `tar -C`, `ninja -C`, `env -C` and `sudo -D`. Each target is bound as part of the session's projects. A target that can't be resolved, such as `cd -`, `cd $X`, `cd ~other`, `pushd +1` or a bare `pushd`, makes the session private with the reason `unresolved`, and so does an unknown variable at the start of a path. More than 32 such folders in one command makes it private with the reason `folders`. The CLI now gives each cause its own explanation (`projects`, `folders`, `unresolved`, `front`, `constraints`). For a cause that lasts until the session ends, it says to start a new session instead of suggesting you share the project.
+- **`p2p ix import` and `p2p ix note --ix-note` are refused for local graph targets** (`graph_target`). Every graph target is local until shared graph memory lands. `ix note` is an Ix Pro command that reads and writes the cloud memory layer, so ext-ix no longer runs it. Against a local target, ext-ix runs only `--version`, `impact`, `around`, `overview`, `inventory`, `context`, `subsystems` and `status`. Plain `p2p ix note` messages to peers (`x:ix.note`) are unaffected.
+- **`ix` runs with a pinned endpoint and a minimal environment.** ext-ix takes Ix's endpoint only from p2p's graph target, which is the loopback `ixEndpoint` in `config.json` or the default `http://localhost:8090`, never `IX_ENDPOINT` from the environment. It runs `ix` with an allowlisted environment, so the caller's `IX_ENDPOINT`, `IX_PAT`, `IX_ORG`, `P2P_*`, `NODE_OPTIONS` and proxy settings don't reach it, and background map refresh and update checks are off.
+- **A same-device send to yourself is refused with `self_send`.** Before, `--to <you>/<own sid>` was `not_found`.
+
+### New
+
+- **`p2p history`**: messages this device sent and received, kept only on this device. They're encrypted at rest with ChaCha20-Poly1305 under a key of their own (`cli/history.key`, 0600), kept for 30 days up to 8 MiB by default, and sent to no relay or peer.
+  - Options: `--session <sid>` or `--inbox`, `--peer`, `--circle`, `--since 30m|12h|7d|<date>`, `--limit`, `--clear` and `--json`.
+  - The full history and the inbox belong to the person: they need the front end's token or your `yes` on the terminal, and are refused inside an agent's session. A session sees only its own history.
+  - Settings: `history.enabled`, `history.retentionDays` and `history.maxBytes` in `config.json`. `P2P_HISTORY=0` stops recording.
+  - The TUI's Messages screen merges in the history (`h` toggles the inbox only). The Codex bridge has a `p2p_history` tool, and the Claude mod has `/peers history [inbox|here]` and `/peers inbox`.
+- **Send to another session on the same device.** `p2p send --to "<you> [ref]"` or `--to <you>/<sid>`, the mod's `SendMessage` and the bridge's `p2p_send` now reach another session of yours on this device when it is named. A bare `--to <you>` still means your other devices. The message goes through your relay sealed to this device, under the same rules as your other devices. Delivery receipts and `--notify-when-idle` work for these sends.
+- **Shares that cover subfolders: `p2p project share --subfolders`** (and `/peers project share --subfolders`). A shared non-git folder can cover the folders below it.
+  - Coverage is opt-in, so existing shares stay exact.
+  - A covered subfolder never crosses a git repository (bare ones included), a `.p2p-private` marker, or a folder with its own policy.
+  - `--subfolders` is refused for `/`, your home folder and the folders above it, the temp folders and the system's top folders, and ignored with a warning on a git repository.
+  - At share time it warns about nested repositories and `.p2p-private` folders.
+- **`p2p session show <sid>`** (and `/peers session`, typed only): a session's bound projects, who it reaches, every reason it is private, and what to do. It is refused inside an agent's session without the front end's token.
+- **Ix is on by default, and `p2p doctor` has an Ix section.**
+  - `p2p setup` on a new install enables the `ix` extension when both the Ix CLI and `@peer2peer/ext-ix` are found, and otherwise says how to get them. Setup installs nothing. Only you can enable it: with the front end's token or your `yes` on the terminal, never from inside an agent's session.
+  - An existing install never changes silently. It gets a one-time notice at a terminal instead.
+  - The doctor's Ix section shows the Ix binary and version, whether the extension is enabled, the local backend's health, whether the project here is mapped, and each project's graph target. Without Ix, nothing in that section is a failure.
+  - `p2p project show|ls` print each project's graph target (`graph: local only (http://localhost:8090)`).
+
+### Fixes
+
+- Project boundaries bind less noise, so sessions go private by mistake less often:
+  - `/dev/null` and other device or pseudo files are no longer projects.
+  - The scripts of `sed`, `jq`, `awk`, `perl -e`, `python -c`, `sh -c` and similar commands are no longer read as paths, while the absolute and relative paths written inside them now bind.
+  - `$HOME`, `$PWD` and `$CLAUDE_JOB_DIR` are expanded when the front end knows their real value.
+  - Paths are sent as written, so `git -C /src/secret.repo` binds `/src/secret.repo`, not `/src`.
+- Every check stays fail-closed, and each case where a session could have been shared too widely is closed and tested ([#49](https://github.com/ix-infrastructure/Peer2Peer/pull/49)). Remaining gaps are tracked in [#51](https://github.com/ix-infrastructure/Peer2Peer/issues/51).
+
+### Release process
+
+- The cross-version matrix runs on every pull request and in the release workflow, against the previous two release tags from git and from npm ([#36](https://github.com/ix-infrastructure/Peer2Peer/pull/36)).
+- The relay install scripts are pinned to the v0.1.0 source tarball ([#39](https://github.com/ix-infrastructure/Peer2Peer/pull/39)). They move to v0.1.1 in a follow-up after this release, once its `SHA256SUMS` exists.
+
+## 0.1.0
+
+The first npm release. These notes were added after it shipped, because the release itself carried only the generated text.
+
+- **Invite codes and `p2p remove`.** A code records which circles its redemption actually put the redeemer in, and `p2p remove` takes the redeemer out of only those, never out of a circle they were already in. Codes redeemed before invite links shipped have no such record. For them, `p2p remove` falls back to undoing every circle the code named.
+- **Invite codes on private relays.** A code or link whose relay host is, or resolves to, a loopback, link-local or private address is refused unless the redeemer passes `p2p join --allow-private-relay` (or sets `P2P_ALLOW_PRIVATE_RELAY=1`).
+  - The same applies to a code whose inviter's relays are such relays, to pasted long invite links (`p2p accept`) and to circle links (`p2p circle join`) that name one.
+  - Held invites and rotations from friends on such relays are approved as before. A relay that is already one of yours (a team's Tailscale or LAN relay) never needs the flag.
+  - In Claude Code: `/peers join --allow-private-relay <code>`.

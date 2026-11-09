@@ -14,12 +14,9 @@ All five are licensed Apache-2.0 and versioned in lockstep: they always carry th
 
 **Publish order:** core → relay → codex-bridge → cli → ext-ix. Each package comes after the packages it depends on, so a user never installs a version whose dependencies aren't there yet. `scripts/release-pack.mjs` writes this order to `.release/tarballs/manifest.json`, and the release workflow follows it.
 
-## Release notes for the next release
+## Release notes
 
-Things to carry into the next release's notes:
-
-- **Invite codes and `p2p remove`.** A code now records which circles its redemption actually put the redeemer in, and `p2p remove` takes them out of only those, never a circle they were in already. Codes redeemed before invite links shipped have no such record: for them `p2p remove` falls back to undoing every circle the code named, as before.
-- **Invite codes on private relays.** A code or link whose relay host is, or resolves to, a loopback, link-local or private address is refused unless the redeemer passes `p2p join --allow-private-relay` (or sets `P2P_ALLOW_PRIVATE_RELAY=1`). Teams that run a relay on their own network need the flag, and so do a code whose inviter's relays are such relays, and pasted long invite links (`p2p accept`) and circle links (`p2p circle join`) that name one. Held invites and rotations from friends on such relays are approved as before, and a relay that is already one of the user's own (a team's Tailscale or LAN relay) never needs the flag. In Claude Code: `/peers join --allow-private-relay <code>`.
+Each release's notes go in [CHANGELOG.md](../CHANGELOG.md), in the PR that bumps the version. Between releases, add anything the next release's notes must say (a behaviour change, a step 2 of a two-step rollout) under an "Unreleased" heading there.
 
 ## How a release is built
 
@@ -98,7 +95,7 @@ These need an owner of the npm organization `peer2peer` and an admin of the GitH
 ### Release checklist
 
 - [ ] Version bumped in all five packages (`scripts/set-version.mjs`), bundles rebuilt, `scripts/check-bundle.sh` clean.
-- [ ] Release notes written, including anything carried in "Release notes for the next release" above, and any step 2 of a two-step rollout this release turns on.
+- [ ] Release notes written in CHANGELOG.md (the "Unreleased" heading renamed to the version), including any step 2 of a two-step rollout this release turns on.
 - [ ] The bump PR's `compat` check green: the cross-version matrix both ways against the previous two releases, from their tags and from npm ([docs/compatibility.md](compatibility.md)). Every check listed there passes, or reports a clean absence for a feature one side doesn't have.
 - [ ] A step 2 rollout in this release: the matrix also green with that setting (`--new-env ...`) against both previous releases.
 - [ ] `ci` dispatched on the PR's head and green (Linux and macOS, Node 22 and 24).
