@@ -76,11 +76,12 @@ const cap = (s: string) => ([...s].length > HISTORY_SHOW_MAX ? `${[...s].slice(0
 
 /**
  * This session's history as the model may read it. A received message's body is shown only when
- * this bridge showed it to the model (or the person released it) in this run, or it came from the
- * user's own devices (never held but for a location refusal). Anything else (held, declined,
- * expired, or from before a restart, when the decision isn't known here) is listed by sender only:
- * history never gets around a hold, and a restart can't bring a declined message back. Bodies are
- * framed exactly as live messages are.
+ * this bridge showed it to the model (or the person released it) in this run. That holds for the
+ * user's own sessions too: an own agent session's message, or one from another device, is held like
+ * a peer's (screenMessage, `p2p own-agents`), and a history record can't say which it was. Anything
+ * else (held, declined, expired, or from before a restart, when the decision isn't known here) is
+ * listed by sender only: history never gets around a hold, and a restart can't bring a held or
+ * declined message back. Bodies are framed exactly as live messages are.
  */
 export function historyText(bridge: Bridge, recs: readonly HistoryRecord[], truncated: boolean): string {
   if (recs.length === 0) return "No Peer2Peer messages in this session's history.";
@@ -97,7 +98,7 @@ export function historyText(bridge: Bridge, recs: readonly HistoryRecord[], trun
       continue;
     }
     const state = seen.get(r.id);
-    const ok = !refused && (state === "shown" || state === "released" || (state === undefined && r.peer.self === true));
+    const ok = !refused && (state === "shown" || state === "released");
     if (!ok) {
       held++;
       out.push(`- ${when}: a message from ${addr}, ${state === "declined" ? "declined" : state === "expired" ? "expired unread" : "not shown here"}: only your user can read it`);
@@ -161,10 +162,11 @@ export function makeTools(bridge: Bridge, onMeta?: (meta: unknown) => void): Too
         const message = str(args.message) ?? "";
         if (message.trim() === "" && args.notify_when_idle !== true) return text("Nothing to send: `message` is empty.", true);
         if (message.length > MAX_MESSAGE_CHARS) return text(`The message is too long (${message.length} characters; at most ${MAX_MESSAGE_CHARS}).`, true);
-        let target = resolveTarget(to, bridge.peers);
-        if (target.kind === "cli" || target.kind === "ambiguous") {
+        // Another session on this device is a target like any other listed one; this session itself never is.
+        let target = resolveTarget(to, bridge.peers, bridge.sid);
+        if (target.kind === "cli" || target.kind === "ambiguous" || (target.kind === "refused" && target.code === "no-label")) {
           await bridge.refreshPeers();
-          target = resolveTarget(to, bridge.peers);
+          target = resolveTarget(to, bridge.peers, bridge.sid);
         }
         if (target.kind === "refused") return text(target.reason, true);
         if (target.kind === "ambiguous") return text(`More than one session matches ${inertMax(to, 100)}. Retry with one of:\n${target.candidates.map((p) => `- ${sessionAddress(p)} — ${p.state}`).join("\n")}`, true);

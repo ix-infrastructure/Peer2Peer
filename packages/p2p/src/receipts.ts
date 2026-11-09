@@ -175,12 +175,14 @@ export async function sendReceipt(app: App, o: { eventId: string; fromSession: s
   if (asked.unclaimedFor === undefined && asked.toSession !== undefined && asked.toSession !== o.fromSession) return { sent: false, reason: "not-yours" };
   // A private session (shared with nobody) sends none: one would tell the sender it exists. Nor does
   // the copy of a private ended session's message. A session with no roster here counts as private.
+  // Except to this user's own sessions (another device, or this one): they list it anyway, and the
+  // receipt is how one of them learns its message waits for Deliver.
   const sessions = (await app.state.get("sessions")) ?? {};
   const isPrivate = (sid: string) => {
     const doc = sessions[sid];
     return !doc || (doc.vis === "private" && doc.parts.length === 0);
   };
-  if (isPrivate(o.fromSession) || (asked.unclaimedFor !== undefined && isPrivate(asked.unclaimedFor))) return { sent: false, reason: "private" };
+  if (asked.from !== app.userId && (isPrivate(o.fromSession) || (asked.unclaimedFor !== undefined && isPrivate(asked.unclaimedFor)))) return { sent: false, reason: "private" };
   const key = `${asked.from}|${asked.id}`;
   const verdict = await withDoc(app, (d, now) => {
     const done = d.sent[key]?.outcomes ?? [];

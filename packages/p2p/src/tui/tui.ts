@@ -24,7 +24,7 @@ import type { App } from "../app.js";
 import { approveJoinRequest, circleMembers, joinFromHeld, listCircles } from "../circle-ops.js";
 import { doctor } from "../doctor.js";
 import { CliError, toErrorJson } from "../errors.js";
-import { listPeers, sendSharing } from "../sessions.js";
+import { listPeers, sendSharing, tuiTaintNote } from "../sessions.js";
 import { isPersonRecord, readHistory, type HistoryRec } from "../history.js";
 import { sessionWorkdir, showProject } from "../projects.js";
 import { accept, dropHeld, friends, getHeld, listHeld } from "../social.js";
@@ -571,7 +571,8 @@ export class Tui {
             // Your own send crosses no project boundary; it says which one this folder has (projects.ts).
             const here = await showProject(this.app, sessionWorkdir(this.app.env)).catch(() => undefined);
             const boundary = here ? ` Project ${clean(here.name)} here is ${here.policy}: this send was yours.` : "";
-            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}${boundary}`);
+            const taint = await tuiTaintNote(this.app, r.to.userId).catch(() => undefined);
+            this.flash(`${r.queued ? `Queued for ${clean(r.to.address)} [${r.to.ref}]: it goes out or waits until they're back.` : `Sent to ${clean(r.to.address)} [${r.to.ref}].`}${note}${boundary}${taint ? ` Note: ${taint}.` : ""}`);
           } catch (err) {
             Object.assign(row, { state: "failed", note: clean(toErrorJson(err).reason) });
             throw err;

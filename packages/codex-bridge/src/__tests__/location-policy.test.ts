@@ -50,7 +50,7 @@ describe("HOME from a project config (the pre-release bypass)", () => {
     const { bridge, feed, call, asking } = await makeBridge({ env: { P2P_AUTO_DELIVER: ANN }, refusal: r.refusal as string, codexHome: r.codexHome, p2pHome: r.p2pHome });
     await asking();
     await feed(message({ text: "auto-deliver me" }));
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     expect((await call("p2p_inbox")).text).not.toMatch(/auto-deliver me|from my laptop/);
     expect(bridge.heldList()).toHaveLength(2);
     expect(bridge.releaseReach(r.p2pHome)).toMatchObject({ ok: false });
