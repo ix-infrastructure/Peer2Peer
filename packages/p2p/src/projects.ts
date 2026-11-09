@@ -117,6 +117,8 @@ export interface SessionBinding {
   unregistered?: true;
   /** A front end holding the person token (personTokenOk) has used it. */
   registered?: true;
+  /** When this binding began (ms): a session id bound anew (its old binding expired) starts again here (history.ts). */
+  since?: number;
   at: number;
 }
 
@@ -497,6 +499,7 @@ export async function bindSession(
       ...(constraints.length ? { constraints } : {}),
       ...(unregistered ? { unregistered: true as const } : {}),
       ...(registered ? { registered: true as const } : {}),
+      since: typeof have?.since === "number" ? have.since : now,
       at: now,
     };
     return { next: { ...all, [sid]: next }, result: next };
@@ -604,18 +607,19 @@ export type ConfirmTty = (question: string) => Promise<boolean>;
  * Lets a command that widens who reaches this user (sharing a project, a session, a default
  * circle, invites, joins, trust, friends) run only for the person: their front end's token; or,
  * outside any agent's session, their "yes" typed on the controlling terminal (never stdin, never a
- * flag: a process detached from every terminal can't give it). Reads are never asked.
+ * flag: a process detached from every terminal can't give it). Reads are never asked, except for
+ * the person's own messages (history.ts), which pass their own `why`.
  */
-export async function assertPersonForWidening(app: Pick<App, "env"> & { front?: boolean }, what: string, confirm: ConfirmTty): Promise<void> {
+export async function assertPersonForWidening(app: Pick<App, "env"> & { front?: boolean }, what: string, confirm: ConfirmTty, why = "changes who reaches you"): Promise<void> {
   if (app.front === true) return;
   if (agentContext(app.env)) {
     throw new CliError(
       "refused",
-      `\`p2p ${what}\` changes who reaches you, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`,
+      `\`p2p ${what}\` ${why}, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`,
     );
   }
-  if (!(await confirm(`p2p ${what} changes who reaches you.`))) {
-    throw new CliError("refused", `\`p2p ${what}\` changes who reaches you: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
+  if (!(await confirm(`p2p ${what} ${why}.`))) {
+    throw new CliError("refused", `\`p2p ${what}\` ${why}: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
   }
 }
 

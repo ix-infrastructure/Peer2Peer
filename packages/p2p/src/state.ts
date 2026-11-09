@@ -35,6 +35,7 @@
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
 //   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
+//   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";

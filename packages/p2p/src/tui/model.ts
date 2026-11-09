@@ -76,6 +76,10 @@ export interface MessageRow {
   lastSeen?: number;
   receiptId?: string;
   note?: string;
+  /** From the message history (history.ts): kept past this run, up to its retention. */
+  fromHistory?: true;
+  /** The person's own inbox (this TUI's session, or no session) rather than one of their agent sessions'. */
+  inbox?: boolean;
 }
 
 export interface RelayRow {
@@ -135,6 +139,8 @@ export interface Ui {
   compose?: { target: SendTarget; text: string };
   flash?: { text: string; error?: boolean };
   busy?: string;
+  /** Messages screen: only your inbox (this TUI's session, or none), not your agent sessions' too. */
+  inboxOnly?: boolean;
 }
 
 export type Effect =
@@ -190,8 +196,8 @@ export function sendTargets(d: Data): SendTarget[] {
   return [...sessions, ...people];
 }
 
-export function messagesSorted(d: Data): MessageRow[] {
-  return [...d.messages].sort((a, b) => b.at - a.at);
+export function messagesSorted(d: Data, ui?: Pick<Ui, "inboxOnly">): MessageRow[] {
+  return d.messages.filter((m) => !ui?.inboxOnly || m.inbox !== false).sort((a, b) => b.at - a.at);
 }
 
 function count(ui: Ui, d: Data): number {
@@ -201,7 +207,7 @@ function count(ui: Ui, d: Data): number {
     case "held":
       return d.held.length;
     case "messages":
-      return d.messages.length;
+      return messagesSorted(d, ui).length;
     case "send":
       return sendTargets(d).length;
     case "health":
@@ -357,7 +363,11 @@ export function onKey(ui0: Ui, d: Data, key: Key, page = 10): { ui: Ui; effect?:
       return { ui };
     }
     case "messages": {
-      const msg = messagesSorted(d)[sel];
+      if (key.ch === "h") {
+        const next = clampSel({ ...ui, inboxOnly: !ui.inboxOnly }, d);
+        return { ui: flash(next, next.inboxOnly ? "Your inbox only: messages to you and this window's session." : "Every session on this device: your inbox and your agent sessions' messages.") };
+      }
+      const msg = messagesSorted(d, ui)[sel];
       if (!msg) return { ui };
       if (key.name === "return" || key.name === "space") {
         const head = msg.dir === "in" ? `From ${msg.who}${msg.ref ? ` [${msg.ref}]` : ""}` : `To ${msg.who}${msg.ref ? ` [${msg.ref}]` : ""}`;
