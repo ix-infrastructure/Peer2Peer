@@ -3,10 +3,12 @@
 # Public CI: the full gate, on GitHub-hosted runners only (never
 # self-hosted), on Linux and/or macOS with Node 22 and 24.
 #
-# Manual only (workflow_dispatch): a maintainer runs it from the Actions tab
-# (or `gh workflow run ci-public.yml --ref <branch>`), on a pull request's
-# branch before merging. There is no push or pull_request trigger. The DCO
-# check (dco.yml) is the only workflow that runs on pull requests.
+# The full gate is manual (workflow_dispatch): a maintainer runs it from the
+# Actions tab (or `gh workflow run ci-public.yml --ref <branch>`), on a pull
+# request's branch before merging. On pull requests (the `pull_request`
+# event, never `pull_request_target`) only the cross-version matrix runs (the
+# `compat` job below); the gate job is skipped. There is no push trigger. The
+# DCO check (dco.yml) also runs on pull requests.
 #
 # Per job, in the build order core -> relay -> codex-bridge -> p2p -> ext-ix:
 #   - install every package with `npm ci --ignore-scripts` (no dependency needs
@@ -36,12 +38,18 @@
 # The internal self-hosted workflow (ci.yml, manual dispatch only) is removed
 # from the public repository at launch.
 #
-# With compat_matrix=true a dispatch also runs the cross-version matrix
-# (scripts/compat/matrix.mjs, docs/compatibility.md): this tree's CLI against
-# the CLI bundles committed at earlier refs, both ways, over a local relay.
-# Part of the release checklist.
+# The cross-version matrix (scripts/compat/matrix.mjs, docs/compatibility.md):
+# this tree's CLI against the previous two release tags (the CLI bundles
+# committed at them; 70b86c7, the initial public release, fills in while
+# fewer than two tags exist) and, where those releases are on npm, against
+# them as npm installs them, both ways, over a local relay. It runs on every
+# pull request and, unless compat_matrix is unticked, on every dispatch. It
+# takes about a minute (about 30 s per baseline), so it isn't path-filtered.
+# On a pull request from a fork it runs with the read-only token GitHub gives
+# fork runs, and no secrets: this workflow uses none.
 name: ci
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       os:
@@ -52,9 +60,13 @@ on:
       compat_matrix:
         description: "Also run the cross-version matrix (scripts/compat/matrix.mjs)"
         type: boolean
-        default: false
+        default: true
       compat_refs:
-        description: "Earlier refs to test against, comma-separated (default: the script's, until release tags exist)"
+        description: "Earlier git refs to test against, comma-separated (default: the previous two release tags)"
+        type: string
+        default: ""
+      compat_npm:
+        description: "Published @peer2peer/cli versions to test against, comma-separated (exact versions; an unpublished one is skipped)"
         type: string
         default: ""
 concurrency:
@@ -68,6 +80,8 @@ defaults:
 jobs:
   gate:
     name: gate (${{ matrix.os }}, node ${{ matrix.node }})
+    # The full gate is a maintainer's dispatch; pull requests get the matrix only (above).
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -222,14 +236,14 @@ jobs:
 
   compat:
     name: cross-version matrix
-    if: ${{ inputs.compat_matrix }}
+    if: ${{ github.event_name == 'pull_request' || inputs.compat_matrix }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-          # The old CLI bundles come from git history.
+          # The old CLI bundles come from git history, and the baselines from its release tags.
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
@@ -240,7 +254,19 @@ jobs:
           for p in core relay; do
             (cd "packages/$p" && npm ci --ignore-scripts && npm run build)
           done
-      - name: matrix (this tree's committed CLI bundle against earlier refs, both ways)
+      - name: matrix (this tree's committed CLI bundle against the previous two releases, from git and npm, both ways)
         env:
+          # Empty on a pull request: the script's defaults (the previous two release tags).
           P2P_COMPAT_REFS: ${{ inputs.compat_refs }}
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        run: node scripts/compat/matrix.mjs --npm-releases
+      - name: matrix against published npm versions (compat_npm)
+        if: ${{ inputs.compat_npm != '' }}
+        env:
+          P2P_COMPAT_NPM: ${{ inputs.compat_npm }}
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
         run: node scripts/compat/matrix.mjs

@@ -54,8 +54,8 @@ P2P_DEFAULT_RELAYS=wss://relay.example.org/v3 claude
 **Just the CLI** (any agent, or scripts):
 
 ```sh
-npm i -g @peer2peer/cli                                  # after the first npm release
-# today: node /path/to/Peer2Peer/mods/claude/peer2peer/bin/p2p.mjs <command>  (alias it as p2p)
+npm i -g @peer2peer/cli
+# or from a checkout: node /path/to/Peer2Peer/mods/claude/peer2peer/bin/p2p.mjs <command>  (alias it as p2p)
 export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3     # 1–5, comma-separated
 ```
 

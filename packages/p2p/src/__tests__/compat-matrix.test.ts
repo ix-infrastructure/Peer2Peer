@@ -3,7 +3,7 @@
 // The cross-version matrix (scripts/compat/matrix.mjs, docs/compatibility.md) as a test: this
 // tree's committed CLI bundle against the bundles at earlier refs, both ways. It needs git history
 // and a built packages/relay, so it runs only with P2P_COMPAT=1 (P2P_COMPAT_REFS picks the refs);
-// the release checklist and the manual CI dispatch run it.
+// CI (ci-public.yml, every pull request) and the release workflow run the script itself.
 
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
@@ -20,6 +20,7 @@ describe.skipIf(process.env.P2P_COMPAT !== "1")("cross-version matrix", () => {
     const r = JSON.parse(out) as { ok: boolean; results: { direction: string; ref: string; checks: { name: string; ok: boolean; detail?: string }[] }[] };
     const failed = r.results.flatMap((x) => x.checks.filter((c) => !c.ok).map((c) => `${x.direction} ${x.ref}: ${c.name}: ${c.detail}`));
     expect(failed).toEqual([]);
-    expect(r.results.length).toBeGreaterThanOrEqual(4);
+    // Both directions against at least one baseline (the default: the previous two releases).
+    expect(r.results.length).toBeGreaterThanOrEqual(2);
   }, 900_000);
 });

@@ -80,13 +80,13 @@ function Install-P2PRelay {
     Set-StrictMode -Version 2.0
     $ErrorActionPreference = 'Stop'
 
-    # TODO(first release): pin both after the first release, from its
-    # SHA256SUMS asset (docs/releasing.md, step 5). GitHub's generated
-    # /archive/ tarballs aren't byte-stable, so they are never used.
+    # Pinned from the release's SHA256SUMS asset (docs/releasing.md, step 5).
+    # GitHub's generated /archive/ tarballs aren't byte-stable, so they are
+    # never used.
     # TODO: once releases publish a multi-arch image
     # (for example on GHCR), pull it by digest instead of building locally.
-    $RelayVersion = ''
-    $RelaySourceSha256 = ''
+    $RelayVersion = '0.1.0'
+    $RelaySourceSha256 = 'f677c00a9422f3adcfa89a174a3bd61e35eeef6ce3975a0f391c2e26dc2f8d65'
     $RelaySourceUrlBase = 'https://github.com/ix-infrastructure/Peer2Peer/releases/download'
 
     $image = 'peer2peer/relay:local'
