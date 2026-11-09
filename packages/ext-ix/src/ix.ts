@@ -9,8 +9,10 @@
 //   ix --version                                   is Ix installed
 //   ix impact <target> --format json [--kind k] [--path p] [--depth n] [--limit n]
 //   ix around <path> --format json [--limit n]     callers / users / tests / importers of a file
-//   ix note show <id> --json                       read a note (Ix Pro memory layer: cloud; refused for a local graph target)
-//   ix note [--tag t] [--session s] [--actor a] --json   < text   write a note (cloud; refused for a local graph target)
+//   ix --help                                      which `ix note` / `ix session` answer: OSS (local) or Ix Pro (cloud)
+//   ix note --json show <id>                       read a note (OSS: the local backend; refused when Ix Pro answers)
+//   ix note --tag=t [--session=s] [--actor=a] --json   < text   write a note (likewise)
+//   ix session --json create <p2p-name> --purpose=p --actor=a --ttl=h   a session's record in the local graph (likewise)
 //   ix overview <file> --format llm                resolve a subgraph: one file
 //   ix inventory --kind file --path <prefix> --format llm --limit n    a directory
 //   ix context <symbol> --format llm [--kind k] [--path p]             a symbol
@@ -192,28 +194,174 @@ export function callPaths(call: IxCall): string[] {
  * The `ix` subcommands ext-ix may run against a local target: reads of the local graph only. Ix
  * Pro's own commands (`ix note` writes and reads Ix-memory in the cloud, whatever IX_ENDPOINT says)
  * and `ix map` (routed to the cloud when an org session is active) are refused, so a private
- * project's content never reaches the cloud through ext-ix.
+ * project's content never reaches the cloud through ext-ix. The exceptions are the memory calls
+ * (memoryCall): exact forms of `ix note` and `ix session`, allowed against a local target only and
+ * only when the `ix` that answers is the OSS one (guardRunner, memorySupport).
  */
 export const LOCAL_IX_COMMANDS: readonly string[] = ["--version", "impact", "around", "overview", "inventory", "context", "subsystems", "status"];
+
+// ---------------------------------------------------------------------------
+// Memory calls (epic #41 piece 2): OSS `ix note` and `ix session` against the local backend
+
+/** Tags `ix note --tag` takes (the OSS CLI and Ix Pro accept the same four). */
+const MEMORY_TAGS: readonly string[] = ["note", "finding", "decision", "reminder"];
+/** An Ix note id (`ix note show <id>`): what --ix-note accepts. */
+export const IX_NOTE_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/;
+/** An Ix session reference (`--session=`): a name or an id. */
+export const IX_SESSION_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** The sessions ext-ix creates: `p2p-` and a session id (or its hash). */
+export const IX_SESSION_NAME_RE = /^p2p-[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+/** `--actor=`: `p2p`, or `p2p:` and a Peer2Peer address. A label on the OSS backend, never an identity. */
+export const IX_ACTOR_RE = /^p2p(?::[A-Za-z0-9._@-]{1,80})?$/;
+/** Longest `--purpose=` ext-ix sends. */
+export const MAX_PURPOSE = 200;
+/** Longest session TTL ext-ix asks for, in hours (a year). */
+export const MAX_TTL_HOURS = 8760;
+
+export type MemoryCall = "help" | "note-create" | "note-show" | "session-create";
+
+/** One line of printable text: no control or format characters, no line or paragraph separators. */
+const isOneLine = (s: string) => !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s);
+
+/**
+ * Which memory call `argv` is, when it is exactly one of the forms ext-ix runs; undefined for
+ * anything else (another subcommand, an extra or repeated flag, a positional note text: the text
+ * only ever goes on stdin, never into argv where `ps` shows it):
+ *   ix --help                                                         which commands answer (memorySupport)
+ *   ix note --json show <id>                                          read a note (--ix-note)
+ *   ix note --tag=<t> [--session=<ref>] [--actor=<a>] --json          write a note, text on stdin
+ *   ix session --json create <p2p-name> --purpose=<p> --actor=<a> --ttl=<h>   a session record
+ */
+export function memoryCall(argv: readonly string[]): MemoryCall | undefined {
+  const a = argv;
+  if (a.length === 1 && a[0] === "--help") return "help";
+  if (a[0] === "note") {
+    if (a.length === 4 && a[1] === "--json" && a[2] === "show" && IX_NOTE_ID_RE.test(a[3])) return "note-show";
+    const seen = new Set<string>();
+    for (const x of a.slice(1)) {
+      const m = /^--(tag|session|actor)=(.*)$/s.exec(x);
+      const key = x === "--json" ? "json" : m?.[1];
+      if (key === undefined || seen.has(key)) return undefined;
+      seen.add(key);
+      if (key === "tag" && !MEMORY_TAGS.includes(m![2])) return undefined;
+      if (key === "session" && !IX_SESSION_REF_RE.test(m![2])) return undefined;
+      if (key === "actor" && !IX_ACTOR_RE.test(m![2])) return undefined;
+    }
+    return seen.has("json") && seen.has("tag") ? "note-create" : undefined;
+  }
+  if (a[0] === "session" && a.length === 7 && a[1] === "--json" && a[2] === "create" && IX_SESSION_NAME_RE.test(a[3])) {
+    const purpose = /^--purpose=(.+)$/s.exec(a[4])?.[1];
+    const actor = /^--actor=(.+)$/s.exec(a[5])?.[1];
+    const ttl = /^--ttl=([1-9]\d{0,3})$/.exec(a[6])?.[1];
+    if (purpose === undefined || [...purpose].length > MAX_PURPOSE || !isOneLine(purpose) || purpose.trim() !== purpose) return undefined;
+    if (actor === undefined || !IX_ACTOR_RE.test(actor)) return undefined;
+    if (ttl === undefined || Number(ttl) > MAX_TTL_HOURS) return undefined;
+    return "session-create";
+  }
+  return undefined;
+}
+
+/** Calls that write to the backend: each must say on stderr that it went to the local backend. */
+const WRITES: ReadonlySet<MemoryCall> = new Set(["note-create", "session-create"]);
+
+/**
+ * Which `ix note` / `ix session` this Ix has, from `ix --help` (the capability, never a trial write):
+ *   - "oss": the OSS commands against the local backend (Ix after 0.13.0, ix-infrastructure/Ix#916).
+ *     Ix registers them only when Ix Pro did not load, and lists them in a "Memory:" section of the
+ *     help only then.
+ *   - "pro": Ix Pro loaded (its "Pro:" section). Its `ix note` and `ix session` always go to the
+ *     active cloud org, whatever IX_ENDPOINT says.
+ *   - "none": neither (an Ix from before #916 without Pro, or not Ix at all).
+ * Anything that isn't plainly the first is not it.
+ */
+export type MemorySupport = "oss" | "pro" | "none";
+
+export function parseMemorySupport(help: string): MemorySupport {
+  const lines = help.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/);
+  if (lines.some((l) => /^Pro:\s*$/.test(l))) return "pro";
+  const at = lines.findIndex((l) => /^Memory:\s*$/.test(l));
+  if (at < 0) return "none";
+  const section: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (!/^\s+\S/.test(l)) break;
+    section.push(l);
+  }
+  const has = (name: string) => section.some((l) => new RegExp(`^\\s+${name}\\s`).test(l));
+  return has("note") && has("session") ? "oss" : "none";
+}
+
+/** Why a memory call can't run with this Ix, for a person: what to do about it. */
+export function memoryRefusal(support: Exclude<MemorySupport, "oss">, target: IxTarget): IxExtError {
+  const where = target.kind === "local" && target.why ? ` (${target.why})` : "";
+  if (support === "pro") {
+    return new IxExtError("graph_target", `Ix Pro is installed, and its \`ix note\` and \`ix session\` write to your Ix cloud org whatever the endpoint; this graph is local only${where}, so Peer2Peer doesn't run them (\`p2p project show\` shows the graph)`, { ix: "pro" });
+  }
+  return new IxExtError("graph_target", `this Ix has no local \`ix note\` (it came after Ix 0.13.0, ix-infrastructure/Ix#916): upgrade Ix (\`ix upgrade\`), and Peer2Peer writes notes into your local graph${where}`, { ix: "upgrade" });
+}
+
+/** `ix --help` through `ix`, read as a MemorySupport; "none" when it fails. */
+export async function memorySupport(ix: IxRunner): Promise<MemorySupport> {
+  try {
+    const r = await ix.run(["--help"], { timeoutMs: 15_000 });
+    return r.code === 0 ? parseMemorySupport(r.stdout) : "none";
+  } catch {
+    return "none";
+  }
+}
+
+/** Whether a write's stderr says it went to `endpoint`, the local backend (OSS `ix note`/`ix session` print `→ local backend <origin+path>`). */
+export function confirmsLocalWrite(stderr: string, endpoint: string): boolean {
+  const want = `→ local backend ${endpoint}`;
+  return stderr
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split(/\r?\n/)
+    .some((l) => l.trim() === want);
+}
 
 /** The refusal for a command a target doesn't allow. */
 export function refuseForTarget(argv: readonly string[], target: IxTarget): IxExtError | undefined {
   const cmd = argv[0] ?? "";
   if (LOCAL_IX_COMMANDS.includes(cmd)) return undefined;
+  const memory = memoryCall(argv);
+  if (memory === "help") return undefined;
   if (target.kind === "local") {
-    const what = cmd === "note" ? "Ix notes live in Ix Pro's cloud memory" : `\`ix ${cmd.slice(0, 40)}\` can reach Ix Pro's cloud`;
-    return new IxExtError("graph_target", `${what}, and this project's graph is local only${target.why ? ` (${target.why})` : ""}: Peer2Peer doesn't run it (\`p2p project show\` shows the graph)`);
+    if (memory !== undefined) return undefined;
+    if (cmd === "note" || cmd === "session") {
+      return new IxExtError("graph_target", `ext-ix runs only its own forms of \`ix ${cmd}\` (to the local graph${target.why ? `: ${target.why}` : ""}), not this one`);
+    }
+    return new IxExtError("graph_target", `\`ix ${cmd.slice(0, 40)}\` can reach Ix Pro's cloud, and this project's graph is local only${target.why ? ` (${target.why})` : ""}: Peer2Peer doesn't run it (\`p2p project show\` shows the graph)`);
+  }
+  if (cmd === "note" || cmd === "session") {
+    // Graph memory (notes, sessions) goes to the local graph only: no shared graph takes it yet.
+    return new IxExtError("graph_target", `ext-ix writes Ix notes and sessions to the local graph only, never to a shared graph (circle ${target.circle.slice(0, 64)})`);
   }
   return new IxExtError("graph_target", `ext-ix doesn't run \`ix ${cmd.slice(0, 40)}\` against a shared graph yet`);
 }
 
-/** Wraps a runner so every call is checked against its target first (refuseForTarget). `cwd`: the folder a call runs in when it names none. */
+/**
+ * Wraps a runner so every call is checked against its target first (refuseForTarget). `cwd`: the
+ * folder a call runs in when it names none. A memory call (`ix note`, `ix session`) also needs the
+ * OSS commands (memorySupport, asked once per guard: a guard lives for one command or one batch),
+ * and a write must then say on stderr that it went to the target's local endpoint, or it fails
+ * with `ix_unconfirmed` (whatever answered was not the OSS command against that backend).
+ */
 export function guardRunner(inner: IxRunner, target: TargetFn | (() => Promise<IxTarget>), cwd: string = process.cwd()): IxRunner {
+  let support: Promise<MemorySupport> | undefined;
   return {
     run: async (argv, o) => {
-      const refused = refuseForTarget(argv, await (target as TargetFn)({ argv, cwd: o?.cwd ?? cwd }));
+      const t = await (target as TargetFn)({ argv, cwd: o?.cwd ?? cwd });
+      const refused = refuseForTarget(argv, t);
       if (refused) throw refused;
-      return inner.run(argv, o);
+      const memory = memoryCall(argv);
+      if (memory === undefined || memory === "help") return inner.run(argv, o);
+      support ??= memorySupport(inner);
+      const s = await support;
+      if (s !== "oss") throw memoryRefusal(s, t);
+      const r = await inner.run(argv, o);
+      if (r.code === 0 && WRITES.has(memory) && !confirmsLocalWrite(r.stderr, t.endpoint)) {
+        throw new IxExtError("ix_unconfirmed", `\`ix ${argv[0]}\` didn't say it wrote to the local backend (${t.endpoint}): Peer2Peer stops writing to Ix until it does (is Ix Pro installed now?)`);
+      }
+      return r;
     },
   };
 }

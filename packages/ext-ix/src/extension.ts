@@ -24,7 +24,8 @@ import { audienceOf } from "./overlap-command.js";
 import { FOOTPRINT_KIND, FOOTPRINT_TTL, parseFootprintBody } from "./footprint.js";
 import { footprintCommands } from "./footprint-command.js";
 import { buildImpact, IMPACT_KIND, impactFallback, parseImpactBody, renderImpact } from "./impact.js";
-import { callPaths, checkedTarget, guardRunner, refuseForTarget, ixAvailable, ixJson, ixRunner, localTarget, type IxRunner, type IxTarget, type TargetFn } from "./ix.js";
+import { callPaths, checkedTarget, guardRunner, refuseForTarget, ixAvailable, ixJson, ixRunner, IX_NOTE_ID_RE, localTarget, memoryRefusal, memorySupport, type IxRunner, type IxTarget, type TargetFn } from "./ix.js";
+import { ixMemory } from "./memory.js";
 import { buildNote, NOTE_KIND, parseNoteBody, renderNote, type NoteBody } from "./note.js";
 import { compareRepo, localRepo, normalizeRemote, type RepoRef } from "./repo.js";
 import { buildSubgraph, describeSelector, parseSubgraphBody, renderSubgraph, resolveArgv, SUBGRAPH_KIND, type Selector } from "./subgraph.js";
@@ -251,7 +252,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
         let tag = opts.tag as string | undefined;
         let at: string | undefined;
         if (typeof opts.ixNote === "string") {
-          if (!/^[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}$/.test(opts.ixNote) || opts.ixNote.startsWith("-")) throw usage("--ix-note must be a note id");
+          if (!IX_NOTE_ID_RE.test(opts.ixNote)) throw usage("--ix-note must be a note id");
           const n = (await ixJson(runner(ctx, deps, fromSession), ["note", "--json", "show", opts.ixNote])) as Partial<{ text: string; tag: string; at: string }>;
           if (typeof n?.text !== "string") throw new IxExtError("ix_failed", "ix note show returned no text");
           text = n.text;
@@ -450,7 +451,7 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
     {
       name: "import",
       args: "<event>",
-      description: "Write a received Ix note into your Ix graph (asks first; the user's decision, never the agent's)",
+      description: "Write a received Ix note into your local Ix graph (asks first; the user's decision, never the agent's). Needs an Ix with the OSS `ix note`",
       options: [
         { flags: "--tag <tag>", description: "Override the note's tag" },
         { flags: "--session <name>", description: "Attach it to one of your Ix sessions" },
@@ -460,14 +461,23 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
       run: async (ctx, args, opts) => {
         const e = await findEvent(ctx, String(args[0]), NOTE_KIND);
         const b = keptBody(e, parseNoteBody);
-        // `ix note` writes to Ix Pro's cloud memory: refused before anything is asked when the graph is local only.
-        const refused = refuseForTarget(["note"], await targetOf(ctx)({ argv: ["note"], cwd: ctx.cwd }));
-        if (refused) throw refused;
         const tag = (opts.tag as string | undefined) ?? b.tag;
         if (!(NOTE_TAGS as readonly string[]).includes(tag)) throw usage(`--tag must be one of ${NOTE_TAGS.join(", ")}`);
         const session = opts.session as string | undefined;
         if (session !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(session)) throw usage("--session must be an Ix session name or id");
         const address = line(e.from.address, 80);
+        const actor = /^[A-Za-z0-9._@-]{1,80}$/.test(address) ? [`--actor=p2p:${address}`] : [];
+        const argv = ["note", `--tag=${tag}`, ...(session ? [`--session=${session}`] : []), ...actor, "--json"];
+        // Before anything is asked: the graph target must allow this exact call (local, never shared),
+        // and the `ix` that answers must have the OSS `ix note` (the local backend), not Ix Pro's (the
+        // cloud org) or none (an Ix from before #916: upgrade). The guarded runner checks both again.
+        const target = await targetOf(ctx)({ argv, cwd: ctx.cwd });
+        const refused = refuseForTarget(argv, target);
+        if (refused) throw refused;
+        const ix = runner(ctx, deps);
+        if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
+        const support = await memorySupport(ix);
+        if (support !== "oss") throw memoryRefusal(support, target);
         const text = `Shared by ${address} over Peer2Peer${b.title ? `: ${b.title}` : ""}\n\n${b.text}`;
         // M1: consent covers exactly what is written. Either the full title and text are shown here
         // and the user agrees, or --yes after the user read this very note with `p2p ix show` at a terminal.
@@ -482,10 +492,6 @@ export function ixCommands(deps: Deps = {}): ExtCommand[] {
           const ok = await ctx.confirm(`${noteFull(b, address)}\n\nWrite all of this ${tag} note (${[...b.text].length} characters, shown in full above) from ${address} into your Ix graph?`);
           if (!ok) throw new IxExtError("consent_required", "not imported: the user didn't agree (run it in a terminal, or `p2p ix show` it there and then import with --yes)");
         }
-        const ix = runner(ctx, deps);
-        if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
-        const actor = /^[A-Za-z0-9._@-]{1,80}$/.test(address) ? [`--actor=p2p:${address}`] : [];
-        const argv = ["note", `--tag=${tag}`, ...(session ? [`--session=${session}`] : []), ...actor, "--json"];
         const r = await ix.run(argv, { stdin: text });
         if (r.code !== 0) throw new IxExtError("ix_failed", `ix note failed (exit ${r.code})${r.stderr ? `: ${line(r.stderr, 300)}` : ""}`);
         let created: { id?: unknown } = {};
@@ -573,6 +579,8 @@ export function createIxExtension(deps: Deps = {}): P2PExtension {
     commands: ixCommands(deps),
     // x:ix.footprint is a state kind: published to the session's status audience, kept latest-wins.
     state: { [FOOTPRINT_KIND]: { ttl: FOOTPRINT_TTL } },
+    // Graph memory (SPEC §10): this device's own sessions' context, into the local graph only.
+    memory: ixMemory((ctx, sid) => runner(ctx, deps, sid)),
   };
 }
 

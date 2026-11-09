@@ -8,7 +8,7 @@
 //   `p2p ix conflicts` flags a semantic conflict from a stubbed Ix graph.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cleanupTmp, extensionDir, fakeIx, gitRepo, startRelay, User, type FakeIx, type TestRelay } from "./harness.js";
+import { cleanupTmp, extensionDir, fakeIx, gitRepo, OSS_HELP, PRO_HELP, startRelay, User, type FakeIx, type TestRelay } from "./harness.js";
 
 const R = "wss://relay.ext-ix.test/v3";
 const REMOTE = "https://github.com/Acme/Widgets.git";
@@ -116,9 +116,11 @@ describe("ext-ix end to end", () => {
     expect(ce.rendered).toBeUndefined();
     expect(c.raw.join("\n")).not.toContain("rotate every 24h");
 
-    // Import: `ix note` writes to Ix Pro's cloud memory, and bob's graph target is local only (every
-    // target is, until shared graphs exist: packages/p2p/src/projects.ts graphTarget). Refused before
-    // anything is asked, with --yes and a vouched hash too; nothing reaches Ix.
+    // Import goes to bob's LOCAL graph (every target is local until shared graphs exist:
+    // packages/p2p/src/projects.ts graphTarget), through OSS `ix note` only. Asked of Ix by its help
+    // (the capability), never by trying a write: with an Ix from before #916 (no local `ix note`)
+    // and with Ix Pro (whose `ix note` writes to the cloud org) it is refused before anything is
+    // asked, with --yes and a vouched hash too; nothing is written.
     const inbox = await bob.ok(["ix", "inbox", "--kind", "note"]);
     expect(inbox.events).toHaveLength(1);
     const id = inbox.events[0].id;
@@ -129,16 +131,46 @@ describe("ext-ix end to end", () => {
     expect(shownJson.body.text).toBeUndefined();
     expect(shownJson.textHash).toMatch(/^[0-9a-f]{32}$/);
     const before = ix.calls().length;
-    for (const argv of [["ix", "import", id], ["ix", "import", id, "--yes"], ["ix", "import", id, "--yes", "--shown", shownJson.textHash]]) {
-      const r = await bob.run(argv);
-      expect(r.code).toBe(1);
-      expect(r.json).toMatchObject({ error: "graph_target", reason: expect.stringMatching(/local only/) });
+    const askedBefore = bob.asked.length;
+    const probesOnly = () => ix.calls().slice(before).every((c) => c.argv.length === 1 && (c.argv[0] === "--help" || c.argv[0] === "--version"));
+    for (const [help, why] of [[undefined, /upgrade Ix/], [PRO_HELP, /Ix Pro is installed.*cloud org.*local only/]] as const) {
+      if (help) ix.set("help.txt", help);
+      for (const argv of [["ix", "import", id], ["ix", "import", id, "--yes"], ["ix", "import", id, "--yes", "--shown", shownJson.textHash]]) {
+        const r = await bob.run(argv);
+        expect(r.code).toBe(1);
+        expect(r.json).toMatchObject({ error: "graph_target", reason: expect.stringMatching(why) });
+      }
+      const no = await bob.run(["ix", "import", id], { json: false, answer: "y" });
+      expect(no.code).toBe(1);
+      expect(no.err).toContain("graph_target");
+      // Nothing was asked of the person, and nothing but the capability probes reached Ix.
+      expect(bob.asked).toHaveLength(askedBefore);
+      expect(ix.written()).toHaveLength(0);
+      expect(probesOnly()).toBe(true);
     }
-    const no = await bob.run(["ix", "import", id], { json: false, answer: "y" });
-    expect(no.code).toBe(1);
-    expect(no.err).toContain("graph_target");
+
+    // OSS `ix note` (an Ix after #916, without Pro): imported into the local graph, with consent, and
+    // a Pro-like login in config.yaml (its cloud `endpoint`) doesn't move it: the child's endpoint is
+    // pinned to the local graph.
+    ix.set("help.txt", OSS_HELP);
+    ix.set("config.yaml", 'endpoint: "https://prod.cloud.ix-infra.com"\nactive: acme\ncluster: prod\n');
+    expect((await bob.run(["ix", "import", id, "--yes"])).json.error).toBe("consent_required");
     expect(ix.written()).toHaveLength(0);
-    expect(ix.calls().length).toBe(before);
+    const yes = await bob.run(["ix", "import", id], { json: false, answer: "y" });
+    expect(yes.code).toBe(0);
+    expect(yes.out).toMatch(/Imported into your Ix graph as note note-42/);
+    const w = ix.written();
+    expect(w).toHaveLength(1);
+    expect(w[0].endpoint).toBe("http://localhost:8090");
+    expect(w[0].argv).toEqual(["note", "--tag=decision", expect.stringMatching(/^--actor=p2p:alice@/), "--json"]);
+    expect(w[0].text).toMatch(/^Shared by alice@[a-z2-7-]+ over Peer2Peer: Token rotation\n\nAuth tokens/);
+    // A client that showed it vouches with the hash.
+    const vouched = await bob.ok(["ix", "import", id, "--yes", "--shown", shownJson.textHash, "--session", "sprint-23"]);
+    expect(vouched).toMatchObject({ imported: true, noteId: "note-42", tag: "decision" });
+    expect(ix.written().at(-1)!.argv).toContain("--session=sprint-23");
+    // The text never reaches argv (ps shows argv): stdin only.
+    expect(JSON.stringify(ix.calls().map((c) => c.argv))).not.toContain("Auth tokens");
+    ix.set("config.yaml", "");
   });
 
   it("x:ix.subgraph: a reference only; resolving is the user's, in their own graph of the same repo", async () => {

@@ -73,7 +73,8 @@ Each kind is a §4.3 extension kind with this plaintext:
 |---|---|---|
 | Receiving any kind | (automatic) | Validate, sanitize and render. **No Ix call, no write.** |
 | Preview (`p2p watch`, `p2p ix inbox`, `p2p ix show`) | the user or their agent | Reads the local event log |
-| `p2p ix import <event>` | **the user** | Refused while the graph target is local only (§2.1). Otherwise one `ix note` write, after the **full** title and text were shown and the user said y; or with `--yes`, only if the user read that same note (same title and text) with `p2p ix show` at a terminal |
+| `p2p ix import <event>` | **the user** | One OSS `ix note` write into the **local** graph (§2.1), after the **full** title and text were shown and the user said y; or with `--yes`, only if the user read that same note (same title and text) with `p2p ix show` at a terminal. Refused before anything is asked when the graph target isn't local, when Ix Pro answers `ix note` (the cloud org), or when this Ix has no local `ix note` ("upgrade Ix") |
+| Graph memory (`p2p watch`) | (automatic, the user's own sessions) | The session's record, status lines and edited files into the **local** graph only (§10). Never a peer's content |
 | `p2p ix resolve <event>` | **the user** | One read-only `ix` query of their own graph, after a y/N prompt or `--yes`; with `--shown=<bodyHash>` (from `show --json`) only if the reference is still the one a client displayed |
 
 - A received note is **never** written into the graph automatically (§4.3:
@@ -110,7 +111,20 @@ Each kind is a §4.3 extension kind with this plaintext:
 
 ### 2.1 Graph targets
 
-An ext-ix declares `graphTargets: 1` in its `P2PExtension`; p2p refuses to load the `ix` namespace without it. Every `ix` call takes its endpoint (and any token) only from the host's graph target (`ExtContext.graphTarget`, `graphTarget` in packages/p2p/src/projects.ts), asked per call with the command's session when it has one (`--from-session`, `--session`) and the call's paths: the folder it runs in, its target (a file, `file:start-end`, a directory or a symbol, resolved against that folder), `--path` and `--root`, and the command's own `--changed` and `--file`. A host without `graphTarget` (a p2p from before it), a failure, or a target that doesn't check out (a `local` one that isn't loopback, a `shared` one that isn't https) means the default local target. `ix` runs with an allowlisted environment (`IX_ENV_ALLOW` in ix.ts; `PATH` keeps only absolute entries) with `IX_ENDPOINT` set to the target's endpoint, `IX_MAP_BACKGROUND_REFRESH=0` and `IX_NO_UPDATE_CHECK=1`; no `IX_ENDPOINT`, `IX_PAT` or other cloud setting of the caller's reaches it. Against a local target only `--version`, `impact`, `around`, `overview`, `inventory`, `context`, `subsystems` and `status` run; anything else is refused with `graph_target`. That includes `ix note`, an Ix Pro command that reads and writes the cloud memory layer, so **`p2p ix import` and `p2p ix note --ix-note` are refused while the graph is local only** (every graph is, today). The threat model ("Graph targets") says why.
+An ext-ix declares `graphTargets: 1` in its `P2PExtension`; p2p refuses to load the `ix` namespace without it. Every `ix` call takes its endpoint (and any token) only from the host's graph target (`ExtContext.graphTarget`, `graphTarget` in packages/p2p/src/projects.ts), asked per call with the command's session when it has one (`--from-session`, `--session`) and the call's paths: the folder it runs in, its target (a file, `file:start-end`, a directory or a symbol, resolved against that folder), `--path` and `--root`, and the command's own `--changed` and `--file`. A host without `graphTarget` (a p2p from before it), a failure, or a target that doesn't check out (a `local` one that isn't loopback, a `shared` one that isn't https) means the default local target. `ix` runs with an allowlisted environment (`IX_ENV_ALLOW` in ix.ts; `PATH` keeps only absolute entries) with `IX_ENDPOINT` set to the target's endpoint, `IX_MAP_BACKGROUND_REFRESH=0` and `IX_NO_UPDATE_CHECK=1`; no `IX_ENDPOINT`, `IX_PAT` or other cloud setting of the caller's reaches it. Against a local target only `--version`, `--help`, `impact`, `around`, `overview`, `inventory`, `context`, `subsystems` and `status` run, plus the memory forms below; anything else is refused with `graph_target`.
+
+**Memory forms (`ix note`, `ix session`).** Ix Pro's `ix note` and `ix session` always use the cloud org. Since Ix #916 (after Ix 0.13.0), an Ix without Pro has OSS ones against the local backend (`IX_ENDPOINT` first), registered only when Pro didn't load. ext-ix runs them only when all of these hold:
+- The target is local. Every memory form against a shared target is refused.
+- The call is exactly one of these forms (`memoryCall` in ix.ts):
+  - `ix note --json show <id>`;
+  - `ix note --tag=<t> [--session=<ref>] [--actor=p2p[:<address>]] --json`, with the text on stdin;
+  - `ix session --json create p2p-<sid> --purpose=<one line, ≤200> --actor=p2p[:<address>] --ttl=<1-8760>`.
+
+  It has no positional text, no other flag or subcommand, and no flag twice.
+- `ix --help` shows the OSS commands, asked once per command or batch (`memorySupport`). With Pro loaded, the help has a "Pro:" section and no "Memory:" one; an Ix before #916 has neither. Both are refused before any write: Pro with "Ix Pro is installed … cloud org", the older Ix with "upgrade Ix". This is a capability check, never a trial write.
+- After a write, stderr says `→ local backend <the target's endpoint>`, as the OSS commands print it. Otherwise the call fails with `ix_unconfirmed`.
+
+So `p2p ix import` and `p2p ix note --ix-note` work against the local graph with an OSS `ix note`, and stay refused with Ix Pro or an older Ix. The threat model ("Graph targets") says why.
 
 ## 3. `x:ix.note`: a shared Ix session note
 
@@ -267,8 +281,10 @@ shared an Ix blast-radius report (<level> risk, <n> affected): install Ix to ope
 | `ix overview <file> --format json` | footprint: the coarse fallback | `{keyItems?[{name,kind}], childrenByKind?, …}` |
 | `ix impact <t> --format json` | `p2p ix impact` | **leaf shape:** `{resolvedTarget:{kind,name}, graph?, depth, systemPath?, riskSummary, riskLevel, riskCategory, atRiskBehavior[], nextStep?, summary:{callers,callees}, callerList?[{kind,name}], calleeList?, propagationBuckets?[{region,regionKind,count,members[]}], decisions?, tasks?, bugs?}`. **Container shape:** the same with `summary:{members,directImporters,directDependents,memberLevelCallers}` and `topImpactedMembers?[{name,kind,id,callerCount,path,lineStart,lineEnd}]`. An unresolved target prints `{error, message}`. |
 | `ix around <path> --format json --limit 20` | semantic conflicts | `{path, symbols:[{name,kind,path,callers:{total,rows:[{path,line?,name?}]}, users:{…}, tests:{…}}], importers:{total,rows:[{path,line?}],tests}}`. Paths are workspace-relative. |
+| `ix --help` | which `ix note` / `ix session` answer (§2.1) | text: a `Memory:` heading followed by indented `note …` and `session …` lines means the OSS commands (Pro not loaded); a `Pro:` heading means Ix Pro's |
 | `ix note --json show <id>` | `p2p ix note --ix-note` | `{id, text, tag, actor?, nodeIds, at, stale, sessionName?, …}` |
-| `ix note --tag=… [--session=…] [--actor=…] --json` (text on stdin) | `p2p ix import` | `{id, text, tag, nodeIds, at, stale}` |
+| `ix note --tag=… [--session=…] [--actor=…] --json` (text on stdin) | `p2p ix import`, graph memory | `{id, text, tag, nodeIds, at, stale}` on stdout; `→ local backend <endpoint>` on stderr |
+| `ix session --json create <name> --purpose=… --actor=… --ttl=…` | graph memory | `{sessionId, name, purpose, actor, actors, ttlHours, createdAt, lastLoadedAt}` on stdout; `→ local backend <endpoint>` on stderr |
 | `ix overview` / `inventory` / `context` / `subsystems … --format llm` | `p2p ix resolve` | text, passed through (capped). `subsystems --target` is sent to the Ix backend as a region-name query (`getSubsystemMap({target})`), not opened as a path; names with `..`, `.` or empty segments are refused anyway. |
 
 `ix` and `git` are resolved to absolute paths from PATH's absolute entries before
@@ -276,8 +292,9 @@ they run with the repository as their working directory, so a program planted in
 a cloned repo (Windows searches the current directory first) never runs.
 
 The CLI prints plugin warnings (`ix: failed to load …`) on stderr, and they
-are ignored. `ix note` and `ix session` come from the Ix Pro plugin (they
-need the memory layer); `impact`, `around`, `overview`, `inventory`,
+are ignored. `ix note` and `ix session` come from the Ix Pro plugin when
+it is installed (cloud), and from open-source Ix after 0.13.0 otherwise
+(the local backend; §2.1); `impact`, `around`, `overview`, `inventory`,
 `context` and `subsystems` are open-source Ix.
 
 ## 7. Semantic conflicts
@@ -697,3 +714,43 @@ per peer user and three in all per 10 minutes. Only these derived lines are
 read: a peer's footprint body never reaches the model. The mod's standing
 instruction tells the model not to name anything to the peer when a line
 says `(hashed: names stay private)`, only to ask whether to sync.
+
+## 10. Graph memory: the user's own sessions in the local graph
+
+`P2PExtension.memory` is optional in the extension API (v1). An older
+ext-ix has none, and an older p2p never asks. It has two calls:
+`available(ctx)` and `write(ctx, {sid, items})`.
+
+The host (packages/p2p/src/graph-memory.ts) gathers the items in
+`p2p watch`, from the statuses this device posted for its own sessions.
+They are never a peer's, another device's or a message's. It queues them
+(at most 64; `p2p doctor` counts drops) and hands them over in batches of
+one session each, off the hook path. Before each batch it checks that the
+session's graph target is local. A batch for a shared target is dropped as
+`not_local` and never handed over.
+
+| item | written as |
+|---|---|
+| `start` (label, repo, branch) | once per session: `ix session --json create p2p-<sid> --purpose="Peer2Peer session <label> (repo <r>, branch <b>)" --actor=p2p:<address> --ttl=720`, then a note `Session started <ISO>: …` |
+| `status` (summary) | a note `Status (<ISO>): <line>` |
+| `files` (repo-relative paths new since the last batch) | a note `Edited (<ISO>): a, b, …` (at most 50 named) |
+| `end` | a note `Session ended <ISO>.` |
+
+Each note is `ix note --tag=note --session=<the record's id> --actor=… --json`,
+with the text on stdin. It runs through the guarded runner (§2.1), so the
+target must be local, the call must be one of the exact forms, Ix must
+answer with the OSS commands, and stderr must confirm the local backend.
+Text is one line, with control and format characters removed, and capped.
+A path that isn't repo-relative is dropped. The extension's store
+(`memory`) keeps the Ix session id of each Peer2Peer session, for the
+newest 50.
+
+`available` answers `{ok: true}` only for an Ix with the OSS `ix note`.
+Otherwise it answers `ix_missing`, `ix_pro` (Ix Pro answers: the cloud) or
+`ix_upgrade` (an Ix before #916). The host then gathers nothing, and asks
+again every 5 minutes. A write the guard refuses (`graph_target`), or one
+that doesn't confirm the local backend (`ix_unconfirmed`), stops the batch
+and reports `unavailable` the same way.
+
+Message bodies are never written. A note a peer shares reaches the graph
+only when the user imports it (`p2p ix import`), as before.

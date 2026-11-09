@@ -32,10 +32,32 @@ if (cmd === "around") {
   process.stdout.write(j ?? JSON.stringify({ path: argv[1], symbols: [], importers: { total: 0, rows: [], tests: 0 } }));
   process.exit(0);
 }
+// `ix --help`: help.txt when set (an OSS Ix after #916 lists "Memory:", one with Ix Pro a "Pro:"
+// section), else an Ix from before #916 (neither).
+if (cmd === "--help") { process.stdout.write(file("help.txt") ?? "Usage: ix [options] [command]\n\nSystem:\n  status                Check status\n"); process.exit(0); }
+// Where a write goes, as the OSS CLI decides it (ix-cli config.ts getEndpoint): IX_ENDPOINT, else
+// config.yaml's `endpoint` (which Ix Pro's login points at the cloud), else the default.
+const endpoint = () => {
+  if (process.env.IX_ENDPOINT) return process.env.IX_ENDPOINT;
+  const m = /^endpoint:\s*"?([^"\n]+)"?\s*$/m.exec(file("config.yaml") ?? "");
+  return m ? m[1].trim() : "http://localhost:8090";
+};
+const display = (e) => { try { const u = new URL(e); return u.origin + u.pathname.replace(/\/+$/, ""); } catch { return "(unparseable endpoint)"; } };
+const isLocal = (e) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(e).hostname); } catch { return false; } };
+// stderr.txt overrides what a write reports (a test of an `ix` that doesn't confirm the local backend).
+const reportWrite = () => process.stderr.write(file("stderr.txt") ?? `→ ${isLocal(endpoint()) ? "local backend" : "backend"} ${display(endpoint())}\n`);
 if (cmd === "note" && argv.includes("show")) { process.stdout.write(file("note.json") ?? "{}"); process.exit(0); }
 if (cmd === "note") {
-  fs.appendFileSync(path.join(dir, "notes-written.jsonl"), JSON.stringify({ argv, text: stdin }) + "\n");
+  fs.appendFileSync(path.join(dir, "notes-written.jsonl"), JSON.stringify({ argv, text: stdin, endpoint: endpoint() }) + "\n");
+  reportWrite();
   console.log(JSON.stringify({ id: "note-42", text: stdin, tag: (argv.find((a) => a.startsWith("--tag=")) || "--tag=note").slice(6), nodeIds: [], at: "2026-10-21T00:00:00Z", stale: false }));
+  process.exit(0);
+}
+if (cmd === "session" && argv[2] === "create") {
+  fs.appendFileSync(path.join(dir, "sessions-written.jsonl"), JSON.stringify({ argv, endpoint: endpoint() }) + "\n");
+  reportWrite();
+  const val = (k) => (argv.find((a) => a.startsWith(`--${k}=`)) || "").slice(k.length + 3);
+  console.log(JSON.stringify({ sessionId: "sess-" + String(argv[3]).slice(4, 40), name: argv[3], purpose: val("purpose"), actor: val("actor"), actors: [val("actor")], ttlHours: Number(val("ttl")), createdAt: "2026-11-09T00:00:00Z", lastLoadedAt: null }));
   process.exit(0);
 }
 console.log("RESOLVED " + argv.join(" "));

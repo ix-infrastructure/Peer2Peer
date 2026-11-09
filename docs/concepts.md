@@ -80,6 +80,17 @@ These checks are best effort against an agent with your shell; [sandbox your age
 
 **Graph targets.** Each project also has a graph target: where Ix calls made for it may go. Today it is always `local`, this machine's Ix backend ("local only" in `p2p project show` and `p2p doctor`). A session's target is the intersection of its projects', like its ceiling, so one private project keeps it local. Shared graphs (a circle's graph in the cloud) come later, and only a project shared with that circle will reach one. See the [threat model](security/threat-model.md#graph-targets-ix).
 
+**Graph memory.** With the Ix extension on and an Ix that has the open-source `ix note` (Ix after 0.13.0, without Ix Pro), your sessions' context is written into your **local** Ix graph as they run.
+- **What it writes.** Each session gets an Ix session record named `p2p-<session id>`, with its label, repository and branch, and notes for:
+  - its start;
+  - each new status line;
+  - the files it edits (repo-relative, as its status lists them);
+  - its end.
+- **What it never writes.** Message bodies (message history stays in its own encrypted store), peers' statuses and other devices' sessions. A note a peer shares goes in only when you import it with `p2p ix import`, as before.
+- **How it runs.** `p2p watch` does the writing in the background, from the statuses your session already posted, so the hook path never waits on Ix. The writes are best effort: at most 64 items wait in the queue, and `p2p doctor` counts anything dropped.
+- **Local only.** Every batch goes through the graph-target chokepoint and must be `local`. A shared target is refused. With Ix Pro installed, whose `ix note` writes to your cloud org, nothing is written at all. With an older Ix, the doctor says to upgrade.
+- **Turning it off.** Set `"ixMemory": false` in config.json, or `P2P_IX_MEMORY=0`.
+
 ## Envelopes (§4)
 
 Every message, status, invite or circle update is an **envelope**: encrypted (XChaCha20-Poly1305 over X25519) to each of the recipient's devices, signed (Ed25519) by the sending device, and replay-protected. Its outer header stays readable to relays: sender and recipient user and device ids, the session's owner and id, sequence and timestamp counters, and the **kind**. It can't be altered, because it's bound into the encryption, but it isn't hidden. Who may send what to whom is decided by your own device, from keys, friendships, circles and rosters (§4.2), never by a relay or an extension.

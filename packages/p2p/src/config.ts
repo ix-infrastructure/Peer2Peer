@@ -41,6 +41,24 @@ export interface FileConfig {
   deviceInfo?: boolean;
   /** The local Ix backend (projects.ts localGraphEndpoint): honoured only as a loopback URL. Default http://localhost:8090. */
   ixEndpoint?: string;
+  /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
+  ixMemory?: boolean;
+}
+
+/**
+ * Whether `p2p watch` writes this device's sessions' context into the local Ix graph (graph-memory.ts):
+ * on by default (it needs the Ix extension and an Ix with the OSS `ix note`). `"ixMemory": false` in
+ * config.json turns it off, and so does P2P_IX_MEMORY=0 (or `false`). The environment can only turn it
+ * off: it never overrides the person's `false`.
+ */
+export function graphMemoryEnabled(env: Env, home: string): boolean {
+  const v = env.P2P_IX_MEMORY?.trim().toLowerCase();
+  if (v === "0" || v === "false") return false;
+  try {
+    return readFileConfig(home).ixMemory !== false;
+  } catch {
+    return true;
+  }
 }
 
 /**

@@ -133,6 +133,58 @@ export interface P2PExtension {
    * advertises `<kind>.v1` for each.
    */
   state?: Record<string, ExtStateKind>;
+  /**
+   * Graph memory (epic #41 piece 2): writes this device's own sessions' context (their record, status
+   * one-liners, the files they edit) into the person's local graph. `p2p watch` gathers it from the
+   * statuses this device posted, queues it (bounded) and hands it over in batches, off the hook path.
+   * Optional: an extension without it (an older ext-ix) is simply never asked. Each batch is for one
+   * session and has already been checked local by graphTarget; the extension checks again.
+   */
+  memory?: ExtMemory;
+}
+
+/** One thing to remember about a session (graph-memory.ts). Every string is local, the person's own. */
+export interface ExtMemoryItem {
+  kind: "start" | "status" | "files" | "end";
+  /** When it happened (ms). */
+  at: number;
+  /** start: the session's label, repository and branch. */
+  label?: string;
+  repo?: string;
+  branch?: string;
+  /** status: the one-line status. */
+  summary?: string;
+  /** files: repo-relative files edited since the last batch. */
+  files?: string[];
+}
+
+/** Why memory can't be written now; `message` says what the person can do. */
+export interface ExtMemoryUnavailable {
+  ok: false;
+  /** e.g. `ix_missing`, `ix_upgrade` (no local `ix note`), `ix_pro` (Ix Pro answers: cloud). */
+  reason: string;
+  message: string;
+}
+
+export interface ExtMemoryResult {
+  written: number;
+  /** Items not written, by reason (counted as dropped). */
+  failed?: { reason: string; n: number; message?: string }[];
+  /** Stop asking for now (the same as available() turning false). */
+  unavailable?: ExtMemoryUnavailable;
+}
+
+export interface ExtMemory {
+  v: 1;
+  /** Whether the writes can go to the local graph at all (asked before anything is gathered). */
+  available(ctx: ExtContext): Promise<{ ok: true } | ExtMemoryUnavailable>;
+  write(ctx: ExtContext, batch: { sid: string; items: ExtMemoryItem[] }): Promise<ExtMemoryResult>;
+}
+
+/** `ext.memory` when it is a usable v1 memory writer; undefined otherwise (absent or malformed: never asked). */
+export function memoryOf(ext: P2PExtension | undefined): ExtMemory | undefined {
+  const m = ext?.memory as Partial<ExtMemory> | undefined;
+  return m && typeof m === "object" && m.v === 1 && typeof m.available === "function" && typeof m.write === "function" ? (m as ExtMemory) : undefined;
 }
 
 export interface ExtStateKind {

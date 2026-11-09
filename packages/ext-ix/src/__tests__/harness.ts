@@ -72,9 +72,15 @@ export interface FakeIx {
   dir: string;
   set(name: string, content: unknown): void;
   calls(): { argv: string[]; stdin: string; cwd: string }[];
-  written(): { argv: string[]; text: string }[];
+  written(): { argv: string[]; text: string; endpoint: string }[];
+  sessions(): { argv: string[]; endpoint: string }[];
   env(): Record<string, string>;
 }
+
+/** `ix --help` of an OSS Ix after ix-infrastructure/Ix#916 without Ix Pro: the "Memory:" section (ix-cli help-text.ts). */
+export const OSS_HELP = "Usage: ix [options] [command]\n\nSystem:\n  status                Check status\n\nMemory:\n  note [text]           Record a note (ls, show, supersede, retract)\n  session [actor]       List and manage sessions\n\nUse \"ix <command> --help\" for details.\n";
+/** `ix --help` with Ix Pro loaded: its own section, no "Memory:" (its note and session go to the cloud org). */
+export const PRO_HELP = "Usage: ix [options] [command]\n\nSystem:\n  status                Check status\n\nPro:\n  note                Create or manage notes\n  session             Manage sessions\n\nUse \"ix <command> --help\" for details.\n";
 
 export function fakeIx(): FakeIx {
   const bin = tmp("fake-ix-bin-");
@@ -88,6 +94,7 @@ export function fakeIx(): FakeIx {
     set: (name, content) => writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content)),
     calls: () => lines("calls.jsonl"),
     written: () => lines("notes-written.jsonl"),
+    sessions: () => lines("sessions-written.jsonl"),
     env: () => ({ PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_IX_DIR: dir, IX_HOME: dir }),
   };
 }

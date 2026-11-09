@@ -55,7 +55,9 @@ import { readCapped, RelayConnection } from "./relay-client.js";
 import { rosterAudience, sessionRef } from "./sessions.js";
 import type { PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
-import { extIxInstalled, ixBinary, IX_INSTALL_URL, ixVersion, runIx } from "./ix-local.js";
+import { extIxInstalled, ixBinary, IX_INSTALL_URL, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
+import { graphMemoryReport } from "./graph-memory.js";
+import { graphMemoryEnabled } from "./config.js";
 import { describeGraphTarget, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir } from "./projects.js";
 
 export type CheckStatus = "ok" | "fail" | "unknown";
@@ -624,6 +626,7 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
+    if (on) await graphMemoryChecks(c, app, bin, target, ms);
     // Never followed elsewhere: a loopback listener that redirects is not the local backend.
     const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== undefined && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
@@ -654,6 +657,31 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
     c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t)}${t.kind === "local" ? `: ${t.why}` : ""}`);
   }
   if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
+}
+
+/**
+ * Graph memory (graph-memory.ts): whether this Ix has the OSS `ix note` (local) or Ix Pro's (cloud,
+ * so memory stays off), and what `p2p watch` wrote, queued and dropped. Never a failure: Peer2Peer
+ * works without it.
+ */
+async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { endpoint: string }, ms: number): Promise<void> {
+  if (!graphMemoryEnabled(app.env, app.home)) {
+    c.add("ix-memory", "ok", "Ix graph memory", 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)');
+    return;
+  }
+  const support = (await bounded(ixMemorySupport(bin, app.env, target, ms), ms + 500)).value;
+  const doc = (await bounded(graphMemoryReport(app), ms)).value;
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  const dropped = doc ? Object.entries(doc.dropped).filter(([, n]) => n > 0) : [];
+  if (support === "oss") c.add("ix-memory", "ok", "Ix graph memory", `on: sessions' records, statuses and edited files go to the local graph only (${target.endpoint}); ${counts}`);
+  else if (support === "pro") c.add("ix-memory", "unknown", "Ix graph memory", "off: Ix Pro is installed, and its `ix note` writes to your cloud org; Peer2Peer keeps graph writes local", "use an Ix without Pro for local notes (or leave it off)");
+  else if (support === "none") c.add("ix-memory", "unknown", "Ix graph memory", "off: this Ix has no local `ix note` (it came after Ix 0.13.0)", "upgrade Ix (`ix upgrade`)");
+  else c.add("ix-memory", "unknown", "Ix graph memory", `couldn't tell whether this Ix has a local \`ix note\`; ${counts}`, "run `ix --help` in a terminal");
+  if (dropped.length > 0) {
+    const total = dropped.reduce((a, [, n]) => a + n, 0);
+    c.add("ix-memory-dropped", "unknown", "Ix graph memory dropped", `${total} item${total === 1 ? "" : "s"} not written (${dropped.map(([r, n]) => `${peer(r)}: ${n}`).join(", ")})`, "best effort: each reason is counted; the queue holds 64 items");
+  }
+  if (doc?.unavailable && support === "oss") c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`);
 }
 
 // ---------------------------------------------------------------------------
