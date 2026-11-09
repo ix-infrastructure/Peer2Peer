@@ -122,20 +122,20 @@ export class P2P {
    * This session's status. Never a mode: what this session auto-approves is nobody else's business.
    * `projectDirs`: every folder the session has worked in (projects.ts binds each one's project).
    */
-  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[]; projectDirsOver?: boolean }, timeoutMs?: number) {
+  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[]; projectDirsOver?: boolean | readonly string[] }, timeoutMs?: number) {
     const args = ["status", `--session=${o.session}`, `--state=${o.state}`, `--label=${o.label}`];
     if (o.repo) args.push(`--repo=${o.repo}`);
     if (o.branch) args.push(`--branch=${o.branch}`);
     if (o.summary) args.push(`--summary=${o.summary}`);
     for (const file of o.files ?? []) args.push(`--file=${file}`);
     for (const dir of o.projectDirs ?? []) args.push(`--project-dir=${dir}`);
-    if (o.projectDirsOver) args.push("--project-dirs-over");
+    if (o.projectDirsOver) args.push(overFlag(o.projectDirsOver));
     return this.call<{ delivered: unknown[]; failed: { address: string; error: string }[]; roster?: RosterView; warnings?: string[]; project?: ProjectInfo }>(args, timeoutMs !== undefined ? { timeoutMs } : {});
   }
 
   /** A message from this session; refused (`not_shared`) to anyone its projects don't share (projects.ts). */
-  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[]; projectDirsOver?: boolean }): Promise<Outcome<SendResult>> {
-    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...(o.projectDirsOver ? ["--project-dirs-over"] : [])];
+  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[]; projectDirsOver?: boolean | readonly string[] }): Promise<Outcome<SendResult>> {
+    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...(o.projectDirsOver ? [overFlag(o.projectDirsOver)] : [])];
     return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
   }
 
@@ -171,4 +171,10 @@ export class P2P {
     const r = await this.call<{ held: HeldItem[] }>(["held"]);
     return r.ok ? { ok: true, value: Array.isArray(r.value.held) ? r.value.held : [] } : r;
   }
+}
+
+/** `--project-dirs-over`, with why when the bridge knows it (`=unresolved,folders`: the CLI's OverWhy words). */
+function overFlag(v: true | readonly string[]): string {
+  const why = v === true ? [] : v.filter((w) => /^[a-z]{1,16}$/.test(w));
+  return why.length ? `--project-dirs-over=${why.join(",")}` : "--project-dirs-over";
 }

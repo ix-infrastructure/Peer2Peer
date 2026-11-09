@@ -4,7 +4,9 @@
 //
 //  - A project is a git repository, keyed by its normalised remote URL (if any) and its git
 //    common dir, so every worktree and subfolder of one clone is the same project. Outside git,
-//    the real path of the folder.
+//    the real path of the folder, or of the nearest folder above it whose share covers its
+//    subfolders (opt-in: `p2p project share --subfolders`), never past a repository, a
+//    `.p2p-private`, a folder with its own policy or a folder that is gone.
 //  - Its policy lives only in this user's state (`<home>/cli/projects`): shared with circles and
 //    named people, or private. A project with no policy is private: only this user's own devices
 //    see its sessions. Nothing in a repository can widen that; a committed `.p2p-private` file at
@@ -21,8 +23,9 @@
 
 import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
 import { CliError } from "./errors.js";
@@ -55,11 +58,32 @@ export function sessionWorkdir(env: Record<string, string | undefined>): string 
  * (sessionWorkdir) and P2P_PROJECT_DIRS (path-delimited: folders it moved to, files it touched
  * elsewhere). Anyone may add to these: a binding only ever narrows who the session reaches.
  */
-export function sessionDirs(env: Record<string, string | undefined>): { dirs: string[]; over: boolean } {
+export function sessionDirs(env: Record<string, string | undefined>): { dirs: string[]; over: boolean; why: OverWhy[] } {
   const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter).filter((x) => x.trim() !== "" && isAbsolute(x.trim()));
   // Past the cap (or when the front end says it dropped some): private, never "the first N".
-  const over = extra.length > MAX_SESSION_DIRS || env.P2P_PROJECT_DIRS_OVER === "1";
-  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over };
+  const why: OverWhy[] = extra.length > MAX_SESSION_DIRS ? ["folders"] : [];
+  const said = env.P2P_PROJECT_DIRS_OVER?.trim() ?? "";
+  if (said !== "" && said !== "0") why.push(...overWhys(said));
+  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over: why.length > 0, why: [...new Set(why)] };
+}
+
+/**
+ * Why a session went private for good, past a cap or a gap in what its front end saw:
+ *  - `projects`: more than MAX_SESSION_PROJECTS projects;
+ *  - `folders`: more folders than a front end or the CLI keeps (MAX_SESSION_DIRS per call);
+ *  - `unresolved`: a path its front end couldn't resolve (a variable or `$(…)` it doesn't know, in the path's first segment);
+ *  - `front`: its front end lost track (a forked conversation, a record it couldn't read; an older front end's bare "over");
+ *  - `constraints`: more than MAX_SESSION_CONSTRAINTS bounds from own-session messages.
+ */
+export type OverWhy = "projects" | "folders" | "unresolved" | "front" | "constraints";
+const OVER_WHYS: ReadonlySet<string> = new Set<OverWhy>(["projects", "folders", "unresolved", "front", "constraints"]);
+
+/** A front end's over reasons (`unresolved,folders`, an array, or `1`/`true` from an older one): an unknown word counts as `front`, never as nothing. */
+export function overWhys(v: unknown): OverWhy[] {
+  const words = Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.split(/[\s,]+/) : v === true ? ["front"] : [];
+  const out = new Set<OverWhy>();
+  for (const w of words.map((x) => x.trim().toLowerCase()).filter((x) => x !== "")) out.add(OVER_WHYS.has(w) ? (w as OverWhy) : "front");
+  return [...out];
 }
 
 /** At most this many folders a front end passes per call; past it the session is private. */
@@ -93,6 +117,11 @@ export interface ProjectPolicyRec {
   root: string;
   remote?: string;
   share: ProjectShare;
+  /**
+   * A folder project's share covers its subfolders too (`p2p project share --subfolders`). Without
+   * it (every policy from before it), the policy is for that folder alone.
+   */
+  covers?: true;
   at: number;
 }
 
@@ -104,9 +133,10 @@ export interface ProjectsDoc {
 }
 
 export interface SessionBinding {
-  projects: Record<string, { name: string; repoPrivate?: true }>;
-  /** More than MAX_SESSION_PROJECTS projects or MAX_SESSION_DIRS folders: private. */
+  projects: Record<string, BoundProject>;
+  /** Past a cap, or a path its front end couldn't resolve: private (overWhy says which; absent in bindings from before it). */
   over?: true;
+  overWhy?: OverWhy[];
   /**
    * What other sessions of this user that sent to this one could reach (own-device messages carry
    * their sender's ceiling): intersected in, sticky, so a private session can't launder through a
@@ -127,8 +157,36 @@ export const MAX_SESSION_CONSTRAINTS = 16;
 
 export type SessionProjectsDoc = Record<string, SessionBinding>;
 
+export interface BoundProject {
+  name: string;
+  /** Its folder (git: the working tree it was first seen in), for `p2p session show`. */
+  root?: string;
+  repoPrivate?: true;
+  /**
+   * Folders below `root` that a shared folder covered (dir projects only, at most MAX_UNDER): a
+   * policy given to one of them later still narrows this session. `underOver`: more than that,
+   * so any policy below `root` does.
+   */
+  under?: string[];
+  underOver?: true;
+}
+
+/** At most this many covered subfolders a bound folder project remembers; past it, every policy below it counts. */
+export const MAX_UNDER = 64;
+
 /** What a session may reach. `none`: the person's own session, or one not bound yet. */
-export type Ceiling = { kind: "none" } | { kind: "private"; why: string } | { kind: "shared"; circles: string[]; people: string[] };
+export type Ceiling = { kind: "none" } | { kind: "private"; why: string; causes: PrivateCause[]; blocking?: string[] } | { kind: "shared"; circles: string[]; people: string[] };
+
+/**
+ * Why a session is private: an over reason (OverWhy), `unregistered` (an agent named it, no front
+ * end registered it), `repo-private` (`.p2p-private`), `private` (a project made private),
+ * `unshared` (a project never shared), `sent-private` (a private session of yours sent it a
+ * message), `disjoint` (its projects share nobody in common, or nobody you can reach).
+ */
+export type PrivateCause = OverWhy | "legacy-over" | "unregistered" | "repo-private" | "private" | "unshared" | "sent-private" | "disjoint";
+
+/** Causes no share can lift: the session stays private until it ends. */
+const STICKY: ReadonlySet<PrivateCause> = new Set<PrivateCause>(["projects", "folders", "unresolved", "front", "constraints", "legacy-over", "repo-private", "sent-private"]);
 
 // ---------------------------------------------------------------------------
 // Project identity
@@ -162,6 +220,82 @@ function existingDir(p: string): string {
     }
   }
   return cur;
+}
+
+/** Device and pseudo-file roots: what is under them is never a project (POSIX). */
+const PSEUDO_ROOTS = ["/dev", "/proc", "/sys"];
+
+/**
+ * Whether `p` is a device or pseudo file (`/dev/null`, `/dev/tty`, `/proc/self/status`), never a
+ * project: it exists, isn't a folder, and its real path stays under /dev (and isn't a regular
+ * file there, like one in /dev/shm), /proc or /sys. A path through /proc to a real file
+ * (`/proc/self/cwd/x`, `/proc/<pid>/root/…`) resolves out of it and binds as usual; one that
+ * doesn't exist binds its nearest existing parent as every path does.
+ */
+export function pseudoPath(p: string): boolean {
+  if (process.platform === "win32" || typeof p !== "string" || !isAbsolute(p)) return false;
+  // Named there, too: a link elsewhere (a repository's file that points at /dev/null) binds as its folder.
+  const at = resolve(p);
+  if (!PSEUDO_ROOTS.some((root) => at === root || at.startsWith(`${root}/`))) return false;
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(p);
+  } catch {
+    return false;
+  }
+  if (st.isDirectory()) return false;
+  const r = real(p);
+  const under = (root: string) => r === root || r.startsWith(`${root}/`);
+  if (under("/dev")) return !st.isFile();
+  return PSEUDO_ROOTS.slice(1).some(under);
+}
+
+/**
+ * Whether a path component holds a brace expansion with a choice: a `{`, then `,` or `..` with no
+ * brace between, then `}` (`{.git,x}`, `{a..z}`). One pass, so it stays linear on any input.
+ */
+export function braceChoice(c: string): boolean {
+  let open = false;
+  let choice = false;
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i];
+    if (ch === "{") {
+      open = true;
+      choice = false;
+    } else if (ch === "}") {
+      if (open && choice) return true;
+      open = false;
+    } else if (open && (ch === "," || (ch === "." && c[i + 1] === "."))) choice = true;
+  }
+  return false;
+}
+
+/**
+ * The folder holding the first path component that names a repository's marker (`.git`,
+ * PRIVATE_MARKER) or could match one (a glob or brace pattern a dotfile can match: `.g*`,
+ * `[.]git`, `{.git,x}`): a command naming it may remove it, so a shared folder above never
+ * covers that folder (projectOf). Lexical, on the path as given.
+ */
+function namedStop(p: string): string | undefined {
+  const parts = p.split(/[\\/]/);
+  for (let i = 1; i < parts.length; i++) {
+    const c = parts[i];
+    const glob = ((c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c)) || braceChoice(c);
+    if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep) || sep;
+  }
+  return undefined;
+}
+
+/** Whether `p` is `dir` or below it (real paths, this platform's separator). */
+function within(p: string, dir: string): boolean {
+  if (p === dir) return true;
+  const d = dir.endsWith(sep) ? dir : `${dir}${sep}`;
+  return p.startsWith(d);
+}
+
+/** A folder project's id: its real path, hashed. */
+export function dirProjectId(root: string): string {
+  return `pj_${sha(`dir\n${root}`).slice(0, 24)}`;
 }
 
 /**
@@ -230,25 +364,92 @@ function readSmall(file: string): string | undefined {
 }
 
 /**
+ * Whether `d` is a bare git repository: `HEAD`, `objects/` and `refs/` in it, or a `config` that
+ * says `bare = true` (a folder named `.git` is a working tree's, found from its parent instead).
+ */
+function isBareRepo(d: string): boolean {
+  if (basename(d) === ".git") return false;
+  const st = (p: string) => {
+    try {
+      return statSync(p);
+    } catch {
+      return undefined;
+    }
+  };
+  if (st(join(d, "HEAD"))?.isFile() && st(join(d, "objects"))?.isDirectory() && st(join(d, "refs"))?.isDirectory()) return true;
+  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join(d, "config")) ?? "");
+}
+
+/** The git project whose git dir is `gitDir`, found at the folder `root`. */
+function gitRef(gitDir: string, root: string): ProjectRef {
+  let common = gitDir;
+  const cd = readSmall(join(gitDir, "commondir"))?.trim();
+  if (cd) common = resolve(gitDir, cd);
+  common = real(common);
+  const urls = remotesOf(readSmall(join(common, "config")) ?? "");
+  const remote = urls.map(normalizeRemote).find((x): x is string => x !== undefined);
+  const main = basename(common) === ".git" ? dirname(common) : common;
+  const name = clean(remote ? (remote.split("/").pop() ?? "") : basename(main)) || clean(basename(root)) || "project";
+  return {
+    id: `pj_${sha(`git\n${remote ?? ""}\n${common}`).slice(0, 24)}`,
+    name,
+    kind: "git",
+    root,
+    ...(remote ? { remote } : {}),
+    ...(existsSync(join(root, PRIVATE_MARKER)) ? { repoPrivate: true as const } : {}),
+  };
+}
+
+/** Whether `p` names something that is there, its trailing pattern parts (`*.log`, `{a,b}`) left out. */
+function present(p: string): boolean {
+  let q = resolve(p);
+  while (/[*?[\]{}]/.test(basename(q)) && dirname(q) !== q) q = dirname(q);
+  try {
+    statSync(q);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The project `dir` belongs to, read from the files alone (git is never run: no hook, fsmonitor
  * or config of the repository's can execute). A `.git` directory or `gitdir:` file up the tree
  * marks a working tree; its common dir (`commondir` for a linked worktree) identifies the clone.
+ * A bare repository (isBareRepo) is a git project too, and a `.git` that can't be read as one is
+ * a folder project of its own.
+ *
+ * Outside git, a folder project. With `doc` (the policies), the nearest folder at or above `dir`
+ * that has a policy of its own is the project when that is `dir`'s own folder, or when its share
+ * covers subfolders (`covers`, given with `p2p project share --subfolders`; a policy without it
+ * is for that folder alone, as before). The walk stops at the first folder with a policy (the
+ * nearest one wins, so a private subfolder stays private; one that doesn't cover leaves `dir`'s
+ * own folder as the project), and it never crosses:
+ *  - a git repository (found first: a nested repository is always its own project);
+ *  - a `.p2p-private` (at or above `dir`: the folder project is private, whatever covers it);
+ *  - a folder whose `.git` or `.p2p-private` the path itself names (namedStop: a command that may
+ *    have just removed it);
+ *  - the nearest existing folder, when `dir` itself isn't there (deleted or moved since the
+ *    session named it, or not made yet): that folder is the project unless it has a policy, so a
+ *    repository removed after a session read it is never covered from above.
+ * Without `doc` (sharing, `project show`): the folder itself.
  */
-export function projectOf(dir: string): ProjectRef {
-  const start = existingDir(isAbsolute(dir) ? dir : resolve(dir));
+export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
+  const given = resolve(dir);
+  const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
     const dotgit = join(cur, ".git");
     // Anything named .git here (a folder, a file, a symlink, even a broken or unreadable one) ends
     // the walk: this folder is its own project, never the parent repository's.
-    let present: boolean;
+    let isThere: boolean;
     try {
       lstatSync(dotgit);
-      present = true;
+      isThere = true;
     } catch {
-      present = false;
+      isThere = false;
     }
-    if (present) {
+    if (isThere) {
       let st: ReturnType<typeof statSync> | undefined;
       try {
         st = statSync(dotgit);
@@ -263,32 +464,44 @@ export function projectOf(dir: string): ProjectRef {
       }
       if (!gitDir || !existsSync(gitDir)) {
         // A .git that can't be read as one: a folder project at this level (private until shared).
-        return { id: `pj_${sha(`dir\n${cur}`).slice(0, 24)}`, name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
+        return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
       }
-      {
-        let common = gitDir;
-        const cd = readSmall(join(gitDir, "commondir"))?.trim();
-        if (cd) common = resolve(gitDir, cd);
-        common = real(common);
-        const urls = remotesOf(readSmall(join(common, "config")) ?? "");
-        const remote = urls.map(normalizeRemote).find((x): x is string => x !== undefined);
-        const main = basename(common) === ".git" ? dirname(common) : common;
-        const name = clean(remote ? (remote.split("/").pop() ?? "") : basename(main)) || clean(basename(cur)) || "project";
-        return {
-          id: `pj_${sha(`git\n${remote ?? ""}\n${common}`).slice(0, 24)}`,
-          name,
-          kind: "git",
-          root: cur,
-          ...(remote ? { remote } : {}),
-          ...(existsSync(join(cur, PRIVATE_MARKER)) ? { repoPrivate: true as const } : {}),
-        };
-      }
+      return gitRef(gitDir, cur);
     }
+    // A bare repository (a clone with no working tree): a git project, never a shared folder's.
+    if (isBareRepo(cur)) return gitRef(cur, cur);
     const up = dirname(cur);
     if (up === cur) break;
     cur = up;
   }
-  return { id: `pj_${sha(`dir\n${start}`).slice(0, 24)}`, name: clean(basename(start)) || "folder", kind: "dir", root: start };
+  const dirRef = (root: string, repoPrivate: boolean): ProjectRef => ({ id: dirProjectId(root), name: clean(basename(root)) || "folder", kind: "dir", root, ...(repoPrivate ? { repoPrivate: true as const } : {}) });
+  // A .p2p-private at or above the folder (no repository in between, or the walk above found it):
+  // the folder is private, whatever a policy above says.
+  let marked = false;
+  for (let c = start, i = 0; i < 4096; i++) {
+    if (existsSync(join(c, PRIVATE_MARKER))) {
+      marked = true;
+      break;
+    }
+    const up = dirname(c);
+    if (up === c) break;
+    c = up;
+  }
+  if (!doc || marked) return dirRef(start, marked);
+  // The walk stops at a folder the path names a marker in (it may be gone now: never covered from
+  // above), and at `start` itself when the path isn't there (only its nearest parent is).
+  const named = namedStop(given);
+  const ns = named === undefined ? undefined : existingDir(named);
+  const stop = !present(given) ? start : ns === undefined ? undefined : within(start, ns) ? ns : start;
+  for (let c = start, i = 0; i < 4096; i++) {
+    const rec = doc.projects[dirProjectId(c)];
+    if (rec) return c === start || rec.covers === true ? dirRef(c, false) : dirRef(start, false);
+    if (c === stop) break;
+    const up = dirname(c);
+    if (up === c) break;
+    c = up;
+  }
+  return dirRef(start, false);
 }
 
 const clean = (s: string) => sanitizePeerText(s, 64).replace(/[^\w.@+-]/g, "").slice(0, 64);
@@ -323,6 +536,8 @@ export interface ProjectView {
   /** Why it is private although a policy shares it, or `unmapped` when none does. */
   why?: string;
   repoPrivate?: true;
+  /** A folder whose share covers its subfolders (`p2p project share --subfolders`). */
+  covers?: true;
   /** Which Ix graph its work may reach (graphTarget): `local` (only this machine's) today. */
   graph: GraphTarget;
 }
@@ -353,8 +568,93 @@ export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" 
     people,
     ...(why ? { why } : {}),
     ...(ref.repoPrivate ? { repoPrivate: true as const } : {}),
+    ...(d.projects[ref.id]?.covers === true && ref.kind === "dir" ? { covers: true as const } : {}),
     graph: projectGraphTarget(app, ref, d),
   };
+}
+
+/**
+ * Why `root` may not cover its subfolders (a share for it alone is still allowed), or undefined:
+ * the file system's root, a home folder or a folder above one (`$HOME`, `/Users`, `/home/<u>`),
+ * the temporary folders (`/tmp`, `/private/tmp`, `/var/folders/…`, os.tmpdir() and above it), and
+ * the system's top folders. Everything below them would be one project.
+ */
+export function broadRoot(root: string, env: Record<string, string | undefined> = {}): string | undefined {
+  const norm = (p: string) => {
+    const r = resolve(p);
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  const forms = (p: string) => [...new Set([norm(p), norm(real(p))])];
+  const at = forms(root);
+  const isOrAbove = (dir: string | undefined) => !!dir && isAbsolute(dir) && forms(dir).some((d) => at.some((r) => within(d, r)));
+  if (at.some((r) => dirname(r) === r)) return "the file system's root";
+  const homes = [homedir(), env.HOME, env.USERPROFILE].filter((x): x is string => typeof x === "string" && x !== "");
+  if (homes.some(isOrAbove)) return "a home folder (or a folder that holds one)";
+  if (isOrAbove(tmpdir()) || isOrAbove(env.TMPDIR)) return "the temporary folder (or a folder that holds it)";
+  for (const r of at) {
+    const parts = r.split(/[\\/]+/).filter(Boolean);
+    const top = (parts[0] ?? "").toLowerCase();
+    if (!/^[a-z]:$/i.test(top) && parts.length === 1) return "a top-level system folder";
+    if (/^[a-z]:$/i.test(parts[0] ?? "") && parts.length <= 2 && (parts.length === 1 || (parts[1] ?? "").toLowerCase() === "users")) return "a drive's root or its Users folder";
+    if (/^[a-z]:$/i.test(parts[0] ?? "") && parts.length === 3 && (parts[1] ?? "").toLowerCase() === "users") return "a home folder";
+    if (["home", "users"].includes(top) && parts.length <= 2) return "a home folder (or the folder that holds them)";
+    if (top === "tmp" && parts.length === 1) return "the temporary folder";
+    if (top === "private" && parts.length <= 2) return "a system folder";
+    if (top === "private" && (parts[1] === "tmp" || parts[1] === "var") && parts.length === 2) return "the temporary folder";
+    const vf = top === "var" ? 1 : top === "private" && parts[1] === "var" ? 2 : -1;
+    if (vf > 0 && parts[vf] === "folders" && parts.length <= vf + 4) return "the temporary folder (or a folder that holds it)";
+    if (vf > 0 && parts.length <= vf + 1) return "a system folder";
+    if (top === "run" && parts.length <= 3) return "a system folder";
+    if (["volumes", "mnt", "media"].includes(top) && parts.length <= 2) return "a volume's root";
+  }
+  return undefined;
+}
+
+/** At most this deep and this many entries `nestedBoundaries` looks through below a covering share. */
+export const NESTED_SCAN_DEPTH = 4;
+export const NESTED_SCAN_ENTRIES = 2000;
+
+/**
+ * The nested git repositories (a `.git`, or a bare repository) and `.p2p-private` folders below
+ * `root`, for the warning a covering share prints: each stays its own project, but only while its
+ * marker is there. Bounded (NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES: `capped` past it); symlinks
+ * are never followed.
+ */
+export function nestedBoundaries(root: string): { repos: string[]; private: string[]; capped: boolean } {
+  const repos: string[] = [];
+  const priv: string[] = [];
+  let seen = 0;
+  let capped = false;
+  let level: string[] = [root];
+  for (let depth = 1; depth <= NESTED_SCAN_DEPTH && level.length > 0 && !capped; depth++) {
+    const next: string[] = [];
+    for (const d of level) {
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = readdirSync(d, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (++seen > NESTED_SCAN_ENTRIES) {
+          capped = true;
+          break;
+        }
+        if (!e.isDirectory() || e.isSymbolicLink()) continue;
+        const p = join(d, e.name);
+        if (e.name === ".git") continue;
+        if (existsSync(join(p, ".git")) || isBareRepo(p)) {
+          repos.push(p);
+          continue;
+        }
+        if (existsSync(join(p, PRIVATE_MARKER))) priv.push(p);
+        next.push(p);
+      }
+      if (capped) break;
+    }
+    level = next;
+  }
+  return { repos, private: priv, capped };
 }
 
 /**
@@ -363,14 +663,29 @@ export async function projectView(app: App, ref: Pick<ProjectRef, "id" | "name" 
  * command: no session or file can run it for them (the mod and the Codex bridge refuse it from a
  * model).
  */
-export async function shareProject(app: App, dir: string, targets: { circles?: string[]; people?: string[]; add?: boolean }): Promise<{ project: ProjectView; warnings: string[] }> {
+export async function shareProject(app: App, dir: string, targets: { circles?: string[]; people?: string[]; add?: boolean; subfolders?: boolean }): Promise<{ project: ProjectView; warnings: string[] }> {
   const ref = projectOf(dir);
   if (ref.repoPrivate) {
     throw new CliError("repo_private", `${ref.name} asks to stay private: its repository has ${PRIVATE_MARKER} at the top level. Peer2Peer never shares it; remove that file from your copy first if you mean to`);
   }
+  const warnings: string[] = [];
+  // Subfolders are covered only when asked, and never below a root that holds everything.
+  let subfolders = targets.subfolders === true;
+  if (subfolders && ref.kind === "git") {
+    warnings.push(`${ref.name} is a git repository: its subfolders are part of it already (--subfolders is for folders outside git)`);
+    subfolders = false;
+  }
+  if (subfolders) {
+    const broad = broadRoot(ref.root, app.env);
+    if (broad) throw new CliError("usage", `${ref.root} is ${broad}: a share there can't cover its subfolders (share it without --subfolders, or share the folders below it you mean)`);
+    const n = nestedBoundaries(ref.root);
+    const list = (xs: string[]) => `${xs.slice(0, 10).join(", ")}${xs.length > 10 ? ` and ${xs.length - 10} more` : ""}`;
+    if (n.repos.length > 0) warnings.push(`git repositories below ${ref.root} stay their own projects (private until you share each one), only while their .git is there: ${list(n.repos)}`);
+    if (n.private.length > 0) warnings.push(`folders below ${ref.root} with ${PRIVATE_MARKER} stay private: ${list(n.private)}`);
+    if (n.capped) warnings.push(`stopped looking for repositories below ${ref.root} after ${NESTED_SCAN_ENTRIES} entries (${NESTED_SCAN_DEPTH} levels deep): there may be more than listed`);
+  }
   const { resolveCircle } = await import("./circle-ops.js");
   const circles: string[] = [];
-  const warnings: string[] = [];
   for (const c of targets.circles ?? []) {
     const r = await resolveCircle(app, c);
     if (!r.record.joinedByMe) throw new CliError("usage", `you haven't joined circle ${c}`);
@@ -396,7 +711,9 @@ export async function shareProject(app: App, dir: string, targets: { circles?: s
     const keep = targets.add && old !== "private" ? old : { circles: [], people: [] };
     const share = { circles: [...new Set([...keep.circles, ...circles])], people: [...new Set([...keep.people, ...people])] };
     if (share.circles.length + share.people.length > MAX_PROJECT_SHARES) throw new CliError("usage", `a project is shared with at most ${MAX_PROJECT_SHARES} circles and people`);
-    const next: ProjectsDoc = { ...d, projects: { ...d.projects, [ref.id]: { name: ref.name, root: ref.root, ...(ref.remote ? { remote: ref.remote } : {}), share, at: Date.now() } } };
+    // --add keeps whether it covers its subfolders; a share made afresh covers them only when asked.
+    const covers = subfolders || (targets.add === true && targets.subfolders === undefined && d.projects[ref.id]?.covers === true);
+    const next: ProjectsDoc = { ...d, projects: { ...d.projects, [ref.id]: { name: ref.name, root: ref.root, ...(ref.remote ? { remote: ref.remote } : {}), share, ...(covers ? { covers: true as const } : {}), at: Date.now() } } };
     return { next: next, result: next };
   });
   return { project: await projectView(app, ref, doc), warnings };
@@ -423,9 +740,10 @@ export async function listProjects(app: App): Promise<ProjectView[]> {
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
-/** `p2p project show`: the project at `dir`, its policy and why. */
+/** `p2p project show`: the project at `dir` (a shared folder above it covers it), its policy and why. */
 export async function showProject(app: App, dir: string): Promise<ProjectView> {
-  return projectView(app, projectOf(dir));
+  const doc = await projectsDoc(app);
+  return projectView(app, projectOf(dir, doc), doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,17 +759,27 @@ export async function bindSession(
   app: App,
   sid: string,
   dirs: readonly string[],
-  o: { person?: boolean; over?: boolean; constraint?: ProjectShare; inbound?: boolean } = {},
+  o: { person?: boolean; over?: boolean | readonly OverWhy[]; constraint?: ProjectShare; inbound?: boolean } = {},
 ): Promise<SessionBinding | undefined> {
   if (sid === PERSON_SESSION) {
     if (o.person) return undefined;
     throw new CliError("usage", `session ${PERSON_SESSION} is your own terminal's (p2p tui, or p2p send typed with no --from-session); an agent sends from its own session`);
   }
-  const refs = new Map<string, ProjectRef>();
+  // Folder projects follow the policies (a shared folder covers its subfolders): read once, before the lock.
+  const doc = dirs.length > 0 ? await projectsDoc(app) : undefined;
+  const refs = new Map<string, { ref: ProjectRef; under: Set<string> }>();
   for (const d of dirs) {
     if (typeof d !== "string" || d.trim() === "") continue;
-    const r = projectOf(d);
-    refs.set(r.id, r);
+    // A device or pseudo file (2>/dev/null) is no project; a path that isn't there yet still binds its parent's.
+    if (pseudoPath(d)) continue;
+    const r = projectOf(d, doc);
+    const one = refs.get(r.id) ?? { ref: r, under: new Set<string>() };
+    // A folder a shared folder above covered: remembered, so a policy it gets later still narrows this session.
+    if (r.kind === "dir") {
+      const at = existingDir(d);
+      if (at !== r.root && within(at, r.root)) one.under.add(at);
+    }
+    refs.set(r.id, one);
   }
   // Who may speak for a session (statuses, sends): its front end (the person token), or, for a session
   // no front end registered, a caller outside any agent's session. An agent's own shell never may.
@@ -476,26 +804,42 @@ export async function bindSession(
       throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
     }
     const projects = { ...(have?.projects ?? {}) };
-    let over = have?.over === true || o.over === true;
-    for (const r of refs.values()) {
+    const why = new Set<OverWhy>(have?.overWhy ?? []);
+    if (o.over === true) why.add("front");
+    else if (Array.isArray(o.over)) for (const w of overWhys(o.over)) why.add(w);
+    // A binding from before overWhy kept only `over`: it stays over (said as such: legacy-over).
+    let over = have?.over === true || why.size > 0;
+    for (const { ref: r, under } of refs.values()) {
       const prev = projects[r.id];
       if (!prev && Object.keys(projects).length >= MAX_SESSION_PROJECTS) {
         over = true;
+        why.add("projects");
         continue;
       }
-      // Once a repository asked for privacy, it stays asked for this session.
-      projects[r.id] = { name: r.name, ...(r.repoPrivate || prev?.repoPrivate ? { repoPrivate: true as const } : {}) };
+      // Once a repository asked for privacy, it stays asked for this session; covered folders only add up.
+      const all = new Set([...(prev?.under ?? []), ...under]);
+      const underOver = prev?.underOver === true || all.size > MAX_UNDER;
+      projects[r.id] = {
+        name: r.name,
+        root: prev?.root ?? r.root,
+        ...(r.repoPrivate || prev?.repoPrivate ? { repoPrivate: true as const } : {}),
+        ...(!underOver && all.size > 0 ? { under: [...all].sort() } : {}),
+        ...(underOver ? { underOver: true as const } : {}),
+      };
     }
     const constraints = [...(have?.constraints ?? [])];
     if (o.constraint !== undefined && !constraints.some((c) => JSON.stringify(c) === JSON.stringify(o.constraint))) {
-      if (constraints.length >= MAX_SESSION_CONSTRAINTS) over = true;
-      else constraints.push(o.constraint);
+      if (constraints.length >= MAX_SESSION_CONSTRAINTS) {
+        over = true;
+        why.add("constraints");
+      } else constraints.push(o.constraint);
     }
     const registered = front || have?.registered === true;
     const unregistered = !registered && have?.unregistered === true;
     const next: SessionBinding = {
       projects,
       ...(over ? { over: true as const } : {}),
+      ...(why.size > 0 ? { overWhy: [...why] } : {}),
       ...(constraints.length ? { constraints } : {}),
       ...(unregistered ? { unregistered: true as const } : {}),
       ...(registered ? { registered: true as const } : {}),
@@ -647,6 +991,99 @@ export async function sessionBinding(app: App, sid: string): Promise<SessionBind
   return ((await app.state.get("sessionProjects")) as SessionProjectsDoc | undefined)?.[sid];
 }
 
+/** One reason a session is private, as said to the person (and to a model that reads a refusal). */
+export interface PrivateReason {
+  cause: PrivateCause;
+  why: string;
+  /** The project it is about, when it is one project's policy. */
+  project?: string;
+}
+
+const OVER_TEXT: Record<OverWhy | "legacy-over", string> = {
+  projects: `it worked in more than ${MAX_SESSION_PROJECTS} projects`,
+  folders: "it worked in more folders than Peer2Peer keeps track of for one session",
+  unresolved:
+    "a command it ran named a path Peer2Peer couldn't resolve (one that starts with a variable or a command substitution its front end doesn't know the value of, like $X/… or $(…)/…), so which project that path is in can't be told",
+  front: "its front end couldn't keep track of every folder it worked in (a forked conversation, or a record it couldn't read)",
+  constraints: `more than ${MAX_SESSION_CONSTRAINTS} sessions of yours sent it messages`,
+  "legacy-over": "it worked in more projects or folders than Peer2Peer keeps track of, or named a path Peer2Peer couldn't resolve",
+};
+
+/**
+ * Every policy a bound project answers to: its own, and, for a folder project a shared folder
+ * covered, each policy a covered subfolder (or a folder between it and the root) has since been
+ * given. Past MAX_UNDER covered subfolders, every folder policy below the root.
+ */
+function boundShares(doc: ProjectsDoc, id: string, p: BoundProject): { share: ProjectShare; mapped: boolean; name: string }[] {
+  const out = [{ share: shareOf(doc, id), mapped: doc.projects[id] !== undefined, name: p.name }];
+  const root = p.root;
+  if (typeof root !== "string" || root === "") return out;
+  const seen = new Set<string>([id]);
+  const add = (pid: string) => {
+    const r = doc.projects[pid];
+    if (seen.has(pid) || !r) return;
+    seen.add(pid);
+    out.push({ share: shareOf(doc, pid), mapped: true, name: clean(String(r.name ?? "")) || p.name });
+  };
+  // Subfolders it covered, and its share no longer covers them (shared again without --subfolders): private.
+  if ((p.underOver || (p.under?.length ?? 0) > 0) && doc.projects[id]?.covers !== true) out.push({ share: "private", mapped: true, name: p.name });
+  if (p.underOver) {
+    for (const [pid, r] of Object.entries(doc.projects)) if (typeof r?.root === "string" && r.root !== root && within(r.root, root) && pid === dirProjectId(r.root)) add(pid);
+    return out;
+  }
+  for (const f of p.under ?? []) {
+    if (typeof f !== "string") continue;
+    for (let c = f, i = 0; i < 4096 && c !== root && within(c, root); i++) {
+      add(dirProjectId(c));
+      const up = dirname(c);
+      if (up === c) break;
+      c = up;
+    }
+  }
+  return out;
+}
+
+/** Why a binding is private, every cause (no network: `disjoint` needs the store, see sessionCeiling). */
+export function privateReasons(doc: ProjectsDoc, b: SessionBinding): PrivateReason[] {
+  const out: PrivateReason[] = [];
+  if (b.over) for (const w of b.overWhy?.length ? overWhys(b.overWhy) : (["legacy-over"] as const)) out.push({ cause: w, why: OVER_TEXT[w] });
+  if (b.unregistered) out.push({ cause: "unregistered", why: "an agent named it, and no front end of yours has registered it" });
+  for (const [id, p] of Object.entries(b.projects)) {
+    if (p.repoPrivate) {
+      out.push({ cause: "repo-private", why: `${p.name} asks to stay private (${PRIVATE_MARKER})`, project: p.name });
+      continue;
+    }
+    for (const s of boundShares(doc, id, p)) {
+      if (s.share !== "private") continue;
+      out.push(s.mapped ? { cause: "private", why: `${s.name} is private`, project: s.name } : { cause: "unshared", why: `${s.name} isn't shared (projects are private until you share them)`, project: s.name });
+      break;
+    }
+  }
+  if ((b.constraints ?? []).includes("private")) out.push({ cause: "sent-private", why: "a private session of yours sent it a message" });
+  return out;
+}
+
+/**
+ * What the person can do about a private session, for an error a model may read: a share only
+ * when a share can lift it, never the "share each project" hint for a cause that lasts until the
+ * session ends (a cap, an unresolved path, a dropped front end, `.p2p-private`, a private
+ * session's message).
+ */
+export function privateRemedy(causes: readonly PrivateCause[], names: string[]): string {
+  if (causes.some((c) => STICKY.has(c))) {
+    return "sharing a project can't change that, and it lasts until the session ends: start a new session for the work you want to share (`p2p session show <session>` in your own terminal, or /peers session in Claude Code, lists what it is bound to and why)";
+  }
+  const parts: string[] = [];
+  if (causes.includes("unregistered")) parts.push("send from the session's own front end (SendMessage in Claude Code, p2p_send in Codex), which registers it");
+  if (causes.some((c) => c === "private" || c === "unshared" || c === "disjoint") || parts.length === 0) parts.push(shareHint(names));
+  return parts.join("; and ");
+}
+
+/** Whether a ceiling's privacy can only end with the session (privateRemedy says to start a new one). */
+export function stickyPrivate(c: Ceiling): boolean {
+  return c.kind === "private" && c.causes.some((x) => STICKY.has(x));
+}
+
 /**
  * The most a session may reach: the intersection of every bound project's policy. Unmapped,
  * private and repository-private projects make it private, and so does an empty intersection.
@@ -655,22 +1092,14 @@ export async function sessionCeiling(app: App, sid: string, binding?: SessionBin
   if (sid === PERSON_SESSION) return { kind: "none" };
   const b = binding === null ? undefined : (binding ?? (await sessionBinding(app, sid)));
   if (!b || (Object.keys(b.projects).length === 0 && !b.constraints?.length && !b.unregistered && !b.over)) return { kind: "none" };
-  if (b.over) return { kind: "private", why: `it worked in more than ${MAX_SESSION_PROJECTS} projects (or ${MAX_SESSION_DIRS} folders)` };
-  if (b.unregistered) return { kind: "private", why: "an agent named it, and no front end of yours has registered it" };
   const doc = await projectsDoc(app);
+  const reasons = privateReasons(doc, b);
+  if (reasons.length > 0) return privateOf(reasons);
   let circles: Set<string> | undefined;
   let people: Set<string> | undefined;
   const shares: { name: string; share: ProjectShare }[] = [];
-  for (const [id, p] of Object.entries(b.projects)) {
-    if (p.repoPrivate) return { kind: "private", why: `${p.name} asks to stay private (${PRIVATE_MARKER})` };
-    const share = shareOf(doc, id);
-    if (share === "private") return { kind: "private", why: doc.projects[id] ? `${p.name} is private` : `${p.name} isn't shared (projects are private until you share them)` };
-    shares.push({ name: p.name, share });
-  }
-  for (const c of b.constraints ?? []) {
-    if (c === "private") return { kind: "private", why: "a private session of yours sent it a message" };
-    shares.push({ name: "a session of yours that sent it a message", share: c });
-  }
+  for (const [id, p] of Object.entries(b.projects)) for (const s of boundShares(doc, id, p)) shares.push({ name: s.name, share: s.share });
+  for (const c of b.constraints ?? []) shares.push({ name: "a session of yours that sent it a message", share: c });
   for (const { share } of shares) {
     if (share === "private") continue;
     circles = circles ? new Set(share.circles.filter((c) => circles!.has(c))) : new Set(share.circles);
@@ -683,10 +1112,22 @@ export async function sessionCeiling(app: App, sid: string, binding?: SessionBin
   const friends = (people?.size ?? 0) > 0 ? await friendIds(app) : new Set<string>();
   const ppl = [...(people ?? [])].filter((u) => !blocks.has(u) && u !== app.userId && friends.has(u));
   if (joined.length + ppl.length === 0) {
-    const names = shares.map((x) => x.name);
-    return { kind: "private", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` };
+    const names = [...new Set(shares.map((x) => x.name))];
+    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
   }
   return { kind: "shared", circles: joined.sort(), people: ppl.sort() };
+}
+
+/** A private ceiling from its reasons: the first said in full, the count of the rest (`p2p session show` lists them all). */
+function privateOf(reasons: PrivateReason[], names?: string[]): Ceiling & { kind: "private" } {
+  const more = reasons.length - 1;
+  const blocking = names ?? [...new Set(reasons.map((r) => r.project).filter((x): x is string => x !== undefined))];
+  return {
+    kind: "private",
+    why: `${reasons[0].why}${more > 0 ? ` (and ${more} more reason${more === 1 ? "" : "s"})` : ""}`,
+    causes: [...new Set(reasons.map((r) => r.cause))],
+    ...(blocking.length ? { blocking } : {}),
+  };
 }
 
 /** Everyone a ceiling lets in (besides this user): members of its circles who stand in them, and its people. */
@@ -726,9 +1167,10 @@ export async function assertMayReach(app: App, sid: string, userId: string, o: {
   const names = Object.values(b?.projects ?? {}).map((p) => p.name);
   const who = o.address ?? (await app.addressOf(userId));
   const why = c.kind === "private" ? c.why : `${who} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
-  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who}: ${why}. ${shareHint(names).replace(/^o/, "O")}`, {
+  const remedy = c.kind === "private" ? privateRemedy(c.causes, c.blocking?.length ? c.blocking : names) : shareHint(names);
+  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
     delivered: false,
-    project: { names, policy: c.kind },
+    project: { names, policy: c.kind, ...(c.kind === "private" ? { causes: c.causes, ...(stickyPrivate(c) ? { sticky: true } : {}) } : {}) },
   });
 }
 
@@ -745,6 +1187,8 @@ export interface SessionProjectView {
   /** `private`: only your own devices see it; `shared`: the circles and people below (all its projects share them). */
   policy: "private" | "shared" | "none";
   why?: string;
+  /** Why it is private, as codes (PrivateCause). */
+  causes?: PrivateCause[];
   circles?: string[];
   people?: string[];
 }
@@ -753,9 +1197,61 @@ export async function sessionProjectView(app: App, sid: string): Promise<Session
   const b = await sessionBinding(app, sid);
   const c = await sessionCeiling(app, sid, b ?? null);
   const projects = Object.entries(b?.projects ?? {}).map(([id, p]) => ({ id, name: p.name, ...(p.repoPrivate ? { repoPrivate: true as const } : {}) }));
-  if (c.kind === "private") return { projects, policy: "private", why: c.why };
+  if (c.kind === "private") return { projects, policy: "private", why: c.why, causes: c.causes };
   if (c.kind === "shared") return { projects, policy: "shared", circles: c.circles, people: c.people };
   return { projects, policy: "none" };
+}
+
+/** `p2p session show`: one session's bound projects, each one's policy, and every reason it is private. */
+export interface SessionShow {
+  sid: string;
+  policy: "private" | "shared" | "none";
+  /** Every reason it is private (empty when it isn't). */
+  reasons: PrivateReason[];
+  /** What the person can do about it (privateRemedy). */
+  remedy?: string;
+  /** Who it reaches, when shared: circle ids and userIds. */
+  circles?: string[];
+  people?: string[];
+  projects: (ProjectView & { under?: string[]; underOver?: true })[];
+  /** Bounds own-session messages carried in (projects.v1). */
+  constraints: number;
+}
+
+/**
+ * `p2p session show <sid>`: read only, and the person's: their front end (the person token) or
+ * their own terminal outside any agent's session. An agent's shell is refused, so no session reads
+ * another's bindings (or its own: the model has the not_shared reason already).
+ */
+export async function showSession(app: App, sid: string): Promise<SessionShow> {
+  if (app.front !== true && agentContext(app.env)) {
+    throw new CliError(
+      "refused",
+      "`p2p session show` lists a session's projects and why it is private, which is for you to read: run it in your own terminal (not inside Claude Code or Codex), or type /peers session in Claude Code",
+    );
+  }
+  if (sid === PERSON_SESSION) return { sid, policy: "none", reasons: [], projects: [], constraints: 0 };
+  const b = await sessionBinding(app, sid);
+  const c = await sessionCeiling(app, sid, b ?? null);
+  const doc = await projectsDoc(app);
+  const reasons = b ? privateReasons(doc, b) : [];
+  if (c.kind === "private" && reasons.length === 0) reasons.push({ cause: c.causes[0] ?? "disjoint", why: c.why });
+  const projects: SessionShow["projects"] = [];
+  for (const [id, p] of Object.entries(b?.projects ?? {})) {
+    const root = typeof p.root === "string" && p.root !== "" ? p.root : (doc.projects[id]?.root ?? "");
+    const kind = root !== "" && dirProjectId(root) === id ? "dir" : "git";
+    const v = await projectView(app, { id, name: p.name, kind, root, ...(doc.projects[id]?.remote ? { remote: doc.projects[id].remote } : {}), ...(p.repoPrivate ? { repoPrivate: true as const } : {}) }, doc);
+    projects.push({ ...v, ...(p.under?.length ? { under: [...p.under] } : {}), ...(p.underOver ? { underOver: true as const } : {}) });
+  }
+  return {
+    sid,
+    policy: c.kind,
+    reasons,
+    ...(c.kind === "private" ? { remedy: privateRemedy(c.causes, c.blocking?.length ? c.blocking : projects.map((x) => x.name)) } : {}),
+    ...(c.kind === "shared" ? { circles: c.circles, people: c.people } : {}),
+    projects,
+    constraints: b?.constraints?.length ?? 0,
+  };
 }
 
 /**

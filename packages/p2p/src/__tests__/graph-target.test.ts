@@ -177,6 +177,32 @@ describe("graphTarget: the chokepoint, with real projects and a session", () => 
     }
   });
 
+  it("a folder shared with --subfolders (#49): the session's ceiling is shared, but a subfolder path still resolves on its own, so the target stays local (fail closed)", async () => {
+    const reg = new Map([[team, GRAPH]]);
+    const fold = join(root, "fold");
+    mkdirSync(join(fold, "sub", "deep"), { recursive: true });
+    mkdirSync(join(fold, "priv"), { recursive: true });
+    writeFileSync(join(fold, "priv", PRIVATE_MARKER), "");
+    await ann.ok(["project", "share", team, "--dir", fold, "--subfolders"]);
+    const a = await app();
+    try {
+      // A session working in a covered subfolder binds the covering folder's project: its ceiling is shared.
+      await bindSession(a, "g4", [join(fold, "sub")]);
+      // The folder itself, with its own policy: the shared graph (the baseline).
+      expect(await graphTarget(a, { sid: "g4", dirs: [fold] }, reg)).toEqual({ kind: "shared", circle: team, endpoint: GRAPH });
+      // A covered subfolder, as a dir or a path a call names: graphTarget never walks up to the covering share.
+      local(await graphTarget(a, { sid: "g4", dirs: [join(fold, "sub")] }, reg));
+      local(await graphTarget(a, { sid: "g4", dirs: [fold], paths: [join(fold, "sub", "deep", "a.ts")] }, reg));
+      // A .p2p-private subfolder below the covering share: local.
+      local(await graphTarget(a, { sid: "g4", dirs: [fold], paths: [join(fold, "priv", "keys.ts")] }, reg));
+      // A session that worked in the private subfolder is private, so local whatever it names.
+      await bindSession(a, "g5", [join(fold, "sub"), join(fold, "priv")]);
+      expect(local(await graphTarget(a, { sid: "g5", dirs: [fold] }, reg)).why).toMatch(/session g5 is private/);
+    } finally {
+      await a.close();
+    }
+  });
+
   it.skipIf(process.platform === "win32")("P2P_WORKDIR doesn't replace the process's real cwd: a private cwd keeps it local", async () => {
     const reg = new Map([[team, GRAPH]]);
     const a = await app();

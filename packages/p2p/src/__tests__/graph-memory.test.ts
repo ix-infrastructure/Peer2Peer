@@ -291,6 +291,35 @@ describe("draining, with real state and the chokepoint", () => {
     }
   });
 
+  it("#49 subfolders: a session in a subfolder is gathered only when the share covers it (--subfolders), never in a .p2p-private one or under a share without --subfolders", async () => {
+    const fold = join(root, "fold-covered");
+    const plain = join(root, "fold-plain");
+    for (const d of [join(fold, "sub", "deep"), join(fold, "priv"), join(plain, "sub")]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(fold, "priv", ".p2p-private"), "");
+    await ann.ok(["project", "share", team, "--dir", fold, "--subfolders"]);
+    await ann.ok(["project", "share", team, "--dir", plain]);
+    const a = await app();
+    try {
+      await reset(a);
+      await putStatus(a, "cov", { summary: "covered work" }, {}, [join(fold, "sub", "deep")]);
+      await putStatus(a, "cpriv", { summary: "private sub" }, {}, [join(fold, "priv")]);
+      await putStatus(a, "mixed", { summary: "covered and private" }, {}, [join(fold, "sub"), join(fold, "priv")]);
+      await putStatus(a, "uncov", { summary: "uncovered sub" }, {}, [join(plain, "sub")]);
+      await gatherGraphMemory(a);
+      const d = (await a.state.get("graphMemory"))!;
+      expect([...new Set(d.queue.map((i) => i.sid))]).toEqual(["cov"]);
+      expect(JSON.stringify(d)).not.toMatch(/private sub|covered and private|uncovered sub/);
+      // And a covered session's record may go out from another covered session, never to or from the private ones.
+      await bindSession(a, "cov2", [join(fold, "sub")]);
+      expect(await mayShareSessionContext(a, "cov", "cov2")).toBe(true);
+      expect(await mayShareSessionContext(a, "cov", "cpriv")).toBe(false);
+      expect(await mayShareSessionContext(a, "cpriv", "cov")).toBe(false);
+      expect(await mayShareSessionContext(a, "uncov", "cov")).toBe(false);
+    } finally {
+      await a.close();
+    }
+  });
+
   it("L4: a writer past its deadline is told to stop, waited for, and writes nothing after it", async () => {
     const a = await app();
     try {

@@ -75,8 +75,11 @@ import {
   sessionDirs,
   sessionWorkdir,
   MAX_SESSION_DIRS,
+  overWhys,
+  privateRemedy,
   shareHint,
   type Ceiling,
+  type OverWhy,
   type SessionProjectView,
 } from "./projects.js";
 import { renderExtension, type ExtSendResult } from "./extensions.js";
@@ -360,7 +363,10 @@ export async function roster(
     const names = Object.values((await sessionBinding(app, sid))?.projects ?? {}).map((p) => p.name);
     const ceiling = ctx.ceiling;
     const deny = (what: string): never => {
-      throw new CliError("not_shared", `session ${sid} works in ${names.join(", ")}, which ${ceiling.kind === "private" ? `is private (${ceiling.why}), so it isn't shared` : "isn't shared"} ${what}: ${shareHint(names)}`);
+      const remedy = ceiling.kind === "private" ? privateRemedy(ceiling.causes, ceiling.blocking?.length ? ceiling.blocking : names) : shareHint(names);
+      throw new CliError("not_shared", `session ${sid} works in ${names.join(", ")}, which ${ceiling.kind === "private" ? `is private (${ceiling.why}), so it isn't shared` : "isn't shared"} ${what}: ${remedy}`, {
+        project: { names, policy: ceiling.kind, ...(ceiling.kind === "private" ? { causes: ceiling.causes } : {}) },
+      });
     };
     if (opts.circle !== undefined && circle !== undefined && (ceiling.kind !== "shared" || !ceiling.circles.includes(circle))) deny(`with circle ${circle}`);
     for (const u of add) if (!ctx.audience.has(u)) deny(`with ${await app.addressOf(u)}`);
@@ -451,8 +457,12 @@ export interface StatusOpts {
    * project for the rest of its life (projects.ts), which can only narrow who sees it.
    */
   projectDirs?: string[];
-  /** The front end dropped folders past its cap (`--project-dirs-over`): private. */
-  projectDirsOver?: boolean;
+  /**
+   * The front end dropped folders past its cap, or couldn't resolve a path (`--project-dirs-over`):
+   * private. A list says why (projects.ts OverWhy: `--project-dirs-over=unresolved,folders`); `true`
+   * is an older front end's bare flag.
+   */
+  projectDirsOver?: boolean | string[];
   /**
    * The session's subagents (`--agents-json`), as the caller has them: entries
    * are normalized (sanitized, capped, ordered, trimmed), never trusted as is.
@@ -682,7 +692,7 @@ export async function sendStatus(app: App, o: StatusOpts): Promise<StatusResult>
   // a path through a symlink): each binds its project.
   const work = sessionWorkdir(app.env);
   const fileDirs = (o.files ?? []).filter((f) => typeof f === "string").map((f) => dirname(resolvePath(work, f)));
-  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs], { ...(o.projectDirsOver ? { over: true } : {}) });
+  await bindFromEnv(app, sid, [...(o.projectDirs ?? []), ...fileDirs], { ...(o.projectDirsOver !== undefined && o.projectDirsOver !== false ? { over: overOf(o.projectDirsOver) } : {}) });
   const prev = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
   const before = (await app.state.get("sessions"))?.[sid];
   const warnings: string[] = [];
@@ -866,7 +876,7 @@ export interface SendOpts {
   /** Directories the sending session works in besides its working directory (see StatusOpts.projectDirs). */
   projectDirs?: string[];
   /** See StatusOpts.projectDirsOver. */
-  projectDirsOver?: boolean;
+  projectDirsOver?: boolean | string[];
   /**
    * The person at their own terminal (`p2p send` typed with no --from-session, `p2p tui`): their
    * session is theirs, never bound to a project. Set only by those two paths, never from a flag.
@@ -1086,7 +1096,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
   if (Buffer.byteLength(o.text, "utf8") > MAX_TEXT_BYTES) throw new CliError("too_large", `message text is at most ${MAX_TEXT_BYTES} bytes`);
   if (o.text === "" && !o.notifyWhenIdle) throw new CliError("usage", "nothing to send (give text, or --notify-when-idle)");
   // Bound before anything is read or sent: the project ceiling decides who this may reach.
-  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...(o.projectDirsOver ? { over: true } : {}) });
+  await bindFromEnv(app, fromSession, o.projectDirs ?? [], { person: o.person === true, ...(o.projectDirsOver !== undefined && o.projectDirsOver !== false ? { over: overOf(o.projectDirsOver) } : {}) });
   // This device can't reach any of its relays: the message can still be sealed and kept in the
   // outbox (outbox.ts) for `watch` to send once it can.
   let offline = false;
@@ -1314,11 +1324,18 @@ export async function onSessionEnvelope(app: App, env: string, r: AcceptedMessag
  * Binds `sid` to the folders its front end reports (projects.ts sessionDirs: P2P_WORKDIR,
  * P2P_PROJECT_DIRS, past its cap private) and any more the caller names.
  */
-export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean; over?: boolean } = {}): Promise<void> {
-  const { dirs, over } = sessionDirs(app.env);
+export async function bindFromEnv(app: App, sid: string, extra: readonly string[] = [], o: { person?: boolean; over?: OverWhy[] } = {}): Promise<void> {
+  const { dirs, why } = sessionDirs(app.env);
   // Past the cap in folders named on the command line too: private, never the first N.
-  const tooMany = extra.length > MAX_SESSION_DIRS;
-  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over || tooMany || o.over ? { over: true } : {}) });
+  const over = new Set<OverWhy>([...why, ...(o.over ?? [])]);
+  if (extra.length > MAX_SESSION_DIRS) over.add("folders");
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over.size > 0 ? { over: [...over] } : {}) });
+}
+
+/** A front end's `--project-dirs-over` as reasons: a bare flag (an older front end) is `front`. */
+function overOf(v: boolean | string[]): OverWhy[] {
+  const out = v === true ? ["front" as const] : overWhys(Array.isArray(v) ? v.flatMap((x) => String(x).split(",")) : []);
+  return out.length > 0 ? out : ["front"];
 }
 
 /** Whether a ceiling is within a bound (narrower or equal): private always is. */
