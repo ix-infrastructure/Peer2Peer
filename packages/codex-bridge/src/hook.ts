@@ -17,7 +17,8 @@
 // Failing open is safe here (the hold rule lives in the bridge, and no
 // bridge means no messages): any error prints nothing and exits 0.
 
-import { isAbsolute } from "node:path";
+import { lstatSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { CodexMode } from "./lib.js";
 import { boundaryRefusal, editedFiles, MAX_COMMAND_PATHS, mutatingP2PVerb, namesP2PCli, resolveLike, shellPaths, touchesSecrets } from "./lib.js";
 import { ancestors, ask, findEntry, readEntries } from "./ipc.js";
@@ -48,28 +49,113 @@ export function guard(toolName: string, input: unknown, binNames: readonly strin
   return null;
 }
 
+/** Whether `d` is a bare git repository (projects.ts isBareRepo: HEAD, objects/ and refs/, or `bare = true`). */
+function isBareRepo(d: string): boolean {
+  if (basename(d) === ".git") return false;
+  const st = (p: string) => {
+    try {
+      return statSync(p);
+    } catch {
+      return undefined;
+    }
+  };
+  if (st(join(d, "HEAD"))?.isFile() && st(join(d, "objects"))?.isDirectory() && st(join(d, "refs"))?.isDirectory()) return true;
+  try {
+    const c = join(d, "config");
+    const cs = st(c);
+    return !!cs && cs.isFile() && cs.size <= 256 * 1024 && /^\s*bare\s*=\s*true\s*$/im.test(readFileSync(c, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The marker of the nearest folder at or above each path that holds a `.git` (any kind), a
+ * `.p2p-private`, or is a bare repository (`<that folder>/.git` then), and each of `maybe` that
+ * exists: the bridge binds them too, so a shared folder above never covers a repository once its
+ * files are gone (projects.ts namedStop). Metadata only; git is never run. The same rules as the
+ * Claude mod's MARKER_PROBE.
+ */
+export function markerPaths(paths: readonly string[], maybe: readonly string[] = []): string[] {
+  const out = new Set<string>();
+  const exists = (p: string) => {
+    try {
+      statSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const there = (p: string) => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (const m of maybe) if (isAbsolute(m) && exists(m)) out.add(m);
+  for (const p of new Set([...paths, ...maybe])) {
+    if (!isAbsolute(p)) continue;
+    let cur = resolve(p);
+    for (let i = 0; i < 4096; i++) {
+      try {
+        if (!statSync(cur).isDirectory()) cur = dirname(cur);
+        break;
+      } catch {
+        const up = dirname(cur);
+        if (up === cur) break;
+        cur = up;
+      }
+    }
+    for (let i = 0; i < 4096; i++) {
+      if (there(join(cur, ".git")) || isBareRepo(cur)) {
+        out.add(join(cur, ".git"));
+        break;
+      }
+      if (there(join(cur, ".p2p-private"))) {
+        out.add(join(cur, ".p2p-private"));
+        break;
+      }
+      const up = dirname(cur);
+      if (up === cur) break;
+      cur = up;
+    }
+  }
+  return [...out];
+}
+
 /**
  * The paths a tool call names outside its folder (a shell command's absolute, ~ and .. paths; the
  * files an apply_patch or edit names), resolved: the bridge binds each one's project (projects.ts).
+ * Plus the repository marker each one (and the cwd) is under, and a program's word that names a
+ * file that exists (markerPaths).
  */
-export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): { paths: string[]; over: boolean } {
+export function touchedPaths(toolName: string, input: unknown, cwd: string | undefined, home: string | undefined): { paths: string[]; over: boolean; why?: string[] } {
   const out: string[] = [];
-  let over = false;
+  const maybe: string[] = [];
+  // Why it is private (the CLI's OverWhy words): a path that can't be placed, or too many.
+  const why = new Set<string>();
   if (SHELL_TOOLS.test(toolName)) {
     // No folder to resolve against: what it names can't be placed, so private.
-    if (!cwd) over = true;
+    if (!cwd) why.add("unresolved");
     else {
       const r = shellPaths(commandOf(input), cwd, home);
       out.push(...r.paths);
-      over ||= r.over;
+      maybe.push(...(r.maybe ?? []));
+      for (const w of r.why ?? []) why.add(w);
     }
   }
   for (const f of editedFiles(toolName, input)) {
     if (cwd || isAbsolute(f)) out.push(resolveLike(cwd ?? "/", f));
-    else over = true;
+    else why.add("unresolved");
   }
-  if (out.length > MAX_COMMAND_PATHS) over = true;
-  return { paths: out.slice(0, MAX_COMMAND_PATHS), over };
+  // (The cwd's own marker only beside other paths: a call that names none needn't reach the bridge, and
+  // the CLI never covers a session folder that is gone from above: projects.ts projectOf.)
+  const extras = out.length + maybe.length > 0 ? markerPaths([...(cwd && isAbsolute(cwd) ? [cwd] : []), ...out], maybe) : [];
+  const all = [...new Set([...out, ...extras])];
+  if (all.length > MAX_COMMAND_PATHS) why.add("folders");
+  return { paths: all.slice(0, MAX_COMMAND_PATHS), over: why.size > 0, ...(why.size > 0 ? { why: [...why] } : {}) };
 }
 
 export interface HookDeps {
@@ -111,7 +197,7 @@ export async function runHook(event: string, stdin: string, deps: HookDeps): Pro
     const t = entry ? touchedPaths(String(payload.tool_name ?? ""), payload.tool_input, cwd, deps.homeDir) : { paths: [], over: false };
     if (entry && (t.paths.length > 0 || t.over)) {
       // The bridge must hear it before the call runs: if it can't be told, the call doesn't run.
-      const told = await ask<{ ok?: boolean }>(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true } : {}) } }, 8_000)
+      const told = await ask<{ ok?: boolean }>(entry.sock, { op: "hook", report: { event: "PreToolUse", ...(sessionId ? { sessionId } : {}), ...(cwd ? { cwd } : {}), mode: {}, dirs: t.paths, ...(t.over ? { over: true, overWhy: t.why ?? [] } : {}) } }, 8_000)
         .then((r) => r?.ok === true)
         .catch(() => false);
       if (!told) {

@@ -487,10 +487,15 @@ export class P2P {
    */
   project(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
     const [verb = 'show', ...rest] = args
-    const flags = rest.filter(a => a === '--add' || a.startsWith('--person='))
+    const flags = rest.filter(a => a === '--add' || a === '--subfolders' || a.startsWith('--person='))
     const positionals = rest.filter(a => !a.startsWith('--'))
 
     return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])
+  }
+
+  /** `p2p session show`: this session's bound projects, their policies and why it is private (the person's: it needs the token). */
+  sessionShow(sid: string): Promise<Outcome<Record<string, unknown>>> {
+    return this.call(['session', 'show', '--', sid])
   }
 
   /** `p2p session bound`: binds this session to the bound an own-session message it holds carried (narrowing only). */

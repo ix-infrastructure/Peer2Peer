@@ -525,7 +525,9 @@ describe("project boundaries", () => {
     const many = Array.from({ length: 600 }, (_, i) => join(repo.S, `d${i}`));
     const a = await inDir(ann, repo.S, many).ok(["status", "--session", "o1", "--state", "busy", "--label", "o"]);
     expect(a.roster.vis).toBe("private");
-    expect(a.project.why).toMatch(/more than/);
+    // Said as its own cause: too many folders, not a project count or an unresolved path.
+    expect(a.project.why).toMatch(/more folders than Peer2Peer keeps track of/);
+    expect(a.project.causes).toEqual(["folders"]);
     // --project-dir past the cap, and a front end's --project-dirs-over (the Codex bridge's).
     const flags = many.flatMap((x) => ["--project-dir", x]);
     expect((await inDir(ann, repo.S).ok(["status", "--session", "o3", "--state", "busy", "--label", "o", ...flags])).roster.vis).toBe("private");

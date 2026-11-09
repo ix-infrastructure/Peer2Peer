@@ -170,7 +170,7 @@ export function makeTools(bridge: Bridge, onMeta?: (meta: unknown) => void): Too
         }
         if (target.kind === "refused") return text(target.reason, true);
         if (target.kind === "ambiguous") return text(`More than one session matches ${inertMax(to, 100)}. Retry with one of:\n${target.candidates.map((p) => `- ${sessionAddress(p)} — ${p.state}`).join("\n")}`, true);
-        const r = await bridge.p2p.send({ fromSession: bridge.sid, to: target.to, text: message, notifyWhenIdle: args.notify_when_idle === true, projectDirs: bridge.sessionDirs(), projectDirsOver: bridge.isDirsOver });
+        const r = await bridge.p2p.send({ fromSession: bridge.sid, to: target.to, text: message, notifyWhenIdle: args.notify_when_idle === true, projectDirs: bridge.sessionDirs(), projectDirsOver: bridge.dirsOver() });
         if (!r.ok) return text(`Not sent: ${inert(r.reason)}`, true);
         const where = sessionAddress({ address: r.value.to.address, ref: r.value.to.ref, ...(target.kind === "peer" ? { label: target.peer.label } : {}) });
         return text(r.value.delivered ? `Sent to ${where} (end-to-end encrypted, via ${r.value.relays} relay${r.value.relays === 1 ? "" : "s"}). Its session may hold it for its user, depending on their settings.${args.notify_when_idle === true ? " You'll get one notice when it next goes idle." : ""}` : `Subscribed to ${where}'s next idle.`);
