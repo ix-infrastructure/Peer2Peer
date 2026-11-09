@@ -465,7 +465,8 @@ export const MUTATING_TOOLS = new Set([
 ]);
 
 /** `p2p` verbs that change who reaches this user, or touch its keys (the mod's guard list). */
-const MUTATING_ONE = new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "petname", "link", "release"]);
+// `history`: the person's messages (and `history --clear` deletes them); a session's own come through p2p_history.
+const MUTATING_ONE = new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "petname", "link", "release", "history"]);
 const MUTATING_TWO = new Set([
   "held approve",
   "held decline",

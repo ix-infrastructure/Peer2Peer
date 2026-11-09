@@ -41,6 +41,8 @@ import {
   firstLine,
   friendsText,
   heldListText,
+  HISTORY_BAND_DEFAULT,
+  historyText,
   sessionsText,
   REPO_PROBE,
   parseRepoProbe,
@@ -2090,7 +2092,7 @@ const dismiss = async ($: EngineInterface, id: string) => {
  * (its "I saved it" offers to delete the file) or a rotation plan (Cancel runs `p2p identity rotate
  * --cancel`), and never a held item (`/peers decline`). Oldest first, as the band shows them.
  */
-const dismissable = (list: readonly Reveal[]) => list.filter(one => one.kind === 'joined' || one.kind === 'invite' || one.kind === 'warning')
+const dismissable = (list: readonly Reveal[]) => list.filter(one => one.kind === 'joined' || one.kind === 'invite' || one.kind === 'warning' || one.kind === 'history')
 
 const BAND_HINT = '(ctrl+x then Tab to use the buttons, or /peers dismiss)'
 
@@ -2589,6 +2591,9 @@ const peersCommand = async (S: Sess, $: EngineInterface, args: string, origin: s
   const command = parsePeersArgs(args)
   if (command.verb === 'usage') return `${command.error ? `${command.error}\n` : ''}${PEERS_USAGE}`
   const isTyped = origin === 'composer' || origin === 'bridge'
+  // The person's own messages (their inbox, every session's history) are theirs to read: typed only.
+  // Composer only, not Remote Control (`bridge`): it shows the person's own messages, as trust changes are typed only there.
+  if (command.verb === 'history' && origin !== 'composer') return 'Only your user reads their message history, at their own terminal: they type /peers history there (not over Remote Control), or run p2p history or p2p tui themselves.'
   if (isMutating(command) && !isTyped) return 'Only what your user types at the prompt changes who reaches them: run this /peers command yourself.'
   // Trust only from the terminal (pre-release review N4): the engine's own types call a Remote Control
   // (`bridge`) input the user's, but also "not attestably the owner's hand" (it may come through a
@@ -2631,6 +2636,26 @@ const peersCommand = async (S: Sess, $: EngineInterface, args: string, origin: s
       const h = await p.held()
 
       return h.ok ? heldListText(h.value) : `p2p held failed: ${h.reason}`
+    }
+    case 'history': {
+      // Typed by the person at their terminal (checked above). What it lists is shown above the prompt,
+      // to the person only: a command's result is read by the model (and kept in the transcript), so
+      // the result says only how many there are, never who sent them or what they say.
+      const r = await p.history({
+        ...(command.scope === 'here' ? { session: current.sid } : command.scope === 'inbox' ? { inbox: true } : {}),
+        ...(command.since ? { since: command.since } : {}),
+        ...(command.peer ? { peer: command.peer } : {}),
+        limit: command.limit ?? HISTORY_BAND_DEFAULT,
+      })
+      if (!r.ok) {
+        await reveal($, { id: 'history', kind: 'history', text: `p2p history failed: ${inert(r.reason)}` })
+
+        return 'p2p history failed; the reason is shown above the prompt, to you only.'
+      }
+      await reveal($, { id: 'history', kind: 'history', text: historyText(r.value, current.sid) })
+      const n = Array.isArray(r.value.messages) ? r.value.messages.length : 0
+
+      return `Your message history (${n} message${n === 1 ? '' : 's'}${r.value.truncated ? ', the newest' : ''}) is shown above the prompt, to you only: none of it is in this conversation. Dismiss clears it; p2p history or p2p tui in your own terminal shows more.`
     }
     case 'ls': {
       const r = await p.ls()
