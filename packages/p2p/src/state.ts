@@ -36,6 +36,7 @@
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
 //   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
 //   graphMemory  graph memory (graph-memory.ts): what was recorded of each own session, the bounded queue, counters
+//   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";

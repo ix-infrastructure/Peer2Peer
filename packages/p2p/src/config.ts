@@ -41,6 +41,8 @@ export interface FileConfig {
   deviceInfo?: boolean;
   /** The local Ix backend (projects.ts localGraphEndpoint): honoured only as a loopback URL. Default http://localhost:8090. */
   ixEndpoint?: string;
+  /** Message history (history.ts): on by default, kept `retentionDays` (30) and at most `maxBytes` (8 MiB). P2P_HISTORY=0 turns recording off. */
+  history?: { enabled?: boolean; retentionDays?: number; maxBytes?: number };
   /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
   ixMemory?: boolean;
 }
