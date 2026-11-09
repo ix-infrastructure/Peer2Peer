@@ -20,6 +20,10 @@ const PRIVATE = { sid: 'x', ref: 'ffffff', ver: 1, vis: 'private', parts: [] }
 describe('project boundaries: guards (lib)', () => {
   test('`p2p project share|private` is the person\'s: refused from the shell; show and ls only read', () => {
     expect(mutatingP2PVerb('p2p project share c_team')).toBe('project share')
+    // L1: a delivery receipt is the mod's own report, own-agents the person's choice; as words in text they pass.
+    expect(mutatingP2PVerb('p2p receipt p2p.message:abc --from-session s1 --outcome shown')).toBe('receipt')
+    expect(mutatingP2PVerb('p2p own-agents deliver')).toBe('own-agents')
+    expect(mutatingP2PVerb('p2p send --from-session s1 --to x receipt')).toBeNull()
     expect(mutatingP2PVerb('p2p project share --person ben@bbbb-bbbb-bbbb-bbbb')).toBe('project share')
     expect(mutatingP2PVerb('cd ~/work/api && p2p project private')).toBe('project private')
     expect(mutatingP2PVerb('bash -c "p2p project share"')).toBe('project share')

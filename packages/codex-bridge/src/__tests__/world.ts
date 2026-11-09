@@ -30,6 +30,8 @@ export class World {
   identity = true;
   /** What the thread's rollout file says (the trusted mode), as RolloutReader would report it. */
   trusted: TrustedMode | null = null;
+  /** What `p2p own-agents` says (the person's setting). */
+  ownAgents: { ownAgents: "hold" | "deliver"; devices: string[] | "all-other" } = { ownAgents: "hold", devices: [] };
   t = 1_000_000;
   timers: { at: number; every?: number; fn: () => void; dead?: boolean }[] = [];
 
@@ -44,6 +46,7 @@ export class World {
       if (verb === "status") return ok({ delivered: [], failed: [] });
       if (verb === "ls") return ok({ peers: this.peers, relays: { listed: ["wss://r/v3"], connected: ["wss://r/v3"], failed: [] } });
       if (verb === "held") return ok({ held: this.held });
+      if (verb === "own-agents") return ok(this.ownAgents);
       if (verb === "history") return ok({ messages: this.history, truncated: false });
       if (verb === "send") {
         const to = (args.find((a) => a.startsWith("--to=")) ?? "").slice(5);
@@ -148,17 +151,32 @@ export async function makeBridge(o: { env?: Record<string, string>; root?: strin
 }
 
 let seq = 0;
-export function message(o: { from?: string; address?: string; text: string; self?: boolean; toSession?: string | null; own?: string; sid?: string }) {
+export function message(o: {
+  from?: string;
+  address?: string;
+  text: string;
+  self?: boolean;
+  toSession?: string | null;
+  own?: string;
+  sid?: string;
+  /** The sending device ("d1" is this one). */
+  did?: string;
+  /** An own-session message's origin as the CLI logs it (sessions.ts ownOrigin). */
+  via?: "person" | "agent";
+  fromRef?: string;
+}) {
   const from = o.from ?? ANN;
   return {
     kind: "p2p.message",
     id: `m${++seq}`,
     at: 1_000_000,
-    from: { userId: from, address: o.address ?? ANN_ADDR, did: "x", self: o.self === true },
+    from: { userId: from, address: o.address ?? ANN_ADDR, did: o.did ?? "x", self: o.self === true },
     own: o.own ?? from,
     sid: o.sid ?? "s1",
     ref: "abc123",
     text: o.text,
+    ...(o.via ? { via: o.via } : {}),
+    ...(o.fromRef ? { fromRef: o.fromRef } : {}),
     ...(o.toSession === null ? {} : { toSession: o.toSession ?? "SELF" }),
   };
 }

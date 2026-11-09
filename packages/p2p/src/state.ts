@@ -140,6 +140,15 @@ export interface XStateSenderDoc {
   all?: { start: number; n: number };
 }
 
+/** One same-device send (Docs.localSends). */
+export interface LocalSend {
+  /** The sending session. */
+  from: string;
+  /** `person`: the person's own terminal session (`tui`, or a send as them); `agent`: any other session. */
+  via: "person" | "agent";
+  at: number;
+}
+
 export interface PeerStatusRec {
   own: string;
   sid: string;
@@ -372,6 +381,14 @@ type Docs = {
   xstateSent: Record<string, number>;
   /** Sealed messages no relay accepted yet, retried by `watch` (outbox.ts). */
   outbox: OutboxDoc;
+  /**
+   * Messages one session of this device sent to another session of this device, by `<target sid>|<seq>`:
+   * which session sent it and whether the person did (sessions.ts). Local only, never on the wire: the
+   * receiving side (this same device) reads it to frame the message and to apply the hold rule.
+   */
+  localSends: Record<string, LocalSend>;
+  /** When a message from a bounded session of yours last reached the person's own session (`tui`): for a warning there. */
+  tuiTaint: { at: number; bound: "private" | "shared" };
   /** Delivery receipts (receipts.ts, §4.3). */
   receipts: ReceiptsDoc;
   /** When each (sender, kind) of an envelope this version doesn't know was last noticed (unknown-kinds.ts). */

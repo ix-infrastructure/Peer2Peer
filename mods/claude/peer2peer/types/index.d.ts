@@ -71,6 +71,14 @@ export type SessionFields = {
   viewerRule?: string
   /** The local session the event is for, when the CLI knows it. */
   toSession?: string
+  /**
+   * From one of this user's own sessions (the CLI's local record, never the wire): `person` for the
+   * person's own terminal session, `agent` for any other (and for every other device: unknown counts as
+   * agent). `fromRef` names the sending session on this device. Whether `p2p own-agents` lets an
+   * agent's message through is asked at delivery time (`p2p own-agents check <did>`), never stamped here.
+   */
+  via?: 'person' | 'agent'
+  fromRef?: string
 }
 
 export type IdleReason = 'idle' | 'exited' | 'expired'
@@ -389,6 +397,8 @@ export type HeldMessage = {
   isUnclaimed?: boolean
   /** message: the CLI event to report delivery receipts for (the sender asked for them). */
   receiptEvent?: string
+  /** The held-queue bucket (capHeld) when it isn't the sender's userId: one per sending session of yours. */
+  bucket?: string
   /** share: what the model's ix_share would send, once the person presses Send. */
   share?: Omit<IxSendInput, 'fromSession'>
   /** share: SHA-256 of exactly the row text the person reviewed; Send acts only while it still matches. */
@@ -420,6 +430,12 @@ export type PendingItem = {
   isActivity?: boolean
   /** The peer who sent it; absent for this user's own devices and the mod's own notes. */
   from?: { userId: string; address: string }
+  /**
+   * This user's own session sent it (another device, or another session on this one): never held
+   * by the hold rule, but it may start at most TURNS_FROM_SELF turns per window; past that, `message`
+   * waits for Deliver (and its sender's receipt says so).
+   */
+  fromOwn?: { userId: string; address: string; isAgent?: boolean; did?: string }
   /** The held message it becomes if the hold rule turns against it before delivery. */
   message?: HeldMessage
   /** The CLI event a `shown` receipt is reported for once the model has it. */

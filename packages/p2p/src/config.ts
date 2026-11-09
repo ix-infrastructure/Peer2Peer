@@ -45,6 +45,19 @@ export interface FileConfig {
   history?: { enabled?: boolean; retentionDays?: number; maxBytes?: number };
   /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
   ixMemory?: boolean;
+  /**
+   * Messages from your own agent sessions skip the hold in a session that approves its own tool calls
+   * (`p2p own-agents deliver`, person only). Off by default: they are held like a peer's. No variable
+   * overrides it, so nothing an agent sets in its environment turns it on.
+   */
+  ownAgentsDeliver?: boolean;
+  /**
+   * Narrower (`p2p own-agents deliver --devices <did…|all-other>`, person only): messages from your own
+   * sessions on these other devices skip the hold, while this device's agent sessions stay held. Another
+   * device can't say whether you typed a message (that needs the wire field of RFC #48), so this trusts
+   * every session there.
+   */
+  ownDevicesDeliver?: string[] | "all-other";
 }
 
 /**
@@ -61,6 +74,38 @@ export function graphMemoryEnabled(env: Env, home: string): boolean {
   } catch {
     return true;
   }
+}
+
+/** Whether your own agent sessions' messages skip the hold (FileConfig.ownAgentsDeliver). */
+export function ownAgentsDeliver(home: string): boolean {
+  try {
+    return readFileConfig(home).ownAgentsDeliver === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The other devices whose sessions skip the hold (FileConfig.ownDevicesDeliver): none, a list, or every other one. */
+export function ownDevicesDeliver(home: string): string[] | "all-other" {
+  try {
+    const v = readFileConfig(home).ownDevicesDeliver;
+    if (v === "all-other") return v;
+    return Array.isArray(v) ? v.filter((d): d is string => typeof d === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether a message from one of your own agent sessions on device `did` skips the hold now (read at
+ * delivery time, never stamped on an event): `own-agents deliver`, or `--devices` naming that device
+ * (another device than this one).
+ */
+export function ownAgentsDeliverFrom(home: string, did: string, thisDevice: string): boolean {
+  if (ownAgentsDeliver(home)) return true;
+  if (did === thisDevice) return false;
+  const devices = ownDevicesDeliver(home);
+  return devices === "all-other" || devices.includes(did);
 }
 
 /**
