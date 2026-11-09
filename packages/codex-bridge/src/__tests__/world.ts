@@ -25,6 +25,8 @@ export class World {
   calls: Call[] = [];
   peers: PeerRow[] = [];
   held: unknown[] = [];
+  /** What `p2p history --session` returns (packages/p2p history.ts). */
+  history: unknown[] = [];
   identity = true;
   /** What the thread's rollout file says (the trusted mode), as RolloutReader would report it. */
   trusted: TrustedMode | null = null;
@@ -45,6 +47,7 @@ export class World {
       if (verb === "ls") return ok({ peers: this.peers, relays: { listed: ["wss://r/v3"], connected: ["wss://r/v3"], failed: [] } });
       if (verb === "held") return ok({ held: this.held });
       if (verb === "own-agents") return ok(this.ownAgents);
+      if (verb === "history") return ok({ messages: this.history, truncated: false });
       if (verb === "send") {
         const to = (args.find((a) => a.startsWith("--to=")) ?? "").slice(5);
         return ok({ delivered: true, to: { userId: to.split(" ")[0], address: ANN_ADDR, own: ANN, sid: "s1", ref: "abc123" }, relays: 1 });

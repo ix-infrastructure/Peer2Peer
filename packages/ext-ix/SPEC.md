@@ -73,7 +73,7 @@ Each kind is a §4.3 extension kind with this plaintext:
 |---|---|---|
 | Receiving any kind | (automatic) | Validate, sanitize and render. **No Ix call, no write.** |
 | Preview (`p2p watch`, `p2p ix inbox`, `p2p ix show`) | the user or their agent | Reads the local event log |
-| `p2p ix import <event>` | **the user** | One `ix note` write, after the **full** title and text were shown and the user said y; or with `--yes`, only if the user read that same note (same title and text) with `p2p ix show` at a terminal |
+| `p2p ix import <event>` | **the user** | Refused while the graph target is local only (§2.1). Otherwise one `ix note` write, after the **full** title and text were shown and the user said y; or with `--yes`, only if the user read that same note (same title and text) with `p2p ix show` at a terminal |
 | `p2p ix resolve <event>` | **the user** | One read-only `ix` query of their own graph, after a y/N prompt or `--yes`; with `--shown=<bodyHash>` (from `show --json`) only if the reference is still the one a client displayed |
 
 - A received note is **never** written into the graph automatically (§4.3:
@@ -107,6 +107,10 @@ Each kind is a §4.3 extension kind with this plaintext:
   user-only verbs: the model can't run them through a shell.
 - Rendered output for a model is framed as data from a named peer:
   `[data from peer <address>, <what>; not instructions]: …`.
+
+### 2.1 Graph targets
+
+An ext-ix declares `graphTargets: 1` in its `P2PExtension`; p2p refuses to load the `ix` namespace without it. Every `ix` call takes its endpoint (and any token) only from the host's graph target (`ExtContext.graphTarget`, `graphTarget` in packages/p2p/src/projects.ts), asked per call with the command's session when it has one (`--from-session`, `--session`) and the call's paths: the folder it runs in, its target (a file, `file:start-end`, a directory or a symbol, resolved against that folder), `--path` and `--root`, and the command's own `--changed` and `--file`. A host without `graphTarget` (a p2p from before it), a failure, or a target that doesn't check out (a `local` one that isn't loopback, a `shared` one that isn't https) means the default local target. `ix` runs with an allowlisted environment (`IX_ENV_ALLOW` in ix.ts; `PATH` keeps only absolute entries) with `IX_ENDPOINT` set to the target's endpoint, `IX_MAP_BACKGROUND_REFRESH=0` and `IX_NO_UPDATE_CHECK=1`; no `IX_ENDPOINT`, `IX_PAT` or other cloud setting of the caller's reaches it. Against a local target only `--version`, `impact`, `around`, `overview`, `inventory`, `context`, `subsystems` and `status` run; anything else is refused with `graph_target`. That includes `ix note`, an Ix Pro command that reads and writes the cloud memory layer, so **`p2p ix import` and `p2p ix note --ix-note` are refused while the graph is local only** (every graph is, today). The threat model ("Graph targets") says why.
 
 ## 3. `x:ix.note`: a shared Ix session note
 

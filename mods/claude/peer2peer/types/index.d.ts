@@ -557,6 +557,8 @@ export type Reveal =
   | { id: string; kind: 'invite'; text: string; code: string; message?: string }
   | { id: string; kind: 'joined'; text: string; userId: string; cid?: string; sharedSid?: string }
   | { id: string; kind: 'warning'; text: string }
+  /** `/peers history`: the person's messages, shown to them only (never in a command result the model reads). */
+  | { id: string; kind: 'history'; text: string }
   /** `/peers rotate`'s plan: the person drops devices (`dropped`), then presses Rotate or Cancel. */
   | {
       id: string

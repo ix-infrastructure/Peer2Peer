@@ -403,6 +403,7 @@ export class Device {
       P2P_EXTENSIONS: "ix",
       P2P_EXTENSION_PATH: this.ext,
       FAKE_IX_DIR: this.fakeIxDir,
+      IX_HOME: this.fakeIxDir,
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_SYSTEM: "/dev/null",
       SOAK_FAULT_DIR: this.faultDir,

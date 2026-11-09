@@ -84,6 +84,7 @@ import { fromOf, makeEvent, type NewEvent } from "./inbound.js";
 import { receiptsEnabled, statusCapsEnabled } from "./config.js";
 import { CAP_PROJECTS, CLI_CAPS, protoMinor, supportsIn } from "./features.js";
 import { asksReceipts, newReceiptId, rememberAsked, rememberWanted } from "./receipts.js";
+import { recordSent } from "./history.js";
 import { sessKey, type IdleSub, type LocalSend, type PeerStatusRec, type SessionDoc } from "./state.js";
 import { isStateEnvelope, liveStates, onStateEnvelope, stateKindCaps, stateSummaries, type StateSummary } from "./xstate.js";
 
@@ -1132,6 +1133,8 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
       : d && offlineSince !== undefined
         ? { queued: true as const, state: "offline" as const, lastSeen: offlineSince, expiresAt: Date.now() + OUTBOX_TTL_MS }
         : {};
+  // Message history (history.ts): what this session sent, kept on this device only.
+  if (d) await recordSent(app, { fromSession, to, text: o.text, state: "state" in queued ? queued.state : "sent" });
   return {
     ...(o.person ? {} : { bound: true as const }),
     // Accepted by a relay (it stores ciphertext for its session for 7 days), or not yet.
@@ -1189,6 +1192,8 @@ export async function sendExtension(app: App, o: SendExtOpts): Promise<ExtSendRe
   if (target.own !== app.userId) {
     await app.state.update("spoke", (cur = {}) => ({ next: { ...cur, [sessKey(target.own, target.sid)]: fromSession }, result: undefined }));
   }
+  // Message history: an extension kind as its one-line fallback, never its body.
+  await recordSent(app, { fromSession, to, text: o.fallback, ext: o.kind });
   return { delivered: true, to, relays: d.relays.length, devices: d.devices, kind: o.kind, bytes, bound: true };
 }
 
