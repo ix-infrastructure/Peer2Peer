@@ -1034,8 +1034,8 @@ export class Bridge {
    * turn's context may not be written yet, so only what doesn't depend on
    * the mode goes out there). When the delivery starts a turn (a Stop
    * continuation, `codex queue`), the turn caps apply: past a cap, peers'
-   * messages are held for the person, and the user's own devices' wait for
-   * the next prompt.
+   * messages and the user's own sessions' are held until the person
+   * releases them (`p2p codex release`).
    */
   takeDeliverable(o: { startsTurn: boolean; confirmed?: boolean }): InboxItem[] {
     const mode = this.modeClass(o.confirmed !== false);
