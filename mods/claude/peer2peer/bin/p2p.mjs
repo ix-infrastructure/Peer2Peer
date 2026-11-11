@@ -504,17 +504,17 @@ var init_md = __esm({
         const len = data.length;
         let processed = false;
         for (let pos = 0; pos < len; ) {
-          const take = Math.min(blockLen - this.pos, len - pos);
-          if (take === blockLen) {
+          const take2 = Math.min(blockLen - this.pos, len - pos);
+          if (take2 === blockLen) {
             const dataView = createView(data);
             for (; blockLen <= len - pos; pos += blockLen)
               this.process(dataView, pos);
             processed = true;
             continue;
           }
-          buffer.set(pos === 0 && take === len ? data : data.subarray(pos, pos + take), this.pos);
-          this.pos += take;
-          pos += take;
+          buffer.set(pos === 0 && take2 === len ? data : data.subarray(pos, pos + take2), this.pos);
+          this.pos += take2;
+          pos += take2;
           if (this.pos === blockLen) {
             this.process(view, 0);
             this.pos = 0;
@@ -2886,12 +2886,12 @@ function runCipher(core, sigma, key, nonce, data, output, counter, rounds) {
       swap32IfBE(b32);
       if (counter >= MAX_COUNTER)
         throw new Error("arx: counter overflow");
-      const take = Math.min(BLOCK_LEN, len - pos);
-      for (let j = 0, posj; j < take; j++) {
+      const take2 = Math.min(BLOCK_LEN, len - pos);
+      for (let j = 0, posj; j < take2; j++) {
         posj = pos + j;
         output[posj] = data[posj] ^ block2[j];
       }
-      pos += take;
+      pos += take2;
     }
     return;
   }
@@ -2899,8 +2899,8 @@ function runCipher(core, sigma, key, nonce, data, output, counter, rounds) {
     core(sigma, key, nonce, b32, counter, rounds);
     if (counter >= MAX_COUNTER)
       throw new Error("arx: counter overflow");
-    const take = Math.min(BLOCK_LEN, len - pos);
-    if (isAligned && take === BLOCK_LEN) {
+    const take2 = Math.min(BLOCK_LEN, len - pos);
+    if (isAligned && take2 === BLOCK_LEN) {
       const pos32 = pos / 4;
       if (pos % 4 !== 0)
         throw new Error("arx: invalid block position");
@@ -2911,11 +2911,11 @@ function runCipher(core, sigma, key, nonce, data, output, counter, rounds) {
       pos += BLOCK_LEN;
       continue;
     }
-    for (let j = 0, posj; j < take; j++) {
+    for (let j = 0, posj; j < take2; j++) {
       posj = pos + j;
       output[posj] = data[posj] ^ block2[j];
     }
-    pos += take;
+    pos += take2;
   }
 }
 function createCipher(core, opts) {
@@ -3211,15 +3211,15 @@ var init_poly1305 = __esm({
         const { buffer, blockLen } = this;
         const len = data.length;
         for (let pos = 0; pos < len; ) {
-          const take = Math.min(blockLen - this.pos, len - pos);
-          if (take === blockLen) {
+          const take2 = Math.min(blockLen - this.pos, len - pos);
+          if (take2 === blockLen) {
             for (; blockLen <= len - pos; pos += blockLen)
               this.process(data, pos);
             continue;
           }
-          buffer.set(data.subarray(pos, pos + take), this.pos);
-          this.pos += take;
-          pos += take;
+          buffer.set(data.subarray(pos, pos + take2), this.pos);
+          this.pos += take2;
+          pos += take2;
           if (this.pos === blockLen) {
             this.process(buffer, 0, false);
             this.pos = 0;
@@ -10895,7 +10895,7 @@ async function verifyOrThrow(jws, ctx) {
     checkDeviceListed(sender, { iss: view.iss, ik: view.ik, devices: view.devices });
   verifyEnvelopeV3Signature(jws, sender.signingPublicKey);
   let commit;
-  let release;
+  let release2;
   let attempt;
   if (ctx.replayClaim) {
     const { claimant, isAlive: isAlive2 } = ctx.replayClaim;
@@ -10908,7 +10908,7 @@ async function verifyOrThrow(jws, ctx) {
       fail("replay-in-progress", `seq ${p.seq} from ${p.fdid} is being handled by another process`);
     attempt = c.attempt;
     commit = () => store2.commitReplay(p.fdid, p, nowMs, claimant.token);
-    release = (o) => store2.releaseReplay(p.fdid, p, claimant.token, o);
+    release2 = (o) => store2.releaseReplay(p.fdid, p, claimant.token, o);
   } else {
     const admitted = await store2.admitReplay(p.fdid, p, nowMs);
     if (admitted)
@@ -10917,10 +10917,10 @@ async function verifyOrThrow(jws, ctx) {
   if (!commit)
     return finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec);
   try {
-    return { ...await finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec), commitReplay: commit, releaseReplay: release, ...attempt !== void 0 ? { attempt } : {} };
+    return { ...await finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, skewSec), commitReplay: commit, releaseReplay: release2, ...attempt !== void 0 ? { attempt } : {} };
   } catch (e) {
     if (!(e instanceof P2PError) && ctx.replayClaim?.retryable?.(e))
-      await release().catch(() => void 0);
+      await release2().catch(() => void 0);
     else
       await commit().catch(() => void 0);
     throw e;
@@ -11300,8 +11300,8 @@ function codeRelayPart(relay) {
 function formatShortCode(relay, s2) {
   return `${codeRelayPart(relay)}/${groupCode(encodeCodeChars(s2))}`;
 }
-function codeWebLink(short) {
-  return CODE_WEB_PREFIX + short;
+function codeWebLink(short2) {
+  return CODE_WEB_PREFIX + short2;
 }
 function codeFromWebLink(input) {
   const t2 = input.trim();
@@ -12490,6 +12490,10 @@ function extensionPackageName(ns) {
 function kindNamespace(kind) {
   return isExtensionKind(kind) ? kind.slice(2, kind.indexOf(".")) : void 0;
 }
+function memoryOf(ext) {
+  const m = ext?.memory;
+  return m && typeof m === "object" && m.v === 1 && typeof m.available === "function" && typeof m.write === "function" ? m : void 0;
+}
 function checkExtension(mod2, ns) {
   const m = mod2;
   const ext = m?.extension ?? m?.default?.extension ?? m?.default;
@@ -12745,6 +12749,15 @@ import { mkdirSync as mkdirSync8, readFileSync as readFileSync11, renameSync as 
 import { homedir as homedir4 } from "node:os";
 import { join as join15 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+function graphMemoryEnabled(env, home) {
+  const v = env.P2P_IX_MEMORY?.trim().toLowerCase();
+  if (v === "0" || v === "false") return false;
+  try {
+    return readFileConfig(home).ixMemory !== false;
+  } catch {
+    return true;
+  }
+}
 function ownAgentsDeliver(home) {
   try {
     return readFileConfig(home).ownAgentsDeliver === true;
@@ -20251,6 +20264,23 @@ async function ixNotice(app) {
   if (!shown) return void 0;
   const how = extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`";
   return `Ix: new installs now turn the Ix extension on when Ix is installed, so sessions can share Ix context. Yours wasn't changed; to turn it on, run ${how}. Ix calls stay on this machine (\`p2p doctor\` shows each project's graph: local only)`;
+}
+function parseIxMemorySupport(help) {
+  const lines = help.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/);
+  if (lines.some((l) => /^Pro:\s*$/.test(l))) return "pro";
+  const at = lines.findIndex((l) => /^Memory:\s*$/.test(l));
+  if (at < 0) return "none";
+  const section = [];
+  for (const l of lines.slice(at + 1)) {
+    if (!/^\s+\S/.test(l)) break;
+    section.push(l);
+  }
+  const has = (name2) => section.some((l) => new RegExp(`^\\s+${name2}\\s`).test(l));
+  return has("note") && has("session") ? "oss" : "none";
+}
+async function ixMemorySupport(bin, env, target, timeoutMs) {
+  const r = await runIx(bin, ["--help"], { env, target, timeoutMs });
+  return r.code === 0 ? parseIxMemorySupport(r.stdout) : void 0;
 }
 var IX_INSTALL_URL, IX_CHILD_ALLOW, envDecides, INSTALL_IX, INSTALL_EXT;
 var init_ix_local = __esm({
@@ -28016,7 +28046,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
     out.add(p);
     return out.size <= MAX_COMMAND_PATHS;
   };
-  const take = (word, mode) => {
+  const take2 = (word, mode) => {
     const inner = mode !== "path";
     let t2 = expand2(word);
     const pathLike = t2.startsWith("~") || t2.startsWith(".") || t2.includes("/") || t2.includes("\\");
@@ -28094,17 +28124,17 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
     const program2 = programs.has(i);
     if (program2 || /\s/.test(t2)) {
       for (const e of embedded(t2))
-        if (!e.includes("://") && !take(e, "inner"))
+        if (!e.includes("://") && !take2(e, "inner"))
           return capped();
     }
     if (t2.includes("://") || t2.includes("\n"))
       continue;
     if (program2 && !t2.startsWith("/") && !t2.startsWith("~") && !/[$`]/.test(t2) && !DOTDOT.test(t2)) {
-      if (!take(t2, "maybe"))
+      if (!take2(t2, "maybe"))
         return capped();
       continue;
     }
-    if (!take(t2, "path"))
+    if (!take2(t2, "path"))
       return capped();
   }
   for (const p of moved)
@@ -28680,7 +28710,7 @@ var isOpen = (t2) => t2.depth > 0 || t2.quote !== null;
 function readTomlTable(text2, table3, touched) {
   const out = {};
   const isPrefix = (a, b) => a.length <= b.length && a.every((x, i) => x === b[i]);
-  const take = (full, value) => {
+  const take2 = (full, value) => {
     if (isPrefix(table3, full))
       touched?.();
     if (full.length === table3.length + 1 && isPrefix(table3, full))
@@ -28740,7 +28770,7 @@ function readTomlTable(text2, table3, touched) {
       continue;
     }
     if (c === "{") {
-      if (!readInlineTable(sc, (k, v2) => take([...full, ...k], v2)) && relevant)
+      if (!readInlineTable(sc, (k, v2) => take2([...full, ...k], v2)) && relevant)
         return null;
       continue;
     }
@@ -28756,7 +28786,7 @@ function readTomlTable(text2, table3, touched) {
       continue;
     }
     if (relevant)
-      take(full, v);
+      take2(full, v);
   }
   if (isOpen(tail))
     return null;
@@ -34588,7 +34618,7 @@ Expecting one of '${allowedValues.join("', '")}'`);
     const negativeNumberArg = (arg) => {
       if (!/^-(\d+|\d*\.\d+)(e[+-]?\d+)?$/.test(arg)) return false;
       return !this._getCommandAndAncestors().some(
-        (cmd) => cmd.options.map((opt) => opt.short).some((short) => /^-\d$/.test(short))
+        (cmd) => cmd.options.map((opt) => opt.short).some((short2) => /^-\d$/.test(short2))
       );
     };
     let activeVariadicOption = null;
@@ -36402,7 +36432,8 @@ function extContext(app, ext, io2, json, confirm) {
     graphTarget: async (o = {}) => {
       const { dirs, over } = sessionDirs(app.env);
       const paths = Array.isArray(o.paths) ? [...o.paths] : [];
-      return graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
+      const t2 = await graphTarget(app, { ...typeof o.sid === "string" && o.sid !== "" ? { sid: o.sid } : {}, dirs, paths, over });
+      return t2.kind === "local" && app.file.ixTrustRootListener === true ? { ...t2, trustRootListener: true } : t2;
     },
     io: { err: (s2) => io2.err(s2), ...io2.readStdin ? { readStdin: io2.readStdin } : {} },
     json,
@@ -36462,6 +36493,7 @@ function extContext(app, ext, io2, json, confirm) {
       });
     },
     audience: (sid) => sessionAudience(app, sid),
+    mayShareSessionContext: (ofSid, fromSid) => mayShareSessionContext(app, ofSid, fromSid),
     localMac: (data) => localMac(app, ext.ns, data),
     ownStatus: async (sid) => {
       const rec = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
@@ -36470,6 +36502,18 @@ function extContext(app, ext, io2, json, confirm) {
       return { ...rec.status.repo ? { repo: rec.status.repo } : {}, files: rec.status.files ?? [], ...d.caps ? { caps: d.caps } : {}, ...d.agents ? { agents: d.agents } : {} };
     }
   };
+}
+async function mayShareSessionContext(app, ofSid, fromSid) {
+  if (typeof ofSid !== "string" || typeof fromSid !== "string" || ofSid === "" || fromSid === "") return false;
+  if (ofSid === fromSid) return true;
+  if (ofSid === PERSON_SESSION || fromSid === PERSON_SESSION) return false;
+  const [of, from] = await Promise.all([sessionCeiling(app, ofSid), sessionCeiling(app, fromSid)]);
+  if (of.kind !== "shared" || from.kind !== "shared") return false;
+  const [ofAud, fromAud] = await Promise.all([ceilingAudience(app, of), ceilingAudience(app, from)]);
+  if (!ofAud || !fromAud) return false;
+  for (const u of fromAud) if (!ofAud.has(u)) return false;
+  const [a, b] = await Promise.all([graphTarget(app, { sid: ofSid }), graphTarget(app, { sid: fromSid })]);
+  return a.kind === b.kind && a.endpoint === b.endpoint && (a.kind !== "shared" || b.kind === "shared" && a.circle === b.circle);
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
@@ -36608,6 +36652,292 @@ import { join as join23 } from "node:path";
 init_rotation();
 init_outbox();
 init_running();
+
+// packages/p2p/src/graph-memory.ts
+init_v3();
+init_config();
+init_extensions();
+init_projects();
+init_running();
+var GRAPH_MEMORY_TICK_MS = 5e3;
+var GRAPH_MEMORY_QUEUE_MAX = 64;
+var GRAPH_MEMORY_BATCH = 16;
+var GRAPH_MEMORY_SESSIONS_MAX = 64;
+var GRAPH_MEMORY_FILES_MAX = 200;
+var GRAPH_MEMORY_FRESH_MS = 6 * 36e5;
+var GRAPH_MEMORY_RECHECK_MS = 5 * 6e4;
+var GRAPH_MEMORY_DRAIN_MS = 12e4;
+var emptyDoc = () => ({ v: 1, sessions: {}, queue: [], written: 0, dropped: {} });
+function docOf(cur) {
+  if (!cur || cur.v !== 1 || typeof cur !== "object") return emptyDoc();
+  return {
+    v: 1,
+    sessions: cur.sessions && typeof cur.sessions === "object" ? { ...cur.sessions } : {},
+    queue: Array.isArray(cur.queue) ? [...cur.queue] : [],
+    written: typeof cur.written === "number" ? cur.written : 0,
+    dropped: cur.dropped && typeof cur.dropped === "object" ? { ...cur.dropped } : {},
+    ...cur.lastWriteAt ? { lastWriteAt: cur.lastWriteAt } : {},
+    ...cur.lastDropAt ? { lastDropAt: cur.lastDropAt } : {},
+    ...cur.unavailable ? { unavailable: cur.unavailable } : {},
+    ...cur.leases && typeof cur.leases === "object" ? { leases: { ...cur.leases } } : {}
+  };
+}
+var short = (s2, max) => typeof s2 === "string" ? sanitizePeerText(s2, max).trim() : "";
+function statusFiles(rec) {
+  const out = /* @__PURE__ */ new Set();
+  for (const f of rec.status.files ?? []) if (typeof f === "string") out.add(f);
+  for (const a of rec.status.agents ?? []) for (const f of a.files ?? []) if (typeof f === "string") out.add(f);
+  return [...out];
+}
+function gather(doc, recs, ended, now = Date.now(), recordable = () => true) {
+  const next = docOf(doc);
+  let queued = 0;
+  let dropped = 0;
+  const push = (item) => {
+    if (next.queue.length >= GRAPH_MEMORY_QUEUE_MAX) {
+      next.dropped.queue_full = (next.dropped.queue_full ?? 0) + 1;
+      next.lastDropAt = now;
+      dropped++;
+      return;
+    }
+    next.queue.push(item);
+    queued++;
+  };
+  for (const rec of recs) {
+    const sid = rec.sid;
+    if (!recordable(sid)) continue;
+    let s2 = next.sessions[sid];
+    const isEnded = ended(sid);
+    if (!s2) {
+      if (isEnded || now - rec.ts > GRAPH_MEMORY_FRESH_MS) continue;
+      s2 = { start: now, files: [] };
+      push({ sid, kind: "start", at: rec.ts, label: short(rec.status.label, 64) || "session", ...rec.status.repo ? { repo: short(rec.status.repo, 200) } : {}, ...rec.status.branch ? { branch: short(rec.status.branch, 128) } : {} });
+    }
+    if (s2.ended) continue;
+    const summary3 = short(rec.status.summary, 280);
+    if (summary3 && summary3 !== s2.summary) {
+      push({ sid, kind: "status", at: rec.status.summaryAt ?? rec.ts, summary: summary3 });
+      s2 = { ...s2, summary: summary3 };
+    }
+    const known2 = new Set(s2.files);
+    const fresh = statusFiles(rec).filter((f) => !known2.has(f));
+    if (fresh.length > 0) {
+      push({ sid, kind: "files", at: rec.ts, files: fresh });
+      s2 = { ...s2, files: [...s2.files, ...fresh].slice(-GRAPH_MEMORY_FILES_MAX) };
+    }
+    if (isEnded) {
+      push({ sid, kind: "end", at: rec.ts });
+      s2 = { ...s2, ended: now };
+    }
+    next.sessions[sid] = s2;
+  }
+  const entries = Object.entries(next.sessions).filter(([, s2]) => !(s2.ended && now - s2.ended > 24 * 36e5));
+  entries.sort((a, b) => a[1].start - b[1].start);
+  next.sessions = Object.fromEntries(entries.slice(-GRAPH_MEMORY_SESSIONS_MAX));
+  return { doc: next, queued, dropped };
+}
+async function ownRecs(app) {
+  const peers = await app.state.get("peers") ?? {};
+  return Object.values(peers).filter((r) => r && r.self === true && r.own === app.userId && r.did === app.did && typeof r.sid === "string" && r.status && typeof r.status === "object");
+}
+async function gatherGraphMemory(app, now = Date.now()) {
+  const recs = await ownRecs(app);
+  if (recs.length === 0) return { queued: 0, dropped: 0 };
+  const shared = /* @__PURE__ */ new Set();
+  for (const r of recs) if ((await sessionCeiling(app, r.sid).catch(() => ({ kind: "private" }))).kind === "shared") shared.add(r.sid);
+  return app.state.update("graphMemory", (cur) => {
+    const before = docOf(cur);
+    const r = gather(before, recs, (sid) => sessionEnded(app, sid), now, (sid) => shared.has(sid));
+    const changed2 = JSON.stringify(r.doc) !== JSON.stringify(before);
+    return { ...changed2 ? { next: r.doc } : {}, result: { queued: r.queued, dropped: r.dropped } };
+  });
+}
+async function countDropped(app, reason, n) {
+  if (n <= 0) return;
+  const key = /^[a-z_]{1,32}$/.test(reason) ? reason : "other";
+  await app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    d.dropped[key] = (d.dropped[key] ?? 0) + n;
+    d.lastDropAt = Date.now();
+    return { next: d, result: void 0 };
+  });
+}
+async function noteAvailability(app, u) {
+  await app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    const was = d.unavailable;
+    if (!u && !was) return { result: void 0 };
+    if (u && was && was.reason === u.reason) return { result: void 0 };
+    if (u) d.unavailable = { reason: short(u.reason, 32) || "unavailable", message: short(u.message, 300), at: Date.now() };
+    else delete d.unavailable;
+    return { next: d, result: void 0 };
+  });
+}
+var GRAPH_MEMORY_SETTLE_MS = 3e4;
+var GRAPH_MEMORY_LEASE_MS = 2 * GRAPH_MEMORY_DRAIN_MS + 6e4;
+async function take(app, now = Date.now()) {
+  return app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    if (d.queue.length === 0) return { result: [] };
+    const leases = Object.fromEntries(Object.entries(d.leases ?? {}).filter(([, until]) => typeof until === "number" && until > now));
+    const batch = [];
+    const rest = [];
+    for (const it of d.queue) (batch.length < GRAPH_MEMORY_BATCH && !leases[it.sid] ? batch : rest).push(it);
+    if (batch.length === 0) return { result: [] };
+    for (const it of batch) leases[it.sid] = now + GRAPH_MEMORY_LEASE_MS;
+    d.queue = rest;
+    d.leases = leases;
+    return { next: d, result: batch };
+  });
+}
+async function release(app, sids) {
+  await app.state.update("graphMemory", (cur) => {
+    const d = docOf(cur);
+    if (!d.leases) return { result: void 0 };
+    for (const sid of sids) delete d.leases[sid];
+    if (Object.keys(d.leases).length === 0) delete d.leases;
+    return { next: d, result: void 0 };
+  });
+}
+var within3 = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), ms).unref())]);
+async function drainGraphMemory(app, ext, mem, deps = {}) {
+  const batch = await take(app);
+  if (batch.length === 0) return { written: 0, dropped: 0 };
+  const abandoned2 = /* @__PURE__ */ new Set();
+  try {
+    return await drainBatch(app, ext, mem, batch, deps, abandoned2);
+  } finally {
+    await release(app, [...new Set(batch.map((i) => i.sid))].filter((s2) => !abandoned2.has(s2))).catch(() => void 0);
+  }
+}
+async function drainBatch(app, ext, mem, batch, deps, abandoned2) {
+  const ctx = extContext(app, ext, { out: () => {
+  }, err: (s2) => deps.log?.(s2) }, true, async () => false);
+  const target = deps.target ?? ((sid) => {
+    const { dirs, over } = sessionDirs(app.env);
+    return graphTarget(app, { sid, dirs, over });
+  });
+  let written = 0;
+  let dropped = 0;
+  const bySid = /* @__PURE__ */ new Map();
+  for (const { sid, ...item } of batch) bySid.set(sid, [...bySid.get(sid) ?? [], item]);
+  const groups = [...bySid];
+  for (let g = 0; g < groups.length; g++) {
+    const [sid, items] = groups[g];
+    let t2;
+    try {
+      t2 = await target(sid);
+    } catch {
+      t2 = { kind: "shared", circle: "?", endpoint: "" };
+    }
+    if (t2.kind !== "local") {
+      await countDropped(app, "not_local", items.length);
+      dropped += items.length;
+      continue;
+    }
+    if ((await sessionCeiling(app, sid).catch(() => ({ kind: "private" }))).kind !== "shared") {
+      await countDropped(app, "not_shared", items.length);
+      dropped += items.length;
+      continue;
+    }
+    const stop = new AbortController();
+    const writing = Promise.resolve().then(() => mem.write(ctx, { sid, items, signal: stop.signal })).catch(() => void 0);
+    let r = await within3(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
+    if (r === "timeout") {
+      stop.abort();
+      const late = await within3(writing, deps.settleMs ?? GRAPH_MEMORY_SETTLE_MS);
+      if (late === "timeout") {
+        abandoned2.add(sid);
+        await countDropped(app, "timeout", items.length);
+        dropped += items.length;
+        continue;
+      }
+      const lateOk = late && typeof late === "object" ? Math.max(0, Math.min(items.length, Number(late.written) || 0)) : 0;
+      r = { written: lateOk, failed: [{ reason: "timeout", n: items.length - lateOk }] };
+    }
+    if (r === void 0 || typeof r !== "object") {
+      await countDropped(app, "ext_failed", items.length);
+      dropped += items.length;
+      continue;
+    }
+    const ok = Math.max(0, Math.min(items.length, Number(r.written) || 0));
+    written += ok;
+    if (ok > 0) {
+      await app.state.update("graphMemory", (cur) => {
+        const d = docOf(cur);
+        d.written += ok;
+        d.lastWriteAt = Date.now();
+        return { next: d, result: void 0 };
+      });
+    }
+    for (const f of Array.isArray(r.failed) ? r.failed : []) {
+      const n = Math.max(0, Math.min(items.length, Number(f?.n) || 0));
+      await countDropped(app, String(f?.reason ?? "other"), n);
+      dropped += n;
+    }
+    if (r.unavailable) {
+      await noteAvailability(app, r.unavailable);
+      const left = groups.slice(g + 1).reduce((a, [, its]) => a + its.length, 0);
+      await countDropped(app, short(r.unavailable.reason, 32) || "unavailable", left);
+      return { written, dropped: dropped + left, unavailable: r.unavailable };
+    }
+  }
+  return { written, dropped };
+}
+function graphMemoryTickMs(env) {
+  const n = Number(env.P2P_IX_MEMORY_TICK_MS);
+  return Number.isInteger(n) && n >= 1e3 && n <= 6e4 ? n : GRAPH_MEMORY_TICK_MS;
+}
+function graphMemoryLoop(app, deps = {}) {
+  let busy = false;
+  let okUntil = 0;
+  let offUntil = 0;
+  return {
+    tick: async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        if (!graphMemoryEnabled(app.env, app.home)) return;
+        const ext = app.extensions?.get("ix");
+        const mem = memoryOf(ext);
+        if (!ext || !mem) return;
+        const now = Date.now();
+        if (now < offUntil) return;
+        if (now >= okUntil) {
+          const ctx = extContext(app, ext, { out: () => {
+          }, err: (s2) => deps.log?.(s2) }, true, async () => false);
+          const a = await within3(
+            mem.available(ctx).catch((e) => ({ ok: false, reason: "ext_failed", message: String(e?.message ?? e) })),
+            GRAPH_MEMORY_DRAIN_MS
+          );
+          const u = a === "timeout" ? { ok: false, reason: "timeout", message: "Ix didn't answer in time" } : a.ok ? void 0 : a;
+          await noteAvailability(app, u);
+          if (u) {
+            offUntil = now + GRAPH_MEMORY_RECHECK_MS;
+            return;
+          }
+          okUntil = now + GRAPH_MEMORY_RECHECK_MS;
+        }
+        await gatherGraphMemory(app);
+        const r = await drainGraphMemory(app, ext, mem, deps);
+        if (r.unavailable) {
+          okUntil = 0;
+          offUntil = Date.now() + GRAPH_MEMORY_RECHECK_MS;
+        }
+      } catch (e) {
+        deps.log?.(`p2p watch: graph memory: ${sanitizePeerText(String(e?.message ?? e), 200)}`);
+      } finally {
+        busy = false;
+      }
+    }
+  };
+}
+async function graphMemoryReport(app) {
+  const d = await app.state.get("graphMemory");
+  return d ? docOf(d) : void 0;
+}
+
+// packages/p2p/src/watch.ts
 function cursorPath(app, sid) {
   return join23(app.home, "cursors", `${sid}.cursor`);
 }
@@ -36665,7 +36995,7 @@ function untilAborted(p, signal) {
     );
   });
 }
-function within3(p, ms) {
+function within4(p, ms) {
   return Promise.race([p.catch(() => void 0), new Promise((r) => setTimeout(r, ms).unref())]);
 }
 async function watch(app, opts) {
@@ -36717,6 +37047,8 @@ async function watch(app, opts) {
     await renewOpenJoinCaps(app);
   });
   every(36e5, () => maintain(app));
+  const memory = graphMemoryLoop(app, { log: opts.log });
+  every(graphMemoryTickMs(app.env), () => memory.tick());
   void maintain(app).catch(() => {
   });
   const pollMs = opts.pollMs ?? 300;
@@ -36790,8 +37122,8 @@ async function watch(app, opts) {
     for (const t2 of timers) clearInterval(t2);
     opts.signal.removeEventListener("abort", onAbort);
     const deadline = Date.now() + WATCH_EXIT_MS;
-    await within3(unmarkRunning(app, sid), CLOSE_GRACE_MS);
-    await within3(app.close(), Math.max(0, deadline - Date.now()));
+    await within4(unmarkRunning(app, sid), CLOSE_GRACE_MS);
+    await within4(app.close(), Math.max(0, deadline - Date.now()));
   }
   if (fatal) {
     opts.log(`p2p watch: ${fatal}`);
@@ -36856,11 +37188,12 @@ init_relay_client();
 init_sessions();
 init_extensions();
 init_ix_local();
-init_projects();
 import { readdirSync as readdirSync4, statSync as statSync5 } from "node:fs";
 import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname7, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
+init_config();
+init_projects();
 var SKEW_OK_SEC = 30;
 var SKEW_FAIL_SEC = DEFAULT_SKEW_SEC;
 var DAY2 = 86400;
@@ -37267,6 +37600,7 @@ async function ixChecks(c, app, ms) {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
+    if (on) await graphMemoryChecks(c, app, bin, target, ms);
     const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== void 0 && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
     else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
@@ -37295,6 +37629,29 @@ async function ixChecks(c, app, ms) {
     c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t2)}${t2.kind === "local" ? `: ${t2.why}` : ""}`);
   }
   if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
+}
+async function graphMemoryChecks(c, app, bin, target, ms) {
+  if (!graphMemoryEnabled(app.env, app.home)) {
+    c.add("ix-memory", "ok", "Ix graph memory", 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)');
+    return;
+  }
+  const support = (await bounded(ixMemorySupport(bin, app.env, target, ms), ms + 500)).value;
+  const doc = (await bounded(graphMemoryReport(app), ms)).value;
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  const dropped = doc ? Object.entries(doc.dropped).filter(([, n]) => n > 0) : [];
+  if (support === "oss") c.add("ix-memory", "ok", "Ix graph memory", `on: sessions' records, statuses and edited files go to the local graph only (${target.endpoint}); ${counts}`);
+  else if (support === "pro") c.add("ix-memory", "unknown", "Ix graph memory", "off: Ix Pro is installed, and its `ix note` writes to your cloud org; Peer2Peer keeps graph writes local", "use an Ix without Pro for local notes (or leave it off)");
+  else if (support === "none") c.add("ix-memory", "unknown", "Ix graph memory", "off: this Ix has no local `ix note` (it came after Ix 0.13.0)", "upgrade Ix (`ix upgrade`)");
+  else c.add("ix-memory", "unknown", "Ix graph memory", `couldn't tell whether this Ix has a local \`ix note\`; ${counts}`, "run `ix --help` in a terminal");
+  if (dropped.length > 0) {
+    const total = dropped.reduce((a, [, n]) => a + n, 0);
+    c.add("ix-memory-dropped", "unknown", "Ix graph memory dropped", `${total} item${total === 1 ? "" : "s"} not written (${dropped.map(([r, n]) => `${peer(r)}: ${n}`).join(", ")})`, "best effort: each reason is counted; the queue holds 64 items");
+  }
+  if (doc?.unavailable && support === "oss") {
+    const fix = doc.unavailable.reason === "ix_listener" ? `start your Ix backend (\`ix docker start\`); if another user's process holds the port, use a port of yours (\`ixEndpoint\` in config.json). On Linux, Docker's port proxy runs as root: if this machine's Docker is only yours, set "ixTrustRootListener": true in config.json (by hand)` : void 0;
+    c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
+  }
+  if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
 }
 async function refreshCapped(app, userId, relays) {
   const allowed = new Set(relays.slice(0, MAX_PEER_RELAYS));

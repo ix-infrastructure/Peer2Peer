@@ -35,12 +35,14 @@
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
 //   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
+//   graphMemory  graph memory (graph-memory.ts): what was recorded of each own session, the bounded queue, counters
 //   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";
 import type { RelayInfoRec } from "./relay-info.js";
 import type { ProjectsDoc, SessionProjectsDoc } from "./projects.js";
+import type { GraphMemoryDoc } from "./graph-memory.js";
 import { join } from "node:path";
 import { FileDocBackend, type LockOptions } from "@peer2peer/core/v3/node";
 import type { DocBackend, RotationStatement, StatusBody } from "@peer2peer/core/v3";
@@ -399,6 +401,8 @@ type Docs = {
   sessionProjects: SessionProjectsDoc;
   /** When this device showed the one-time notice that new installs turn the Ix extension on (ix-local.ts). */
   ixNotice: { at: number };
+  /** Graph memory (graph-memory.ts): this device's sessions' context waiting for the local Ix graph, and counters. */
+  graphMemory: GraphMemoryDoc;
 };
 
 export const sessKey = (own: string, sid: string) => `${own}|${sid}`;

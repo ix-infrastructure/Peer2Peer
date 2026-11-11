@@ -66,15 +66,19 @@ describe("targets are checked again in ext-ix", () => {
 
   it("commands that can reach Ix Pro's cloud are refused for a local target; reads pass", async () => {
     const t = { kind: "local" as const, endpoint: DEFAULT_IX_ENDPOINT, why: "secret is private" };
-    expect(refuseForTarget(["note", "--json", "show", "n1"], t)).toMatchObject({ code: "graph_target", message: expect.stringMatching(/local only \(secret is private\)/) });
+    expect(refuseForTarget(["map"], t)).toMatchObject({ code: "graph_target", message: expect.stringMatching(/local only \(secret is private\)/) });
     for (const c of ["note", "map", "login", "org", "memory", "session", "agent", "workspace", "-c", ""]) expect(refuseForTarget([c], t), c).toBeDefined();
     for (const c of ["--version", "impact", "around", "overview", "inventory", "context", "subsystems", "status"]) expect(refuseForTarget([c], t), c).toBeUndefined();
+    // Only ext-ix's exact memory forms pass against a local target (memory.test.ts has the rest).
+    expect(refuseForTarget(["note", "--json", "show", "n1"], t)).toBeUndefined();
+    expect(refuseForTarget(["note", "ls", "--json"], t)).toMatchObject({ code: "graph_target" });
     const calls: string[][] = [];
-    const inner: IxRunner = { run: async (argv) => (calls.push([...argv]), { code: 0, stdout: "{}", stderr: "" }) };
-    const g = guardRunner(inner, async () => t);
-    await expect(g.run(["note", "--tag=note", "--json"], { stdin: "private text" })).rejects.toMatchObject({ code: "graph_target" });
+    // An `ix` from before #916: no local `ix note`, so a write is refused after the help probe alone.
+    const inner: IxRunner = { run: async (argv) => (calls.push([...argv]), { code: 0, stdout: argv[0] === "--help" ? "Usage: ix\n" : "{}", stderr: "" }) };
+    const g = guardRunner(inner, async () => t, undefined, { listener: async () => ({ ok: true }) });
+    await expect(g.run(["note", "--tag=note", "--json"], { stdin: "private text" })).rejects.toMatchObject({ code: "graph_target", message: expect.stringMatching(/upgrade Ix/) });
     await g.run(["impact", "x", "--format", "json"]);
-    expect(calls).toEqual([["impact", "x", "--format", "json"]]);
+    expect(calls).toEqual([["--help"], ["impact", "x", "--format", "json"]]);
   });
 });
 
@@ -90,9 +94,11 @@ describe.skipIf(process.platform === "win32")("a real `ix` child sees only the c
       expect(ixKeys(s.env)).toEqual(["IX_ENDPOINT", "IX_MAP_BACKGROUND_REFRESH", "IX_NO_UPDATE_CHECK"]);
       expect(JSON.stringify(s.env)).not.toContain(CLOUD);
       expect(s.env.P2P_PERSON_TOKEN).toBeUndefined();
-      // And `ix note` (Ix Pro's cloud memory) never runs for it.
-      await expect(runner(c, {}, "s1").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target" });
-      expect(seen().argv[0]).toBe("status");
+      // And `ix note` never runs for it unless the `ix` is the OSS one (this one's help lists no
+      // "Memory:"): only the help probe ran, with the same pinned endpoint.
+      await expect(runner(c, { listener: async () => ({ ok: true }) }, "s1").run(["note", "--json", "show", "n1"])).rejects.toMatchObject({ code: "graph_target" });
+      expect(seen().argv).toEqual(["--help"]);
+      expect(seen().env.IX_ENDPOINT).toBe(DEFAULT_IX_ENDPOINT);
     } finally {
       for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
       Object.assign(process.env, saved);
