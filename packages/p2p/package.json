@@ -1,6 +1,6 @@
 {
   "name": "@peer2peer/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The standalone Peer2Peer v3 CLI (`p2p`): an account-free identity, friends, circles, end-to-end encrypted session messaging and status over open relays",
   "keywords": [
     "peer2peer",

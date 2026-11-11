@@ -15,7 +15,7 @@ A peer without this extension sees a one-line fallback, such as "alice@…: shar
 ```
 npm i -g @peer2peer/cli @peer2peer/ext-ix     # side by side: p2p can find it
 p2p extensions enable ix                       # opt in (writes config.json; or P2P_EXTENSIONS=ix)
-p2p extensions                                 # → @peer2peer/ext-ix 0.1.0 (x:ix.*)
+p2p extensions                                 # → @peer2peer/ext-ix 0.1.1 (x:ix.*)
 ```
 
 **Trust:** an extension runs inside `p2p` with your identity (it can read `~/.p2p` and your keys). Enable it only if you trust where it came from. `p2p` announces the first load from each new location.

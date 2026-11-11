@@ -1,6 +1,6 @@
 {
   "name": "@peer2peer/ext-ix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The Ix extension for Peer2Peer v3: share Ix session notes, subgraph references and blast-radius reports between agent sessions (x:ix.note, x:ix.subgraph, x:ix.impact), and flag semantic conflicts. Needs only a local Ix install.",
   "keywords": [
     "peer2peer",
@@ -63,7 +63,7 @@
     "@peer2peer/core": "file:../core"
   },
   "peerDependencies": {
-    "@peer2peer/cli": "^0.1.0"
+    "@peer2peer/cli": "^0.1.1"
   },
   "peerDependenciesMeta": {
     "@peer2peer/cli": {

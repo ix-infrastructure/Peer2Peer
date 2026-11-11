@@ -32,7 +32,7 @@ import { compareRepo, localRepo, normalizeRemote, type RepoRef } from "./repo.js
 import { buildSubgraph, describeSelector, parseSubgraphBody, renderSubgraph, resolveArgv, SUBGRAPH_KIND, type Selector } from "./subgraph.js";
 import { frame, InvalidBody, IxExtError, line, NOTE_TAGS, SPEC_VERSION, toRepoRelative } from "./text.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const KINDS = [NOTE_KIND, SUBGRAPH_KIND, IMPACT_KIND] as const;
 /** Cap on local Ix output a command hands back (resolve). */
 export const MAX_RESOLVE_OUTPUT = 32 * 1024;

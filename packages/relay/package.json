@@ -1,6 +1,6 @@
 {
   "name": "@peer2peer/relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Peer2Peer v3 open relay: dumb store-and-forward for end-to-end encrypted envelopes, identity documents and device-link mailboxes",
   "keywords": [
     "peer2peer",
