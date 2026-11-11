@@ -133,6 +133,62 @@ export interface P2PExtension {
    * advertises `<kind>.v1` for each.
    */
   state?: Record<string, ExtStateKind>;
+  /**
+   * Graph memory (epic #41 piece 2): writes this device's own sessions' context (their record, status
+   * one-liners, the files they edit) into the person's local graph. `p2p watch` gathers it from the
+   * statuses this device posted, queues it (bounded) and hands it over in batches, off the hook path.
+   * Optional: an extension without it (an older ext-ix) is simply never asked. Each batch is for one
+   * session and has already been checked local by graphTarget; the extension checks again.
+   */
+  memory?: ExtMemory;
+}
+
+/** One thing to remember about a session (graph-memory.ts). Every string is local, the person's own. */
+export interface ExtMemoryItem {
+  kind: "start" | "status" | "files" | "end";
+  /** When it happened (ms). */
+  at: number;
+  /** start: the session's label, repository and branch. */
+  label?: string;
+  repo?: string;
+  branch?: string;
+  /** status: the one-line status. */
+  summary?: string;
+  /** files: repo-relative files edited since the last batch. */
+  files?: string[];
+}
+
+/** Why memory can't be written now; `message` says what the person can do. */
+export interface ExtMemoryUnavailable {
+  ok: false;
+  /** e.g. `ix_missing`, `ix_upgrade` (no local `ix note`), `ix_pro` (Ix Pro answers: cloud). */
+  reason: string;
+  message: string;
+}
+
+export interface ExtMemoryResult {
+  written: number;
+  /** Items not written, by reason (counted as dropped). */
+  failed?: { reason: string; n: number; message?: string }[];
+  /** Stop asking for now (the same as available() turning false). */
+  unavailable?: ExtMemoryUnavailable;
+}
+
+export interface ExtMemory {
+  v: 1;
+  /** Whether the writes can go to the local graph at all (asked before anything is gathered). */
+  available(ctx: ExtContext): Promise<{ ok: true } | ExtMemoryUnavailable>;
+  /**
+   * Writes one session's items. `signal` aborts when the host's time for the batch is up: the writer
+   * must check it before every write and write nothing after it fires (the host waits for it to settle).
+   */
+  write(ctx: ExtContext, batch: { sid: string; items: ExtMemoryItem[]; signal?: AbortSignal }): Promise<ExtMemoryResult>;
+}
+
+/** `ext.memory` when it is a usable v1 memory writer; undefined otherwise (absent or malformed: never asked). */
+export function memoryOf(ext: P2PExtension | undefined): ExtMemory | undefined {
+  const m = ext?.memory as Partial<ExtMemory> | undefined;
+  return m && typeof m === "object" && m.v === 1 && typeof m.available === "function" && typeof m.write === "function" ? (m as ExtMemory) : undefined;
 }
 
 export interface ExtStateKind {
@@ -263,7 +319,10 @@ export interface ExtAudience {
  * or one circle's shared graph. An extension that runs Ix takes the endpoint (and any token) only
  * from here, never from its environment.
  */
-export type ExtGraphTarget = { kind: "local"; endpoint: string; why: string } | { kind: "shared"; circle: string; endpoint: string; token?: string };
+export type ExtGraphTarget =
+  /** `trustRootListener`: the person set `ixTrustRootListener: true` in config.json (a root-owned listener on the port, Docker's proxy on Linux, is theirs). */
+  | { kind: "local"; endpoint: string; why: string; trustRootListener?: true }
+  | { kind: "shared"; circle: string; endpoint: string; token?: string };
 
 /** What a command gets from `p2p`: no keys, no store, only these. */
 export interface ExtContext {
@@ -318,6 +377,13 @@ export interface ExtContext {
    * file tools): store the MAC with the setting and honour the setting only when it verifies.
    */
   localMac?(data: string): string;
+  /**
+   * Whether session `fromSid` may pass on context recorded for session `ofSid` (graph memory's
+   * records, ExtMemory): the same session, or both bound to projects whose ceilings are shared, with
+   * `fromSid`'s audience within `ofSid`'s and the same graph target. Absent on older clients: a
+   * caller then refuses anything but the same session.
+   */
+  mayShareSessionContext?(ofSid: string, fromSid: string): Promise<boolean>;
   /** Own sessions' last posted statuses on this device. */
   ownStatus(sid: string): Promise<{ repo?: string; files: string[]; caps?: string[]; agents?: StatusAgent[] } | undefined>;
 }

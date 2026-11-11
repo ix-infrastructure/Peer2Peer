@@ -187,3 +187,30 @@ export async function ixNotice(app: App): Promise<string | undefined> {
   const how = extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`";
   return `Ix: new installs now turn the Ix extension on when Ix is installed, so sessions can share Ix context. Yours wasn't changed; to turn it on, run ${how}. Ix calls stay on this machine (\`p2p doctor\` shows each project's graph: local only)`;
 }
+
+/**
+ * Which `ix note` / `ix session` this Ix has, from `ix --help` (graph memory, graph-memory.ts):
+ * "oss" (the local backend: Ix after 0.13.0, ix-infrastructure/Ix#916, with Ix Pro not loaded: its
+ * help then lists them under "Memory:"), "pro" (Ix Pro loaded: its "Pro:" section; its note and
+ * session go to the cloud org), "none" (neither). The same reading as ext-ix's parseMemorySupport
+ * (ix.ts), which decides; this one only reports (`p2p doctor`).
+ */
+export function parseIxMemorySupport(help: string): "oss" | "pro" | "none" {
+  const lines = help.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/);
+  if (lines.some((l) => /^Pro:\s*$/.test(l))) return "pro";
+  const at = lines.findIndex((l) => /^Memory:\s*$/.test(l));
+  if (at < 0) return "none";
+  const section: string[] = [];
+  for (const l of lines.slice(at + 1)) {
+    if (!/^\s+\S/.test(l)) break;
+    section.push(l);
+  }
+  const has = (name: string) => section.some((l) => new RegExp(`^\\s+${name}\\s`).test(l));
+  return has("note") && has("session") ? "oss" : "none";
+}
+
+/** `ix --help` read as parseIxMemorySupport; undefined when it doesn't answer. */
+export async function ixMemorySupport(bin: string, env: Env, target: Pick<GraphTarget, "endpoint">, timeoutMs: number): Promise<"oss" | "pro" | "none" | undefined> {
+  const r = await runIx(bin, ["--help"], { env, target, timeoutMs });
+  return r.code === 0 ? parseIxMemorySupport(r.stdout) : undefined;
+}

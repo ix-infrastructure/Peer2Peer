@@ -72,9 +72,15 @@ export interface FakeIx {
   dir: string;
   set(name: string, content: unknown): void;
   calls(): { argv: string[]; stdin: string; cwd: string }[];
-  written(): { argv: string[]; text: string }[];
+  written(): { argv: string[]; text: string; endpoint: string }[];
+  sessions(): { argv: string[]; endpoint: string }[];
   env(): Record<string, string>;
 }
+
+/** `ix --help` of an OSS Ix after ix-infrastructure/Ix#916 without Ix Pro: the "Memory:" section (ix-cli help-text.ts). */
+export const OSS_HELP = "Usage: ix [options] [command]\n\nSystem:\n  status                Check status\n\nMemory:\n  note [text]           Record a note (ls, show, supersede, retract)\n  session [actor]       List and manage sessions\n\nUse \"ix <command> --help\" for details.\n";
+/** `ix --help` with Ix Pro loaded: its own section, no "Memory:" (its note and session go to the cloud org). */
+export const PRO_HELP = "Usage: ix [options] [command]\n\nSystem:\n  status                Check status\n\nPro:\n  note                Create or manage notes\n  session             Manage sessions\n\nUse \"ix <command> --help\" for details.\n";
 
 export function fakeIx(): FakeIx {
   const bin = tmp("fake-ix-bin-");
@@ -88,8 +94,32 @@ export function fakeIx(): FakeIx {
     set: (name, content) => writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content)),
     calls: () => lines("calls.jsonl"),
     written: () => lines("notes-written.jsonl"),
+    sessions: () => lines("sessions-written.jsonl"),
     env: () => ({ PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_IX_DIR: dir, IX_HOME: dir }),
   };
+}
+
+/**
+ * A loopback port this test process holds, as a local Ix endpoint: the listener check (listener.ts)
+ * passes for it. `observable` is false where the environment hides the socket tables from child
+ * processes (a sandbox): the check then fails closed.
+ */
+export async function ownedEndpoint(): Promise<{ endpoint: string; observable: boolean; close(): Promise<void> }> {
+  const { createServer } = await import("node:net");
+  const { checkLoopbackListener } = await import("../listener.js");
+  // Holds the port only: any connection (the doctor's health probe) is closed at once, so close() never waits.
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const observable = (await checkLoopbackListener(endpoint)).ok;
+  return { endpoint, observable, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+/** Sets `ixEndpoint` in a test user's config.json (keeping what's there). */
+export function setIxEndpoint(home: string, endpoint: string): void {
+  const p = join(home, "config.json");
+  const cur = existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>) : {};
+  writeFileSync(p, JSON.stringify({ ...cur, ixEndpoint: endpoint }, null, 2));
 }
 
 /** A git checkout with an origin remote and one commit. */
