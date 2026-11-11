@@ -48,8 +48,8 @@
 # release.yml attaches a deterministic peer2peer-<ver>-src.tar.gz; GitHub's
 # generated /archive/ tarballs aren't guaranteed to be byte-stable, so the
 # scripts never use those.
-RELAY_VERSION="0.1.0"
-RELAY_SOURCE_SHA256="f677c00a9422f3adcfa89a174a3bd61e35eeef6ce3975a0f391c2e26dc2f8d65"
+RELAY_VERSION="0.1.1"
+RELAY_SOURCE_SHA256="9f0c72e30f62c0abcb608b09c5ebdc75a27ce9e725a11f5540db65e5842c709f"
 RELAY_SOURCE_URL_BASE="https://github.com/ix-infrastructure/Peer2Peer/releases/download"
 # TODO(first release): once releases publish a multi-arch image (for example on
 # GHCR), pull it by digest here instead of building locally.
