@@ -3719,23 +3719,38 @@ export function queuedNote(address: string, r: { state?: string; lastSeen?: numb
 
 /**
  * Commands that install Ix (or fetch one of its install scripts): a fetch (curl, wget, irm, iwr,
- * Invoke-WebRequest, Invoke-RestMethod) of an Ix install script at ix-infra.com or in the Ix
- * repository, its Homebrew tap and formula, and an npm-family install of the Ix CLI package. Read
- * word by word in one linear pass (it runs on every shell command an agent makes, so no regular
- * expression here may backtrack): segments split on newlines, `;`, `&` and `|`, words on blanks,
- * quotes and substitution marks trimmed. Not a parser: a command that builds the URL at run time
- * isn't seen (the person's own permission rules still apply to it).
+ * Invoke-WebRequest, Invoke-RestMethod, .NET's WebClient DownloadString/DownloadFile) of an Ix
+ * install script at ix-infra.com (any port) or in the Ix repository; its Homebrew tap and formula;
+ * and an npm-family install of the Ix CLI package, wherever npm or brew sits in the command (after
+ * sudo, nice, arch, xargs and the like). Line continuations (`\` or PowerShell's backtick before a
+ * newline) join their lines first. Every step is one linear pass (it runs on every shell command an
+ * agent makes, so no regular expression here may backtrack). Not a parser: a command that builds
+ * the URL or package name at run time isn't seen (the person's own permission rules still apply).
+ *
+ * A loose text match that errs toward asking: segments split on every newline, `;`, `&` and `|`,
+ * words on blanks, quotes and comments not read at all (so a fetch inside `bash -c "…"`, a quoted
+ * program path, or an install after a stray quote are all seen), and every npm or brew word in a
+ * segment is checked. Mentioning an Ix install command anywhere in a shell command asks, even in a
+ * commit message or an `echo`: a false positive that costs the person one approval. Reading quotes
+ * like a shell would have to match every shell's rules exactly, and a mismatch would hide an install.
  */
-const IX_SCRIPT_HOSTS = ['ix-infra.com/', 'raw.githubusercontent.com/ix-infrastructure/ix/']
+const IX_SCRIPT_HOSTS: readonly (readonly [host: string, under: string])[] = [
+  ['ix-infra.com', ''],
+  ['raw.githubusercontent.com', 'ix-infrastructure/ix/'],
+]
 const FETCHERS = new Set(['curl', 'wget', 'irm', 'iwr', 'invoke-webrequest', 'invoke-restmethod'])
+/** PowerShell's .NET downloads, read as substrings: they sit inside expressions, not as words. */
+const FETCH_MARKS = ['downloadstring', 'downloadfile', 'webclient', 'new-object', 'invoke-webrequest', 'invoke-restmethod']
 const NPM_FAMILY = new Set(['npm', 'pnpm', 'yarn', 'bun'])
 const NPM_INSTALL = new Set(['i', 'in', 'install', 'add'])
 const BREW_VERBS = new Set(['tap', 'install', 'reinstall', 'upgrade'])
-const IX_MARKS = ['ix-infra.com/', 'ix-infrastructure/ix', '@ix/cli', 'brew']
-const PREFIXES = new Set(['sudo', 'doas', 'env', 'command', 'exec', 'nohup', 'time'])
+const URL_MARKS = ['ix-infra.com', 'ix-infrastructure/ix']
+const RUN_MARKS = ['@ix/cli', 'brew']
 const TRIM = new Set(['"', "'", '`', '(', ')', '<', '$', '{', '}'])
 /** A URL path character as the matcher reads one (lower-cased input): a-z, 0-9, `_`, `.`, `/`, `-`. */
 const isUrlChar = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 46 || c === 47 || c === 45
+const isDigit = (c: number) => c >= 48 && c <= 57
+const isBlank = (c: number) => c === 32 || c === 9 || c === 13
 
 /** A word with quotes, parentheses and substitution marks trimmed from both ends (a loop: no backtracking). */
 function bareWord(w: string): string {
@@ -3754,60 +3769,81 @@ function programName(w: string): string {
   return base.endsWith('.exe') || base.endsWith('.cmd') ? base.slice(0, -4) : base
 }
 
-/** The words of a segment from its program on: env assignments, `sudo`-like prefixes and their flags skipped. */
-function commandWords(words: readonly string[]): string[] {
-  let i = 0
-  while (i < words.length) {
-    const w = words[i] ?? ''
-    const eq = w.indexOf('=')
-    if (PREFIXES.has(programName(w)) || w.startsWith('-') || (eq > 0 && !w.slice(0, eq).includes('/'))) i++
-    else break
-  }
-
-  return words.slice(i)
-}
-
-/** Whether the segment names an Ix install script by URL (any occurrence). */
-function namesIxScript(segment: string): boolean {
-  for (const host of IX_SCRIPT_HOSTS) {
-    let at = segment.indexOf(host)
-    while (at >= 0) {
-      let end = at + host.length
-      while (end < segment.length && isUrlChar(segment.charCodeAt(end))) end++
-      const path = segment.slice(at + host.length, end)
-      if (path.includes('install') && (path.endsWith('.sh') || path.endsWith('.ps1'))) return true
-      at = segment.indexOf(host, end)
-    }
-  }
-
-  return false
-}
-
-function segmentInstallsIx(segment: string): boolean {
-  // Every form below names one of these: the rest (most commands) costs a few substring searches.
-  if (!IX_MARKS.some(m => segment.includes(m))) return false
+/** Words split on every blank, quotes or not, each trimmed (bareWord). */
+function looseWords(segment: string): string[] {
   const words: string[] = []
   let from = 0
   for (let i = 0; i <= segment.length; i++) {
-    const c = i < segment.length ? segment.charCodeAt(i) : 32
-    if (c !== 32 && c !== 9 && c !== 13) continue
+    if (i < segment.length && !isBlank(segment.charCodeAt(i))) continue
     if (i > from) {
       const w = bareWord(segment.slice(from, i))
       if (w !== '') words.push(w)
     }
     from = i + 1
   }
-  if (words.length === 0) return false
-  if (words.some(w => FETCHERS.has(programName(w))) && namesIxScript(segment)) return true
-  const cmd = commandWords(words)
-  const program = programName(cmd[0] ?? '')
-  const rest = cmd.slice(1)
-  if (NPM_FAMILY.has(program)) return rest.some(w => NPM_INSTALL.has(w)) && rest.some(w => w === '@ix/cli' || w.startsWith('@ix/cli@'))
-  if (program === 'brew') {
-    const verb = rest.find(w => !w.startsWith('-')) ?? ''
-    const args = rest.slice(rest.indexOf(verb) + 1).filter(w => !w.startsWith('-'))
 
-    return BREW_VERBS.has(verb) && args.some(w => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/'))
+  return words
+}
+
+/** Whether the segment names an Ix install script by URL (any occurrence; ix-infra.com on any port). */
+function namesIxScript(segment: string): boolean {
+  for (const [host, under] of IX_SCRIPT_HOSTS) {
+    let at = segment.indexOf(host)
+    while (at >= 0) {
+      let i = at + host.length
+      if (segment.charCodeAt(i) === 58) {
+        i++
+        while (i < segment.length && isDigit(segment.charCodeAt(i))) i++
+      }
+      let end = i
+      if (segment.charCodeAt(i) === 47) {
+        end = i + 1
+        while (end < segment.length && isUrlChar(segment.charCodeAt(end))) end++
+        const path = segment.slice(i + 1, end)
+        if (path.startsWith(under)) {
+          const rest = path.slice(under.length)
+          if (rest.includes('install') && (rest.endsWith('.sh') || rest.endsWith('.ps1'))) return true
+        }
+      }
+      at = segment.indexOf(host, Math.max(end, at + 1))
+    }
+  }
+
+  return false
+}
+
+/** A fetch of an Ix install script in this (loosely split) segment. */
+function fetchesIxScript(segment: string): boolean {
+  if (!URL_MARKS.some(m => segment.includes(m)) || !namesIxScript(segment)) return false
+
+  return FETCH_MARKS.some(m => segment.includes(m)) || looseWords(segment).some(w => FETCHERS.has(programName(w)))
+}
+
+const isIxCli = (w: string) => w === '@ix/cli' || w.startsWith('@ix/cli@')
+const isIxFormula = (w: string) => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/')
+
+/**
+ * Whether any npm or brew word in the segment installs Ix from there on: npm (pnpm, yarn, bun) with
+ * an install verb and `@ix/cli` later in the segment; brew whose next non-flag word is
+ * tap/install/reinstall/upgrade with an Ix formula after it. One backward pass (every npm or brew
+ * word is checked, still linear).
+ */
+function installsIx(words: readonly string[]): boolean {
+  let verbAfter = false
+  let cliAfter = false
+  let formulaAfter = false
+  let nextArg = -1
+  const formulaAfterAt: boolean[] = new Array<boolean>(words.length).fill(false)
+  for (let k = words.length - 1; k >= 0; k--) {
+    const w = words[k] ?? ''
+    const p = programName(w)
+    if (NPM_FAMILY.has(p) && verbAfter && cliAfter) return true
+    if (p === 'brew' && nextArg >= 0 && BREW_VERBS.has(words[nextArg] ?? '') && formulaAfterAt[nextArg]) return true
+    formulaAfterAt[k] = formulaAfter
+    if (NPM_INSTALL.has(w)) verbAfter = true
+    if (isIxCli(w)) cliAfter = true
+    if (isIxFormula(w)) formulaAfter = true
+    if (!w.startsWith('-')) nextArg = k
   }
 
   return false
@@ -3816,8 +3852,11 @@ function segmentInstallsIx(segment: string): boolean {
 /** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. Linear in the command's length. */
 export function isIxInstallCommand(command: string): boolean {
   if (typeof command !== 'string' || command === '') return false
+  // Line continuations join their lines (one fixed-shape alternative each: no backtracking).
+  const text = command.toLowerCase().replace(/\\\r?\n|`\r?\n/g, ' ')
+  if (URL_MARKS.some(m => text.includes(m)) && text.split(/[\n;&|]/).some(fetchesIxScript)) return true
 
-  return command.toLowerCase().split(/[\n;&|]/).some(segmentInstallsIx)
+  return RUN_MARKS.some(m => text.includes(m)) && text.split(/[\n;&|]/).some(segment => RUN_MARKS.some(m => segment.includes(m)) && installsIx(looseWords(segment)))
 }
 
 /** The reason the permission prompt shows for an agent's Ix install (and the model reads where nobody can be asked). */
