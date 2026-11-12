@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { RECEIPT_SID } from "@peer2peer/core/v3";
 import { RECEIPT_RATE_ALL, RECEIPT_RATE_HARD, RECEIPT_RATE_PER_USER, receiptRateAllows } from "../receipts.js";
 import { sessKey } from "../state.js";
+import { flushOutbox } from "../outbox.js";
+import { sendMessage } from "../sessions.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-receipts.test/v3";
@@ -194,6 +196,43 @@ describe("delivery receipts", () => {
     expect((await messageEvent("to the downgraded one"))?.data.receipt).toBeUndefined();
     await ann.ok(["status", "--session", "a2", "--state", "idle", "--label", "a2", "--cap", "receipts.v1"]);
     await ben.ok(["ls"]);
+  }, 60_000);
+
+  it("issue #3: a copy kept for later (no relay of theirs answered) asks for no receipt when it goes out", async () => {
+    await ann.ok(["status", "--session", "a1", "--state", "idle", "--label", "a1", "--cap", "receipts.v1"]);
+    await ben.ok(["ls"]);
+    const app = await ben.app();
+    await app.load();
+    await app.connect();
+    const pool = app.pool!;
+    const real = pool.sendEnvelope.bind(pool);
+    // Ann's relays don't answer this once (refused before anything was written): the copy is kept.
+    let refused = 0;
+    pool.sendEnvelope = async (env, to, tdid, kind, targets) => {
+      if (kind === "msg" && to === ids.ann && refused++ === 0) return { sent: [], errors: targets.map((t) => ({ relay: t.relay, code: "unreachable" })) };
+      return real(env, to, tdid, kind, targets);
+    };
+    let r: Awaited<ReturnType<typeof sendMessage>>;
+    try {
+      r = await sendMessage(app, { fromSession: "b1", to: `${ids.ann}/a1`, text: "kept for later" });
+    } finally {
+      await app.close();
+    }
+    expect(refused).toBe(1);
+    expect(r).toMatchObject({ delivered: false, queued: true, state: "outbox", receipts: "unsupported" });
+    expect(r.receiptId).toBeUndefined();
+    // Sent later (as watch does): the copy that arrives doesn't ask, so a client that downgraded meanwhile still takes it.
+    const later = await ben.app();
+    await later.load();
+    await later.connect();
+    try {
+      expect((await flushOutbox(later, { force: true })).sent).toBe(1);
+    } finally {
+      await later.close();
+    }
+    const ev = await messageEvent("kept for later");
+    expect(ev).toBeDefined();
+    expect(ev?.data.receipt).toBeUndefined();
   }, 60_000);
 
   it("R3: nothing to change writes nothing", async () => {

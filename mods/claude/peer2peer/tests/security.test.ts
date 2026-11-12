@@ -256,6 +256,35 @@ describe('review L2: the terminal UI under a pty wrapper is refused', () => {
     expect(mutatingP2PVerb('p2p tui # yes')).toBe('tui')
     expect(mutatingP2PVerb('p2p ls; p2p tui')).toBe('tui')
   })
+
+  test('issue #3: an interpreter reading its program from stdin, and text-first commands that run things', () => {
+    // Program text the guard can't read as commands (`'t' + 'ui'` spells it so no line says tui): refused
+    // when the command names p2p, like a pipe into a shell.
+    for (const cmd of [
+      `echo "require('child_process').spawnSync('p2p', ['t' + 'ui'], { stdio: 'inherit' })" | node`,
+      `printf '%s' "import os; os.system('p2p ' + 't' + 'ui')" | python3 -`,
+      `python3 <<< "import os; os.system('p2p t' + 'ui')"`,
+      "node <<'EOF'\nrequire('child_process').spawnSync('p2p', ['t' + 'ui'], { stdio: 'inherit' })\nEOF",
+      'node < /tmp/x.js && p2p ls',
+      // Text-first commands that run a command of their own.
+      `awk 'BEGIN { system("p2p tui") }'`,
+      `git -c alias.t='!p2p tui' t`,
+      // A substitution inside a text-first command runs (already refused before this issue: kept so).
+      'echo "$(p2p tui)"',
+    ]) expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
+    // A script or module named, inline code's own check, version and help, and text: unchanged.
+    for (const cmd of [
+      'p2p ls --json | node scripts/summarize.js',
+      'p2p ls --json 2>&1 | node /x/y.js',
+      'p2p ls --json | python3 -m json.tool',
+      'node --version && p2p ls',
+      'python3 script.py < input.txt; p2p ls',
+      'cat x.js | node',
+      `awk '/tui/ {print}' notes.md; p2p ls`,
+      'git log --oneline -- packages/p2p/src/tui && p2p ls',
+      'echo "try p2p tui"',
+    ]) expect([cmd, uncheckableShell(cmd)]).toEqual([cmd, null])
+  })
 })
 
 describe('L4: shell commands that run mutating p2p verbs are refused', () => {
@@ -342,6 +371,20 @@ describe('L4: shell commands that run mutating p2p verbs are refused', () => {
     expect(mutatingP2PVerb('script -q /dev/null p2p send --to bob hi')).toBe('send (no --from-session)')
     expect(mutatingP2PVerb('p2p send --from-session s1 --to bob hi')).toBeNull()
     expect(mutatingP2PVerb('p2p send --from-session=s1 --to bob hi')).toBeNull()
+    // Issue #3: --from-session counts only where the CLI reads it as the option. After `--` it is message
+    // text, and as another option's value it is that value: either way the send goes from `tui`.
+    for (const cmd of [
+      'p2p send --to bob -- --from-session=s1',
+      'p2p send --to bob -- --from-session s1',
+      'p2p -- send --from-session=s1 --to bob hi',
+      'p2p send --to --from-session=s1 hi',
+      'p2p send --project-dir --from-session s1 --to bob',
+      'p2p send --to --no-input --from-session=s1',
+      'p2p --no-input send --to bob -- --from-session=s1',
+    ]) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, 'send (no --from-session)'])
+    // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
+    for (const cmd of ['p2p send hi --from-session=s1 --to bob', 'p2p send --no-input --to bob --from-session s1 hi', 'p2p send --from-session -- --to bob hi', 'p2p send --to=bob --from-session=s1 -- --to'])
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null])
     // The CLI's pickers (an argument left out on a terminal) change nothing here: still refused without one.
     for (const [cmd, verb] of [['p2p invite', 'invite'], ['p2p invite noah', 'invite'], ['p2p trust add', 'trust add'], ['p2p trust remove', 'trust remove'], ['p2p tui', 'tui'], ['p2p held approve', 'held approve'], ['p2p remove', 'remove'], ['p2p circle leave', 'circle leave'], ['printf "\\r" | p2p invite', 'invite'], ['p2p --no-input invite', 'invite']] as const) {
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb])

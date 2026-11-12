@@ -528,6 +528,28 @@ function shellWords(segment: string): string[] {
   return shellTokens(segment);
 }
 
+/** `p2p send` options that take the next word as their value, whatever it is (`--` and `--from-session=x` included). */
+const SEND_VALUE_OPTIONS = new Set(["--to", "--project-dir"]);
+
+/**
+ * Whether a `p2p send` command line (the words after the CLI's name) gives --from-session, read as
+ * the CLI reads it (the mod's `sendNamesFromSession`): `--no-input` before the first `--` dropped
+ * first (cli.ts main), nothing after a `--` (text from there on, even with the `--` before `send`),
+ * and never another option's value (`--to --from-session=x` sends to "--from-session=x" from the
+ * `tui` session). Linear.
+ */
+export function sendNamesFromSession(args: readonly string[]): boolean {
+  const end = args.indexOf("--");
+  const words = [...(end < 0 ? args : args.slice(0, end)).filter((w) => w !== "--no-input"), ...(end < 0 ? [] : args.slice(end))];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? "";
+    if (w === "--") return false;
+    if (w === "--from-session" || w.startsWith("--from-session=")) return true;
+    if (SEND_VALUE_OPTIONS.has(w)) i++;
+  }
+  return false;
+}
+
 /**
  * The mutating `p2p` verb a shell command runs, or null (the mod's
  * `mutatingP2PVerb`, for Codex's PreToolUse hook). Defence in depth only:
@@ -579,7 +601,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (const w of after) if (MUTATING_ONE.has(w)) return w;
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
-    if (plain[0] === "send" && !after.some((w) => /^--from-session(=|$)/.test(w))) return "send (no --from-session)";
+    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1))) return "send (no --from-session)";
   }
   return null;
 }

@@ -1913,10 +1913,23 @@ export function blankShellComments(command: string): string {
  */
 const TEXT_FIRST_WORDS = new Set(['echo', 'printf', 'sed', 'awk', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'git', 'gh', 'jq', 'cat', 'tee', 'head', 'tail', 'less', 'more', 'wc', 'diff'])
 
+/**
+ * A text-first command that runs a command of its own (issue #3): awk's system() or a getline from a
+ * command, a git alias (`-c alias.x='!…'`) or a rebase's exec. Its text is then no longer only text.
+ * Plain substring tests (linear); a substitution (`echo "$(…)"`) is mutatingP2PVerb's (simpleCommands).
+ */
+function textRuns(base: string, segment: string): boolean {
+  if (base === 'awk') return segment.includes('system') || segment.includes('getline')
+  if (base === 'git') return segment.includes('alias.') || segment.includes('--exec') || segment.includes(' -x')
+
+  return false
+}
+
 export function namesP2P(text: string, homes: readonly string[] = []): boolean {
   const t = text.replace(/\\/g, '/')
   // (Linear: no unbounded prefix before `p2p`.) A `cd`/`pushd` argument is a folder, not the CLI.
-  for (const m of t.matchAll(/(?:^|[\s;&|()=`"'<>{}[\],]|\/bin\/)p2p(?:\.(?:mjs|cjs|js|exe|cmd))?(?=$|[\s;&|()`"'<>,\]}])/gi)) {
+  // After `!` too: a git alias's shell command (`alias.x='!p2p …'`).
+  for (const m of t.matchAll(/(?:^|[\s;&|()=`"'<>{}[\],!]|\/bin\/)p2p(?:\.(?:mjs|cjs|js|exe|cmd))?(?=$|[\s;&|()`"'<>,\]}])/gi)) {
     const before = t.slice(Math.max(0, (m.index ?? 0) - 40), (m.index ?? 0) + 1)
     if (/(?:^|[\s;&|(])(?:cd|pushd)(?:\s+-\S+)*\s+$/i.test(before)) continue
     return true
@@ -1955,7 +1968,7 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
       if (!TUI_WORD.test(seg)) continue
       const first = /^\s*\(?\s*(?:(?:sudo|exec|env|command|nohup|time)\s+|[A-Za-z_]\w*=\S*\s+)*["']?([^\s"']+)/.exec(seg)?.[1] ?? ''
       const base = first.split(/[\\/]/).pop()?.toLowerCase() ?? ''
-      if (TEXT_FIRST_WORDS.has(base)) continue
+      if (TEXT_FIRST_WORDS.has(base) && !textRuns(base, seg)) continue
       return 'the terminal UI (p2p tui), which only the person runs, on a line that names p2p'
     }
   }
@@ -1971,11 +1984,34 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
     const hidden = hidesCommand(c)
     if (hidden === 'interpreter') return 'interpreter code on a line that names p2p'
     if (hidden === 'pty') return 'a pseudo-terminal wrapper on a line that names p2p'
+    if (interpreterReadsStdin(c)) return 'an interpreter reading its program from a pipe, here-string, heredoc or file, on a command that names p2p'
   }
   // Widening a project's sharing is the person's alone, however it is spelled to the shell.
   if (/project["'\s,\]]+share/.test(c) && (names(c) || /p2p|peer2peer/i.test(c))) return 'a project share, which only your user runs'
 
   return null
+}
+
+/** `p2p send` options that take the next word as their value, whatever it is (`--` and `--from-session=x` included). */
+const SEND_VALUE_OPTIONS = new Set(['--to', '--project-dir'])
+
+/**
+ * Whether a `p2p send` command line (the words after the CLI's name) gives --from-session, read as
+ * the CLI reads it: `--no-input` before the first `--` dropped first (cli.ts main), nothing after a
+ * `--` (text from there on, even with the `--` before `send`), and never another option's value
+ * (`--to --from-session=x` sends to "--from-session=x" from the `tui` session). Linear.
+ */
+export function sendNamesFromSession(args: readonly string[]): boolean {
+  const end = args.indexOf('--')
+  const words = [...(end < 0 ? args : args.slice(0, end)).filter(w => w !== '--no-input'), ...(end < 0 ? [] : args.slice(end))]
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? ''
+    if (w === '--') return false
+    if (w === '--from-session' || w.startsWith('--from-session=')) return true
+    if (SEND_VALUE_OPTIONS.has(w)) i++
+  }
+
+  return false
 }
 
 export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0): string | null {
@@ -2037,7 +2073,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (const w of after) if (MUTATING_ONE.has(w)) return w
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
-    if (plain[0] === 'send' && !after.some(w => /^--from-session(=|$)/.test(w))) return 'send (no --from-session)'
+    if (plain[0] === 'send' && !sendNamesFromSession(words.slice(at + 1))) return 'send (no --from-session)'
   }
 
   return null
@@ -2852,17 +2888,65 @@ const INTERPRETERS = new Set(['python', 'python2', 'python3', 'node', 'nodejs', 
 const CODE_FLAGS = new Set(['-c', '-e', '-E', '-p', '-r', '--eval', '--print', '-command', '-Command'])
 const PTY_WRAPPERS = new Set(['script', 'expect', 'unbuffer', 'socat', 'tmux', 'screen', 'pty', 'zpty', 'winpty'])
 
+/** A command word's program name, lowercased, without its folder or `.exe`, and without a version (`python3.12`, `node22`: `python`, `node`). */
+function programNames(word: string): { base: string; bare: string } {
+  let base = (word.split(/[\\/]/).pop() ?? '').toLowerCase()
+  if (base.endsWith('.exe')) base = base.slice(0, -4)
+  // The name without its version (a loop, not a regex over the word).
+  let end = base.length
+  while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
+
+  return { base, bare: base.slice(0, end) }
+}
+
+const INFO_FLAGS = new Set(['-v', '-V', '--version', '-version', '-h', '--help', '-help'])
+
+const isInterpreter = (word: string) => {
+  const { base, bare } = programNames(word)
+
+  return INTERPRETERS.has(base) || INTERPRETERS.has(bare)
+}
+
+/**
+ * Whether a command runs an interpreter whose program comes from stdin: a pipe into it, a here-string,
+ * a heredoc or a redirected file (`… | node`, `python3 - <<EOF`, `node < x.js`), with no script file
+ * or inline code named. Like a shell reading a pipe, it runs text the guard can't read as commands.
+ * Read by words, one pass per simple command (linear): an option's value (`node --require x`) reads
+ * as a script, a miss on the safe side of a backstop.
+ */
+export function interpreterReadsStdin(command: string): boolean {
+  for (const segment of simpleCommands(blankShellComments(command))) {
+    const words = stripPrefixes(shellWords(segment))
+    if (!isInterpreter(words[0] ?? '')) continue
+    let program = false
+    for (let j = 1; j < words.length && !program; j++) {
+      const w = words[j] ?? ''
+      if (w === '-') break
+      let k = 0
+      while (k < w.length && '0123456789'.includes(w[k] as string)) k++
+      const r = w[k]
+      if (r === '<' || r === '>' || (r === '&' && w[k + 1] === '>')) {
+        // A redirection: its target is the next word when the operator stands alone (`<<<`, `<`, `2>`).
+        let op = k
+        while (op < w.length && '<>&-'.includes(w[op] as string)) op++
+        if (op === w.length) j++
+        continue
+      }
+      // Inline code is hidesCommand's; any other word that isn't an option is the script (or module) run.
+      // `--version` and `--help` read nothing.
+      if (CODE_FLAGS.has(w) || INFO_FLAGS.has(w) || !w.startsWith('-')) program = true
+    }
+    if (!program) return true
+  }
+
+  return false
+}
+
 /** Whether a command runs interpreter code given inline, or anything under a pseudo-terminal wrapper (by its words: linear). */
 export function hidesCommand(command: string): 'interpreter' | 'pty' | null {
   const words = shellTokens(command)
   for (let i = 0; i < words.length; i++) {
-    const w = words[i] as string
-    let base = (w.split(/[\\/]/).pop() ?? '').toLowerCase()
-    if (base.endsWith('.exe')) base = base.slice(0, -4)
-    // python3.12, node22: the name without its version (a loop, not a regex over the word).
-    let end = base.length
-    while (end > 0 && '0123456789.'.includes(base[end - 1] as string)) end--
-    const bare = base.slice(0, end)
+    const { base, bare } = programNames(words[i] as string)
     if (PTY_WRAPPERS.has(base) || PTY_WRAPPERS.has(bare)) return 'pty'
     if (INTERPRETERS.has(base) || INTERPRETERS.has(bare)) {
       for (let j = i + 1; j < Math.min(words.length, i + 6); j++) if (CODE_FLAGS.has(words[j] as string)) return 'interpreter'

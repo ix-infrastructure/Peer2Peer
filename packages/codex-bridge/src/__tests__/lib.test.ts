@@ -178,6 +178,23 @@ describe("guards (PreToolUse backstop)", () => {
     expect(mutatingP2PVerb("p2p send")).toBe("send (no --from-session)");
     expect(mutatingP2PVerb("p2p send --from-session s1 --to bob hi")).toBeNull();
     expect(mutatingP2PVerb("p2p send --from-session=s1 --to bob hi")).toBeNull();
+    // Issue #3: --from-session counts only where the CLI reads it as the option. After `--` it is message
+    // text, and as another option's value it is that value: either way the send goes from `tui`.
+    for (const cmd of [
+      "p2p send --to bob -- --from-session=s1",
+      "p2p send --to bob -- --from-session s1",
+      "p2p -- send --from-session=s1 --to bob hi",
+      "p2p send --to --from-session=s1 hi",
+      "p2p send --project-dir --from-session s1 --to bob",
+      "p2p send --to --no-input --from-session=s1",
+      "p2p --no-input send --to bob -- --from-session=s1",
+    ]) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, "send (no --from-session)"]);
+    }
+    // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
+    for (const cmd of ["p2p send hi --from-session=s1 --to bob", "p2p send --no-input --to bob --from-session s1 hi", "p2p send --from-session -- --to bob hi", "p2p send --to=bob --from-session=s1 -- --to"]) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null]);
+    }
     expect(mutatingP2PVerb("node /x/p2p.mjs held approve h1")).toBe("held approve");
     expect(mutatingP2PVerb("bash -lc 'p2p relays add wss://evil'")).toBe("relays add");
     expect(mutatingP2PVerb("p2p codex release m1")).toBe("codex release");

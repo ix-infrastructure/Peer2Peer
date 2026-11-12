@@ -94,7 +94,7 @@ Pre-release clients from before protocol 3.1 refuse an identity document with a 
 
 Migrated to it: receipts' `rcpt` (`{sid}`), status `agents` (`{all}`) and extension state (`{all}`).
 
-The outbox-downgrade edge of delivery receipts (a message sealed with `rcpt` and sent days later, after its recipient downgraded) becomes moot once both sides are 3.1: a 3.1 receiver ignores an `rcpt` it doesn't understand instead of rejecting the message. Until then, `rcpt` is still added only for a session that is live now, never on the offline path or the outbox-only path.
+The outbox-downgrade edge of delivery receipts (a message sealed with `rcpt` and sent days later, after its recipient downgraded) becomes moot once both sides are 3.1: a 3.1 receiver ignores an `rcpt` it doesn't understand instead of rejecting the message. Until then, `rcpt` is still added only for a session that is live now, never on the offline path, the outbox-only path, or a copy queued because the recipient's relays didn't take it (one already written to a relay connection is resent as sealed, so this edge remains for it).
 
 ### What this client never sends to an older one
 

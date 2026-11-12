@@ -884,6 +884,12 @@ export interface SendOpts {
    * session is theirs, never bound to a project. Set only by those two paths, never from a flag.
    */
   person?: boolean;
+  /**
+   * Set by sendMessage to whether a copy of this message may have reached a relay: true from the
+   * moment one is about to go out, and after delivery whether one did or was written to a relay
+   * whose answer never came. sendSharing undoes its share only while it is false.
+   */
+  wire?: { maybe: boolean };
 }
 
 export interface SendResult {
@@ -1078,19 +1084,37 @@ export async function tuiTaintNote(app: App, toUserId: string, now = Date.now())
 export async function sendSharing(app: App, o: SendOpts): Promise<{ result: SendResult; shared?: { userId: string; address: string } }> {
   const sid = checkSid(o.fromSession, "--from-session");
   const uid = await app.resolveUser(o.to.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/\/[^/]*$/, ""));
-  let added = false;
-  if (uid !== app.userId && !(await rosterAudience(app, await getSession(app, sid))).includes(uid)) {
-    await roster(app, sid, { add: [uid] });
-    added = true;
+  let added: { ver: number; had: SessionDoc } | undefined;
+  const had = await getSession(app, sid);
+  if (uid !== app.userId && !(await rosterAudience(app, had)).includes(uid)) {
+    added = { ver: (await roster(app, sid, { add: [uid] })).ver, had };
   }
+  const wire = { maybe: false };
   try {
-    const result = await sendMessage(app, { ...o, person: true });
+    const result = await sendMessage(app, { ...o, person: true, wire });
     return added ? { result, shared: { userId: uid, address: await app.addressOf(uid) } } : { result };
   } catch (e) {
-    // Nothing was sent: the session goes back to whom it was shared with before.
-    if (added) await roster(app, sid, { remove: [uid] }).catch(() => undefined);
+    // Undone only when nothing can have gone out (issue #3): a send cut off by the command deadline
+    // (`outcome_unknown`), or one a relay may have stored without answering, may have reached them,
+    // and their reply must still land here.
+    if (added && !wire.maybe) await unshare(app, sid, uid, added).catch(() => undefined);
     throw e;
   }
+}
+
+/**
+ * Takes back the share sendSharing made for a send that never went out: only while the roster is
+ * still exactly the version that share wrote (issue #3). Anything since (another send's share, the
+ * person's own `session roster`, a status following the project) stands as it is. Back to whom it
+ * was shared with before, `uid` included if they were on it already, and following the default
+ * again if it did.
+ */
+async function unshare(app: App, sid: string, uid: string, added: { ver: number; had: SessionDoc }): Promise<void> {
+  await writeRoster(app, sid, (have) => {
+    if (!have || have.ver !== added.ver) return undefined;
+    const parts = added.had.parts.includes(uid) ? have.parts : have.parts.filter((u) => u !== uid);
+    return { vis: have.vis, ...(have.circle ? { circle: have.circle } : {}), parts, ...(added.had.auto !== undefined ? { auto: added.had.auto } : {}) };
+  });
 }
 
 export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
@@ -1115,20 +1139,49 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
   // whole message for `rcpt` (§4.3). Not when this device can't reach a relay either: the sealed copy
   // may wait in the outbox for days, long past the status that advertised it (pre-release review R2).
   const rcpt = o.text !== "" && !offline && offlineSince === undefined && (await asksReceipts(app, target.own, target.sid)) ? newReceiptId() : undefined;
+  // Whether a copy that may reach them still asks (below: copies kept for later are sealed without it).
+  let receiptAsked = rcpt !== undefined;
   if (o.text !== "") {
     // Anything this device couldn't send earlier goes first (order, and it may be the same peer).
     if (!offline) await flushOutbox(app).catch(() => undefined);
     const rosterJws = await rosterFor(app, target);
     const plaintext = { text: o.text, ...(rcpt ? { rcpt } : {}), ...(rosterJws ? { roster: rosterJws } : {}), ...(o.person ? {} : await ownBound(app, fromSession, target, userId)) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
-    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {});
+    const local: { onlyDevices?: string[]; beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void> } =
+      userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {};
+    d = await app.deliver(userId, "msg", target, plaintext, {
+      ...local,
+      beforeSend: async (copies) => {
+        // From here a copy may go out (sendSharing's undo reads this).
+        if (o.wire) o.wire.maybe = true;
+        await local.beforeSend?.(copies);
+      },
+    });
     const unsent = d.unsent ?? [];
+    // The devices whose copy went out on a connection whose answer never came (it may be stored).
+    const written = new Set((d.errors ?? []).filter((e) => e.written).map((e) => e.did));
+    if (o.wire) o.wire.maybe = d.relays.length > 0 || written.size > 0;
     if (d.relays.length === 0 && !retryable(unsent)) {
       throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
     }
     // Copies no relay took, for reasons a retry gets past: kept, sealed, for watch to send. When
     // other copies did go out the message is delivered already; these reach the other devices.
-    const later = d.relays.length === 0 ? unsent : unsent.filter((u) => u.codes.every((c) => OUTBOX_RETRYABLE.has(c)));
+    let later = d.relays.length === 0 ? unsent : unsent.filter((u) => u.codes.every((c) => OUTBOX_RETRYABLE.has(c)));
+    // A copy kept for later never asks for a receipt (issue #3, §4.3): it may go out days from now,
+    // after the recipient's client downgraded, and a client without receipts.v1 rejects the whole
+    // message for `rcpt`. Sealed again without it, unless it went out on a connection already (a
+    // relay may hold it: a second envelope could deliver the message twice; the outbox resends those
+    // same bytes, which the recipient's replay window drops).
+    if (rcpt && later.length > 0) {
+      const fresh = later.filter((u) => !written.has(u.did));
+      if (fresh.length > 0) {
+        const { rcpt: _asked, ...plain } = plaintext;
+        void _asked;
+        const resealed = await app.seal(userId, "msg", target, plain, { onlyDevices: fresh.map((u) => u.did), ...(local.beforeSend ? { beforeSend: local.beforeSend } : {}) });
+        later = [...later.filter((u) => written.has(u.did)), ...resealed.map((c) => ({ ...c, codes: [] as string[] }))];
+      }
+      receiptAsked = d.relays.length > 0 || later.some((u) => written.has(u.did));
+    }
     if (later.length > 0) outboxed = await enqueue(app, later, { kind: "msg", dest: to, fromSession });
   }
   if (target.own !== app.userId) {
@@ -1157,7 +1210,7 @@ export async function sendMessage(app: App, o: SendOpts): Promise<SendResult> {
     ...(d ? { messageId: `m${Date.now().toString(36)}` } : {}),
     ...(o.notifyWhenIdle ? { notifyWhenIdle: true } : {}),
     ...queued,
-    ...(d ? (rcpt ? { receipts: "requested" as const, receiptId: rcpt } : { receipts: "unsupported" as const }) : {}),
+    ...(d ? (rcpt && receiptAsked ? { receipts: "requested" as const, receiptId: rcpt } : { receipts: "unsupported" as const }) : {}),
   };
 }
 
