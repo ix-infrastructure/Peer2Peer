@@ -30,7 +30,7 @@ Ix is open source too, so these features need only an install.
 - **Graph memory:** your own sessions in shared projects are recorded into your **local** Ix graph as they run (see [concepts.md](concepts.md)).
 - **Graph targets:** every Ix call Peer2Peer makes goes through one chokepoint that decides which graph a project's work may reach. Today that is always your local graph. A shared team graph is planned (see the [roadmap](roadmap.md#ix-as-the-context-layer)).
 
-A peer without Ix sees a one-line fallback, such as "shared an Ix subgraph: install Ix to open it". Nothing installs Ix for you: `p2p setup` enables the extension only when it finds Ix and `@peer2peer/ext-ix` already installed, and only with your consent.
+A peer without Ix sees a one-line fallback, such as "shared an Ix subgraph: install Ix to open it". Ix is optional and recommended, and Peer2Peer never installs it: `p2p setup` asks (default No) and only prints the install command for you to run, and turning on the extension is always your own decision.
 
 ## The rules that keep the layers apart
 1. **Core never imports an extension.** `scripts/check-boundaries.mjs` enforces this for the code: no static or literal import of an extension, no extension in a core `package.json`, and one dynamic loader in `p2p` as the only computed import. That is a rule about dependencies, not containment: an extension the user enables runs inside `p2p` with full access to `~/.p2p` and the identity key, so extensions are opt-in (`p2p extensions enable ix`), load only from explicit directories, and should be installed only when trusted. The `ExtContext` API is the contract they are written against, not a sandbox (`packages/p2p/README.md`, "Extensions").

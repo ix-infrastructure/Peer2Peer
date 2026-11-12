@@ -1,3 +1,6 @@
 scripts/install-relay.sh text eol=lf
 scripts/install-relay.ps1 text eol=lf
 scripts/install-relay.sha256 text eol=lf
+scripts/install.sh text eol=lf
+scripts/install.ps1 text eol=lf
+scripts/install.sha256 text eol=lf

@@ -11,7 +11,7 @@ Extensions add optional features to Peer2Peer without changing the core network.
 
 When `p2p` loads `@peer2peer/ext-<ns>`, that code runs **inside the `p2p` process**, with access to `~/.p2p` and your keys. `ExtContext` is the API an extension is meant to use, but **it isn't a sandbox**. So loading is:
 
-- **opt-in:** `p2p extensions enable <ns>` (or `P2P_EXTENSIONS=<ns>` in your own shell). Nothing is enabled until you enable it: `p2p setup` offers to enable `ix` only when it finds Ix and `@peer2peer/ext-ix` already installed, installs nothing, and needs your own consent;
+- **opt-in:** `p2p extensions enable <ns>` (or `P2P_EXTENSIONS=<ns>` in your own shell). Nothing is enabled until you enable it: `p2p setup` offers to turn on `ix` when Ix is installed, needs your own consent, and never installs anything (without Ix it asks, default No, and only prints the install command);
 - **limited to registered namespaces** (protocol §8.3);
 - **limited to explicit directories:** `P2P_EXTENSION_PATH` entries and the CLI's own sibling `node_modules`. There's no walk-up, no `NODE_PATH` and no globals, and never the repository your agent is working in;
 - **announced** the first time it loads from a new location;

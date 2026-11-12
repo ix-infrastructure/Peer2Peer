@@ -76,9 +76,19 @@ Each project has a **policy**, kept only on your device (in `P2P_HOME`, never sy
 
 **Sessions that move.** Every folder a session works in binds it to that folder's project, until the session ends: its working directory, a folder it `cd`s into, files it reads or changes elsewhere (the mod and the Codex bridge pass these as `--project-dir` / `P2P_PROJECT_DIRS`). Its audience is the **intersection** of all those projects' policies (the circles and people every one of them shares). So a session that touched a private project's files stays private until it ends: what it read can't be carried out through Peer2Peer. Subagents report through their session, so they share its projects and audience.
 
+A session keeps up to 64 projects. That limit only bounds what is stored: more projects can only narrow the intersection, so a higher limit never lets a session reach anyone a lower one wouldn't. Past it the session is private.
+
+**A session's own scratch is the session, not a project.** Claude Code keeps folders for each session: the output of its background tasks (`<tmp>/claude-<uid>/<project>/<session id>/`), the large tool results and subagent transcripts it saves (`~/.claude/projects/<project>/<session id>/`), and a background job's folder (`$CLAUDE_JOB_DIR`, `~/.claude/jobs/<id>/`). What is in them came from the session's own tool calls, whose own paths already bound it, so the Claude Code mod names them to the CLI and a path in them binds no project. That is checked strictly:
+- only this session's folders, by its exact id: another session's folder, the `memory` folder and transcripts that sessions of a project share, or a name that only looks like it (`<id>-x`), bind as any folder does;
+- on real paths: a symlink in the scratch binds what it points at, and a path written with a `..` never gets the exemption (it binds where the file system takes it: `link/../x` is beside the link's target);
+- a git repository or a `.p2p-private` in the scratch is still its own project (a private repository cloned there stays private), and so is a folder you gave a policy, a folder with a `.git` that can't be read, or a path that names a `.git`;
+- the job folder counts only when its name is the start of the session's id (so after a `/clear`, a new id, it binds again), and each folder must be yours and not a symlink;
+- only the mod's own `p2p` runs (with your person token) can name them;
+- it fails closed: a scratch folder that can't be read, or that holds more than 4,096 entries (its symlinks can't all be checked), isn't skipped, so paths in it bind as anywhere else (usually making the session private). It is off on Windows for now.
+
 **Why a session is private, and what helps.** A refusal says its cause, and `p2p session show <sid>` (in your own terminal; `/peers session` in Claude Code) lists a session's projects, who each is shared with, and every reason:
 - a project never shared, or made private: sharing it helps (`p2p project share`);
-- more than 16 projects, more folders than Peer2Peer keeps track of, a path its front end couldn't resolve (one starting with a variable or `$(…)` it doesn't know, like `$X/y`), a front end that lost track (a forked conversation), a `.p2p-private`, or a private session's message: these last until the session ends, so sharing can't help. Start a new session for the work you want to share.
+- more than 64 projects, more folders than Peer2Peer keeps track of, a path its front end couldn't resolve (one starting with a variable or `$(…)` it doesn't know, like `$X/y`), a front end that lost track (a forked conversation), a `.p2p-private`, or a private session's message: these last until the session ends, so sharing can't help. Start a new session for the work you want to share.
 
 An agent's shell can't run `session show` (it would read other sessions' bindings).
 
@@ -133,3 +143,5 @@ Every message, status, invite or circle update is an **envelope**: encrypted (XC
 ## Extensions (§8)
 
 Optional features plug in as **extension kinds** (`x:<ns>.*`), each with a plain-text fallback, or as **trust providers** that add badges. An extension can add information, never authorisation. See [extensions.md](extensions.md).
+
+**Ix is optional and recommended; Peer2Peer never installs it for you.** Installing Ix is the person's decision and action: `p2p setup` at a terminal explains it and asks (default No), and prints the install command for the person to run. A no is remembered (`"ixDeclined": true` in config.json) until `p2p setup --ix`. Agents suggest, people decide: the Claude Code mod and the Codex bridge tell the agent once per session, when Ix isn't installed and the person hasn't said no, that it may suggest Ix once and must never install it. In Claude Code an agent's command that installs Ix goes to the person's permission prompt. Enabling the `ix` extension is the person's alone too (their front end's token, or their `yes` on the terminal).

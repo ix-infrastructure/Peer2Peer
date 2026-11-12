@@ -125,13 +125,13 @@ export interface SetupResult {
   failed?: { relay: string; code: string }[];
   /** Present only when the phrase was saved (`file`) or printing was asked for (`phrase`). */
   backup?: { file?: string; phrase?: string };
-  /** Ix on by default (ix-local.ts setupIx): found, enabled, and what to do when it isn't. */
+  /** Ix, optional and recommended (ix-local.ts setupIx): found, enabled, recommended (with the command for the person to run), and what to do when it isn't on. Never installed for them. */
   ix?: SetupIx;
 }
 
 export const BACKUP_FILE_NAME = "backup-phrase.txt";
 
-export async function setup(app: App, opts: { name?: string; relays?: string[]; backup?: "file" | "print" | "none"; backupFile?: string }): Promise<SetupResult> {
+export async function setup(app: App, opts: { name?: string; relays?: string[]; backup?: "file" | "print" | "none"; backupFile?: string; ix?: boolean }): Promise<SetupResult> {
   let created = false;
   let pub: { published: string[]; failed: { relay: string; code: string }[] } | undefined;
   if (!(await app.load(false))) {
@@ -150,10 +150,10 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     ...(pub ?? {}),
   };
   try {
-    out.ix = await setupIx(app, created);
+    out.ix = await setupIx(app, created, { reoffer: opts.ix === true });
   } catch (e) {
     // Never fails a setup: Ix is optional.
-    out.ix = { found: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
+    out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
   }
   if (opts.backup === "file") {
     const path = opts.backupFile ?? join(app.home, BACKUP_FILE_NAME);

@@ -2919,6 +2919,37 @@ export function isJobDir(dir: string): boolean {
   return /^(\/|[A-Za-z]:[\\/])/.test(dir) && parts.length >= 3 && parts[parts.length - 2] === 'jobs' && /^[\w.-]{1,128}$/.test(parts[parts.length - 1] as string) && !/[\0\n]/.test(dir)
 }
 
+/** What Claude Code's own folders for this session are found from (scratchEnv). */
+export type ScratchWhere = {
+  /** The engine session's id (`$.session.id()`): Claude Code names the session's folders by it. */
+  sid?: string
+  /** CLAUDE_CONFIG_DIR, else `<home>/.claude`. */
+  config?: string
+  home?: string
+  /** The temporary roots Claude Code may use (CLAUDE_CODE_TMPDIR, its TMPDIR, /tmp). */
+  tmp: readonly (string | undefined)[]
+  /** CLAUDE_JOB_DIR, used only when it has a job folder's shape (isJobDir). */
+  job?: string
+}
+
+/**
+ * P2P_SESSION_SCRATCH for the CLI (packages/p2p projects.ts SessionScratch): this session's id and
+ * where Claude Code keeps its per-session folders (`<tmp>/claude-<uid>/<project>/<sid>`,
+ * `<config>/projects/<project>/<sid>`, the job folder). The CLI checks every one of them on real
+ * paths and matches the exact id; a path there binds no project of its own. Undefined without an id.
+ */
+export function scratchEnv(w: ScratchWhere): string | undefined {
+  const abs = (x: string | undefined) => (typeof x === 'string' && x.length <= 4096 && /^(\/|[A-Za-z]:[\\/])/.test(x) && !/[\0\n]/.test(x) ? x.replace(/(.)[\\/]+$/, '$1') : undefined)
+  if (typeof w.sid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(w.sid)) return undefined
+  const home = abs(w.home)
+  const config = abs(w.config) ?? (home ? `${home}${/^[A-Za-z]:\\/.test(home) ? '\\' : '/'}.claude` : undefined)
+  const tmp = [...new Set(w.tmp.map(abs).filter((x): x is string => x !== undefined))].slice(0, 4)
+  const job = w.job && isJobDir(w.job) ? abs(w.job) : undefined
+  if (config === undefined && tmp.length === 0) return undefined
+
+  return JSON.stringify({ sid: w.sid, tmp, ...(config ? { config } : {}), ...(job ? { job } : {}) })
+}
+
 /** Whether `path` is `dir` or under it (either separator, case-insensitive on a drive path). */
 export function isUnder(path: string, dir: string): boolean {
   const norm = (x: string) => x.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -3682,4 +3713,136 @@ export function queuedNote(address: string, r: { state?: string; lastSeen?: numb
   const seen = r.lastSeen !== undefined ? ` (last seen ${ago(r.lastSeen)})` : ''
 
   return `${address} is offline${seen}; queued over Peer2Peer (end-to-end encrypted): it is delivered when that session reconnects (${expiry}). Don't send it again; its reply, if any, arrives as a <cross-session-message from="${address}">.`
+}
+
+// ── Ix: optional, recommended, never installed by an agent ─────────────────
+
+/**
+ * Commands that install Ix (or fetch one of its install scripts): a fetch (curl, wget, irm, iwr,
+ * Invoke-WebRequest, Invoke-RestMethod) of an Ix install script at ix-infra.com or in the Ix
+ * repository, its Homebrew tap and formula, and an npm-family install of the Ix CLI package. Read
+ * word by word in one linear pass (it runs on every shell command an agent makes, so no regular
+ * expression here may backtrack): segments split on newlines, `;`, `&` and `|`, words on blanks,
+ * quotes and substitution marks trimmed. Not a parser: a command that builds the URL at run time
+ * isn't seen (the person's own permission rules still apply to it).
+ */
+const IX_SCRIPT_HOSTS = ['ix-infra.com/', 'raw.githubusercontent.com/ix-infrastructure/ix/']
+const FETCHERS = new Set(['curl', 'wget', 'irm', 'iwr', 'invoke-webrequest', 'invoke-restmethod'])
+const NPM_FAMILY = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const NPM_INSTALL = new Set(['i', 'in', 'install', 'add'])
+const BREW_VERBS = new Set(['tap', 'install', 'reinstall', 'upgrade'])
+const IX_MARKS = ['ix-infra.com/', 'ix-infrastructure/ix', '@ix/cli', 'brew']
+const PREFIXES = new Set(['sudo', 'doas', 'env', 'command', 'exec', 'nohup', 'time'])
+const TRIM = new Set(['"', "'", '`', '(', ')', '<', '$', '{', '}'])
+/** A URL path character as the matcher reads one (lower-cased input): a-z, 0-9, `_`, `.`, `/`, `-`. */
+const isUrlChar = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 46 || c === 47 || c === 45
+
+/** A word with quotes, parentheses and substitution marks trimmed from both ends (a loop: no backtracking). */
+function bareWord(w: string): string {
+  let a = 0
+  let b = w.length
+  while (a < b && TRIM.has(w[a] ?? '')) a++
+  while (b > a && TRIM.has(w[b - 1] ?? '')) b--
+
+  return w.slice(a, b)
+}
+
+/** A program word as run: its base name, without a Windows extension. */
+function programName(w: string): string {
+  const base = w.slice(Math.max(w.lastIndexOf('/'), w.lastIndexOf('\\')) + 1)
+
+  return base.endsWith('.exe') || base.endsWith('.cmd') ? base.slice(0, -4) : base
+}
+
+/** The words of a segment from its program on: env assignments, `sudo`-like prefixes and their flags skipped. */
+function commandWords(words: readonly string[]): string[] {
+  let i = 0
+  while (i < words.length) {
+    const w = words[i] ?? ''
+    const eq = w.indexOf('=')
+    if (PREFIXES.has(programName(w)) || w.startsWith('-') || (eq > 0 && !w.slice(0, eq).includes('/'))) i++
+    else break
+  }
+
+  return words.slice(i)
+}
+
+/** Whether the segment names an Ix install script by URL (any occurrence). */
+function namesIxScript(segment: string): boolean {
+  for (const host of IX_SCRIPT_HOSTS) {
+    let at = segment.indexOf(host)
+    while (at >= 0) {
+      let end = at + host.length
+      while (end < segment.length && isUrlChar(segment.charCodeAt(end))) end++
+      const path = segment.slice(at + host.length, end)
+      if (path.includes('install') && (path.endsWith('.sh') || path.endsWith('.ps1'))) return true
+      at = segment.indexOf(host, end)
+    }
+  }
+
+  return false
+}
+
+function segmentInstallsIx(segment: string): boolean {
+  // Every form below names one of these: the rest (most commands) costs a few substring searches.
+  if (!IX_MARKS.some(m => segment.includes(m))) return false
+  const words: string[] = []
+  let from = 0
+  for (let i = 0; i <= segment.length; i++) {
+    const c = i < segment.length ? segment.charCodeAt(i) : 32
+    if (c !== 32 && c !== 9 && c !== 13) continue
+    if (i > from) {
+      const w = bareWord(segment.slice(from, i))
+      if (w !== '') words.push(w)
+    }
+    from = i + 1
+  }
+  if (words.length === 0) return false
+  if (words.some(w => FETCHERS.has(programName(w))) && namesIxScript(segment)) return true
+  const cmd = commandWords(words)
+  const program = programName(cmd[0] ?? '')
+  const rest = cmd.slice(1)
+  if (NPM_FAMILY.has(program)) return rest.some(w => NPM_INSTALL.has(w)) && rest.some(w => w === '@ix/cli' || w.startsWith('@ix/cli@'))
+  if (program === 'brew') {
+    const verb = rest.find(w => !w.startsWith('-')) ?? ''
+    const args = rest.slice(rest.indexOf(verb) + 1).filter(w => !w.startsWith('-'))
+
+    return BREW_VERBS.has(verb) && args.some(w => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/'))
+  }
+
+  return false
+}
+
+/** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. Linear in the command's length. */
+export function isIxInstallCommand(command: string): boolean {
+  if (typeof command !== 'string' || command === '') return false
+
+  return command.toLowerCase().split(/[\n;&|]/).some(segmentInstallsIx)
+}
+
+/** The reason the permission prompt shows for an agent's Ix install (and the model reads where nobody can be asked). */
+export const IX_INSTALL_ASK =
+  'Peer2Peer: this installs Ix. Ix is optional, and installing it is your decision: approve only if you asked for it.'
+
+/** What `p2p extensions --json` says about Ix (packages/p2p ix-local.ts IxAdvice). */
+export type IxAdvice = { installed: boolean; declined: boolean; recommended: boolean; install: string }
+
+/** IxAdvice from `p2p extensions --json`'s `ix`, or undefined when absent or malformed (an older CLI). */
+export function parseIxAdvice(v: unknown): IxAdvice | undefined {
+  if (typeof v !== 'object' || v === null) return undefined
+  const o = v as Record<string, unknown>
+  if (typeof o.installed !== 'boolean' || typeof o.declined !== 'boolean' || typeof o.recommended !== 'boolean' || typeof o.install !== 'string') return undefined
+
+  return { installed: o.installed, declined: o.declined, recommended: o.recommended, install: o.install }
+}
+
+/**
+ * The once-per-session hint to the agent when Ix isn't installed and the person hasn't said no:
+ * it may suggest Ix to its user once; installing is theirs. Undefined when there is nothing to say.
+ */
+export function ixAgentHint(ix: IxAdvice | undefined): string | undefined {
+  if (!ix || !ix.recommended || ix.installed || ix.declined) return undefined
+  const cmd = inert(ix.install).slice(0, 200)
+
+  return `<peer2peer-ix>Ix isn't installed on this machine. It is optional: a local code graph that lets Peer2Peer flag semantic overlap with peers' sessions, show a change's blast radius, and keep local graph memory. You may suggest it to your user once, when it fits what they're doing, and ask whether they want it. Never install it yourself or run its installer: installing is your user's decision and action (they run \`${cmd}\` in their own terminal, then \`p2p setup --ix\`).</peer2peer-ix>`
 }

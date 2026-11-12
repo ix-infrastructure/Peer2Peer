@@ -6,7 +6,7 @@ Each item has an issue labelled `roadmap`: [roadmap issues](https://github.com/i
 
 ## Where we are today ✅
 
-- **Released on npm:** `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, **v0.1.0** and **v0.1.1**, published with provenance and always at the same version ([CHANGELOG](../CHANGELOG.md), [releasing.md](releasing.md)). The relay install scripts are pinned to the v0.1.1 source.
+- **Released on npm:** `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, **v0.1.0** and **v0.1.1**, published with provenance and always at the same version ([CHANGELOG](../CHANGELOG.md), [releasing.md](releasing.md)). One-line installers for the client are live: `curl -fsSL https://ix-infra.com/p2p/install.sh | sh` (macOS and Linux) and `irm https://ix-infra.com/p2p/install.ps1 | iex` (Windows). They install `@peer2peer/cli` and `@peer2peer/ext-ix` at one pinned version without sudo or Administrator rights, and never install Ix ([getting-started.md](getting-started.md)). The relay install scripts are pinned to the v0.1.1 source.
 - Protocol **v3, draft 3**: identities, devices, rotation, friends, circles (including open circles), rosters, envelopes, open relays, short-code invites, profiles, proofs, status `caps` and `agents`.
 - The `p2p` CLI, the open relay, the Claude Code mod, the Codex bridge and the optional Ix extension, working end to end with integration tests over real relays.
 - **Invite links** that make someone a friend and join them to the circles you chose, in one step.
@@ -16,20 +16,23 @@ Each item has an issue labelled `roadmap`: [roadmap issues](https://github.com/i
 - **Members-only relays, and relays on any machine:** a relay can admit only its group, and one install script runs a relay on Linux, macOS, Windows or a small board, with a small-device preset. See [run-a-relay-on-any-machine.md](run-a-relay-on-any-machine.md).
 - **Delivery receipts** (`shown`, `held`, `declined`, …), end-to-end encrypted, and **offline delivery**: messages wait at the relays for an offline session, or in this device's outbox when no relay can be reached.
 - **Project boundaries:** a session reaches only who every project it works in is shared with, and a private project keeps it private.
+- **Ix is optional and recommended; Peer2Peer never installs it.** At a terminal, `p2p setup` explains what Ix adds and asks `Install Ix? [y/N]` (default No). A yes only prints the install command for you to run yourself; a no is remembered, and `p2p setup --ix` asks again (and turns on the Ix extension once Ix is installed). Agents are told once per session that they may suggest Ix but must never install it, and in Claude Code an agent's command that installs Ix goes to your permission prompt.
 
 New in **v0.1.1**:
 
 - **Message history** (`p2p history`, `/peers history`, the TUI's Messages screen): what this device sent and received, encrypted at rest and kept only on this device (30 days by default).
 - **Send to another session on the same device** (`p2p send --to "<you> [ref]"`), with your agent sessions' messages held like a peer's in a session that approves its own tool calls (`p2p own-agents`), and turn caps for your own sessions.
 - **Shares that cover subfolders** (`p2p project share --subfolders`, opt-in) and **`p2p session show`**, which says what a session is bound to, who it reaches and why it is private.
-- **Ix, optional and recommended:** `p2p setup` enables the `ix` extension when it finds Ix and `@peer2peer/ext-ix` already installed, with your consent, and says how to get them otherwise. Nothing is ever installed for you. `p2p doctor` has an Ix section.
+- **An Ix section in `p2p doctor`**, and `p2p setup` turning on the `ix` extension, with your consent, when Ix and `@peer2peer/ext-ix` are already installed.
 - **Local graph memory:** with the Ix extension enabled, your own sessions in shared projects are recorded into your **local** Ix graph as they run. Every Ix call goes through one graph-target chokepoint, which today is always local.
+
+Since v0.1.1 (on `main`, not yet released): the one-line installers and the Ix prompt above, and quieter project boundaries: Claude Code's own per-session folders (task output, saved tool results, the job folder) no longer bind a project, and a session may work in up to 64 projects (its reach is still the intersection of all of them).
 
 ## Ix as the context layer
 
 Epic [#41](https://github.com/ix-infrastructure/Peer2Peer/issues/41). Peer2Peer carries live events between agents and people, and Ix graphs are the durable context they point into: a local graph on every machine that has Ix, and optionally a shared graph for a team. The protocol core (`packages/core`, the relay, the wire format) stays free of Ix code, so the open network works for any client, and Ix stays optional.
 
-1. ✅ **Ix, optional and recommended** (v0.1.1). `p2p setup` detects Ix and `@peer2peer/ext-ix` and offers to enable the extension; it never installs anything. Without Ix everything still works, with today's fallbacks.
+1. ✅ **Ix, optional and recommended.** `p2p setup` detects Ix and offers to turn on the extension (v0.1.1); without Ix it asks, default No, and only prints the install command, and `p2p setup --ix` asks again; agents may suggest Ix once per session but never install it. Peer2Peer never installs Ix. Without Ix everything still works, with today's fallbacks.
 2. ✅ **Local graph as memory** (v0.1.1). Sessions in shared projects are written into your local graph as they happen. Private projects are never recorded.
 3. **Shared graph** (next). A team graph in the cloud: a project shared with a circle writes its sessions, notes and context there, so every member's agents can query it as well as receive pushed events. Its API contract is settled first.
 4. **Real time over Peer2Peer, durable in the graph** (planned). Live events (status, messages, "changed X, affects Y") stay end-to-end encrypted envelopes, and each one links to graph nodes, so an agent can pull full context on demand.
