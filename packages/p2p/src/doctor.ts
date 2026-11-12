@@ -21,6 +21,11 @@
 // bounded (P2P_DOCTOR_TIMEOUT_MS, default 5 s, never more than the connect
 // timeout), and so is every local step, so the command can't hang. Nothing
 // secret is ever in the output: no keys, caps, invite or link codes, envelopes.
+//
+// For this device it ends with "Where your data goes" (dataFlow): what travels end-to-end
+// encrypted and what a relay still sees, where message history is kept, and per project the graph
+// target (projects.ts graphTarget's rule, as `p2p project show` prints it) and that Ix keeps what it
+// gets in plaintext.
 
 import { readdirSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -53,13 +58,14 @@ import { defaultRelays } from "./config.js";
 import { CliError } from "./errors.js";
 import { readCapped, RelayConnection } from "./relay-client.js";
 import { rosterAudience, sessionRef } from "./sessions.js";
-import type { PeerStatusRec } from "./state.js";
+import { EVENT_RETENTION_MS, type PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
 import { extIxInstalled, ixBinary, ixDeclined, IX_INSTALL_URL, ixInstallLine, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
 import { personHere } from "./projects.js";
 import { graphMemoryReport } from "./graph-memory.js";
 import { graphMemoryEnabled } from "./config.js";
-import { describeGraphTarget, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir } from "./projects.js";
+import { historySettings } from "./history.js";
+import { graphPlaintextNote, graphTargetLine, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir, type GraphTarget } from "./projects.js";
 
 export type CheckStatus = "ok" | "fail" | "unknown";
 
@@ -82,6 +88,35 @@ export interface DoctorResult {
   devices?: PeerDevice[];
   /** About a user: the known features one of you has and the other lacks. */
   unavailable?: { theyLack: string[]; weLack: string[] };
+  /** This device: where each kind of data goes ("Where your data goes"). */
+  dataFlow?: DataFlow;
+}
+
+/** The threat model, which lists everything a relay sees. */
+export const THREAT_MODEL_DOC = "docs/security/threat-model.md";
+/** What is encrypted and what isn't, on one page. */
+export const ENCRYPTION_DOC = "docs/security/encryption.md";
+/** What a relay sees besides an envelope's ciphertext (the threat model, "What each party can see"). */
+export const RELAY_METADATA: readonly string[] = ["which mailboxes send to which", "sizes", "timing", "each envelope's kind and session id", "IP addresses"];
+
+/**
+ * Where each kind of data goes, as `p2p doctor` says it for this device. Facts, not checks: the
+ * graph targets come from projects.ts (graphTarget's rule, the same as `p2p project show`).
+ */
+export interface DataFlow {
+  /** Messages, statuses, receipts, rosters and Ix items shared with peers: end-to-end encrypted envelopes. */
+  wire: { encryption: "end-to-end"; relaysSee: "ciphertext and metadata"; metadata: readonly string[]; doc: string };
+  /** Message history (history.ts): never leaves this device; sealed at rest, with its key beside it. */
+  history: { where: "this device only"; recording: boolean; encryptedAtRest: true; keyBesideIt: true; eventLogPlaintextDays: number };
+  /** Graph memory (graph-memory.ts): on only with Ix, the Ix extension, and an Ix with a local `ix note`. */
+  graphMemory: { on: boolean; detail: string };
+  /** Each project's graph target (the project here first), at most MAX_GRAPH_ROWS of them. */
+  graphs: { id: string; name: string; here: boolean; target: GraphTarget; line: string; plaintext: string }[];
+  /** Projects not listed past MAX_GRAPH_ROWS. */
+  graphsNotListed: number;
+  /** Whether any listed project's target is a shared (cloud) graph. None today: every target is local. */
+  anyShared: boolean;
+  doc: string;
 }
 
 export interface DoctorOptions {
@@ -486,7 +521,7 @@ async function circlesOf(app: App, ms: number): Promise<CircleSummary[]> {
   return (await bounded(listCircles(app), ms)).value ?? [];
 }
 
-async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, reports: readonly RelayReport[]): Promise<void> {
+async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, reports: readonly RelayReport[]): Promise<DataFlow> {
   const view = (await bounded(app.view(app.userId), ms)).value;
   const name = view?.head.name ?? app.self?.name ?? "?";
   c.add("identity", "ok", "identity", `${displayAddress(app.userId, name)} on device ${app.did}${app.isKeyholder ? " (key holder)" : ""}`);
@@ -596,8 +631,20 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
     );
   }
 
-  await ixChecks(c, app, ms);
+  const ix = await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
+  return dataFlowOf(app, ix);
+}
+
+/** "Where your data goes" for this device (no probes: what the code does, and this device's settings). */
+export function dataFlowOf(app: Pick<App, "env" | "home">, ix: Pick<DataFlow, "graphMemory" | "graphs" | "graphsNotListed">): DataFlow {
+  return {
+    wire: { encryption: "end-to-end", relaysSee: "ciphertext and metadata", metadata: RELAY_METADATA, doc: THREAT_MODEL_DOC },
+    history: { where: "this device only", recording: historySettings(app).enabled, encryptedAtRest: true, keyBesideIt: true, eventLogPlaintextDays: Math.round(EVENT_RETENTION_MS / 86_400_000) },
+    ...ix,
+    anyShared: ix.graphs.some((g) => g.target.kind === "shared"),
+    doc: ENCRYPTION_DOC,
+  };
 }
 
 
@@ -614,12 +661,14 @@ const MAX_GRAPH_ROWS = 10;
  * `ix` runs as ext-ix runs it (ix-local.ts): absolute path, allowlisted environment, the local
  * endpoint pinned, read-only commands, bounded.
  */
-export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
+export async function ixChecks(c: Checks, app: App, ms: number): Promise<Pick<DataFlow, "graphMemory" | "graphs" | "graphsNotListed">> {
   const local = localGraphEndpoint(app.env, app.file);
   const target = { endpoint: local };
   const bin = ixBinary(app.env);
   const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
+  let memory: DataFlow["graphMemory"];
   if (!bin) {
+    memory = { on: false, detail: "off: Ix isn't installed" };
     c.add(
       "ix",
       "unknown",
@@ -635,7 +684,7 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
-    if (on) await graphMemoryChecks(c, app, bin, target, ms);
+    memory = on ? await graphMemoryChecks(c, app, bin, target, ms) : { on: false, detail: "off: the Ix extension isn't enabled" };
     // Never followed elsewhere: a loopback listener that redirects is not the local backend.
     const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== undefined && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
@@ -661,11 +710,16 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
   const rows: { id: string; name: string; repoPrivate?: true }[] = [{ id: here.id, name: here.name, ...(here.repoPrivate ? { repoPrivate: true as const } : {}) }];
   const all = (await bounded(listProjects(app), ms)).value ?? [];
   for (const p of all) if (!rows.some((r) => r.id === p.id)) rows.push({ id: p.id, name: p.name });
+  const graphs: DataFlow["graphs"] = [];
   for (const r of rows.slice(0, MAX_GRAPH_ROWS)) {
     const t = projectGraphTarget(app, r, doc);
-    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t)}${t.kind === "local" ? `: ${t.why}` : ""}`);
+    const line = graphTargetLine(t);
+    graphs.push({ id: r.id, name: peer(r.name), here: r.id === here.id, target: t, line, plaintext: graphPlaintextNote(t) });
+    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, line);
   }
-  if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
+  const more = Math.max(0, rows.length - MAX_GRAPH_ROWS);
+  if (more > 0) c.add("graph:more", "ok", "graphs of other projects", `${more} more not listed (run \`p2p project show\` in each)`);
+  return { graphMemory: memory, graphs, graphsNotListed: more };
 }
 
 /**
@@ -673,10 +727,10 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
  * so memory stays off), and what `p2p watch` wrote, queued and dropped. Never a failure: Peer2Peer
  * works without it.
  */
-async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { endpoint: string }, ms: number): Promise<void> {
+async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { endpoint: string }, ms: number): Promise<DataFlow["graphMemory"]> {
   if (!graphMemoryEnabled(app.env, app.home)) {
     c.add("ix-memory", "ok", "Ix graph memory", 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)');
-    return;
+    return { on: false, detail: 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)' };
   }
   const support = (await bounded(ixMemorySupport(bin, app.env, target, ms), ms + 500)).value;
   const doc = (await bounded(graphMemoryReport(app), ms)).value;
@@ -699,6 +753,10 @@ async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { end
     c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
   }
   if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
+  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${target.endpoint})` };
+  if (support === "pro") return { on: false, detail: "off: Ix Pro is installed (its `ix note` writes to the cloud), so nothing is written" };
+  if (support === "none") return { on: false, detail: "off: this Ix has no local `ix note`" };
+  return { on: false, detail: "off until Peer2Peer can tell that this Ix has a local `ix note`" };
 }
 
 // ---------------------------------------------------------------------------
@@ -924,8 +982,8 @@ export async function doctor(app: App, o: DoctorOptions): Promise<DoctorResult> 
   }
   const reports = await probeRelays(app, app.relays, ms, true, app.userId);
   if (scope === "device") {
-    await deviceChecks(c, app, o, ms, reports);
-    return { scope, version: o.version, checks: c.list, summary: summarize(c.list) };
+    const dataFlow = await deviceChecks(c, app, o, ms, reports);
+    return { scope, version: o.version, checks: c.list, summary: summarize(c.list), dataFlow };
   }
   // About a user: who they are first (a userId needn't be known yet).
   const input = o.user!.trim();
@@ -944,8 +1002,8 @@ export async function doctor(app: App, o: DoctorOptions): Promise<DoctorResult> 
     return { scope, version: o.version, user: { input }, checks: c.list, summary: summarize(c.list) };
   }
   if (userId === app.userId) {
-    await deviceChecks(c, app, o, ms, reports);
-    return { scope: "device", version: o.version, user: { input, userId, address: await app.addressOf(userId) }, checks: c.list, summary: summarize(c.list) };
+    const dataFlow = await deviceChecks(c, app, o, ms, reports);
+    return { scope: "device", version: o.version, user: { input, userId, address: await app.addressOf(userId) }, checks: c.list, summary: summarize(c.list), dataFlow };
   }
   // This device first, in one line (its details are `p2p doctor` with no user).
   const dev = new Checks();
@@ -992,7 +1050,24 @@ async function versionChecks(c: Checks, app: App, userId: string): Promise<Pick<
   return { devices, unavailable };
 }
 
-/** Human output: one line per check (✓ ✗ ?), with its fix indented below. */
+/** The heading of the data-flow section (pretty.ts styles it). */
+export const DATA_FLOW_HEADING = "Where your data goes";
+
+/** "Where your data goes", in plain words: one line per kind of data, then one per project's graph. */
+export function formatDataFlow(d: DataFlow): string[] {
+  const lines = [`${DATA_FLOW_HEADING} (${d.doc})`];
+  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays see only ciphertext plus metadata (${d.wire.metadata.join(", ")}): ${d.wire.doc}`);
+  lines.push(
+    `  message history: ${d.history.recording ? "on this device only" : "not recording (history.enabled is false, or P2P_HISTORY=0); what was kept stays on this device only"}, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to ${d.history.eventLogPlaintextDays} days of recent messages in the clear`,
+  );
+  lines.push(`  graph memory: ${d.graphMemory.detail}`);
+  for (const g of d.graphs) lines.push(`  graph of project ${g.name}${g.here ? " (here)" : ""}: ${g.line} (${g.plaintext})`);
+  if (d.graphsNotListed > 0) lines.push(`  ${d.graphsNotListed} more project${d.graphsNotListed === 1 ? "" : "s"} not listed: run \`p2p project show\` in each`);
+  if (!d.anyShared) lines.push(`  cloud graph: none; no ${d.graphsNotListed > 0 ? "listed " : ""}project writes to one (a shared team graph is planned: opt-in per circle, and its operator can read what it holds)`);
+  return lines;
+}
+
+/** Human output: one line per check (✓ ✗ ?), with its fix indented below, then where data goes. */
 export function formatDoctor(r: DoctorResult): string {
   const head = r.scope === "user" && r.user ? `p2p doctor: can you see ${r.user.address ?? r.user.input}?` : "p2p doctor: this device";
   const lines = [head, ""];
@@ -1000,6 +1075,7 @@ export function formatDoctor(r: DoctorResult): string {
     lines.push(`${MARK[x.status]} ${x.title}: ${x.detail}`);
     if (x.fix) lines.push(`    ${x.status === "unknown" ? "to tell" : "fix"}: ${x.fix}`);
   }
+  if (r.dataFlow) lines.push("", ...formatDataFlow(r.dataFlow));
   lines.push("", `${r.summary.ok} ✓  ${r.summary.fail} ✗  ${r.summary.unknown} ?`);
   return lines.join("\n");
 }

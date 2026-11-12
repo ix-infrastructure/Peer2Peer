@@ -14,7 +14,7 @@ import { COLOR, PLAIN, type Style } from "./prompt/picker.js";
 import { cell, clean, displayWidth } from "./tui/sanitize.js";
 import type { CircleSummary } from "./circle-ops.js";
 import type { CodeRow, InviteCodeResult } from "./codes.js";
-import type { DoctorResult } from "./doctor.js";
+import { DATA_FLOW_HEADING, type DoctorResult } from "./doctor.js";
 import type { PeerRow } from "./sessions.js";
 import type { FriendRow } from "./social.js";
 
@@ -228,7 +228,7 @@ export function prettyDoctor(r: DoctorResult, plain: string, p: Pretty): string 
     .split("\n")
     .map((l, i) => {
       const s = cell(l, 400);
-      if (i === 0) return st.bold(s);
+      if (i === 0 || s.startsWith(DATA_FLOW_HEADING)) return st.bold(s);
       if (s.startsWith("✓")) return st.green("✓") + s.slice(1);
       if (s.startsWith("✗")) return st.red("✗") + s.slice(1);
       if (s.startsWith("?")) return st.yellow("?") + s.slice(1);
