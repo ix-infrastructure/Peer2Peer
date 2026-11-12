@@ -162,7 +162,7 @@ A device that holds your identity key can sign for you even after you revoke it.
 
 ## Ix items (optional)
 
-With the Ix extension, peers' sessions can share Ix context: a session note, a reference to part of the graph ("look at `src/auth/*`"), or a blast-radius report. The plugin ships a copy of `@peer2peer/ext-ix` in `ext/` and passes `<plugin>/ext` to `p2p` in `P2P_EXTENSION_PATH` (ahead of yours), so there's nothing to install. **On a new install, `/peers setup` turns it on when Ix is installed** (Ix itself is never installed for you: setup says where to get it). An existing install isn't changed: you get a one-time notice in a terminal, and you enable it once per machine:
+With the Ix extension, peers' sessions can share Ix context: a session note, a reference to part of the graph ("look at `src/auth/*`"), or a blast-radius report. The plugin ships a copy of `@peer2peer/ext-ix` in `ext/` and passes `<plugin>/ext` to `p2p` in `P2P_EXTENSION_PATH` (ahead of yours), so there's nothing to install. Ix itself is optional and recommended, and **Peer2Peer never installs it for you**: on a new install, `/peers setup` turns the extension on when Ix is already installed; otherwise run `p2p setup` in your own terminal, which says what Ix adds and gives you the install command to run yourself. When Ix isn't installed (and you haven't said no to it at setup), Claude is told once per session that it may suggest Ix to you once and must never install it; a command of Claude's that installs Ix goes to your permission prompt, whatever the mode. An existing install isn't changed: you get a one-time notice in a terminal, and you enable it once per machine:
 
 ```
 node <plugin>/bin/p2p.mjs extensions enable ix     # or: p2p extensions enable ix
