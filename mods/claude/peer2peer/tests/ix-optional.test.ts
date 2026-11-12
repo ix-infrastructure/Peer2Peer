@@ -60,32 +60,45 @@ describe('Ix install commands (pure)', () => {
     ]) expect(isIxInstallCommand(c), c).toBe(false)
   })
 
-  test('linear: 100 KB adversarial commands are judged in well under 50 ms each', () => {
-    const inputs = [
-      'npm i '.repeat(17_000),
-      `npm i ${'i '.repeat(50_000)}`,
-      'ix-infra.com/'.repeat(8_000),
-      `curl ${'ix-infra.com/install'.repeat(5_000)}`,
-      `brew install ${'-x '.repeat(33_000)}`,
-      `curl ${'raw.githubusercontent.com/ix-infrastructure/ix/'.repeat(2_000)}`,
-      '"\''.repeat(50_000),
-      ';|&\n'.repeat(25_000),
-      `curl ${'"'.repeat(100_000)}`,
-      ';ix'.repeat(33_000),
-      ';brew ix'.repeat(12_000),
-      ';curl ix-infra.com/install.s'.repeat(3_500),
-      ';npm @ix/cli'.repeat(8_000),
+  test('linear: 100 KB adversarial commands take about 10x what 10 KB ones do, never polynomially more', () => {
+    // Each pattern at about 10 KB and about 100 KB (`k` scales the repeats). A linear matcher grows
+    // about 10x; the regular expressions this replaced grew about 100x (quadratic) or 1000x (cubic:
+    // seconds at 10 KB). Timed as growth, not wall clock: CI runners are several times slower.
+    const patterns: ((k: number) => string)[] = [
+      k => 'npm i '.repeat(1_700 * k),
+      k => `npm i ${'i '.repeat(5_000 * k)}`,
+      k => 'ix-infra.com/'.repeat(800 * k),
+      k => `curl ${'ix-infra.com/install'.repeat(500 * k)}`,
+      k => `brew install ${'-x '.repeat(3_300 * k)}`,
+      k => `curl ${'raw.githubusercontent.com/ix-infrastructure/ix/'.repeat(200 * k)}`,
+      k => '"\''.repeat(5_000 * k),
+      k => ';|&\n'.repeat(2_500 * k),
+      k => `curl ${'"'.repeat(10_000 * k)}`,
+      k => ';ix'.repeat(3_300 * k),
+      k => ';brew ix'.repeat(1_200 * k),
+      k => ';curl ix-infra.com/install.s'.repeat(350 * k),
+      k => ';npm @ix/cli'.repeat(800 * k),
     ]
-    for (const input of inputs) isIxInstallCommand(input.slice(0, 1000))
-    // The best of three runs: a polynomial matcher takes seconds here, so a stray GC pause is no signal.
-    for (const input of inputs) {
-      let best = Infinity
-      for (let i = 0; i < 3; i++) {
+    // The best of five runs: a stray GC pause is no signal.
+    const best = (input: string) => {
+      let ms = Infinity
+      for (let i = 0; i < 5; i++) {
         const t = performance.now()
         isIxInstallCommand(input)
-        best = Math.min(best, performance.now() - t)
+        ms = Math.min(ms, performance.now() - t)
       }
-      expect(best, input.slice(0, 30)).toBeLessThan(50)
+
+      return ms
+    }
+    for (const make of patterns) best(make(1))
+    for (const make of patterns) {
+      const small = best(make(1))
+      const large = best(make(10))
+      const name = make(1).slice(0, 30)
+      // Linear: about 10x, allowed 30x plus 5 ms of timer noise; quadratic would be about 100x.
+      expect(large, `${name}: ${small.toFixed(2)} ms -> ${large.toFixed(2)} ms`).toBeLessThan(30 * small + 5)
+      // And bounded outright: the cubic form took minutes at 40 KB.
+      expect(large, name).toBeLessThan(500)
     }
   })
 
