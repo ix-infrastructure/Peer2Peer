@@ -38,6 +38,8 @@ import {
   stripPaths,
 } from '../hooks/lib'
 import { ANA_ID, BEN, BEN_ID, CIRCLE } from './world'
+// Shared with the Codex bridge's tests (packages/codex-bridge lib.test.ts): both guards answer each the same.
+import { SEND_VECTORS as sendVectors } from './send-from-session.vectors'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -271,6 +273,26 @@ describe('review L2: the terminal UI under a pty wrapper is refused', () => {
       `git -c alias.t='!p2p tui' t`,
       // A substitution inside a text-first command runs (already refused before this issue: kept so).
       'echo "$(p2p tui)"',
+      // Review of #66: stdin by its path, and more text-first commands that run one of their own.
+      "echo 'console.log(1)' | node # p2p",
+      'cat x.js | node /dev/stdin; p2p ls',
+      'cat x.py | python3 /dev/fd/0; p2p ls',
+      'cat x.py | python3 /proc/self/fd/0; p2p ls',
+      'cat x.py | timeout 5 python3; p2p ls',
+      'cat x.py | /usr/bin/env python3; p2p ls',
+      'cat x.py | sudo -u me python3; p2p ls',
+      "sed -n '1e p2p tui' f",
+      "sed 's/x/p2p tui/e' f",
+      "sed 's/x/p2p t\"\"ui/ge' f",
+      "git -c core.pager='p2p tui' log",
+      "git -c core.editor='p2p tui' commit",
+      "git -c core.sshCommand='p2p tui' fetch",
+      'git bisect run p2p tui',
+      'git submodule foreach p2p tui',
+      "git filter-branch --tree-filter 'p2p tui' HEAD",
+      "git difftool --extcmd 'p2p tui'",
+      'rg --pre p2p x tui',
+      "git -c core.pager='p2p t\"\"ui' log",
     ]) expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
     // A script or module named, inline code's own check, version and help, and text: unchanged.
     for (const cmd of [
@@ -283,6 +305,11 @@ describe('review L2: the terminal UI under a pty wrapper is refused', () => {
       `awk '/tui/ {print}' notes.md; p2p ls`,
       'git log --oneline -- packages/p2p/src/tui && p2p ls',
       'echo "try p2p tui"',
+      'echo p2p tui',
+      "git commit -m 'run p2p tui later'",
+      "grep -r 'p2p tui' docs",
+      "sed -n 's/tui/TUI/p' notes.md; p2p ls",
+      'p2p ls --json | node --version',
     ]) expect([cmd, uncheckableShell(cmd)]).toEqual([cmd, null])
   })
 })
@@ -382,6 +409,13 @@ describe('L4: shell commands that run mutating p2p verbs are refused', () => {
       'p2p send --to --no-input --from-session=s1',
       'p2p --no-input send --to bob -- --from-session=s1',
     ]) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, 'send (no --from-session)'])
+    // Review of #66: the shell makes the argv, and the guard can't expand it. A word it can't read as
+    // written (quotes, escapes, expansions, globs, braces, a redirection's target) up to the deciding
+    // --from-session fails closed: refused. The vectors pin this guard and the Codex bridge's together.
+    for (const v of sendVectors) expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb])
+    expect(sendVectors.length).toBeGreaterThan(80)
+    // env -S: the words come from a string the guard reads again, with no source to check: refused.
+    expect(mutatingP2PVerb("env -S 'p2p send --from-session s1 --to bob hi'")).toBe('send (no --from-session)')
     // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
     for (const cmd of ['p2p send hi --from-session=s1 --to bob', 'p2p send --no-input --to bob --from-session s1 hi', 'p2p send --from-session -- --to bob hi', 'p2p send --to=bob --from-session=s1 -- --to'])
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null])

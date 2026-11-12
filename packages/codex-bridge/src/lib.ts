@@ -523,29 +523,47 @@ const MUTATING_TWO = new Set([
  */
 const MUTATING_FIRST = new Set(["receipt", "own-agents"]);
 
-/** Shell words of one simple command (shellTokens: linear, quote-aware, adjacent parts joined). */
-function shellWords(segment: string): string[] {
-  return shellTokens(segment);
-}
 
 /** `p2p send` options that take the next word as their value, whatever it is (`--` and `--from-session=x` included). */
 const SEND_VALUE_OPTIONS = new Set(["--to", "--project-dir"]);
 
+/** Characters that can make a shell word other than what it reads as here: expansions, globs, quoting, or a redirection (`<`: shellTokens marks its target). */
+const NOT_PLAIN = "$`{}*?[]~\\'\"<>";
+
+/** A word written as plain text (its source, from shellTokens' `raws`): what it reads as is what the shell passes. */
+function isPlainWord(raw: string | undefined): boolean {
+  if (raw === undefined || raw === "" || raw.includes("__SUB__")) return false;
+  for (const ch of raw) if (NOT_PLAIN.includes(ch)) return false;
+  return true;
+}
+
 /**
- * Whether a `p2p send` command line (the words after the CLI's name) gives --from-session, read as
- * the CLI reads it (the mod's `sendNamesFromSession`): `--no-input` before the first `--` dropped
- * first (cli.ts main), nothing after a `--` (text from there on, even with the `--` before `send`),
- * and never another option's value (`--to --from-session=x` sends to "--from-session=x" from the
- * `tui` session). Linear.
+ * Whether a `p2p send` command line gives --from-session as the CLI's option (the mod's
+ * `sendNamesFromSession`; both are pinned to the same vectors). `args` are the words after the CLI's
+ * name and `raws` their source text. Read the way the CLI reads its argv: `--no-input` before the
+ * first `--` dropped first (cli.ts main), nothing after a `--` (text from there on, even with the
+ * `--` before `send`), and never another option's value (`--to --from-session=x` sends to
+ * "--from-session=x" from the `tui` session). The shell makes that argv, and this can't expand it:
+ * every word up to and including the deciding one must be written plain (no expansion, glob, brace,
+ * tilde, quote or escape), or the answer is no, and the guard refuses. Linear.
  */
-export function sendNamesFromSession(args: readonly string[]): boolean {
+export function sendNamesFromSession(args: readonly string[], raws: readonly (string | undefined)[]): boolean {
   const end = args.indexOf("--");
-  const words = [...(end < 0 ? args : args.slice(0, end)).filter((w) => w !== "--no-input"), ...(end < 0 ? [] : args.slice(end))];
+  const words: { w: string; raw: string | undefined }[] = [];
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k] ?? "";
+    if (w === "--no-input" && (end < 0 || k < end) && isPlainWord(raws[k])) continue;
+    words.push({ w, raw: raws[k] });
+  }
   for (let i = 0; i < words.length; i++) {
-    const w = words[i] ?? "";
+    const { w, raw } = words[i] as { w: string; raw: string | undefined };
+    if (!isPlainWord(raw)) return false;
     if (w === "--") return false;
     if (w === "--from-session" || w.startsWith("--from-session=")) return true;
-    if (SEND_VALUE_OPTIONS.has(w)) i++;
+    if (SEND_VALUE_OPTIONS.has(w)) {
+      i++;
+      if (!isPlainWord(words[i]?.raw)) return false;
+    }
   }
   return false;
 }
@@ -575,7 +593,8 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     );
   };
   for (const segment of segments) {
-    const words = shellWords(segment);
+    const raws: string[] = [];
+    const words = shellTokens(segment, false, undefined, undefined, raws);
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
       if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
@@ -601,7 +620,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (const w of after) if (MUTATING_ONE.has(w)) return w;
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
-    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1))) return "send (no --from-session)";
+    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1))) return "send (no --from-session)";
   }
   return null;
 }
@@ -834,23 +853,31 @@ export const LITERAL = '\uE000'
  * `starts`: the index of each word that begins a simple command (the first word, and the first
  * after an unquoted `;`, `|`, `&`, `(`, `)` or newline).
  */
-export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>): string[] {
+export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>, raws?: string[]): string[] {
   const out: string[] = [];
   let cur = '';
   let has = false;
   let q: '' | "'" | '"' | '$' = '';
   let fresh = true;
-  const push = () => {
+  // Where the word being read starts in `command` (raws: each word's source text, quotes and all).
+  let start = -1;
+  // The next word is a redirection's target (`<<< x`, `> f`): its source is marked with `<`, never argv.
+  let redir = false;
+  const push = (end: number) => {
     if (has) {
+      raws?.push((redir ? '<' : '') + command.slice(start, end));
+      redir = false;
       if (fresh) starts?.add(out.length);
       fresh = false;
       out.push(cur);
     }
     cur = '';
     has = false;
+    start = -1;
   }
   for (let i = 0; i < command.length; i++) {
     const c = command[i] as string;
+    if (start < 0 && !' \t\n\r;|&()<>'.includes(c)) start = i;
     if (q === "'") {
       if (c === "'") q = ''
       // A `$` or backtick inside single quotes is text, never an expansion (marked when asked).
@@ -906,7 +933,8 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
       continue;
     }
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
-      push();
+      push(i);
+      if (c === '<' || c === '>') redir = true;
       if (c === '\n' || ';|&()'.includes(c)) fresh = true;
 
       continue;
@@ -914,7 +942,7 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
     cur += c;
     has = true;
   }
-  push();
+  push(command.length);
 
   return out;
 }

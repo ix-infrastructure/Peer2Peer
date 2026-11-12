@@ -27463,21 +27463,38 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "project private"
 ]);
 var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
-function shellWords(segment) {
-  return shellTokens(segment);
-}
 var SEND_VALUE_OPTIONS = /* @__PURE__ */ new Set(["--to", "--project-dir"]);
-function sendNamesFromSession(args) {
+var NOT_PLAIN = "$`{}*?[]~\\'\"<>";
+function isPlainWord(raw) {
+  if (raw === void 0 || raw === "" || raw.includes("__SUB__"))
+    return false;
+  for (const ch of raw)
+    if (NOT_PLAIN.includes(ch))
+      return false;
+  return true;
+}
+function sendNamesFromSession(args, raws) {
   const end = args.indexOf("--");
-  const words = [...(end < 0 ? args : args.slice(0, end)).filter((w) => w !== "--no-input"), ...end < 0 ? [] : args.slice(end)];
+  const words = [];
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k] ?? "";
+    if (w === "--no-input" && (end < 0 || k < end) && isPlainWord(raws[k]))
+      continue;
+    words.push({ w, raw: raws[k] });
+  }
   for (let i = 0; i < words.length; i++) {
-    const w = words[i] ?? "";
+    const { w, raw } = words[i];
+    if (!isPlainWord(raw))
+      return false;
     if (w === "--")
       return false;
     if (w === "--from-session" || w.startsWith("--from-session="))
       return true;
-    if (SEND_VALUE_OPTIONS.has(w))
+    if (SEND_VALUE_OPTIONS.has(w)) {
       i++;
+      if (!isPlainWord(words[i]?.raw))
+        return false;
+    }
   }
   return false;
 }
@@ -27491,7 +27508,8 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
     return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || binNames.includes(w);
   };
   for (const segment of segments) {
-    const words = shellWords(segment);
+    const raws = [];
+    const words = shellTokens(segment, false, void 0, void 0, raws);
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
       if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
@@ -27522,7 +27540,7 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
     for (const w of after2)
       if (MUTATING_ONE.has(w))
         return w;
-    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1)))
+    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1)))
       return "send (no --from-session)";
   }
   return null;
@@ -27692,14 +27710,18 @@ function editedFiles(toolName, input) {
   return [...out];
 }
 var LITERAL = "";
-function shellTokens(command, markLiteral = false, substs, starts) {
+function shellTokens(command, markLiteral = false, substs, starts, raws) {
   const out = [];
   let cur = "";
   let has = false;
   let q = "";
   let fresh = true;
-  const push = () => {
+  let start = -1;
+  let redir = false;
+  const push = (end) => {
     if (has) {
+      raws?.push((redir ? "<" : "") + command.slice(start, end));
+      redir = false;
       if (fresh)
         starts?.add(out.length);
       fresh = false;
@@ -27707,9 +27729,12 @@ function shellTokens(command, markLiteral = false, substs, starts) {
     }
     cur = "";
     has = false;
+    start = -1;
   };
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
+    if (start < 0 && !" 	\n\r;|&()<>".includes(c))
+      start = i;
     if (q === "'") {
       if (c === "'")
         q = "";
@@ -27764,7 +27789,9 @@ function shellTokens(command, markLiteral = false, substs, starts) {
       continue;
     }
     if (c === " " || c === "	" || c === "\n" || c === "\r" || ";|&()<>".includes(c)) {
-      push();
+      push(i);
+      if (c === "<" || c === ">")
+        redir = true;
       if (c === "\n" || ";|&()".includes(c))
         fresh = true;
       continue;
@@ -27772,7 +27799,7 @@ function shellTokens(command, markLiteral = false, substs, starts) {
     cur += c;
     has = true;
   }
-  push();
+  push(command.length);
   return out;
 }
 function closingParen(s2, j) {

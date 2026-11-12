@@ -1914,13 +1914,40 @@ export function blankShellComments(command: string): string {
 const TEXT_FIRST_WORDS = new Set(['echo', 'printf', 'sed', 'awk', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'git', 'gh', 'jq', 'cat', 'tee', 'head', 'tail', 'less', 'more', 'wc', 'diff'])
 
 /**
+ * sed running a command: the `e` command (`1e cmd`, `$e`) or the `e` flag of `s///e` (other flags
+ * around it). A scan of the segment (linear), erring towards "runs".
+ */
+function sedRuns(segment: string): boolean {
+  const FLAGS = 'gpiImMw0123456789'
+  for (let i = 0; i < segment.length; i++) {
+    if (segment[i] !== 'e') continue
+    const after = segment[i + 1] ?? ''
+    const ends = after === '' || ' \t\n;}\'"'.includes(after)
+    let k = i - 1
+    while (k >= 0 && FLAGS.includes(segment[k] as string)) k--
+    if (segment[k] === '/' && (ends || FLAGS.includes(after))) return true
+    const before = segment[i - 1] ?? ''
+    if ((before === '' || '0123456789$;{\'" '.includes(before)) && ends) return true
+  }
+
+  return false
+}
+
+/**
  * A text-first command that runs a command of its own (issue #3): awk's system() or a getline from a
- * command, a git alias (`-c alias.x='!…'`) or a rebase's exec. Its text is then no longer only text.
- * Plain substring tests (linear); a substitution (`echo "$(…)"`) is mutatingP2PVerb's (simpleCommands).
+ * command; sed's `e` command or `s///e` flag; git with any `-c`/`--config-env` setting (core.pager,
+ * core.editor, core.sshCommand, an alias's `!`, …), a rebase's exec, `bisect run`, `submodule foreach`,
+ * `filter-branch`, a difftool's or mergetool's command; ripgrep's `--pre`; a gh alias or extension. Its
+ * text is then no longer only text. Plain substring tests (linear), erring towards "runs"; a
+ * substitution (`echo "$(…)"`) is mutatingP2PVerb's (simpleCommands).
  */
 function textRuns(base: string, segment: string): boolean {
-  if (base === 'awk') return segment.includes('system') || segment.includes('getline')
-  if (base === 'git') return segment.includes('alias.') || segment.includes('--exec') || segment.includes(' -x')
+  const has = (...marks: string[]) => marks.some(m => segment.includes(m))
+  if (base === 'awk') return has('system', 'getline')
+  if (base === 'sed') return sedRuns(segment)
+  if (base === 'git') return has(' -c', '--config-env', 'alias.', '--exec', ' -x', 'bisect', 'foreach', 'filter-branch', 'filter-repo', '--extcmd', 'difftool', 'mergetool', '--upload-pack', '--receive-pack')
+  if (base === 'rg' || base === 'ag') return has('--pre')
+  if (base === 'gh') return has('alias', 'extension')
 
   return false
 }
@@ -1986,6 +2013,15 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
     if (hidden === 'pty') return 'a pseudo-terminal wrapper on a line that names p2p'
     if (interpreterReadsStdin(c)) return 'an interpreter reading its program from a pipe, here-string, heredoc or file, on a command that names p2p'
   }
+  // A text-first command that runs a command of its own (sed's e, a git -c setting or alias, awk's
+  // system(), rg --pre, …) with p2p anywhere in it, even after a `/` (`s/x/p2p …/e`): what it runs
+  // isn't text, however `tui` is spelled in it.
+  if (/p2p/i.test(c)) {
+    for (const seg of simpleCommands(blankShellComments(c))) {
+      const base = (stripPrefixes(shellWords(seg))[0] ?? '').split(/[\\/]/).pop()?.toLowerCase() ?? ''
+      if (TEXT_FIRST_WORDS.has(base) && textRuns(base, seg) && (names(seg) || seg.toLowerCase().includes('p2p'))) return `${base} running a command of its own, on a command that names p2p`
+    }
+  }
   // Widening a project's sharing is the person's alone, however it is spelled to the shell.
   if (/project["'\s,\]]+share/.test(c) && (names(c) || /p2p|peer2peer/i.test(c))) return 'a project share, which only your user runs'
 
@@ -1995,20 +2031,44 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
 /** `p2p send` options that take the next word as their value, whatever it is (`--` and `--from-session=x` included). */
 const SEND_VALUE_OPTIONS = new Set(['--to', '--project-dir'])
 
+/** Characters that can make a shell word other than what it reads as here: expansions, globs, quoting, or a redirection (`<`: shellTokens marks its target). */
+const NOT_PLAIN = '$`{}*?[]~\\\'"<>'
+
+/** A word written as plain text (its source, from shellTokens' `raws`): what it reads as is what the shell passes. */
+function isPlainWord(raw: string | undefined): boolean {
+  if (raw === undefined || raw === '' || raw.includes('__SUB__')) return false
+  for (const ch of raw) if (NOT_PLAIN.includes(ch)) return false
+
+  return true
+}
+
 /**
- * Whether a `p2p send` command line (the words after the CLI's name) gives --from-session, read as
- * the CLI reads it: `--no-input` before the first `--` dropped first (cli.ts main), nothing after a
- * `--` (text from there on, even with the `--` before `send`), and never another option's value
- * (`--to --from-session=x` sends to "--from-session=x" from the `tui` session). Linear.
+ * Whether a `p2p send` command line gives --from-session as the CLI's option (the Codex bridge's
+ * `sendNamesFromSession`; both are pinned to the same vectors). `args` are the words after the CLI's
+ * name and `raws` their source text. Read the way the CLI reads its argv: `--no-input` before the
+ * first `--` dropped first (cli.ts main), nothing after a `--` (text from there on, even with the
+ * `--` before `send`), and never another option's value (`--to --from-session=x` sends to
+ * "--from-session=x" from the `tui` session). The shell makes that argv, and this can't expand it:
+ * every word up to and including the deciding one must be written plain (no expansion, glob, brace,
+ * tilde, quote or escape), or the answer is no, and the guard refuses. Linear.
  */
-export function sendNamesFromSession(args: readonly string[]): boolean {
+export function sendNamesFromSession(args: readonly string[], raws: readonly (string | undefined)[]): boolean {
   const end = args.indexOf('--')
-  const words = [...(end < 0 ? args : args.slice(0, end)).filter(w => w !== '--no-input'), ...(end < 0 ? [] : args.slice(end))]
+  const words: { w: string; raw: string | undefined }[] = []
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k] ?? ''
+    if (w === '--no-input' && (end < 0 || k < end) && isPlainWord(raws[k])) continue
+    words.push({ w, raw: raws[k] })
+  }
   for (let i = 0; i < words.length; i++) {
-    const w = words[i] ?? ''
+    const { w, raw } = words[i] as { w: string; raw: string | undefined }
+    if (!isPlainWord(raw)) return false
     if (w === '--') return false
     if (w === '--from-session' || w.startsWith('--from-session=')) return true
-    if (SEND_VALUE_OPTIONS.has(w)) i++
+    if (SEND_VALUE_OPTIONS.has(w)) {
+      i++
+      if (!isPlainWord(words[i]?.raw)) return false
+    }
   }
 
   return false
@@ -2023,7 +2083,14 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     return base === 'p2p' || base === 'p2p.exe' || base === 'p2p.cmd' || /^p2p\.(mjs|cjs|js)$/.test(base) || w === '@peer2peer/cli' || w.startsWith('@peer2peer/cli@') || w === '$P2P_BIN' || w === '${P2P_BIN}' || binNames.includes(w)
   }
   for (const segment of simpleCommands(blankShellComments(command))) {
-    const words = stripPrefixes(shellWords(segment))
+    // As the shell reads them (shellTokens: quoted parts joined, escapes read), with each word's source.
+    const raws: string[] = []
+    const tokens = shellTokens(segment, false, undefined, undefined, raws)
+    const words = stripPrefixes(tokens)
+    // The source of words[k], when stripPrefixes kept a suffix of the tokens (not for `env -S`: none, read as not plain).
+    const off = tokens.length - words.length
+    const aligned = off >= 0 && words.every((w, j) => tokens[off + j] === w)
+    const sourceOf = (k: number) => (aligned ? raws[off + k] : undefined)
     const head = words[0] ?? ''
     const base = head.split(/[\\/]/).pop()?.toLowerCase() ?? ''
     // A command handed to a shell or eval as one string runs too.
@@ -2073,7 +2140,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (const w of after) if (MUTATING_ONE.has(w)) return w
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
-    if (plain[0] === 'send' && !sendNamesFromSession(words.slice(at + 1))) return 'send (no --from-session)'
+    if (plain[0] === 'send' && !sendNamesFromSession(words.slice(at + 1), words.slice(at + 1).map((_, k) => sourceOf(at + 1 + k)))) return 'send (no --from-session)'
   }
 
   return null
@@ -2113,23 +2180,31 @@ export const LITERAL = '\uE000'
  * `starts`: the index of each word that begins a simple command (the first word, and the first
  * after an unquoted `;`, `|`, `&`, `(`, `)` or newline).
  */
-export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>): string[] {
+export function shellTokens(command: string, markLiteral = false, substs?: string[], starts?: Set<number>, raws?: string[]): string[] {
   const out: string[] = []
   let cur = ''
   let has = false
   let q: '' | "'" | '"' | '$' = ''
   let fresh = true
-  const push = () => {
+  // Where the word being read starts in `command` (raws: each word's source text, quotes and all).
+  let start = -1
+  // The next word is a redirection's target (`<<< x`, `> f`): its source is marked with `<`, never argv.
+  let redir = false
+  const push = (end: number) => {
     if (has) {
+      raws?.push((redir ? '<' : '') + command.slice(start, end))
+      redir = false
       if (fresh) starts?.add(out.length)
       fresh = false
       out.push(cur)
     }
     cur = ''
     has = false
+    start = -1
   }
   for (let i = 0; i < command.length; i++) {
     const c = command[i] as string
+    if (start < 0 && !' \t\n\r;|&()<>'.includes(c)) start = i
     if (q === "'") {
       if (c === "'") q = ''
       // A `$` or backtick inside single quotes is text, never an expansion (marked when asked).
@@ -2185,7 +2260,8 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
       continue
     }
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || ';|&()<>'.includes(c)) {
-      push()
+      push(i)
+      if (c === '<' || c === '>') redir = true
       if (c === '\n' || ';|&()'.includes(c)) fresh = true
 
       continue
@@ -2193,7 +2269,7 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
     cur += c
     has = true
   }
-  push()
+  push(command.length)
 
   return out
 }
@@ -2921,7 +2997,8 @@ export function interpreterReadsStdin(command: string): boolean {
     let program = false
     for (let j = 1; j < words.length && !program; j++) {
       const w = words[j] ?? ''
-      if (w === '-') break
+      // `-`, or stdin by its path: the program comes from stdin.
+      if (w === '-' || w === '/dev/stdin' || w === '/dev/fd/0' || w === '/proc/self/fd/0') break
       let k = 0
       while (k < w.length && '0123456789'.includes(w[k] as string)) k++
       const r = w[k]

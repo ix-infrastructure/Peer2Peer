@@ -147,7 +147,7 @@ Only the person widens sharing, and only a session's front end speaks for it. Th
   - inside an agent's session, `p2p status`, `send` and extension sends are refused without the token (the agent's path is SendMessage, `ix_share` or `p2p_send`);
   - a session a front end registered refuses everyone else, even a narrowing roster change.
 - **Shell guards** in the mod and the Codex bridge refuse:
-  - mutating verbs and `project share|private`, and `send` without a `--from-session` the CLI would read as that option (one after `--` is message text, and one that is another option's value is that value);
+  - mutating verbs and `project share|private`, and `send` without a `--from-session` the CLI would read as that option (one after `--` is message text, one that is another option's value is that value, and a word up to it that isn't written plain, such as a quote, escape, expansion, brace, glob or redirection, fails closed);
   - interpreter code (`python -c`, `node -e`, …) and pseudo-terminal wrappers (`script`, `expect`, `unbuffer`, `tmux`, …) on a line that names p2p, and (in the mod) an interpreter reading its program from a pipe, here-string, heredoc or file on a command that names p2p;
   - any `--from-session`/`--session` but the session's own (read as the shell reads words, without a cap that padding could exhaust);
   - a command naming p2p that's longer than 16 KiB, or that a guard fails to check.

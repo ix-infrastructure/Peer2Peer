@@ -1,4 +1,5 @@
 // Copyright 2026 Ix Infrastructure Inc.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   cleanSummary,
@@ -191,6 +192,12 @@ describe("guards (PreToolUse backstop)", () => {
     ]) {
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, "send (no --from-session)"]);
     }
+    // Review of #66: a word the guard can't read as written, up to the deciding --from-session, fails
+    // closed. Vectors shared with the Claude mod's guard (mods/claude/peer2peer/tests): both answer each the same.
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/send-from-session.vectors.ts", import.meta.url), "utf8");
+    const vectors = JSON.parse(file.slice(file.indexOf("= [") + 2)) as { cmd: string; verb: string | null }[];
+    expect(vectors.length).toBeGreaterThan(80);
+    for (const v of vectors) expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb]);
     // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
     for (const cmd of ["p2p send hi --from-session=s1 --to bob", "p2p send --no-input --to bob --from-session s1 hi", "p2p send --from-session -- --to bob hi", "p2p send --to=bob --from-session=s1 -- --to"]) {
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null]);
