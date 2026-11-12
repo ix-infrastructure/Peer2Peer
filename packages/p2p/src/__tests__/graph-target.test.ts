@@ -279,6 +279,7 @@ describe("graphTarget: the chokepoint, with real projects and a session", () => 
     expect(show.project.graph).toMatchObject({ kind: "local", endpoint: DEFAULT_IX_ENDPOINT });
     const human = await ann.run(["project", "show", "--dir", repo.P], { json: false });
     expect(human.out).toMatch(/graph: local only \(http:\/\/localhost:8090\)/);
+    expect(human.out).toContain("(the local Ix backend keeps it in plaintext on this machine)");
     const ls = await ann.ok(["project", "ls"]);
     expect(ls.projects.every((p: { graph: GraphTarget }) => p.graph.kind === "local")).toBe(true);
   });

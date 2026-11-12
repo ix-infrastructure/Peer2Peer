@@ -1676,6 +1676,16 @@ export function describeGraphTarget(t: GraphTarget): string {
   return t.kind === "local" ? `${GRAPH_LOCAL_ONLY} (${t.endpoint})` : `the shared graph of circle ${t.circle} (${t.endpoint})`;
 }
 
+/** A target with, for a local one, why: the one wording `p2p project show|ls` and `p2p doctor` print. */
+export function graphTargetLine(t: GraphTarget): string {
+  return `${describeGraphTarget(t)}${t.kind === "local" && t.why ? `: ${t.why}` : ""}`;
+}
+
+/** Who can read what a graph target holds: Ix keeps it in plaintext (docs/security/encryption.md). */
+export function graphPlaintextNote(t: GraphTarget): string {
+  return t.kind === "local" ? "the local Ix backend keeps it in plaintext on this machine" : "the shared graph keeps it in plaintext that its operator can read";
+}
+
 /**
  * The Ix variables that could send an `ix` call somewhere other than its graph target, or carry a
  * cloud credential: Ix Pro's PAT mode (IX_PAT, IX_ORG, its endpoint override), the cloud push and
