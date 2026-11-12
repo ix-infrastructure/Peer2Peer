@@ -357,5 +357,21 @@ export const SEND_VECTORS: { cmd: string; verb: string | null }[] = [
   {
     "cmd": "p2p send --to bob ${!x} --from-session=s1 hi",
     "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "p2p send --to bob\r--from-session=s1 hi",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "p2p send \r--from-session=s1 --to bob hi",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "p2p send --to bob \r --from-session=s1 hi",
+    "verb": null
+  },
+  {
+    "cmd": "p2p send --from-session=s1 --to bob hi\r",
+    "verb": null
   }
 ]

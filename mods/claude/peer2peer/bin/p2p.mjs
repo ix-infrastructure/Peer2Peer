@@ -27472,7 +27472,7 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
 ]);
 var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
 var SEND_VALUE_OPTIONS = /* @__PURE__ */ new Set(["--to", "--project-dir"]);
-var NOT_PLAIN = "$`{}*?[]~\\'\"<>";
+var NOT_PLAIN = "$`{}*?[]~\\'\"<>\r";
 function isPlainWord(raw) {
   if (raw === void 0 || raw === "" || raw.includes("__SUB__"))
     return false;
@@ -27506,6 +27506,10 @@ function sendNamesFromSession(args, raws) {
   }
   return false;
 }
+function cliBinJs(word) {
+  const w = word.replace(/\\/g, "/").toLowerCase();
+  return w.endsWith("/p2p/dist/bin.js") || w.endsWith("@peer2peer/cli/dist/bin.js");
+}
 function mutatingP2PVerb(command, binNames = [], depth = 0) {
   if (depth > 3)
     return null;
@@ -27513,7 +27517,7 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
     const base = w.split(/[\\/]/).pop() ?? w;
-    return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || binNames.includes(w);
+    return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || cliBinJs(w) || binNames.includes(w);
   };
   for (const segment of segments) {
     const raws = [];
@@ -27728,7 +27732,7 @@ function shellTokens(command, markLiteral = false, substs, starts, raws) {
   let redir = false;
   const push = (end) => {
     if (has) {
-      raws?.push((redir ? "<" : "") + command.slice(start, end));
+      raws?.push((redir ? "<" : "") + (command[start - 1] === "\r" ? "\r" : "") + command.slice(start, end) + (command[end] === "\r" ? "\r" : ""));
       redir = false;
       if (fresh)
         starts?.add(out.length);

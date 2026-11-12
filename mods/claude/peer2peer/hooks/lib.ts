@@ -2032,7 +2032,7 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
 const SEND_VALUE_OPTIONS = new Set(['--to', '--project-dir'])
 
 /** Characters that can make a shell word other than what it reads as here: expansions, globs, quoting, or a redirection (`<`: shellTokens marks its target). */
-const NOT_PLAIN = '$`{}*?[]~\\\'"<>'
+const NOT_PLAIN = '$`{}*?[]~\\\'"<>\r'
 
 /** A word written as plain text (its source, from shellTokens' `raws`): what it reads as is what the shell passes. */
 function isPlainWord(raw: string | undefined): boolean {
@@ -2050,7 +2050,7 @@ function isPlainWord(raw: string | undefined): boolean {
  * `--` before `send`), and never another option's value (`--to --from-session=x` sends to
  * "--from-session=x" from the `tui` session). The shell makes that argv, and this can't expand it:
  * every word up to and including the deciding one must be written plain (no expansion, glob, brace,
- * tilde, quote or escape), or the answer is no, and the guard refuses. Linear.
+ * tilde, quote, escape, redirection or carriage return), or the answer is no, and the guard refuses. Linear.
  */
 export function sendNamesFromSession(args: readonly string[], raws: readonly (string | undefined)[]): boolean {
   const end = args.indexOf('--')
@@ -2074,15 +2074,23 @@ export function sendNamesFromSession(args: readonly string[], raws: readonly (st
   return false
 }
 
+/** The CLI's own built entry point run by path (`…/p2p/dist/bin.js`, `…/@peer2peer/cli/dist/bin.js`). */
+function cliBinJs(word: string): boolean {
+  const w = word.replace(/\\/g, '/').toLowerCase()
+
+  return w.endsWith('/p2p/dist/bin.js') || w.endsWith('@peer2peer/cli/dist/bin.js')
+}
+
 export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0): string | null {
   if (depth > 4) return null
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, '')
     const base = w.split(/[\\/]/).pop() ?? w
 
-    return base === 'p2p' || base === 'p2p.exe' || base === 'p2p.cmd' || /^p2p\.(mjs|cjs|js)$/.test(base) || w === '@peer2peer/cli' || w.startsWith('@peer2peer/cli@') || w === '$P2P_BIN' || w === '${P2P_BIN}' || binNames.includes(w)
+    return base === 'p2p' || base === 'p2p.exe' || base === 'p2p.cmd' || /^p2p\.(mjs|cjs|js)$/.test(base) || w === '@peer2peer/cli' || w.startsWith('@peer2peer/cli@') || w === '$P2P_BIN' || w === '${P2P_BIN}' || cliBinJs(w) || binNames.includes(w)
   }
-  for (const segment of simpleCommands(blankShellComments(command))) {
+  // `${P2P_BIN}`: the CLI by its documented variable, read as `$P2P_BIN` (simpleCommands splits on braces).
+  for (const segment of simpleCommands(blankShellComments(command.split('${P2P_BIN}').join('$P2P_BIN')))) {
     // As the shell reads them (shellTokens: quoted parts joined, escapes read), with each word's source.
     const raws: string[] = []
     const tokens = shellTokens(segment, false, undefined, undefined, raws)
@@ -2119,12 +2127,10 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       if (found) return found
       continue
     }
-    // The CLI as the command word, or run by node (`node [opts] <…>/p2p.mjs`).
+    // The CLI as the command word, or run by node (`node [opts] <…>/p2p.mjs`): any word naming the CLI, so an
+    // option's value (`--stack-size 999`) can't pass for the script (as the Codex bridge reads it).
     let at = isCli(head) ? 0 : -1
-    if (at < 0 && /^node(\.exe)?$/.test(base)) {
-      const script = words.findIndex((w, j) => j > 0 && !w.startsWith('-'))
-      if (script > 0 && isCli(words[script] ?? '')) at = script
-    }
+    if (at < 0 && /^node(\.exe)?$/.test(base)) at = words.findIndex((w, j) => j > 0 && isCli(w))
     if (at < 0) continue
     // A mutating verb anywhere after the CLI's name (flags and their values may come between).
     const after = words.slice(at + 1).map(w => w.toLowerCase())
@@ -2192,7 +2198,8 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
   let redir = false
   const push = (end: number) => {
     if (has) {
-      raws?.push((redir ? '<' : '') + command.slice(start, end))
+      // A carriage return next to it is a separator here but part of the word in bash: kept, so it reads as not plain.
+      raws?.push((redir ? '<' : '') + (command[start - 1] === '\r' ? '\r' : '') + command.slice(start, end) + (command[end] === '\r' ? '\r' : ''))
       redir = false
       if (fresh) starts?.add(out.length)
       fresh = false

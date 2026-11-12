@@ -203,6 +203,19 @@ describe("guards (PreToolUse backstop)", () => {
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null]);
     }
     expect(mutatingP2PVerb("node /x/p2p.mjs held approve h1")).toBe("held approve");
+    // Review of #66 (parity with the mod): `${P2P_BIN}`, node's option values, and the CLI's dist/bin.js by path.
+    for (const [cmd, verb] of [
+      ["${P2P_BIN} invite", "invite"],
+      ["${P2P_BIN} send --to bob hi", "send (no --from-session)"],
+      ["${P2P_BIN} session roster s1 --add bob", "session roster"],
+      ["node --stack-size 999 p2p.mjs invite", "invite"],
+      ["node --stack-size 999 /x/bin/p2p.mjs invite", "invite"],
+      ["node -r ./x.js /x/p2p.mjs held approve h1", "held approve"],
+      ["node --stack-size 999 /x/packages/p2p/dist/bin.js invite", "invite"],
+      ["node /x/node_modules/@peer2peer/cli/dist/bin.js held approve h1", "held approve"],
+    ] as const) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb]);
+    }
     expect(mutatingP2PVerb("bash -lc 'p2p relays add wss://evil'")).toBe("relays add");
     expect(mutatingP2PVerb("p2p codex release m1")).toBe("codex release");
     expect(mutatingP2PVerb("echo hi && p2p circle join link")).toBe("circle join");

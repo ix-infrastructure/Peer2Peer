@@ -414,6 +414,18 @@ describe('L4: shell commands that run mutating p2p verbs are refused', () => {
     // --from-session fails closed: refused. The vectors pin this guard and the Codex bridge's together.
     for (const v of sendVectors) expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb])
     expect(sendVectors.length).toBeGreaterThan(80)
+    // Review of #66: `${P2P_BIN}` with braces (simpleCommands splits on them), and node's option values
+    // (`--stack-size 999`) never pass for the script; the CLI's dist/bin.js by path is the CLI. As the bridge reads them.
+    for (const [cmd, verb] of [
+      ['${P2P_BIN} invite', 'invite'],
+      ['${P2P_BIN} send --to bob hi', 'send (no --from-session)'],
+      ['${P2P_BIN} session roster s1 --add bob', 'session roster'],
+      ['node --stack-size 999 p2p.mjs invite', 'invite'],
+      ['node --stack-size 999 /x/bin/p2p.mjs invite', 'invite'],
+      ['node -r ./x.js /x/p2p.mjs held approve h1', 'held approve'],
+      ['node --stack-size 999 /x/packages/p2p/dist/bin.js invite', 'invite'],
+      ['node /x/node_modules/@peer2peer/cli/dist/bin.js held approve h1', 'held approve'],
+    ] as const) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb])
     // env -S: the words come from a string the guard reads again, with no source to check: refused.
     expect(mutatingP2PVerb("env -S 'p2p send --from-session s1 --to bob hi'")).toBe('send (no --from-session)')
     // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.

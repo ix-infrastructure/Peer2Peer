@@ -528,7 +528,7 @@ const MUTATING_FIRST = new Set(["receipt", "own-agents"]);
 const SEND_VALUE_OPTIONS = new Set(["--to", "--project-dir"]);
 
 /** Characters that can make a shell word other than what it reads as here: expansions, globs, quoting, or a redirection (`<`: shellTokens marks its target). */
-const NOT_PLAIN = "$`{}*?[]~\\'\"<>";
+const NOT_PLAIN = "$`{}*?[]~\\'\"<>\r";
 
 /** A word written as plain text (its source, from shellTokens' `raws`): what it reads as is what the shell passes. */
 function isPlainWord(raw: string | undefined): boolean {
@@ -545,7 +545,7 @@ function isPlainWord(raw: string | undefined): boolean {
  * `--` before `send`), and never another option's value (`--to --from-session=x` sends to
  * "--from-session=x" from the `tui` session). The shell makes that argv, and this can't expand it:
  * every word up to and including the deciding one must be written plain (no expansion, glob, brace,
- * tilde, quote or escape), or the answer is no, and the guard refuses. Linear.
+ * tilde, quote, escape, redirection or carriage return), or the answer is no, and the guard refuses. Linear.
  */
 export function sendNamesFromSession(args: readonly string[], raws: readonly (string | undefined)[]): boolean {
   const end = args.indexOf("--");
@@ -566,6 +566,12 @@ export function sendNamesFromSession(args: readonly string[], raws: readonly (st
     }
   }
   return false;
+}
+
+/** The CLI's own built entry point run by path (`…/p2p/dist/bin.js`, `…/@peer2peer/cli/dist/bin.js`): the mod's `cliBinJs`. */
+function cliBinJs(word: string): boolean {
+  const w = word.replace(/\\/g, "/").toLowerCase();
+  return w.endsWith("/p2p/dist/bin.js") || w.endsWith("@peer2peer/cli/dist/bin.js");
 }
 
 /**
@@ -589,6 +595,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       w.startsWith("@peer2peer/cli@") ||
       w === "$P2P_BIN" ||
       w === "${P2P_BIN}" ||
+      cliBinJs(w) ||
       binNames.includes(w)
     );
   };
@@ -865,7 +872,8 @@ export function shellTokens(command: string, markLiteral = false, substs?: strin
   let redir = false;
   const push = (end: number) => {
     if (has) {
-      raws?.push((redir ? '<' : '') + command.slice(start, end));
+      // A carriage return next to it is a separator here but part of the word in bash: kept, so it reads as not plain.
+      raws?.push((redir ? '<' : '') + (command[start - 1] === '\r' ? '\r' : '') + command.slice(start, end) + (command[end] === '\r' ? '\r' : ''));
       redir = false;
       if (fresh) starts?.add(out.length);
       fresh = false;
