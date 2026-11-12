@@ -1693,7 +1693,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
     for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
     for (const p of v.people) lines.push(`  ${p.address}`);
-    if (v.graph) lines.push(`  graph: ${projects.describeGraphTarget(v.graph)}${v.graph.kind === "local" && v.graph.why ? `: ${v.graph.why}` : ""}`);
+    if (v.graph) lines.push(`  graph: ${projects.graphTargetLine(v.graph)}`, `    (${projects.graphPlaintextNote(v.graph)})`);
     return lines.join("\n");
   };
   project

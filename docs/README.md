@@ -21,6 +21,7 @@
 | [Protocol](protocol.md) | The normative wire spec, v3 draft 3, with its review log |
 | [Compatibility](compatibility.md) | How peers on different versions interoperate: the policy, the `crit` rule, device caps, and the cross-version matrix |
 | [Threat model](security/threat-model.md) | What's protected, from whom, what relays see, and the known limits |
+| [What is encrypted, what isn't](security/encryption.md) | Where each kind of data goes (relays, this device, your local Ix graph) and who can read it there |
 | [Roadmap](roadmap.md) | What's planned, clearly marked |
 
 | Operate and maintain it | |

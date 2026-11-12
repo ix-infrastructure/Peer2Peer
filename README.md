@@ -50,7 +50,7 @@ Metadata privacy is [on the roadmap](docs/roadmap.md#metadata-privacy).
 
 ## No data collection, no telemetry
 
-Ix Infrastructure runs no servers in the Peer2Peer path, and receives nothing from it. There's no telemetry, analytics, crash reporting, usage pings or update checks, and no public relay or other Ix server between you and anyone. Messages, statuses, session names, circle names and rosters are end-to-end encrypted on your device.
+Ix Infrastructure runs no servers in the Peer2Peer path, and receives nothing from it. There's no telemetry, analytics, crash reporting, usage pings or update checks, and no public relay or other Ix server between you and anyone. Messages, statuses, session names, circle names and rosters are end-to-end encrypted on your device (one exception: a members-only relay that admits a circle holds that circle's name and member list, so it can check who may connect).
 
 The clients (the `p2p` CLI, the Claude Code mod and the Codex bridge) connect only to:
 
@@ -90,7 +90,7 @@ Coding agents now work in parallel, on your machine, your teammates' machines an
 And it's built so you can trust it:
 
 - **No account.** Your identity is a key you generate. Names aren't unique, so every address carries a fingerprint: `ann@k7f2-qx9a-3m4n-5p6q`.
-- **End-to-end encrypted.** Message text, status contents, session labels, circle names and rosters are sealed on your device. Relays store and forward envelopes whose contents they can't read. They do see each envelope's routing header: sender and recipient ids, kind, session id, and sequence and timestamp counters.
+- **End-to-end encrypted.** Message text, status contents, session labels, circle names and rosters are sealed on your device. Relays store and forward envelopes whose contents they can't read. They do see each envelope's routing header: sender and recipient ids, kind, session id, and sequence and timestamp counters. A members-only relay that admits a circle also holds that circle's signed chain (its name, owner, admins and members).
 - **No single point of control.** You list 1–5 relays, and senders deliver to up to 3 of them. Any conforming client works with any conforming relay.
 - **Agents can't be talked into things.** Peer text is framed as inert data, never instructions. Sessions that approve their own tool calls hold peers' messages for your click. Only commands *you* type change who can reach you.
 
@@ -326,8 +326,9 @@ The full wire format is in **[docs/protocol.md](docs/protocol.md)** (v3, draft 3
 
 ## Security model, in plain language
 
-- **What relays can't do:** read messages, statuses, session or circle names, or rosters; forge or redirect messages; or impersonate you.
+- **What relays can't do:** read messages, statuses, session names or rosters; read circle names or membership, except a members-only relay that admits a circle, which holds that circle's signed chain (name, owner, admins, members) to check who may connect; forge or redirect messages; or impersonate you.
 - **What relays can see:** who may reach whom; who sends to whom and when; each envelope's plaintext header (sender and recipient user and device ids, the owning user, the **kind** (message, status, roster, idle, circle, contact, sync, or an extension kind such as `x:ix.note`), the target **session id**, and **sequence and timestamp** counters); envelope sizes; source IPs; and public identity documents. Choose relays you trust with that metadata, or run your own. v3 doesn't hide metadata. **Planned:** sealed sender, padding and timing cover, optional two-hop onion routing *between relays only* (relays are never exits to the open web), opt-in Tor transport (`.onion` relays), and bring-your-own egress for your agent's own web access. See [Roadmap: metadata privacy](docs/roadmap.md#metadata-privacy).
+- **Where your data goes:** messages, statuses and receipts are end-to-end encrypted (relays still see metadata); message history stays on your device, encrypted at rest (its key sits beside it); Ix graph memory goes only to your **local** Ix backend, which keeps it in plaintext. `p2p doctor` prints this for your device, with each project's graph target. A shared team graph is planned, opt-in per circle, and would hold plaintext its operator can read. See **[What is encrypted, what isn't](docs/security/encryption.md)**.
 - **Your keys** live on your device (`~/.p2p`, 0600 files; there's no OS keychain backend yet). Lose an ordinary device and you revoke it. Lose a key-holding device and you **rotate** your identity.
 - **Agents are guarded.** Peer text is untrusted and framed as data. Sessions that approve their own tool calls hold other people's messages for your click. Peers can start only a limited number of turns. Secrets like backup phrases and invite codes never enter the model's context.
 - **Extensions run with your identity.** They're opt-in, load only from explicit directories, and are not sandboxed.
