@@ -80,10 +80,11 @@ A session keeps up to 64 projects. That limit only bounds what is stored: more p
 
 **A session's own scratch is the session, not a project.** Claude Code keeps folders for each session: the output of its background tasks (`<tmp>/claude-<uid>/<project>/<session id>/`), the large tool results and subagent transcripts it saves (`~/.claude/projects/<project>/<session id>/`), and a background job's folder (`$CLAUDE_JOB_DIR`, `~/.claude/jobs/<id>/`). What is in them came from the session's own tool calls, whose own paths already bound it, so the Claude Code mod names them to the CLI and a path in them binds no project. That is checked strictly:
 - only this session's folders, by its exact id: another session's folder, the `memory` folder and transcripts that sessions of a project share, or a name that only looks like it (`<id>-x`), bind as any folder does;
-- on real paths: a symlink in the scratch, or a `..` through one, binds what it points at;
-- a git repository or a `.p2p-private` in the scratch is still its own project (a private repository cloned there stays private), and so is a folder you gave a policy, or a path that names a `.git`;
+- on real paths: a symlink in the scratch binds what it points at, and a path written with a `..` never gets the exemption (it binds where the file system takes it: `link/../x` is beside the link's target);
+- a git repository or a `.p2p-private` in the scratch is still its own project (a private repository cloned there stays private), and so is a folder you gave a policy, a folder with a `.git` that can't be read, or a path that names a `.git`;
 - the job folder counts only when its name is the start of the session's id (so after a `/clear`, a new id, it binds again), and each folder must be yours and not a symlink;
-- only the mod's own `p2p` runs (with your person token) can name them.
+- only the mod's own `p2p` runs (with your person token) can name them;
+- it fails closed: a scratch folder that can't be read, or that holds more than 4,096 entries (its symlinks can't all be checked), isn't skipped, so paths in it bind as anywhere else (usually making the session private). It is off on Windows for now.
 
 **Why a session is private, and what helps.** A refusal says its cause, and `p2p session show <sid>` (in your own terminal; `/peers session` in Claude Code) lists a session's projects, who each is shared with, and every reason:
 - a project never shared, or made private: sharing it helps (`p2p project share`);

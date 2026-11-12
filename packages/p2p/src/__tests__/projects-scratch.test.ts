@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MAX_SESSION_PROJECTS, PRIVATE_MARKER, SCRATCH_ENV, scratchRoot, sessionScratch } from "../projects.js";
+import { hasDotDot, MAX_SESSION_PROJECTS, physicalPath, PRIVATE_MARKER, SCRATCH_ENV, scratchRoot, sessionScratch } from "../projects.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-projects-scratch.test/v3";
@@ -105,6 +105,20 @@ describe("a session's own scratch: the folders it is matched by (sessionScratch,
     mkdirSync(join(d, "tmp4", `claude-${UID + 1}`), { recursive: true });
     expect(sessionScratch(JSON.stringify({ sid: csid, tmp: [join(d, "tmp4")] }))).toBeUndefined();
   });
+
+  it("walks a path as the file system does: `link/..` is the link's target's parent, not the link's", () => {
+    mkdirSync(join(d, "pw", "a", "pub"), { recursive: true });
+    mkdirSync(join(d, "pw", "a", "secret"), { recursive: true });
+    mkdirSync(join(d, "pw", "scratch"), { recursive: true });
+    symlinkSync(join(d, "pw", "a", "pub"), join(d, "pw", "scratch", "l"));
+    // Raw strings: path.join would collapse the `..` before the code under test sees it.
+    expect(physicalPath(`${d}/pw/scratch/l/../secret/key.txt`)).toBe(`${d}/pw/a/secret/key.txt`);
+    expect(physicalPath(`${d}/pw/scratch/./x/../y`)).toBe(`${d}/pw/scratch/y`);
+    expect(physicalPath(`${d}/pw/scratch/l/x`)).toBe(`${d}/pw/a/pub/x`);
+    expect(hasDotDot(`${d}/pw/scratch/l/../secret`)).toBe(true);
+    expect(hasDotDot(`${d}/pw/scratch/..`)).toBe(true);
+    expect(hasDotDot(`${d}/pw/scratch/..x/x..`)).toBe(false);
+  });
 });
 
 describe("a session's own scratch and the 64-project cap, end to end", () => {
@@ -191,10 +205,10 @@ describe("a session's own scratch and the 64-project cap, end to end", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("Ian's case: this session's task output, saved tool results, subagents and job folder bind no project; it still sends", async () => {
+  it("the reported case: this session's task output, saved tool results, subagents and job folder bind no project; it still sends", async () => {
     const s = scratch();
     const paths = [join(s.tasks, "tasks", "b96f26ph3.output"), join(s.tasks, "tasks"), join(s.session, "tool-results"), join(s.session, "subagents", "agent-1.jsonl"), join(s.job, "tmp"), join(s.job, "tmp", "sbthome"), join(s.job, "tmp", "not-yet.md")];
-    const sid = `ian${sess++}`;
+    const sid = `rc${sess++}`;
     const u = inDir(ann, work, paths, s.env);
     const st = (await u.ok(["status", "--session", sid, "--state", "busy", "--label", "i"])).project;
     expect(st).toMatchObject({ policy: "shared", circles: [team], people: [cats.id] });
@@ -305,6 +319,37 @@ describe("a session's own scratch and the 64-project cap, end to end", () => {
     const env = JSON.stringify({ sid: s.csid, tmp: [fakeTmp] });
     const st = (await inDir(ann, work, [join(fakeTmp, `claude-${UID}`, SLUG, s.csid, "tasks")], env).ok(["status", "--session", `s${sess++}`, "--state", "busy", "--label", "s"])).project;
     expect(st.policy).toBe("private");
+  });
+
+  it("widening: `<scratch>/link/../sibling/…` binds the sibling of the link's target, not a folder in the scratch", async () => {
+    // The link points at the shared repository; its parent's other child is the private one. The
+    // file system reads <root>/secret/key.txt; a textual `..` would land in the scratch.
+    const s = scratch();
+    symlinkSync(work, join(s.tasks, "tasks", "l"));
+    const raw = `${s.tasks}/tasks/l/../secret/key.txt`;
+    const st = await bind([raw], s);
+    expect(st.policy).toBe("private");
+    expect(st.projects.map((p: { name: string }) => p.name).sort()).toEqual(["secret", "work"]);
+  });
+
+  it("widening: `<covered folder>/link/../x` under a --subfolders share binds where the file system lands, not the covered folder", async () => {
+    const pub = join(root, "pubdir");
+    mkdirSync(pub, { recursive: true });
+    await inDir(ann, pub).ok(["project", "share", team, "--person", cats.id, "--subfolders"]);
+    symlinkSync(join(secret, "lib"), join(pub, "l"));
+    const raw = `${pub}/l/../key.txt`;
+    const st = await bind([raw], undefined, pub);
+    expect(st.policy).toBe("private");
+    expect(st.projects.map((p: { name: string }) => p.name).sort()).toEqual(["pubdir", "secret"]);
+  });
+
+  it("widening: a folder in the scratch with a `.git` that can't be read still binds", async () => {
+    const s = scratch();
+    mkdirSync(join(s.tasks, "half"), { recursive: true });
+    writeFileSync(join(s.tasks, "half", ".git"), "not a gitdir line\n");
+    const st = await bind([join(s.tasks, "half", "x.txt")], s);
+    expect(st.policy).toBe("private");
+    expect(st.projects.map((p: { name: string }) => p.name).sort()).toEqual(["half", "work"]);
   });
 
   it(`a session in 17 to ${MAX_SESSION_PROJECTS} projects gets their intersection, and is private as soon as one is private or unshared`, async () => {

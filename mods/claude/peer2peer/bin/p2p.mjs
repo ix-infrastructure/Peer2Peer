@@ -24850,6 +24850,7 @@ __export(projects_exports, {
   graphPinnedEnv: () => graphPinnedEnv,
   graphTarget: () => graphTarget,
   graphTargetOf: () => graphTargetOf,
+  hasDotDot: () => hasDotDot,
   isAgentProcess: () => isAgentProcess,
   isLoopbackEndpoint: () => isLoopbackEndpoint,
   listProjects: () => listProjects,
@@ -24864,6 +24865,7 @@ __export(projects_exports, {
   personToken: () => personToken,
   personTokenFile: () => personTokenFile,
   personTokenOk: () => personTokenOk,
+  physicalPath: () => physicalPath,
   privateReasons: () => privateReasons,
   privateRemedy: () => privateRemedy,
   projectGraphTarget: () => projectGraphTarget,
@@ -24924,8 +24926,31 @@ function real(p) {
     }
   }
 }
+function hasDotDot(p) {
+  return p.split(/[\\/]/).includes("..");
+}
+function physicalPath(p) {
+  const abs = isAbsolute9(p) ? p : `${process.cwd()}${sep3}${p}`;
+  if (process.platform === "win32") return resolve3(abs);
+  let cur = "/";
+  for (const c of abs.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c === "..") {
+      cur = dirname6(cur);
+      continue;
+    }
+    const next = cur === "/" ? `/${c}` : `${cur}/${c}`;
+    try {
+      lstatSync6(next);
+      cur = real(next);
+    } catch {
+      cur = next;
+    }
+  }
+  return cur;
+}
 function existingDir(p) {
-  let cur = resolve3(p);
+  let cur = physicalPath(p);
   for (let i = 0; i < 4096; i++) {
     try {
       const st = statSync4(cur);
@@ -25086,7 +25111,7 @@ function present(p) {
   }
 }
 function projectOf(dir, doc) {
-  const given = resolve3(dir);
+  const given = physicalPath(dir);
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
@@ -25112,7 +25137,7 @@ function projectOf(dir, doc) {
         if (m) gitDir = resolve3(cur, m[1]);
       }
       if (!gitDir || !existsSync3(gitDir)) {
-        return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur };
+        return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
     }
@@ -25340,6 +25365,7 @@ function ownDir(p) {
   }
 }
 function sessionScratch(raw) {
+  if (process.platform === "win32") return void 0;
   if (typeof raw !== "string" || raw === "" || raw.length > 16 * 1024) return void 0;
   let o;
   try {
@@ -25431,7 +25457,7 @@ async function bindSession(app, sid, dirs, o = {}) {
   const scans = /* @__PURE__ */ new Map();
   const scratchOf = (d, r) => {
     const s2 = o.scratch;
-    if (!s2 || r.kind !== "dir" || r.repoPrivate || doc?.projects[r.id] !== void 0 || namedStop(resolve3(d)) !== void 0) return void 0;
+    if (!s2 || r.kind !== "dir" || r.repoPrivate || r.brokenGit || hasDotDot(d) || doc?.projects[r.id] !== void 0 || namedStop(physicalPath(d)) !== void 0) return void 0;
     return scratchRoot(r.root, s2);
   };
   const scanned = (root) => {

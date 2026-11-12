@@ -112,6 +112,8 @@ export interface ProjectRef {
   remote?: string;
   /** The repository asks to stay private (a committed PRIVATE_MARKER at `root`). */
   repoPrivate?: true;
+  /** A `.git` is there but can't be read as a repository (a folder project at that level). */
+  brokenGit?: true;
 }
 
 export type ProjectShare = "private" | { circles: string[]; people: string[] };
@@ -210,9 +212,42 @@ function real(p: string): string {
   }
 }
 
-/** The nearest existing directory at or above `p`, as a real path. */
+/** Whether a path, as written, has a `..` segment (`a/../b`, `..`, `a/..`). */
+export function hasDotDot(p: string): boolean {
+  return p.split(/[\\/]/).includes("..");
+}
+
+/**
+ * `p` as the file system walks it (POSIX): each existing prefix is resolved through its symlinks
+ * before the next segment applies, so `link/../x` is the link's target's parent's `x`, never the
+ * `x` beside the link (path.resolve collapses `..` as text). Past the first segment that doesn't
+ * exist, the rest is applied as text. Relative paths start at the process's cwd. On Windows,
+ * path.resolve.
+ */
+export function physicalPath(p: string): string {
+  const abs = isAbsolute(p) ? p : `${process.cwd()}${sep}${p}`;
+  if (process.platform === "win32") return resolve(abs);
+  let cur = "/";
+  for (const c of abs.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c === "..") {
+      cur = dirname(cur);
+      continue;
+    }
+    const next = cur === "/" ? `/${c}` : `${cur}/${c}`;
+    try {
+      lstatSync(next);
+      cur = real(next);
+    } catch {
+      cur = next;
+    }
+  }
+  return cur;
+}
+
+/** The nearest existing directory at or above `p` (walked as the file system does: physicalPath), as a real path. */
 function existingDir(p: string): string {
-  let cur = resolve(p);
+  let cur = physicalPath(p);
   for (let i = 0; i < 4096; i++) {
     try {
       const st = statSync(cur);
@@ -439,7 +474,8 @@ function present(p: string): boolean {
  * Without `doc` (sharing, `project show`): the folder itself.
  */
 export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
-  const given = resolve(dir);
+  // As the file system walks it: `link/../x` is beside the link's target, not beside the link.
+  const given = physicalPath(dir);
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
@@ -468,7 +504,7 @@ export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
       }
       if (!gitDir || !existsSync(gitDir)) {
         // A .git that can't be read as one: a folder project at this level (private until shared).
-        return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
+        return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
     }
@@ -775,7 +811,7 @@ export interface SessionScratch {
 /** The variable a front end names its session's scratch in (JSON: `{sid, tmp: [..], config, job}`). */
 export const SCRATCH_ENV = "P2P_SESSION_SCRATCH";
 
-/** At most this many entries a scratch folder is scanned for symlinks; past it nothing in it is skipped. */
+/** At most this many entries a scratch folder is scanned for symlinks; past it nothing in it is skipped (fails closed: paths there bind). */
 export const SCRATCH_SCAN_ENTRIES = 4096;
 
 const SCRATCH_SID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
@@ -801,6 +837,8 @@ function ownDir(p: string): string | undefined {
  * the job folder right in `<config>/jobs`, its name the start of the id. Anything else: none.
  */
 export function sessionScratch(raw: string | undefined): SessionScratch | undefined {
+  // Not on Windows until it is verified there (no owner check, no per-user folder name).
+  if (process.platform === "win32") return undefined;
   if (typeof raw !== "string" || raw === "" || raw.length > 16 * 1024) return undefined;
   let o: Record<string, unknown>;
   try {
@@ -920,11 +958,13 @@ export async function bindSession(
   // The session's own scratch (SessionScratch) is the session, not a project: a path in it binds
   // nothing, unless it is a repository or `.p2p-private` (a clone made there keeps its identity),
   // a folder the person gave a policy of its own, or a path that names a `.git` or `.p2p-private`
-  // (namedStop: a command that may remove one). A symlink in it binds what it points at.
+  // (namedStop: a command that may remove one), or a `.git` that can't be read. A symlink in it
+  // binds what it points at. A path written with a `..` segment never gets the exemption: it binds
+  // where the file system takes it, as everywhere else.
   const scans = new Map<string, string[] | undefined>();
   const scratchOf = (d: string, r: ProjectRef): string | undefined => {
     const s = o.scratch;
-    if (!s || r.kind !== "dir" || r.repoPrivate || doc?.projects[r.id] !== undefined || namedStop(resolve(d)) !== undefined) return undefined;
+    if (!s || r.kind !== "dir" || r.repoPrivate || r.brokenGit || hasDotDot(d) || doc?.projects[r.id] !== undefined || namedStop(physicalPath(d)) !== undefined) return undefined;
     return scratchRoot(r.root, s);
   };
   // Binds what a scratch folder's symlinks point at (once per folder; one into another scratch folder
