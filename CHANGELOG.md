@@ -14,6 +14,11 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
   - In Claude Code, an agent's shell command that installs Ix (the Ix install scripts, its Homebrew tap or formula, or a global npm install of the Ix CLI package) goes to your permission prompt, even in a mode or under rules that would allow it. Where nobody can be asked, it is refused. A URL counts only in a segment that fetches it (curl, wget, irm, iwr, Invoke-WebRequest, Invoke-RestMethod), so reading or searching for it doesn't ask. Other commands are unaffected.
   - Enabling the Ix extension is still yours alone, as before: the front end's token or your `yes` on the terminal, never from inside an agent's session. `p2p doctor` says Ix is optional and shows the install command.
 
+### Security
+
+- **Identity refreshes: what the newest version revokes applies even when a refresh is cut short.** On slow hardware, a refresh far behind can end incomplete after committing an older version that still lists a device the newest version removed. That device is no longer trusted meanwhile: the newest version is kept as a pending head, and until the stored head reaches it, only the devices and key holders it lists too are trusted. Nothing is denied for good. ([#35](https://github.com/ix-infrastructure/Peer2Peer/issues/35))
+- **A genuine history gap is reported as one.** A refresh is cut short by a gap only when a relay held the missing version but it wasn't checked in time. A relay answering with junk no longer turns a real gap (pruned history) into "cut short, try again" on every refresh. An honest relay that runs out of time or allowance still counts as holding the version, so no relay can turn another's slowness into a broken chain. ([#35](https://github.com/ix-infrastructure/Peer2Peer/issues/35))
+
 ## 0.1.1
 
 Nothing changes on the wire. 0.1.1 and 0.1.0 clients interoperate in both directions. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against v0.1.0 and 70b86c7, as committed at their tags and as npm installs them.

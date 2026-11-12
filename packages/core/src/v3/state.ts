@@ -162,9 +162,16 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    (in the walk: until its share is spent, then it is asked no more). The
  *    walk checks the oldest versions first, so whatever it checks connects to
  *    the held chain and is committed. Running out of chain work, or a walk cut
- *    short (by time, quota or the request cap) with a gap left, commits what
- *    was placed and returns `incomplete: true`: a later refresh goes on from
- *    there.
+ *    short with a gap left, commits what was placed and returns
+ *    `incomplete: true`: a later refresh goes on from there. Cut short means
+ *    the request cap, or a gap whose missing version a relay held but wasn't
+ *    checked in time (in an answer cut short by its share, or found by a
+ *    hash-only probe of a relay whose share was spent); a junk relay cut short
+ *    on every page never makes a genuine gap "incomplete" (#35).
+ *  - An incomplete refresh records the verified newest version as the pending
+ *    head (#35): until the stored head reaches its `ver`, the view trusts only
+ *    the devices and key holders it lists too, so a committed intermediate
+ *    version can't trust what the newest already revoked.
  *  - The held chain is built and verified once; documents are placed in
  *    `ver` order, each once. Gaps are filled by walking back with the §5.6
  *    chain request.
@@ -258,12 +265,18 @@ export async function refreshIdentity(
    * `ver` are signature-checked first (at most MAX_EXAMINED_PER_RELAY), and
    * the first `keep` valid ones (iss == H(ik) == userId, the held ik) are kept.
    */
-  const admit = (list: readonly string[], keep: number, quota: number, walk = false, shareMs = Infinity): { docs: VerifiedIdentityDoc[]; cut: boolean; used: number; ms: number } => {
+  const admit = (
+    list: readonly string[],
+    keep: number,
+    quota: number,
+    walk = false,
+    shareMs = Infinity,
+  ): { docs: VerifiedIdentityDoc[]; cut: boolean; used: number; ms: number; unchecked: string[] } => {
     const t0 = performance.now();
     // Cheap filters first (pre-release review T2): after the JSON decode, and before
     // any curve work, the payload must name this userId and (when a chain is
     // held) its ik. Foreign-key junk costs a decode and uses no quota.
-    const claimed = list
+    const sorted = list
       .filter((j): j is string => typeof j === "string")
       .slice(0, MAX_EXAMINED_PER_RELAY * 4)
       .map((j) => {
@@ -276,16 +289,16 @@ export async function refreshIdentity(
           if (seen.has(h) || (walk && chain.has(h))) return undefined;
           // Hash first: iss must be the fingerprint of the ik it names, before any curve work.
           if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId) return undefined;
-          return { j, ver: typeof p.ver === "number" ? p.ver : -1 };
+          return { j, h, ver: typeof p.ver === "number" ? p.ver : -1 };
         } catch {
           return undefined;
         }
       })
-      .filter((x): x is { j: string; ver: number } => x !== undefined)
+      .filter((x): x is { j: string; h: string; ver: number } => x !== undefined)
       // Tips: the highest claimed ver first (a revoking head can't be pushed out). The walk: the oldest
       // first, so each check can connect to the held chain and be committed even when the walk is cut short.
-      .sort((a, b) => (walk ? a.ver - b.ver : b.ver - a.ver))
-      .slice(0, MAX_EXAMINED_PER_RELAY);
+      .sort((a, b) => (walk ? a.ver - b.ver : b.ver - a.ver));
+    const claimed = sorted.slice(0, MAX_EXAMINED_PER_RELAY);
     const out: VerifiedIdentityDoc[] = [];
     let used = 0;
     let cut = false;
@@ -310,7 +323,11 @@ export async function refreshIdentity(
         if (!(e instanceof P2PError)) throw e;
       }
     }
-    return { docs: out, cut, used, ms: performance.now() - t0 };
+    // #35: in the walk, the hashes this answer held but never had checked (cut short, or past a cap): the
+    // evidence that more time would fill a gap left at the end. Only from an answer of at most `keep`
+    // entries, the most a chain request asks for, which an honest relay never exceeds.
+    const unchecked = walk && list.length <= keep ? sorted.slice(used).map((x) => x.h) : [];
+    return { docs: out, cut, used, ms: performance.now() - t0, unchecked };
   };
   const accepted: string[] = [];
   const rejected = new Set<string>();
@@ -337,16 +354,20 @@ export async function refreshIdentity(
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
   /** Per-relay checking time of the whole walk (all its pages): half of checkMs, each relay its own share. */
   const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / 2 / relays.length]));
-  /** The walk was cut short (a relay out of time or quota on a page that still gave documents, or the request cap). */
-  let walkCut = false;
+  /** Relays whose walk share (time or allowance) is spent: asked no more, save the final probe. */
+  const spent = (r: string) => walkTimeLeft.get(r)! <= 0 || walkLeft.get(r)! <= 0;
+  /**
+   * #35: the hashes of entries the walk was given but never checked (a relay cut short by its share, or a
+   * spent relay's probe). A gap left at the end is "cut short, try again" only when its missing version is
+   * among them: a junk relay is cut on every page, but its junk never hashes to a real missing version,
+   * so it can't turn a genuine gap (pruned history) into "incomplete" forever.
+   */
+  const walkUnchecked = new Set<string>();
   const fetchEach = async (f: (relay: string) => Promise<FetchResult>, keep: number, walk = false): Promise<VerifiedIdentityDoc[]> => {
     // The walk asks only relays with walk time and allowance left: a relay whose share is spent (it had
     // its check) is asked no more, so the time bound holds page by page.
-    const asked = walk ? relays.filter((r) => walkTimeLeft.get(r)! > 0 && walkLeft.get(r)! > 0) : relays;
-    if (walk && asked.length === 0) {
-      walkCut = true;
-      return [];
-    }
+    const asked = walk ? relays.filter((r) => !spent(r)) : relays;
+    if (walk && asked.length === 0) return [];
     const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) for (const { r, res } of answers) if (res !== undefined) answeredRelays.add(r);
     // T1: the remaining tips-phase allowance is split evenly between the relays.
@@ -364,6 +385,7 @@ export async function refreshIdentity(
       if (walk) {
         walkLeft.set(r, q - a.used);
         walkTimeLeft.set(r, walkTimeLeft.get(r)! - a.ms);
+        for (const h of a.unchecked) walkUnchecked.add(h);
       }
       return { answered: res !== undefined, ...a };
     });
@@ -371,11 +393,11 @@ export async function refreshIdentity(
     // relay cut short by its quota (junk) doesn't make the refresh incomplete.
     // In the walk, a page that still brought valid documents is progress: the
     // next page goes on from there (a slow machine checks fewer per page), and
-    // the walk ends incomplete only if a gap is left.
+    // the walk ends incomplete only if a gap is left whose missing version a
+    // relay was cut short before checking (walkUnchecked, #35).
     const answered = results.filter((x) => x.answered);
     const docs = results.flatMap((x) => x.docs);
-    if (answered.length > 0 && answered.every((x) => x.cut) && (!walk || docs.length === 0)) docsCapped = true;
-    if (walk && docs.length > 0 && results.some((x) => x.cut)) walkCut = true;
+    if (!walk && answered.length > 0 && answered.every((x) => x.cut)) docsCapped = true;
     return docs;
   };
 
@@ -388,17 +410,33 @@ export async function refreshIdentity(
   // on the walk's own allowance (pre-release review): filling the lowest gap first
   // connects the most versions, and a hostile majority's tips can't use it up.
   let requests = 0;
+  let stalled = false;
+  const lowestGap = () => gaps.reduce((a, b) => (b.d.ver < a.d.ver ? b : a));
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const lowestGap = gaps.reduce((a, b) => (b.d.ver < a.d.ver ? b : a));
-    const page = await fetchEach((r) => chainOf(userId, [r], lowestGap.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
-    if (page.length === 0) break;
+    const need = lowestGap().need;
+    const page = await fetchEach((r) => chainOf(userId, [r], need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
+    if (page.length === 0) {
+      stalled = true;
+      break;
+    }
     begin();
     place(page);
     end();
   }
-  if (requests >= CHAIN_WALK_MAX_REQUESTS) walkCut = true;
+  // The relays asked for the lowest gap had nothing new to check. Those with their walk share spent weren't
+  // asked: probe them once for it, hashes only (no signature check, so the time bound holds), so an honest
+  // relay that ran out of time still counts as holding the missing version, and a junk relay doesn't.
+  if (chainOf && stalled && gaps.length > 0) {
+    const need = lowestGap().need;
+    const probed = relays.filter(spent);
+    const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], need, CHAIN_WALK_PAGE), timeoutMs) })));
+    for (const { r, res } of answers) for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked) walkUnchecked.add(h);
+  }
   // A walk cut short with a gap left isn't a gap the relays can't fill: incomplete (what was placed is
-  // committed, and the next refresh goes on from there), never chain-broken or a jump over it.
+  // committed, and the next refresh goes on from there), never chain-broken or a jump over it. Cut short
+  // means the request cap, or a gap whose missing version a relay held but wasn't checked in time (#35):
+  // a relay merely cut short (junk) or a genuine gap (pruned history) doesn't make it so.
+  const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || gaps.some((g) => walkUnchecked.has(g.need));
   if (gaps.length > 0 && walkCut) docsCapped = true;
 
   // The newest version the relays returned that the chain rules didn't reject.
@@ -413,9 +451,13 @@ export async function refreshIdentity(
     }
     jumpTo = newest!.jws;
   }
+  // #35: an incomplete refresh may commit an intermediate version (or none) below the verified newest
+  // tip. That tip is recorded as the pending head, so until the stored head reaches it, the view trusts
+  // only the devices and key holders it lists too: what it revokes applies now, not after a later refresh.
+  const pending = incomplete && newest !== undefined ? newest : undefined;
   // Commit once, re-applied onto whatever is stored by now. Nothing new and no jump (the usual
   // refresh): nothing to write, and no need to queue for the store's lock to find that out.
-  const unchanged = accepted.length === 0 && jumpTo === undefined && chain.size > 0;
+  const unchanged = accepted.length === 0 && jumpTo === undefined && chain.size > 0 && (pending === undefined || !chain.notePending(pending));
   const jumped = unchanged ? false : await store.updateIdentity(userId, (cur) => {
     const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur) : new IdentityChain(userId);
     // S4: whether the stored history is anchored is re-checked here, before our versions are added.
@@ -432,9 +474,10 @@ export async function refreshIdentity(
       c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
       didJump = true;
     }
+    const narrowed = pending !== undefined && c.size > 0 && c.notePending(pending);
     // Nothing new: the stored chain stays as it is, with no write (every write is an fsync under
     // the store's cross-process lock, which every p2p process of the home queues for).
-    if (accepted.length === 0 && !didJump && cur) return { result: false };
+    if (accepted.length === 0 && !didJump && !narrowed && cur) return { result: false };
     return { next: c.toStored(), result: didJump };
   });
   const view = await getIdentityView(store, userId);
@@ -546,7 +589,7 @@ export async function getIdentityView(store: TrustStoreV3, userId: string): Prom
   if (!stored || stored.versions.length === 0) return undefined;
   // Verified views are cached per store, keyed by the exact stored versions
   // (review N2): signatures are checked once per distinct chain, not per call.
-  const key = `${stored.historyGap ? "g" : "a"}:${jwsHash(stored.versions.join("."))}`;
+  const key = `${stored.historyGap ? "g" : "a"}:${jwsHash(stored.versions.join("."))}:${stored.pendingHead !== undefined ? jwsHash(stored.pendingHead) : ""}`;
   let cache = viewCache.get(store);
   if (!cache) viewCache.set(store, (cache = new Map()));
   const hit = cache.get(userId);
