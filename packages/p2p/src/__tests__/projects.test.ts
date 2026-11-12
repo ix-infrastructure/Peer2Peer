@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { linkJoin, linkStart } from "../identity.js";
 import { receiving } from "../inbound.js";
 import { publishExtensionState } from "../xstate.js";
-import { routableSessions, sendExtension, sessionAudience } from "../sessions.js";
+import { routableSessions, sendExtension, sendStatus, sessionAudience } from "../sessions.js";
 import { alongside, startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-projects.test/v3";
@@ -185,7 +185,10 @@ describe("project boundaries", () => {
     // A clone of the same remote as S, somewhere else, carrying files that claim sharing.
     repo.C = gitRepo(join(root, "clone-of-shared"), "https://github.com/acme/shared.git");
     repo.Q = gitRepo(join(root, "other"), "git@github.com:acme/other.git");
-    relay = await startRelay(R);
+    // Five users on one address (127.0.0.1) make about 110 connections a minute here, so the relay's
+    // per-address limits (120 connections a minute) are raised, as in the other many-user suites. At the
+    // default, a faster machine crossed the limit and a refused `ls` showed an older status (release dry run).
+    relay = await startRelay(R, { limits: { connectsPerIpPerMinute: 100_000, authsPerIpPerMinute: 100_000, authsPerIpv4PerMinute: 100_000, httpPerIpPerMinute: 100_000 } });
     const t = { [R]: `ws://127.0.0.1:${relay.port}/v3` };
     transport = t;
     ann = new User("ann", t);
@@ -522,7 +525,9 @@ describe("project boundaries", () => {
     const many = Array.from({ length: 600 }, (_, i) => join(repo.S, `d${i}`));
     const a = await inDir(ann, repo.S, many).ok(["status", "--session", "o1", "--state", "busy", "--label", "o"]);
     expect(a.roster.vis).toBe("private");
-    expect(a.project.why).toMatch(/more than/);
+    // Said as its own cause: too many folders, not a project count or an unresolved path.
+    expect(a.project.why).toMatch(/more folders than Peer2Peer keeps track of/);
+    expect(a.project.causes).toEqual(["folders"]);
     // --project-dir past the cap, and a front end's --project-dirs-over (the Codex bridge's).
     const flags = many.flatMap((x) => ["--project-dir", x]);
     expect((await inDir(ann, repo.S).ok(["status", "--session", "o3", "--state", "busy", "--label", "o", ...flags])).roster.vis).toBe("private");
@@ -703,6 +708,26 @@ describe("project boundaries", () => {
     expect(row).toMatchObject({ label: "private", state: "idle" });
     expect(row.summary).toBeUndefined();
     expect(JSON.stringify(row)).not.toContain("now private");
+  });
+
+  it("a blank private status that doesn't go out is said, never swallowed", async () => {
+    await inDir(ann, repo.S).ok(["status", "--session", "r2", "--state", "busy", "--label", "visible"]);
+    const app = await inDir(ann, repo.S, [repo.P]).app();
+    await app.load();
+    receiving(app);
+    // Ben's relay refuses the blank status (as a relay at its limit would).
+    const deliver = app.deliver.bind(app);
+    app.deliver = async (to, kind, ...rest) => {
+      if (to === ids.ben && kind === "status") throw new Error("relay refused (rate-limited)");
+      return deliver(to, kind, ...rest);
+    };
+    try {
+      const r = await sendStatus(app, { session: "r2", state: "busy", label: "visible" });
+      expect(r.roster.vis).toBe("private");
+      expect(r.warnings?.join("\n")).toMatch(/blank private status didn't reach ben@.*relay refused \(rate-limited\)/);
+    } finally {
+      await app.close();
+    }
   });
 
   it("project commands: show, ls, share (circles you joined, friends), private", async () => {

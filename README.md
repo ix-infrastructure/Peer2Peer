@@ -342,7 +342,7 @@ Every group brings its own relay: there's no public one. The Docker route is in 
 
 ```sh
 RELAY_URL=wss://relay.example.org/v3 OPERATOR_CONTACT=mailto:ops@example.org \
-DB_PATH=/var/lib/p2p-relay/relay.db npx @peer2peer/relay    # after the npm release; or build from a checkout
+DB_PATH=/var/lib/p2p-relay/relay.db npx @peer2peer/relay    # or build from a checkout
 ```
 
 A relay is one Node 22.13+ process and one SQLite file, and it uses about 50–75 MB idle. Put TLS in front of it (Caddy is one block), set `TRUST_PROXY`, and you're done. **[docs/run-a-relay.md](docs/run-a-relay.md)** covers TLS, limits, discovery, operations and the privacy promise.

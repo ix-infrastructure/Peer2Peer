@@ -149,7 +149,7 @@ describe("the static backstop: CODEX_HOME/sessions and P2P_HOME never in a temp 
     const { bridge, feed, call } = await asking({ codexHome: planted, p2pHome: join(planted, "p2p"), env: { P2P_AUTO_DELIVER: ANN } });
     expect(bridge.untrustedTranscript).toContain("CODEX_HOME (its sessions/ rollout files)");
     await feed(message({ text: "auto-deliver me" }));
-    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR }));
+    await feed(message({ text: "from my laptop", self: true, from: ME, address: ME_ADDR, via: "person" }));
     const r = await call("p2p_inbox");
     expect(r.text).not.toContain("auto-deliver me");
     expect(r.text).not.toContain("from my laptop");

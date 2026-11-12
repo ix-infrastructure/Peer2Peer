@@ -14,12 +14,9 @@ All five are licensed Apache-2.0 and versioned in lockstep: they always carry th
 
 **Publish order:** core → relay → codex-bridge → cli → ext-ix. Each package comes after the packages it depends on, so a user never installs a version whose dependencies aren't there yet. `scripts/release-pack.mjs` writes this order to `.release/tarballs/manifest.json`, and the release workflow follows it.
 
-## Release notes for the next release
+## Release notes
 
-Things to carry into the next release's notes:
-
-- **Invite codes and `p2p remove`.** A code now records which circles its redemption actually put the redeemer in, and `p2p remove` takes them out of only those, never a circle they were in already. Codes redeemed before invite links shipped have no such record: for them `p2p remove` falls back to undoing every circle the code named, as before.
-- **Invite codes on private relays.** A code or link whose relay host is, or resolves to, a loopback, link-local or private address is refused unless the redeemer passes `p2p join --allow-private-relay` (or sets `P2P_ALLOW_PRIVATE_RELAY=1`). Teams that run a relay on their own network need the flag, and so do a code whose inviter's relays are such relays, and pasted long invite links (`p2p accept`) and circle links (`p2p circle join`) that name one. Held invites and rotations from friends on such relays are approved as before, and a relay that is already one of the user's own (a team's Tailscale or LAN relay) never needs the flag. In Claude Code: `/peers join --allow-private-relay <code>`.
+Each release's notes go in [CHANGELOG.md](../CHANGELOG.md), in the PR that bumps the version. Between releases, add anything the next release's notes must say (a behaviour change, a step 2 of a two-step rollout) under an "Unreleased" heading there.
 
 ## How a release is built
 
@@ -73,11 +70,11 @@ These need an owner of the npm organization `peer2peer` and an admin of the GitH
    scripts/check-bundle.sh
    ```
 
-   `set-version.mjs` updates every `package.json`, the version constants in codex-bridge, p2p and ext-ix, ext-ix's peer range on `@peer2peer/cli`, and every `package-lock.json`. Open a PR, get it reviewed, check that CI (`ci-public.yml`, which runs on every PR) is green on its head, and merge it.
+   `set-version.mjs` updates every `package.json`, the version constants in codex-bridge, p2p and ext-ix, ext-ix's peer range on `@peer2peer/cli`, and every `package-lock.json`. Open a PR, get it reviewed, dispatch `ci` (`ci-public.yml`) on its branch and check it is green on its head, and merge it.
 
-   **Compatibility:** run the cross-version matrix against the previous two releases ([docs/compatibility.md](compatibility.md)): `node scripts/compat/matrix.mjs --refs <previous>,<one before>`, or dispatch `ci` with `compat_matrix: true` and `compat_refs` set. It must be green both ways. A release that turns on something older clients would reject (step 2 of a two-step rollout) is run with that setting too (for example `--new-env P2P_DEVICE_INFO=1`).
+   **Compatibility:** the cross-version matrix ([docs/compatibility.md](compatibility.md)) must be green both ways against the previous two releases, as committed at their tags and as npm installs them. The PR's `compat` check runs it (every pull request does), and so does the dispatch. Locally: `node scripts/compat/matrix.mjs --npm-releases`. A release that turns on something older clients would reject (step 2 of a two-step rollout) is run with that setting too (for example `--new-env P2P_DEVICE_INFO=1`), and its notes say so. To try the new version the way npm will install it, before it is published: `node scripts/release-pack.mjs` and then `node scripts/compat/matrix.mjs --tarballs .release/tarballs` (the tarballs as the old side, this tree's bundle as the new).
 
-2. **Dry run.** Actions → release → Run workflow on `main`. A manual run is always a dry run: its build job runs the tests, builds and verifies the tarballs, and runs `npm publish --dry-run` for each, in order, with no credentials; the publish job is skipped. The tarballs are attached to the run as the `peer2peer-tarballs` artifact. Look at them.
+2. **Dry run.** Actions → release → Run workflow on `main`. A manual run is always a dry run: its `compat` job runs the cross-version matrix against the previous two releases (from git and npm), and its build job runs the tests, checks the tree is clean, builds and verifies the tarballs, and runs `npm publish --dry-run` for each, in order, with no credentials (a package whose exact version is already on npm is skipped with an "already published, skipped" line, as the publish job skips it); the publish job is skipped. The tarballs are attached to the run as the `peer2peer-tarballs` artifact. Look at them.
 
 3. **Publish** by tagging the merged commit:
 
@@ -87,13 +84,26 @@ These need an owner of the npm organization `peer2peer` and an admin of the GitH
    git push origin v0.2.0
    ```
 
-   The workflow has two jobs. The build job (read-only, no environment, no credentials, dependencies installed with `--ignore-scripts`) checks that the tag matches the package version, runs the tests and gates, and builds, verifies and uploads the tarballs. The publish job runs only for a `v*` tag whose check passed. It waits for an `npm-publish` reviewer, downloads the tarballs (no checkout, no install), checks them against the manifest's hashes, and publishes core, relay, codex-bridge, cli and ext-ix in that order with `--provenance`. A package version that's already on npm is skipped, so if a run fails halfway, re-run it. Only a tag can publish; a manual run can't.
+   The workflow has two jobs. The build job (read-only, no environment, no credentials, dependencies installed with `--ignore-scripts`) checks that the tag matches the package version, runs the tests and gates, checks the tree is still clean, and builds, verifies and uploads the tarballs. The `compat` job (read-only, its own runner, no artifacts) runs the cross-version matrix against the two releases before this tag; the publish job needs both, so a failed matrix fails the release and nothing is published. The publish job runs only for a `v*` tag whose check passed. It waits for an `npm-publish` reviewer, downloads the tarballs (no checkout, no install), checks them against the manifest's hashes, and publishes core, relay, codex-bridge, cli and ext-ix in that order with `--provenance`. A package version that's already on npm is skipped, so if a run fails halfway, re-run it. Only a tag can publish; a manual run can't.
 
-4. **Check:** `npm view @peer2peer/cli@0.2.0`. Each package's npm page shows a provenance badge linking to the workflow run. Then try `npx @peer2peer/cli@0.2.0 --version` in an empty directory.
+4. **Check:** `npm view @peer2peer/cli@0.2.0`. Each package's npm page shows a provenance badge linking to the workflow run. Then try `npx @peer2peer/cli@0.2.0 --version` in an empty directory, and run the matrix against the published packages: `node scripts/compat/matrix.mjs --npm 0.2.0 --require-npm` (from a checkout of `main`; it fails if the version isn't installable from npm).
 
 5. **The relay install scripts' source.** The same tag run also attaches `peer2peer-<version>-src.tar.gz` and `SHA256SUMS` to the tag's GitHub release (the `github-release` job, `contents: write` only, after the publish job). The tarball is `git archive` of the tag with the commit's time as every file's mtime, compressed with `gzip -n`, so the same commit always gives the same bytes; the build job makes it twice and compares them, and a rerun never replaces an asset that is already there. A manual (dry) run uploads the same files as the `peer2peer-source` artifact.
 
    The install scripts download that tarball when they aren't run from a checkout. A script can't pin the release it ships in (its own bytes are in the tarball), so pin it in a follow-up PR: set `RELAY_VERSION` and `RELAY_SOURCE_SHA256` (from the release's `SHA256SUMS`) in both `scripts/install-relay.sh` and `scripts/install-relay.ps1`, run `npm run install-scripts:checksums` in `packages/relay`, and merge. The website serves the scripts and `install-relay.sha256` from that commit.
+
+### Release checklist
+
+- [ ] Version bumped in all five packages (`scripts/set-version.mjs`), bundles rebuilt, `scripts/check-bundle.sh` clean.
+- [ ] Release notes written in CHANGELOG.md (the "Unreleased" heading renamed to the version), including any step 2 of a two-step rollout this release turns on.
+- [ ] The bump PR's `compat` check green: the cross-version matrix both ways against the previous two releases, from their tags and from npm ([docs/compatibility.md](compatibility.md)). Every check listed there passes, or reports a clean absence for a feature one side doesn't have.
+- [ ] A step 2 rollout in this release: the matrix also green with that setting (`--new-env ...`) against both previous releases.
+- [ ] `ci` dispatched on the PR's head and green (Linux and macOS, Node 22 and 24).
+- [ ] The release workflow's dry run green on `main` (tests, matrix, tarballs, `npm publish --dry-run`); tarballs looked at.
+- [ ] Optional, for the installed layout: `node scripts/compat/matrix.mjs --tarballs .release/tarballs` green.
+- [ ] Tag signed and pushed; the publish job approved by an `npm-publish` reviewer.
+- [ ] After publishing: `npm view`, `npx @peer2peer/cli@<version> --version`, and `node scripts/compat/matrix.mjs --npm <version> --require-npm` green.
+- [ ] Relay install scripts pinned to the new source tarball in a follow-up PR (step 5).
 
 A published version can't be reused, even after `npm unpublish`. To withdraw a broken release, `npm deprecate @peer2peer/<pkg>@<version> "<reason>"` and publish a fixed patch version.
 

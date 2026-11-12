@@ -156,6 +156,8 @@ export type WorldOptions = {
   gitBranches?: Record<string, string>
   /** What the mod's no-git repo probe (`node -e`) finds: the repo's root and branch (default: none). */
   repoProbe?: { root: string; branch?: string }
+  /** What the mod's marker probe (MARKER_PROBE) answers, or a function of the paths it was given; null: it fails (default: nothing exists, no marker). */
+  markerProbe?: { exists: string[]; markers: string[] } | ((paths: string[]) => { exists: string[]; markers: string[] }) | null
   /** What `status` answers as its `roster` (default: none). */
   statusRoster?: object
   /** Extra rows `p2p circle members` lists (besides Ana the owner and me). */
@@ -321,6 +323,13 @@ export function world(on: On, options: WorldOptions = {}): World {
     }
     // The mod's person-token script (lib PERSON_TOKEN_SCRIPT): the token it would print.
     if (bin === 'node' && e.argv[1] === '-e' && String(e.argv.at(-1)).endsWith('person.key')) return ok(options.personToken ?? '')
+    // The mod's marker probe (lib MARKER_PROBE): what the test says exists and which markers it finds.
+    if (bin === 'node' && e.argv[1] === '-e' && String(e.argv[2]).includes("out.markers.push")) {
+      if (options.markerProbe === null) return ok('', 1, 'probe failed')
+      const m = typeof options.markerProbe === 'function' ? options.markerProbe(e.argv.slice(3).map(String)) : options.markerProbe
+
+      return ok(json(m ?? { exists: [], markers: [] }))
+    }
     if (bin === 'node' && e.argv[1] === '-e') return ok(json(options.repoProbe ?? {}))
     if (bin === 'node' && e.argv[1] === '--version') {
       if (options.nodeVersion === null) throw new Error('spawn node ENOENT')

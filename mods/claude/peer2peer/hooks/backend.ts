@@ -38,7 +38,7 @@ import type {
   TrustList,
   Whoami,
 } from '../types'
-import { inert, parseEvent, parseJson, takeLines } from './lib'
+import { inert, parseEvent, parseJson, takeLines, type HistoryRecord } from './lib'
 
 export type RunResult = { exitCode: number; stdout: string; stderr: string }
 export type Chunk = { stream: 'stdout' | 'stderr'; text: string }
@@ -300,6 +300,15 @@ export class P2P {
     return this.call(['trust', 'check', '--', userId])
   }
 
+  /**
+   * `p2p own-agents check <did>`: whether a message from one of this user's agent sessions on device
+   * `did` skips the hold right now (`p2p own-agents deliver`, or `--devices` naming that device).
+   * Read at delivery time, never from the event.
+   */
+  ownAgentsCheck(did: string): Promise<Outcome<{ did: string; deliver: boolean }>> {
+    return this.call(['own-agents', 'check', '--', did])
+  }
+
   /** `p2p trust add|remove <user|circle:cid>`: only ever on the person's own command or button press. */
   trustChange(verb: 'add' | 'remove', target: string): Promise<Outcome<{ added?: string; removed?: string | null; kind: 'user' | 'circle'; address?: string; name?: string }>> {
     return this.call(['trust', verb, '--', target])
@@ -399,6 +408,22 @@ export class P2P {
     return this.call<DoctorResult>(['doctor', ...(user ? ['--', user] : [])], { timeoutMs: LONG_TIMEOUT_MS })
   }
 
+  /**
+   * `p2p history`: the person's view (everything on this device, or `inbox` only), or one session's
+   * own (`session`). Only ever for a /peers command the person typed: the CLI lets this front end's
+   * token read the person's inbox, so the mod never runs it for the model.
+   */
+  history(o: { session?: string; inbox?: boolean; since?: string; peer?: string; limit?: number }): Promise<Outcome<{ messages: HistoryRecord[]; truncated?: boolean; retention?: { days?: number; enabled?: boolean } }>> {
+    const args = ['history']
+    if (o.session) args.push(`--session=${o.session}`)
+    if (o.inbox) args.push('--inbox')
+    if (o.since) args.push(`--since=${o.since}`)
+    if (o.peer) args.push(`--peer=${o.peer}`)
+    if (o.limit !== undefined) args.push(`--limit=${o.limit}`)
+
+    return this.call(args)
+  }
+
   /** The relays this identity's document lists. */
   relays(): Promise<Outcome<{ relays: string[] }>> {
     return this.call(['relays'])
@@ -462,10 +487,15 @@ export class P2P {
    */
   project(args: readonly string[]): Promise<Outcome<Record<string, unknown>>> {
     const [verb = 'show', ...rest] = args
-    const flags = rest.filter(a => a === '--add' || a.startsWith('--person='))
+    const flags = rest.filter(a => a === '--add' || a === '--subfolders' || a.startsWith('--person='))
     const positionals = rest.filter(a => !a.startsWith('--'))
 
     return this.call(['project', verb, ...flags, ...(positionals.length ? ['--', ...positionals] : [])])
+  }
+
+  /** `p2p session show`: this session's bound projects, their policies and why it is private (the person's: it needs the token). */
+  sessionShow(sid: string): Promise<Outcome<Record<string, unknown>>> {
+    return this.call(['session', 'show', '--', sid])
   }
 
   /** `p2p session bound`: binds this session to the bound an own-session message it holds carried (narrowing only). */

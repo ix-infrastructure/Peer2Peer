@@ -68,7 +68,20 @@ export type RosterView = { sid: string; ref: string; vis: "circle" | "private"; 
 export type SendResult = { delivered: boolean; to: { userId: string; address: string; own: string; sid: string; ref: string }; relays: number };
 /** What `p2p status` says about the session's projects (projects.ts). */
 export type ProjectInfo = { projects: { id: string; name: string }[]; policy: "private" | "shared" | "none"; why?: string; circles?: string[]; people?: string[] };
-export type RelaysInfo = { listed: string[]; connected: string[]; failed: { url: string; reason: string }[] };
+/** One record of `p2p history --json` (packages/p2p history.ts): peer text, data only. */
+export type HistoryRecord = {
+  id: string;
+  at: number;
+  dir: "in" | "out";
+  type: "message" | "ext";
+  session?: string;
+  peer: { userId: string; address: string; self?: true };
+  peerSession?: { own: string; sid: string; ref: string };
+  text: string;
+  ext?: string;
+  state?: string;
+};
+export type RelaysInfo ={ listed: string[]; connected: string[]; failed: { url: string; reason: string }[] };
 
 export class P2P {
   constructor(
@@ -109,21 +122,29 @@ export class P2P {
    * This session's status. Never a mode: what this session auto-approves is nobody else's business.
    * `projectDirs`: every folder the session has worked in (projects.ts binds each one's project).
    */
-  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[]; projectDirsOver?: boolean }, timeoutMs?: number) {
+  status(o: { session: string; state: "busy" | "idle"; label: string; repo?: string; branch?: string; summary?: string; files?: readonly string[]; projectDirs?: readonly string[]; projectDirsOver?: boolean | readonly string[] }, timeoutMs?: number) {
     const args = ["status", `--session=${o.session}`, `--state=${o.state}`, `--label=${o.label}`];
     if (o.repo) args.push(`--repo=${o.repo}`);
     if (o.branch) args.push(`--branch=${o.branch}`);
     if (o.summary) args.push(`--summary=${o.summary}`);
     for (const file of o.files ?? []) args.push(`--file=${file}`);
     for (const dir of o.projectDirs ?? []) args.push(`--project-dir=${dir}`);
-    if (o.projectDirsOver) args.push("--project-dirs-over");
+    if (o.projectDirsOver) args.push(overFlag(o.projectDirsOver));
     return this.call<{ delivered: unknown[]; failed: { address: string; error: string }[]; roster?: RosterView; warnings?: string[]; project?: ProjectInfo }>(args, timeoutMs !== undefined ? { timeoutMs } : {});
   }
 
   /** A message from this session; refused (`not_shared`) to anyone its projects don't share (projects.ts). */
-  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[]; projectDirsOver?: boolean }): Promise<Outcome<SendResult>> {
-    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...(o.projectDirsOver ? ["--project-dirs-over"] : [])];
+  send(o: { fromSession: string; to: string; text: string; notifyWhenIdle?: boolean; projectDirs?: readonly string[]; projectDirsOver?: boolean | readonly string[] }): Promise<Outcome<SendResult>> {
+    const dirs = [...(o.projectDirs ?? []).map((d) => `--project-dir=${d}`), ...(o.projectDirsOver ? [overFlag(o.projectDirsOver)] : [])];
     return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
+  }
+
+  /**
+   * `p2p own-agents`, read only: whether this user's agent sessions' messages skip the hold
+   * (`deliver`), or only those from some other devices (`devices`). Setting it is the person's, in a terminal.
+   */
+  ownAgents(): Promise<Outcome<{ ownAgents: "hold" | "deliver"; devices: string[] | "all-other" }>> {
+    return this.call(["own-agents"]);
   }
 
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */
@@ -132,8 +153,28 @@ export class P2P {
     return r.ok ? { ok: true, value: r.value.roster } : r;
   }
 
+  /**
+   * `p2p history --session <sid>`: this session's own message history (the CLI reads only a session
+   * a front end registered, and only within its projects; never the person's inbox).
+   */
+  async history(o: { session: string; since?: string; limit?: number }): Promise<Outcome<{ messages: HistoryRecord[]; truncated: boolean }>> {
+    const args = ["history", `--session=${o.session}`];
+    if (o.since) args.push(`--since=${o.since}`);
+    if (o.limit !== undefined) args.push(`--limit=${o.limit}`);
+    const r = await this.call<{ messages?: unknown; truncated?: unknown }>(args);
+    if (!r.ok) return r;
+    const messages = Array.isArray(r.value.messages) ? (r.value.messages as HistoryRecord[]).filter((m) => m && typeof m.text === "string" && typeof m.at === "number" && (m.dir === "in" || m.dir === "out")) : [];
+    return { ok: true, value: { messages, truncated: r.value.truncated === true } };
+  }
+
   async held(): Promise<Outcome<HeldItem[]>> {
     const r = await this.call<{ held: HeldItem[] }>(["held"]);
     return r.ok ? { ok: true, value: Array.isArray(r.value.held) ? r.value.held : [] } : r;
   }
+}
+
+/** `--project-dirs-over`, with why when the bridge knows it (`=unresolved,folders`: the CLI's OverWhy words). */
+function overFlag(v: true | readonly string[]): string {
+  const why = v === true ? [] : v.filter((w) => /^[a-z]{1,16}$/.test(w));
+  return why.length ? `--project-dirs-over=${why.join(",")}` : "--project-dirs-over";
 }

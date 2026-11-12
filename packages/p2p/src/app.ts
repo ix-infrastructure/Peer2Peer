@@ -495,7 +495,8 @@ export class App {
         // back uncounted, so the next command or the watch applies those envelopes in full.
         if (pool.busy) {
           pool.stopHandling();
-          await this.onAbandon?.().catch(() => undefined);
+          // Bounded too: giving claims back waits on the store's lock, and an exit never hangs on it.
+          if (this.onAbandon) await Promise.race([this.onAbandon().catch(() => undefined), new Promise((r) => setTimeout(r, CLOSE_GRACE_MS).unref())]);
         }
       } finally {
         this.pool = undefined;
@@ -1035,12 +1036,21 @@ export class App {
     kind: EnvelopeKindV3,
     session: { own: string; sid: string },
     plaintext: object,
-    opts: { refresh?: boolean; extraCaps?: readonly string[]; hint?: readonly string[]; onlyDevices?: readonly string[] } = {},
+    opts: {
+      refresh?: boolean;
+      extraCaps?: readonly string[];
+      hint?: readonly string[];
+      onlyDevices?: readonly string[];
+      /** Called with each copy's device and seq once they are known, before any copy goes out. */
+      beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void>;
+    } = {},
   ): Promise<Delivery> {
     const pool = this.pool ?? (await this.connect());
     const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
     if (!view) throw new CliError("unknown_user", `no identity document for ${to}: can't find their devices or relays`);
-    const devices = view.devices.filter((d) => !(to === this.userId && d === this.did) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
+    // This device only when named in onlyDevices (a message to another session of ours here, or a
+    // receipt for one): sealed to itself and sent through a relay like any other copy.
+    const devices = view.devices.filter((d) => (to !== this.userId || d !== this.did || opts.onlyDevices?.includes(d) === true) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
     const relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
     const caps = await this.capsFor(to, kind, opts.extraCaps);
     const resolveCert = storeCertResolver(this.store);
@@ -1062,6 +1072,7 @@ export class App {
       }
     }
     const seqs = ready.length > 0 ? await this.state.nextSeqs(session.own, session.sid, ready.length) : [];
+    if (opts.beforeSend && ready.length > 0) await opts.beforeSend(ready.map((r, i) => ({ did: r.d, seq: seqs[i] })));
     const targets = relays.map((r) => ({ relay: r, cap: caps.get(r) })).filter((t) => t.cap !== undefined || kind === "contact");
     const outgoing: { d: string; env: string }[] = [];
     for (const [i, { d, kpk }] of ready.entries()) {

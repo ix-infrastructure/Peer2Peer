@@ -44,12 +44,12 @@
 #   P2P_DETECT_SYSTEMD (yes/no), P2P_DETECT_UID, P2P_DETECT_DATA_DEVICE, P2P_NODE_BIN,
 #   P2P_SOURCE_DIR (a checkout to build from).
 
-# TODO(first release): pin both after the first release, from its SHA256SUMS
-# asset (docs/releasing.md, step 5). release.yml attaches a deterministic
-# peer2peer-<ver>-src.tar.gz; GitHub's generated /archive/ tarballs aren't
-# guaranteed to be byte-stable, so the scripts never use those.
-RELAY_VERSION=""
-RELAY_SOURCE_SHA256=""
+# Pinned from the release's SHA256SUMS asset (docs/releasing.md, step 5).
+# release.yml attaches a deterministic peer2peer-<ver>-src.tar.gz; GitHub's
+# generated /archive/ tarballs aren't guaranteed to be byte-stable, so the
+# scripts never use those.
+RELAY_VERSION="0.1.1"
+RELAY_SOURCE_SHA256="9f0c72e30f62c0abcb608b09c5ebdc75a27ce9e725a11f5540db65e5842c709f"
 RELAY_SOURCE_URL_BASE="https://github.com/ix-infrastructure/Peer2Peer/releases/download"
 # TODO(first release): once releases publish a multi-arch image (for example on
 # GHCR), pull it by digest here instead of building locally.

@@ -34,11 +34,15 @@
 //   relayInfo the relays' /.well-known/p2p-relay.json (features and frames), as last fetched
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
+//   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
+//   graphMemory  graph memory (graph-memory.ts): what was recorded of each own session, the bounded queue, counters
+//   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
 import type { OutboxDoc } from "./outbox.js";
 import type { ReceiptsDoc } from "./receipts.js";
 import type { RelayInfoRec } from "./relay-info.js";
 import type { ProjectsDoc, SessionProjectsDoc } from "./projects.js";
+import type { GraphMemoryDoc } from "./graph-memory.js";
 import { join } from "node:path";
 import { FileDocBackend, type LockOptions } from "@peer2peer/core/v3/node";
 import type { DocBackend, RotationStatement, StatusBody } from "@peer2peer/core/v3";
@@ -134,6 +138,15 @@ export interface XStateSenderDoc {
   rate: Record<string, { start: number; n: number }>;
   /** The sender's one-minute window across all their sessions. */
   all?: { start: number; n: number };
+}
+
+/** One same-device send (Docs.localSends). */
+export interface LocalSend {
+  /** The sending session. */
+  from: string;
+  /** `person`: the person's own terminal session (`tui`, or a send as them); `agent`: any other session. */
+  via: "person" | "agent";
+  at: number;
 }
 
 export interface PeerStatusRec {
@@ -368,6 +381,14 @@ type Docs = {
   xstateSent: Record<string, number>;
   /** Sealed messages no relay accepted yet, retried by `watch` (outbox.ts). */
   outbox: OutboxDoc;
+  /**
+   * Messages one session of this device sent to another session of this device, by `<target sid>|<seq>`:
+   * which session sent it and whether the person did (sessions.ts). Local only, never on the wire: the
+   * receiving side (this same device) reads it to frame the message and to apply the hold rule.
+   */
+  localSends: Record<string, LocalSend>;
+  /** When a message from a bounded session of yours last reached the person's own session (`tui`): for a warning there. */
+  tuiTaint: { at: number; bound: "private" | "shared" };
   /** Delivery receipts (receipts.ts, §4.3). */
   receipts: ReceiptsDoc;
   /** When each (sender, kind) of an envelope this version doesn't know was last noticed (unknown-kinds.ts). */
@@ -378,6 +399,10 @@ type Docs = {
   projects: ProjectsDoc;
   /** Which projects each session has worked in (projects.ts), by sid: sticky until the session ends. */
   sessionProjects: SessionProjectsDoc;
+  /** When this device showed the one-time notice that new installs turn the Ix extension on (ix-local.ts). */
+  ixNotice: { at: number };
+  /** Graph memory (graph-memory.ts): this device's sessions' context waiting for the local Ix graph, and counters. */
+  graphMemory: GraphMemoryDoc;
 };
 
 export const sessKey = (own: string, sid: string) => `${own}|${sid}`;

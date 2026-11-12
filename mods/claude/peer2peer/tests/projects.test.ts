@@ -20,6 +20,10 @@ const PRIVATE = { sid: 'x', ref: 'ffffff', ver: 1, vis: 'private', parts: [] }
 describe('project boundaries: guards (lib)', () => {
   test('`p2p project share|private` is the person\'s: refused from the shell; show and ls only read', () => {
     expect(mutatingP2PVerb('p2p project share c_team')).toBe('project share')
+    // L1: a delivery receipt is the mod's own report, own-agents the person's choice; as words in text they pass.
+    expect(mutatingP2PVerb('p2p receipt p2p.message:abc --from-session s1 --outcome shown')).toBe('receipt')
+    expect(mutatingP2PVerb('p2p own-agents deliver')).toBe('own-agents')
+    expect(mutatingP2PVerb('p2p send --from-session s1 --to x receipt')).toBeNull()
     expect(mutatingP2PVerb('p2p project share --person ben@bbbb-bbbb-bbbb-bbbb')).toBe('project share')
     expect(mutatingP2PVerb('cd ~/work/api && p2p project private')).toBe('project private')
     expect(mutatingP2PVerb('bash -c "p2p project share"')).toBe('project share')
@@ -149,8 +153,8 @@ describe('project boundaries: the mod', () => {
     await $.tool.call({ tool: 'Bash', tool_use_id: 'b2', command: "grep -r token ../other-repo/src && ls '~/notes'" } as never)
     await settle(w, () => handed(w).includes('/work/other-repo/src'))
     const dirs = handed(w)
-    // A file's folder; a folder as named.
-    expect(dirs).toEqual(expect.arrayContaining(['/work/secret', '/work/other-repo/src']))
+    // A path as written (the CLI finds a file's folder); a folder as named.
+    expect(dirs).toEqual(expect.arrayContaining(['/work/secret/keys.ts', '/work/other-repo/src']))
     // A relative search root (Grep, Glob) resolves against where the session is.
     expect(toolPaths({ tool: 'Grep', pattern: 'x', path: '../third' }, '/work/web')).toEqual(['/work/third'])
   })
@@ -167,7 +171,8 @@ describe('project boundaries: the mod', () => {
     const w = world(on, { gitTop: '/work/web', store: { 'dirs:claude-session-1': { dirs: many, over: false, at: 1 } } })
     await start($, w)
     await settle(w, () => ran(w, 'status').length > 0)
-    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS_OVER).toBe('1')
+    // Said as the cause (the CLI words its refusal from it): too many folders, not an unresolved path.
+    expect(ran(w, 'status').at(-1)?.env?.P2P_PROJECT_DIRS_OVER).toBe('folders')
   })
 })
 
@@ -180,7 +185,7 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     expect(p2pSessionArgs('p2p send --from-\\session x1')).toEqual(['x1'])
     expect(shellPaths('cat /a/b ../c ~/d e', '/w/r', '/home/u')).toEqual({ paths: ['/a/b', '/w/c', '/home/u/d'], over: false })
     // $HOME and $PWD expand; any other expansion in a path can't be resolved: private.
-    expect(shellPaths('cat $HOME/notes/a.md ${PWD}/../x', '/w/r', '/home/u')).toEqual({ paths: ['/home/u/notes', '/w/x'], over: false })
+    expect(shellPaths('cat $HOME/notes/a.md ${PWD}/../x', '/w/r', '/home/u')).toEqual({ paths: ['/home/u/notes/a.md', '/w/x'], over: false })
     expect(shellPaths('cat $SECRET_DIR/keys', '/w/r', '/home/u').over).toBe(true)
     // Quoted text is never an expansion, and $PWD/$HOME expand anywhere in a word (M2).
     expect(shellPaths("sed 's/$/;/' notes.txt", '/w/r').over).toBe(false)
@@ -191,7 +196,7 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     expect(shellPaths('tsc --outDir=$OUT/dist', '/w/r').over).toBe(true)
     expect(shellPaths('cat "$(echo /secret)/k"', '/w/r', '/home/u').over).toBe(true)
     // Relative ones resolve against the folder (a symlink in it binds its target's project, in the CLI).
-    expect(shellPaths('cat link/inside.txt', '/w/r').paths).toEqual(['/w/r/link'])
+    expect(shellPaths('cat link/inside.txt', '/w/r').paths).toEqual(['/w/r/link/inside.txt'])
     // Past the per-command cap: private, never the first N.
     expect(shellPaths(Array.from({ length: 300 }, (_, i) => `/p${i}/x`).join(' '), '/w/r').over).toBe(true)
     // Padding can't push a session id past what is read.

@@ -31,6 +31,7 @@ import {
   conflictMessage,
   conflicts,
   eventAddress,
+  replyToOf,
   classifyMode,
   isExplicitlyAuto,
   screenMessage,
@@ -68,8 +69,15 @@ export const BUSY_WITHOUT_HOOKS_MS = 2 * 60_000;
 export const WATCH_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 const WATCH_STABLE_MS = 10_000;
 const QUEUE_DEBOUNCE_MS = 500;
-/** L1: turns this user's own devices may start, per 10 minutes. */
+/** L1: turns this user's other devices may start, per 10 minutes. */
 export const SELF_TURNS = 5;
+/**
+ * Turns this user's other sessions on this same device may start, per 10 minutes: the person's own
+ * work, so more than a peer's 3, but still a cap. Constants: nothing a session or its agent sets changes them.
+ */
+export const LOCAL_SELF_TURNS = 30;
+/** Turns this user's own sessions may start since the person last typed a prompt here (a slow loop stops too). */
+export const OWN_TURNS_UNATTENDED = 10;
 const FINAL_STATUS_TIMEOUT_MS = 8_000;
 
 export type InboxState = "pending" | "held" | "released" | "shown" | "declined" | "expired";
@@ -81,7 +89,16 @@ export type InboxItem = {
   id: string;
   kind: "message" | "notice";
   from: { userId: string; address: string };
+  /** From one of this user's own sessions (any device). */
   fromSelf: boolean;
+  /** From one of this user's own sessions that isn't the person at their own terminal: held like a peer's (screenMessage). */
+  ownAgent?: boolean;
+  /** From another session on this device (not another device). */
+  local?: boolean;
+  /** The sending device (own sessions only). */
+  did?: string;
+  /** The held-queue bucket (capHeld) for your own sessions: one per sending session. */
+  bucket?: string;
   /** The sender's text (message), or the bridge's own notice line. */
   text: string;
   at: number;
@@ -180,6 +197,8 @@ export type HookReport = {
   dirs?: string[];
   /** PreToolUse: some path couldn't be resolved, or there were too many: the session is private. */
   over?: boolean;
+  /** Why, as the CLI's OverWhy words (`unresolved`, `folders`). */
+  overWhy?: string[];
   stopHookActive?: boolean;
 };
 
@@ -194,31 +213,38 @@ export function loadThreadDirs(home: string | undefined, threadId: string): stri
   return loadThread(home, threadId).dirs;
 }
 
-/** A thread's saved folders, and whether it was already over its cap. A file that exists but can't be read: over (fails closed). */
-export function loadThread(home: string | undefined, threadId: string): { dirs: string[]; over: boolean } {
+/**
+ * A thread's saved folders, and whether it was already over its cap (and why: the CLI's OverWhy
+ * words). A file that exists but can't be read: over (fails closed), `front`.
+ */
+export function loadThread(home: string | undefined, threadId: string): { dirs: string[]; over: boolean; why: string[] } {
   const f = threadDirsFile(home, threadId);
-  if (!f) return { dirs: [], over: false };
+  if (!f) return { dirs: [], over: false, why: [] };
   let text: string;
   try {
     text = readFileSync(f, "utf8");
   } catch (e) {
-    return { dirs: [], over: (e as NodeJS.ErrnoException).code !== "ENOENT" };
+    const over = (e as NodeJS.ErrnoException).code !== "ENOENT";
+    return { dirs: [], over, why: over ? ["front"] : [] };
   }
   try {
-    const v = JSON.parse(text) as { dirs?: unknown; over?: unknown };
+    const v = JSON.parse(text) as { dirs?: unknown; over?: unknown; why?: unknown };
     const dirs = Array.isArray(v.dirs) ? v.dirs.filter((x): x is string => typeof x === "string" && isAbsolute(x)) : [];
-    return { dirs: dirs.slice(0, 512), over: v.over === true || dirs.length > 512 };
+    const over = v.over === true || dirs.length > 512;
+    const said = Array.isArray(v.why) ? v.why.filter((x): x is string => typeof x === "string" && /^[a-z]{1,16}$/.test(x)).slice(0, 8) : [];
+    return { dirs: dirs.slice(0, 512), over, why: over ? (said.length ? said : dirs.length > 512 ? ["folders"] : ["front"]) : [] };
   } catch {
-    return { dirs: [], over: true };
+    return { dirs: [], over: true, why: ["front"] };
   }
 }
 
-export function saveThreadDirs(home: string | undefined, threadId: string, dirs: readonly string[], over = false): void {
+export function saveThreadDirs(home: string | undefined, threadId: string, dirs: readonly string[], over = false, why: readonly string[] = []): void {
   const f = threadDirsFile(home, threadId);
   if (!f) return;
   try {
     mkdirSync(join(home!, "codex-threads"), { recursive: true, mode: 0o700 });
-    writeFileSync(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: over || dirs.length > 512, at: Date.now() }), { mode: 0o600 });
+    const isOver = over || dirs.length > 512;
+    writeFileSync(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: isOver, ...(isOver ? { why: [...new Set([...why, ...(dirs.length > 512 ? ["folders"] : [])])] } : {}), at: Date.now() }), { mode: 0o600 });
   } catch {
     // best effort: the session stays bound for this run either way
   }
@@ -269,6 +295,8 @@ export class Bridge {
   private readonly touched = new Set<string>();
   /** Past a cap, or a path that couldn't be resolved: the CLI keeps this session private (`--project-dirs-over`). */
   isDirsOver = false;
+  /** Why (the CLI's OverWhy words), so its refusal names the cause. */
+  readonly dirsOverWhy = new Set<string>();
   /** Where sandboxed commands may write, per the trusted turn context ("all": no sandbox; undefined: unknown). */
   trustedWritable: string[] | "all" | undefined;
   /** Why this thread's rollout file isn't trusted (planted or malformed), once found. */
@@ -277,7 +305,11 @@ export class Bridge {
   /** Files a PostToolUse reported (p2p_status may name them even before they exist). */
   private seenEdits = new Set<string>();
   /** Turns this user's own devices started (L1: at most 5 per 10 minutes). */
-  private selfTurns: number[] = [];
+  private selfTurns: { at: number; local: boolean }[] = [];
+  /** Turns your own sessions started since the person last typed a prompt here. */
+  private ownSinceTyped = 0;
+  /** Prompts the person typed, as the trusted rollout counts them (TrustedMode.typed). */
+  private trustedTyped = 0;
   threadId: string | undefined;
   hooksSeen = false;
   activeAt = 0;
@@ -352,8 +384,19 @@ export class Bridge {
   /** Every folder this session has worked in: each one's project bounds who it reaches (projects.ts). */
   sessionDirs(): string[] {
     const all = [...new Set([...(this.deps.projectDirs ?? []), this.deps.cwd, ...this.projectSeen, ...this.touched])];
-    if (all.length > 512) this.isDirsOver = true;
+    if (all.length > 512) this.markOver("folders");
     return all.slice(0, 512);
+  }
+
+  /** Private from now on, and why. */
+  markOver(why: string): void {
+    this.isDirsOver = true;
+    this.dirsOverWhy.add(why);
+  }
+
+  /** What `--project-dirs-over` says: false, or why (an over set without a reason is `front`). */
+  dirsOver(): false | string[] {
+    return this.isDirsOver ? (this.dirsOverWhy.size ? [...this.dirsOverWhy] : ["front"]) : false;
   }
 
   private async goOnline(): Promise<void> {
@@ -427,15 +470,15 @@ export class Bridge {
       if (typeof d !== "string" || !isAbsolute(d) || this.touched.has(d)) continue;
       if (this.touched.size >= 512) {
         // Past the cap: private, never "the first 512".
-        if (!this.isDirsOver) added = true;
-        this.isDirsOver = true;
+        if (!this.dirsOverWhy.has("folders")) added = true;
+        this.markOver("folders");
         continue;
       }
       this.touched.add(d);
       added = true;
     }
     if (!added) return;
-    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched], this.isDirsOver);
+    if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.touched], this.isDirsOver, [...this.dirsOverWhy]);
     this.announce();
   }
 
@@ -488,7 +531,7 @@ export class Bridge {
         this.isAnnounceQueued = false;
         const summary = this.sharedSummary();
         const r = await this.deps.p2p
-          .status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...(summary ? { summary } : {}), ...(this.shareStatus ? { files: this.files } : {}), projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver })
+          .status({ session: this.sid, state: this.status, label: this.label, ...this.where(), ...(summary ? { summary } : {}), ...(this.shareStatus ? { files: this.files } : {}), projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() })
           .catch(() => null);
         if (r && !r.ok) this.lastError = `status not shared: ${r.reason}`;
         else if (r && r.ok && this.lastError?.startsWith("status not shared")) this.lastError = undefined;
@@ -533,7 +576,7 @@ export class Bridge {
       // A resumed thread stays bound to every folder it worked in before (projects.ts).
       const saved = loadThread(this.deps.p2pHome, info.threadId);
       for (const d of saved.dirs) this.touched.add(d);
-      if (saved.over) this.isDirsOver = true;
+      if (saved.over) for (const w of saved.why) this.markOver(w);
       this.transcript = this.deps.transcript?.(info.threadId);
       this.deps.onChange?.();
     }
@@ -565,6 +608,12 @@ export class Bridge {
     }
     this.transcriptMode = t.mode;
     this.trustedSeq = t.seq;
+    // The person typed a prompt (the trusted rollout says so, never a hook report or our own queued
+    // pointer): own sessions may start their OWN_TURNS_UNATTENDED again.
+    if (typeof t.typed === "number" && t.typed > this.trustedTyped) {
+      this.trustedTyped = t.typed;
+      this.ownSinceTyped = 0;
+    }
     this.trustedWritable = t.writable;
     if (t.cwd) {
       this.trustedCwd = t.cwd;
@@ -783,7 +832,7 @@ export class Bridge {
       this.activityNotes.push(`POTENTIAL CONFLICT with ${sessionAddress(c.peer)}: you both changed ${c.files.map(inert).join(", ")}.`);
       // The file names go only where the status already goes; with status sharing off, nothing is sent.
       if (this.shareStatus && this.repo) {
-        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => undefined);
+        await this.deps.p2p.send({ fromSession: this.sid, to: `${c.peer.own} [${c.peer.ref}]`, text: conflictMessage(c.files, this.repo), projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() }).catch(() => undefined);
       }
     }
   }
@@ -836,15 +885,15 @@ export class Bridge {
       case "p2p.message": {
         if (!isSessionEvent || typeof e.text !== "string") return;
         if (e.toSession !== undefined && e.toSession !== this.sid) return;
-        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref }, this.peers);
+        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref, fromRef: e.fromRef }, this.peers);
         const item: InboxItem = {
           id: e.id,
           kind: "message",
           from: { userId: e.from.userId, address },
-          fromSelf: e.from.self === true,
+          ...this.ownOf(e),
           text: cleanBody(e.text).slice(0, 64_000),
           at: typeof e.at === "number" ? e.at : this.clock.now(),
-          replyTo: e.own === e.from.userId ? `${e.from.userId} [${e.ref}]` : e.from.userId,
+          replyTo: replyToOf({ from: e.from, own: e.own, ref: e.ref, fromRef: e.fromRef }),
           state: "pending",
         };
         if (this.inbox.some((one) => one.id === item.id)) return;
@@ -858,20 +907,23 @@ export class Bridge {
           return;
         }
         this.inbox.push(item);
-        // Screened by the mode Codex recorded last, not a stale copy of it.
+        // Screened by the mode Codex recorded last, and the person's `p2p own-agents` now: not stale copies.
         await this.refreshTrusted();
+        if (item.fromSelf) await this.refreshOwnAgents();
         this.screenNow(item);
         this.scheduleQueue();
         return;
       }
       case "p2p.idle": {
         if (!isSessionEvent || e.toSession !== this.sid || typeof e.reason !== "string") return;
-        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref }, this.peers);
+        const address = eventAddress({ from: e.from, own: e.own, sid: e.sid, ref: e.ref, fromRef: e.fromRef }, this.peers);
         const item: InboxItem = {
           id: e.id,
           kind: "notice",
           from: { userId: e.from.userId, address },
-          fromSelf: e.from.self === true,
+          // An idle notice is the bridge's own line, never a sender's instruction: not held as an agent's, but it counts as an own turn.
+          ...this.ownOf(e),
+          ownAgent: false,
           text: idleNotice(address, e.reason),
           at: this.clock.now(),
           replyTo: e.from.userId,
@@ -897,10 +949,43 @@ export class Bridge {
     }
   }
 
+  /**
+   * What an event says of an own-session origin (the CLI's local record, never the wire): `via` is
+   * "person" for the person's own terminal session, anything else (or nothing: another device, an
+   * older client) counts as an agent session's. `ownTrusted`: the person ran `p2p own-agents deliver`.
+   */
+  private ownOf(e: Record<string, any>): Pick<InboxItem, "fromSelf" | "ownAgent" | "local" | "bucket" | "did"> {
+    if (e.from?.self !== true) return { fromSelf: false };
+    const ref = typeof e.fromRef === "string" && /^[0-9a-f]{6}$/.test(e.fromRef) ? e.fromRef : "elsewhere";
+    return {
+      fromSelf: true,
+      ownAgent: e.via !== "person",
+      local: this.who !== null && e.from.did === this.who.did,
+      bucket: `${e.from.userId}/${ref}`,
+      ...(typeof e.from.did === "string" ? { did: e.from.did } : {}),
+    };
+  }
+
+  /** `p2p own-agents` as it stands now, read before each screening (never stamped on an event). Unknown: hold. */
+  private ownAgentsSetting: { ownAgents: "hold" | "deliver"; devices: string[] | "all-other" } = { ownAgents: "hold", devices: [] };
+
+  async refreshOwnAgents(): Promise<void> {
+    const r = await this.deps.p2p.ownAgents().catch(() => undefined);
+    this.ownAgentsSetting = r?.ok ? r.value : { ownAgents: "hold", devices: [] };
+  }
+
+  /** Whether the person's `p2p own-agents` lets this own agent session's message through (the CLI's ownAgentsDeliverFrom). */
+  private ownAgentDelivers(item: InboxItem): boolean {
+    const s = this.ownAgentsSetting;
+    if (s.ownAgents === "deliver") return true;
+    if (item.local || item.did === undefined) return false;
+    return s.devices === "all-other" || (Array.isArray(s.devices) && s.devices.includes(item.did));
+  }
+
   /** Applies the hold rule to one new item, by this session's own mode as it stands now. */
   private screenNow(item: InboxItem): void {
     if (item.state !== "pending") return;
-    const verdict = screenMessage({ fromSelf: item.fromSelf, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
+    const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode: this.modeClass(), autoDeliver: this.autoDeliver, refused: this.locationRefusal() });
     if (!verdict.deliver) this.hold(item, verdict.why, verdict.reason);
   }
 
@@ -927,8 +1012,9 @@ export class Bridge {
   }
 
   private async notice(item: InboxItem, what: string): Promise<void> {
-    if (item.kind !== "message" || !this.isOnline) return;
-    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.isDirsOver }).catch(() => undefined);
+    // One of your own sessions with no known sending session: nowhere to send it (replyToOf).
+    if (item.kind !== "message" || !this.isOnline || item.replyTo === "") return;
+    await this.deps.p2p.send({ fromSession: this.sid, to: item.replyTo, text: `[Peer2Peer delivery notice] Your message to ${this.address} ${what}.`, projectDirs: this.sessionDirs(), projectDirsOver: this.dirsOver() }).catch(() => undefined);
   }
 
   async expireHeld(): Promise<void> {
@@ -948,8 +1034,8 @@ export class Bridge {
    * turn's context may not be written yet, so only what doesn't depend on
    * the mode goes out there). When the delivery starts a turn (a Stop
    * continuation, `codex queue`), the turn caps apply: past a cap, peers'
-   * messages are held for the person, and the user's own devices' wait for
-   * the next prompt.
+   * messages and the user's own sessions' are held until the person
+   * releases them (`p2p codex release`).
    */
   takeDeliverable(o: { startsTurn: boolean; confirmed?: boolean }): InboxItem[] {
     const mode = this.modeClass(o.confirmed !== false);
@@ -963,7 +1049,7 @@ export class Bridge {
       }
       const isRescreen = item.state === "held" && item.holdKind === "unknown";
       if (item.state !== "pending" && !isRescreen) continue;
-      const verdict = screenMessage({ fromSelf: item.fromSelf, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
+      const verdict = screenMessage({ fromSelf: item.fromSelf, ownAgent: item.ownAgent && !this.ownAgentDelivers(item), elsewhere: item.fromSelf && !item.local, fromUserId: item.from.userId, mode, autoDeliver: this.autoDeliver, refused });
       if (verdict.deliver) ready.push(item);
       // Unconfirmed at UserPromptSubmit: wait for PostToolUse or Stop rather than hold.
       else if (verdict.reason === "unknown" && o.confirmed === false && item.state === "pending") continue;
@@ -973,12 +1059,28 @@ export class Bridge {
     let out = ready;
     if (o.startsTurn) {
       const now = this.clock.now();
-      // L1: the user's own devices may start at most 5 turns per 10 minutes too.
-      this.selfTurns = this.selfTurns.filter((at) => now - at < TURN_WINDOW_MS);
+      // L1: your other devices may start at most 5 turns per 10 minutes, other sessions on this device 30,
+      // and all of them together 10 since the person last typed here. Past a cap they are held (never
+      // deferred): the person releases them.
+      this.selfTurns = this.selfTurns.filter((one) => now - one.at < TURN_WINDOW_MS);
       const own = out.filter((one) => one.fromSelf && one.state !== "released");
       if (own.length > 0) {
-        if (this.selfTurns.length >= SELF_TURNS) out = out.filter((one) => !own.includes(one));
-        else this.selfTurns.push(now);
+        const used = (local: boolean) => this.selfTurns.filter((one) => one.local === local).length;
+        const why =
+          this.ownSinceTyped >= OWN_TURNS_UNATTENDED
+            ? `your own sessions already started ${OWN_TURNS_UNATTENDED} turns here since your user last typed`
+            : own.some((one) => !one.local) && used(false) >= SELF_TURNS
+              ? `your other devices already started ${SELF_TURNS} turns here in 10 minutes`
+              : own.some((one) => one.local) && used(true) >= LOCAL_SELF_TURNS
+                ? `your other sessions here already started ${LOCAL_SELF_TURNS} turns in 10 minutes`
+                : undefined;
+        if (why !== undefined) {
+          for (const one of own) this.hold(one, why, "cap");
+          out = out.filter((one) => !own.includes(one));
+        } else {
+          for (const local of new Set(own.map((one) => one.local === true))) this.selfTurns.push({ at: now, local });
+          this.ownSinceTyped += 1;
+        }
       }
       const capped = out.filter((one) => one.state !== "released" && !one.fromSelf);
       const senders = [...new Set(capped.map((one) => one.from.userId))];
@@ -1081,6 +1183,8 @@ export class Bridge {
 
   private async flushQueue(): Promise<void> {
     if (!this.deps.queue || !this.threadId || this.status !== "idle") return;
+    await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && one.state === "pending")) await this.refreshOwnAgents();
     const before = new Map(this.inbox.map((one) => [one.id, one.state]));
     const items = this.takeDeliverable({ startsTurn: true });
     if (items.length === 0) return;
@@ -1101,6 +1205,7 @@ export class Bridge {
   async onHook(r: HookReport): Promise<HookOutput> {
     this.hooksSeen = true;
     await this.refreshTrusted();
+    if (this.inbox.some((one) => one.fromSelf && one.ownAgent && (one.state === "pending" || one.state === "held"))) await this.refreshOwnAgents();
     if (r.mode && isExplicitlyAuto(r.mode)) this.reportedAutoSeq = this.trustedSeq;
     // The cwd comes from where Codex started this server and from the trusted turn context, never from a report.
     const context = (event: string, parts: (string | undefined)[]): HookOutput => {
@@ -1116,6 +1221,9 @@ export class Bridge {
       }
       case "UserPromptSubmit": {
         this.activeAt = this.clock.now();
+        // Not a reset of OWN_TURNS_UNATTENDED: a hook report is untrusted (a sandboxed command can send
+        // one), and this hook also runs for the bridge's own `codex queue` turns. Only the rollout's
+        // typed prompts reset it (refreshTrusted).
         this.deps.onChange?.();
         this.setStatus("busy");
         // Codex may run this hook before it records this turn's context: the mode isn't confirmed yet.
@@ -1127,10 +1235,14 @@ export class Bridge {
         return context("UserPromptSubmit", [items.length > 0 ? this.frame(items) : undefined, this.takeActivityNotes(), this.heldNote(), reminder]);
       }
       case "PreToolUse": {
-        if (r.over && !this.isDirsOver) {
-          this.isDirsOver = true;
-          if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched], true);
-          this.announce();
+        if (r.over) {
+          const before = this.dirsOverWhy.size;
+          const was = this.isDirsOver;
+          for (const w of r.overWhy?.length ? r.overWhy : ["front"]) this.markOver(w);
+          if (!was || this.dirsOverWhy.size !== before) {
+            if (this.threadId) saveThreadDirs(this.deps.p2pHome, this.threadId, [...this.projectSeen, ...this.touched], true, [...this.dirsOverWhy]);
+            this.announce();
+          }
         }
         this.noteTouched(r.dirs ?? []);
         return {};

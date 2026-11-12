@@ -15,11 +15,18 @@
 #
 # Three jobs, so the code that builds never sees a credential:
 #   build    contents: read only, no environment, no token, no OIDC. Installs
-#            with --ignore-scripts, tests, packs, uploads the tarballs. It also
+#            with --ignore-scripts, tests, checks the tree is still clean,
+#            packs, uploads the tarballs. It also
 #            makes the deterministic source tarball the relay install scripts
 #            download (peer2peer-<ver>-src.tar.gz: `git archive` of the tag
 #            with the commit's time as every file's mtime, `gzip -n`) and its
 #            SHA256SUMS, built twice and compared byte for byte.
+#   compat   contents: read only, no environment, no token, no artifacts.
+#            The cross-version matrix against the previous two releases, from
+#            git and as npm installs them (docs/compatibility.md). It runs code
+#            from the npm registry, so it has its own runner and checkout,
+#            never the workspace that packs the tarballs. publish and
+#            github-release need it: a failure fails the release.
 #   publish  environment npm-publish + id-token: write. No checkout, no
 #            install, no tests: it downloads the tarballs, checks them against
 #            the manifest and runs `npm publish` in order. NODE_AUTH_TOKEN
@@ -84,14 +91,35 @@ jobs:
           for p in core relay codex-bridge p2p ext-ix; do (cd "packages/$p" && npm test); done
           node scripts/check-boundaries.mjs
           scripts/check-bundle.sh
+      - name: the tree is still the commit (nothing the tests or gates wrote is packed)
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "::error::the working tree changed before packing:"
+            echo "$dirty"
+            exit 1
+          fi
       - name: build, pack, verify and smoke-test the tarballs
         run: node scripts/release-pack.mjs --clean-install
       - name: npm publish --dry-run (no credentials)
         run: |
           set -euo pipefail
           cd .release/tarballs
-          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.tarball)' |
-          while read -r tarball; do npm publish "./$tarball" --access public --dry-run; done
+          version=$(node -p 'require("./manifest.json").version')
+          # As the publish job does: a package whose exact version is already on npm is skipped, so a
+          # dry run on main between releases still checks every package that isn't published yet.
+          # (If `npm view` can't reach the registry, the package is tried, and fails loudly if it is
+          # already there.)
+          node -e 'for (const p of require("./manifest.json").publishOrder) console.log(p.name + " " + p.tarball)' |
+          while read -r name tarball; do
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version: already published, skipped"
+              continue
+            fi
+            npm publish "./$tarball" --access public --dry-run
+          done
       - name: source tarball for the relay install scripts (deterministic) and SHA256SUMS
         run: |
           set -euo pipefail
@@ -120,9 +148,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  compat:
+    name: cross-version matrix (previous two releases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # The earlier releases' CLI bundles and the release tags come from history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+      - name: install and build (core, relay)
+        run: |
+          set -euo pipefail
+          for p in core relay; do (cd "packages/$p" && npm ci --ignore-scripts --no-audit --no-fund && npm run build); done
+      - name: matrix against the previous two releases (from git and npm, both ways)
+        env:
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        run: |
+          set -euo pipefail
+          # The previous two v* release tags reachable from this commit (this tag itself left out),
+          # filled in with 70b86c7 (the initial public release) while there are fewer; each tag also
+          # as npm installs it, when it's published. Any failed check fails the release.
+          node scripts/compat/matrix.mjs --npm-releases
+
   publish:
     name: publish to npm
-    needs: build
+    needs: [build, compat]
     # Only for a v* tag whose version check passed in the build job.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
     runs-on: ubuntu-latest
@@ -177,7 +235,7 @@ jobs:
 
   github-release:
     name: attach the source tarball to the GitHub release
-    needs: [build, publish]
+    needs: [build, compat, publish]
     # Only after a real publish from a v* tag.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.outputs.release == 'true'
     runs-on: ubuntu-latest

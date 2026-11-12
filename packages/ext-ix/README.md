@@ -15,12 +15,16 @@ A peer without this extension sees a one-line fallback, such as "alice@…: shar
 ```
 npm i -g @peer2peer/cli @peer2peer/ext-ix     # side by side: p2p can find it
 p2p extensions enable ix                       # opt in (writes config.json; or P2P_EXTENSIONS=ix)
-p2p extensions                                 # → @peer2peer/ext-ix 0.1.0 (x:ix.*)
+p2p extensions                                 # → @peer2peer/ext-ix 0.1.1 (x:ix.*)
 ```
 
 **Trust:** an extension runs inside `p2p` with your identity (it can read `~/.p2p` and your keys). Enable it only if you trust where it came from. `p2p` announces the first load from each new location.
 
-Ix itself comes from https://github.com/ix-infrastructure/Ix. Previewing what peers send needs only this package. Sending an impact report, resolving a reference, importing a note and conflict detection run your local `ix`. Notes use `ix note`, which the Ix Pro plugin provides.
+Ix itself comes from https://github.com/ix-infrastructure/Ix. Previewing what peers send needs only this package. Sending an impact report, resolving a reference, importing a note and conflict detection run your local `ix`. Notes use `ix note`. ext-ix runs it only against your **local** graph, and only when it is the open-source one (Ix after 0.13.0, without Ix Pro), which writes to the local backend. With Ix Pro installed, its `ix note` writes to your cloud org, so `import` and `note --ix-note` answer `graph_target`. With an older Ix, they answer `graph_target` too, and say to upgrade.
+
+**Graph memory:** with an open-source `ix note`, `p2p watch` writes your own sessions in shared projects into your local graph as they run: a session record, status lines and the files edited, framed as untrusted records. It writes only to a port your own process holds. **Docker on Linux:** `ix docker start` publishes the port through Docker's proxy, which runs as root, so p2p refuses it until you set `"ixTrustRootListener": true` in p2p's config.json by hand. Do that only if this machine's Docker is yours alone. On a machine other people log in to, turn graph memory off. Background writes also move Ix's `-` shorthand (the last note or session you showed or created, `<IX_HOME>/recent.json`) to graph memory's latest, so after a few seconds `ix note show -` may name a Peer2Peer record instead of your own last note. It never writes peers' content or message bodies, and it runs off the hook path, best effort. `"ixMemory": false` in config.json turns it off. See [SPEC.md §10](SPEC.md#10-graph-memory-the-users-own-sessions-in-the-local-graph).
+
+**Graph targets:** every `ix` call takes its endpoint only from `p2p`'s chokepoint (`ExtContext.graphTarget`): a private project, or a session bound to one, is local only. `ix` runs with an allowlisted environment and `IX_ENDPOINT` pinned to that target, so an `IX_ENDPOINT`, `IX_PAT` or Ix Pro login in your shell never sends a private project to the cloud. See [SPEC.md §2.1](SPEC.md#21-graph-targets).
 
 You can also point `P2P_EXTENSION_PATH` at a directory whose `node_modules` holds it. Nothing else is searched: no parent directories, `NODE_PATH` or global folders. How `p2p` loads extensions is described in [packages/p2p/README.md](../p2p/README.md#extensions).
 

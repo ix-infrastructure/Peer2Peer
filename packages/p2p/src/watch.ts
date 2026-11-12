@@ -23,7 +23,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { certExpiresWithin, mayRepublish, nowSec } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
-import { REPUBLISH_DOC_WITHIN_SEC } from "./app.js";
+import { CLOSE_GRACE_MS, REPUBLISH_DOC_WITHIN_SEC } from "./app.js";
 import { receiving } from "./inbound.js";
 import { answerDeferredWants, renewOpenJoinCaps } from "./circle-ops.js";
 import { checkSid, expireSubs } from "./sessions.js";
@@ -33,6 +33,7 @@ import { safeJson } from "./format.js";
 import { alertForeignRotations, noteDocRotations, retryRotationJoins } from "./rotation.js";
 import { flushOutbox, OUTBOX_RETRY_MS } from "./outbox.js";
 import { markRunning, unmarkRunning } from "./running.js";
+import { graphMemoryLoop, graphMemoryTickMs } from "./graph-memory.js";
 
 export interface WatchOptions {
   session: string;
@@ -99,6 +100,41 @@ export function eventLine(e: EventRec): string {
   return safeJson({ kind: e.kind, id: e.id, at: e.at, ...data, ...(e.toSession ? { toSession: e.toSession } : {}) });
 }
 
+/** How long a stopped watch waits for its own clean-up (the running marker, the app's close) before returning. */
+export const WATCH_EXIT_MS = 2 * CLOSE_GRACE_MS;
+
+/** Settles with `p`, or with undefined as soon as `signal` aborts (the work itself goes on, unawaited). */
+function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) {
+    p.catch(() => undefined);
+    return Promise.resolve(undefined);
+  }
+  return new Promise<T | undefined>((resolve, reject) => {
+    const off = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      off();
+      resolve(undefined);
+    };
+    signal.addEventListener("abort", onAbort);
+    p.then(
+      (v) => {
+        off();
+        resolve(v);
+      },
+      (e) => {
+        off();
+        if (signal.aborted) resolve(undefined);
+        else reject(e);
+      },
+    );
+  });
+}
+
+/** `p`, or give up after `ms` (the work goes on, unawaited). */
+function within(p: Promise<unknown>, ms: number): Promise<unknown> {
+  return Promise.race([p.catch(() => undefined), new Promise((r) => setTimeout(r, ms).unref())]);
+}
+
 export async function watch(app: App, opts: WatchOptions): Promise<number> {
   const sid = checkSid(opts.session);
   receiving(app);
@@ -152,6 +188,11 @@ export async function watch(app: App, opts: WatchOptions): Promise<number> {
     await renewOpenJoinCaps(app);
   });
   every(3600_000, () => maintain(app));
+  // Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph, gathered
+  // from the statuses they posted and written in the background, a batch at a time. Off without the
+  // Ix extension, without Ix, or when the person turned it off; never on the hook path.
+  const memory = graphMemoryLoop(app, { log: opts.log });
+  every(graphMemoryTickMs(app.env), () => memory.tick());
   void maintain(app).catch(() => {});
 
   const pollMs = opts.pollMs ?? 300;
@@ -186,13 +227,18 @@ export async function watch(app: App, opts: WatchOptions): Promise<number> {
       // or rotated it, in another process). This watch holds the old keys: stop, so the next one
       // starts as the new. (Never follows by itself: pre-release review H2.)
       if (polls++ % 10 === 0) {
-        if (app.userId !== startedAs || (await app.state.get("keys"))?.userId !== startedAs) {
+        const keys = await untilAborted(app.state.get("keys"), stop.signal);
+        if (stop.signal.aborted) break;
+        if (app.userId !== startedAs || keys?.userId !== startedAs) {
           opts.log(`p2p watch: this device moved to your new identity; restart watch`);
           stop.abort();
           break;
         }
       }
-      const doc = await app.state.get("events");
+      // Every wait in here gives way to a stop at once: a state lock held elsewhere (a background
+      // refresh, another process) must never keep a stopped watch from returning.
+      const doc = await untilAborted(app.state.get("events"), stop.signal);
+      if (stop.signal.aborted) break;
       for (const e of doc?.items ?? []) {
         if (stop.signal.aborted) break;
         if (!eventFor(e, sid, app.userId, cursor)) continue;
@@ -202,13 +248,14 @@ export async function watch(app: App, opts: WatchOptions): Promise<number> {
           break;
         }
         cursor = { ...cursor, n: e.n };
-        await writeCursor(app, sid, cursor);
+        await untilAborted(writeCursor(app, sid, cursor), stop.signal);
       }
+      if (stop.signal.aborted) break;
       // Skip past events not for us, so the scan stays short.
       const last: number = doc?.items.at(-1)?.n ?? cursor.n;
       if (last > cursor.n && !(doc?.items ?? []).some((e) => e.n > cursor!.n && eventFor(e, sid, app.userId, cursor!))) {
         cursor = { ...cursor, n: last };
-        await writeCursor(app, sid, cursor);
+        await untilAborted(writeCursor(app, sid, cursor), stop.signal);
       }
       if (woke) continue;
       await new Promise<void>((r) => {
@@ -224,12 +271,14 @@ export async function watch(app: App, opts: WatchOptions): Promise<number> {
       });
     }
   } finally {
-    await unmarkRunning(app, sid).catch(() => undefined);
     offEvents();
     logWatcher?.close();
     for (const t of timers) clearInterval(t);
     opts.signal.removeEventListener("abort", onAbort);
-    await app.close();
+    // Bounded: a stopped watch returns within WATCH_EXIT_MS whatever its clean-up waits on.
+    const deadline = Date.now() + WATCH_EXIT_MS;
+    await within(unmarkRunning(app, sid), CLOSE_GRACE_MS);
+    await within(app.close(), Math.max(0, deadline - Date.now()));
   }
   if (fatal) {
     opts.log(`p2p watch: ${fatal}`);

@@ -1,45 +1,208 @@
 #!/usr/bin/env node
 // Copyright 2026 Ix Infrastructure Inc.
 //
-// Cross-version matrix (docs/compatibility.md): this tree's CLI against the CLI as it was at
-// earlier git refs, both ways, over a local relay (this tree's), for every feature they share:
-// invite and accept, messages, statuses, a circle join, the offline queue, and delivery receipts
-// where both have them. It asserts that shared features work, that new-only features degrade
-// cleanly (the newer side leaves them out), and that no side rejects an envelope.
+// Cross-version matrix (docs/compatibility.md): this tree's CLI against earlier releases, both
+// ways, over a local relay (this tree's), for every feature they share: invite and accept,
+// statuses, direct messages, project boundaries, delivery receipts, extension envelopes and their
+// fallback, a circle join, invite codes for several circles, a message between circle members who
+// aren't friends, and the offline queue. It asserts that shared features work, that new-only
+// features degrade cleanly (the newer side leaves them out), and that no side rejects an envelope.
 //
-//   node scripts/compat/matrix.mjs [--refs c1bda28,e3a07d4,60b4d61,73e547d,082e7e0] [--new mods/claude/peer2peer/bin/p2p.mjs] [--new-env K=V]... [--json]
+//   node scripts/compat/matrix.mjs [--refs v0.2.0,v0.1.0] [--npm 0.1.0[,0.2.0]] [--new mods/claude/peer2peer/bin/p2p.mjs]
+//                                  [--npm-releases] [--tarballs .release/tarballs] [--new-env K=V]... [--require-npm] [--json]
+//
+// Baselines (the "old" side), two kinds:
+//   - git refs (`--refs`, P2P_COMPAT_REFS): the committed single-file bundle at that ref
+//     (`git show <ref>:mods/claude/peer2peer/bin/p2p.mjs`) and the ext-ix copy committed beside it,
+//     so nothing is built. The default is the previous two release tags (`v<x.y.z>` reachable from
+//     HEAD, newest first, prereleases and a tag on HEAD itself left out), filled up with 70b86c7
+//     (the initial public release) while fewer than two exist.
+//   - npm versions (`--npm`, P2P_COMPAT_NPM): @peer2peer/cli at exactly that version, installed from
+//     the registry the way users get it (`npm install --ignore-scripts` into a temp project, the
+//     lockfile's integrity checked against the registry's), with @peer2peer/ext-ix of the same
+//     version when it is published. A version that isn't published yet is skipped with a notice
+//     (a failure with --require-npm). With --npm and no --refs, only the npm baselines run.
+//     `--npm-releases` (P2P_COMPAT_NPM_RELEASES=1) adds, for each release tag among the git
+//     baselines, that release as npm installs it: the default refs plus --npm-releases is "the
+//     previous two releases, from git and from npm".
+//     `--tarballs <dir>` installs from scripts/release-pack.mjs's tarballs instead (manifest.json),
+//     to try the installed layout before a version is published.
 //
 // `--new-env` sets an environment variable for the new side only: `--new-env P2P_DEVICE_INFO=1` is
-// step 2 of the device-info rollout, which must pass against every ref it is meant to support.
-//
-// Each old CLI is the committed single-file bundle at that ref (`git show <ref>:mods/claude/
-// peer2peer/bin/p2p.mjs`), so nothing is built. The default refs, until there are release tags,
-// are c1bda28 (offline delivery), e3a07d4 (delivery receipts), 60b4d61 (main with the members-only relay
-// and the ix-infra.com/p2p links), 73e547d (main with per-person trust) and 082e7e0 (main with protocol 3.1 and the tui); P2P_COMPAT_REFS
-// overrides them. Needs packages/relay built.
-// Every home is a fresh temp directory (P2P_HOME); nothing reads ~/.p2p or talks to a real relay.
+// step 2 of the device-info rollout, which must pass against every release it is meant to support.
+// Needs packages/relay built. Every home is a fresh temp directory (P2P_HOME); nothing reads ~/.p2p
+// or talks to a real relay (npm installs talk to the npm registry only).
 
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const RELAY_URL = "wss://relay-matrix.test/v3";
-export const DEFAULT_REFS = ["c1bda28", "e3a07d4", "60b4d61", "73e547d", "082e7e0"];
+/** The initial public release: the baseline until (and while fewer than) two release tags exist. */
+export const INITIAL_REF = "70b86c7";
+/** How many earlier releases every release must interoperate with (docs/compatibility.md "Policy"). */
+export const SUPPORTED_RELEASES = 2;
+const EXT_COPY = "mods/claude/peer2peer/ext/node_modules/@peer2peer/ext-ix";
+const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });
 }
 
-/** The committed CLI bundle at `ref`, written to `dir`. */
+/**
+ * The previous `n` release tags: `v<x.y.z>` tags reachable from HEAD, highest version first, without
+ * prereleases or a tag on HEAD itself (a release run on its own tag tests against the ones before
+ * it). Filled up with the initial public release while fewer than `n` exist.
+ */
+export function releaseRefs(n = SUPPORTED_RELEASES) {
+  let tags = [];
+  let head = "";
+  try {
+    head = sh("git", ["rev-parse", "HEAD"]).trim();
+    tags = sh("git", ["tag", "--list", "v*", "--merged", "HEAD", "--sort=-v:refname"]).split("\n").map((t) => t.trim());
+  } catch {
+    tags = [];
+  }
+  const out = [];
+  for (const t of tags) {
+    if (!/^v\d+\.\d+\.\d+$/.test(t)) continue;
+    if (sh("git", ["rev-parse", `${t}^{commit}`]).trim() === head) continue;
+    out.push(t);
+    if (out.length === n) return out;
+  }
+  // The initial public release predates tags; it counts while there are fewer than n of them.
+  try {
+    if (sh("git", ["rev-parse", `${INITIAL_REF}^{commit}`]).trim() !== head) out.push(INITIAL_REF);
+  } catch {
+    /* not in this history */
+  }
+  return out;
+}
+
+/** The default git baselines (computed, so `import { DEFAULT_REFS }` sees the current tags). */
+export const DEFAULT_REFS = releaseRefs();
+
+/** The committed CLI bundle at `ref`, and the ext-ix copy committed beside it, written to `dir`. */
+/** A git ref as a baseline may name it: no option-like or shell-special spelling reaches git. */
+const SAFE_REF = /^[A-Za-z0-9._/-]+$/;
+export function checkRef(ref) {
+  if (!SAFE_REF.test(ref) || ref.startsWith("-")) throw new Error(`not a git ref this matrix takes: ${JSON.stringify(ref)}`);
+  return ref;
+}
+
 export function bundleAt(ref, dir) {
+  checkRef(ref);
   const sha = sh("git", ["rev-parse", "--short=12", `${ref}^{commit}`]).trim();
   const file = join(dir, `p2p-${sha}.mjs`);
   if (!existsSync(file)) writeFileSync(file, sh("git", ["show", `${sha}:mods/claude/peer2peer/bin/p2p.mjs`]));
-  return { ref, sha, file };
+  let extPath;
+  try {
+    const ext = join(dir, `ext-${sha}`, "node_modules/@peer2peer/ext-ix");
+    if (!existsSync(join(ext, "index.mjs"))) {
+      const index = sh("git", ["show", `${sha}:${EXT_COPY}/index.mjs`], { stdio: ["ignore", "pipe", "ignore"] });
+      const pkg = sh("git", ["show", `${sha}:${EXT_COPY}/package.json`], { stdio: ["ignore", "pipe", "ignore"] });
+      mkdirSync(ext, { recursive: true });
+      writeFileSync(join(ext, "index.mjs"), index);
+      writeFileSync(join(ext, "package.json"), pkg);
+    }
+    extPath = join(dir, `ext-${sha}`);
+  } catch {
+    extPath = undefined; // no ext-ix copy at that ref
+  }
+  return { kind: "ref", ref, sha, label: `old ${sha}`, file, extPath, source: readFileSync(file, "utf8") };
+}
+
+/** Every .js file under a package's dist, concatenated: what the feature probes read for an installed CLI. */
+function distText(pkgDir) {
+  const parts = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        if (e.name !== "__tests__") walk(join(d, e.name));
+      } else if (e.name.endsWith(".js")) parts.push(readFileSync(join(d, e.name), "utf8"));
+    }
+  };
+  walk(join(pkgDir, "dist"));
+  return parts.join("\n");
+}
+
+function npm(args, cwd) {
+  return execFileSync("npm", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false" } });
+}
+
+/** `npm view <name>@<version> dist.integrity` and its publish time, or undefined when that version isn't published. */
+function registryIntegrity(name, version) {
+  try {
+    const out = npm(["view", `${name}@${version}`, "dist.integrity", "time", "--json"], tmpdir()).trim();
+    if (!out) return undefined;
+    const v = JSON.parse(out);
+    const integrity = v["dist.integrity"];
+    const published = v.time?.[version];
+    if (typeof integrity !== "string" || typeof published !== "string") throw new Error(`no integrity or publish time in ${out.slice(0, 200)}`);
+    return { integrity, published };
+  } catch (e) {
+    if (!("stderr" in e)) throw e;
+    const err = String(e.stderr ?? e.message ?? e);
+    if (/E404|404 Not Found|is not in this registry|No match found/.test(err)) return undefined;
+    throw new Error(`npm view ${name}@${version}: ${err.slice(-400)}`);
+  }
+}
+
+/**
+ * @peer2peer/cli@<version> (and @peer2peer/ext-ix@<version> when published) installed into a fresh
+ * project under `dir`, as a user installs it: exact versions, `--ignore-scripts`, and `--before` the
+ * later of the two packages' publish times (so a ranged transitive dependency resolves to what existed
+ * when the release shipped, never to something published since). The lockfile's integrity for each is
+ * checked against the registry's, and `npm audit signatures` checks every installed package's registry
+ * signature and provenance attestation where it has one. Returns undefined when the CLI isn't published.
+ */
+export function installFromNpm(version, dir) {
+  if (!EXACT_VERSION.test(version)) throw new Error(`--npm takes exact versions (like 0.1.0), not ${JSON.stringify(version)}`);
+  const want = { "@peer2peer/cli": registryIntegrity("@peer2peer/cli", version) };
+  if (!want["@peer2peer/cli"]) return undefined;
+  const ext = registryIntegrity("@peer2peer/ext-ix", version);
+  if (ext) want["@peer2peer/ext-ix"] = ext;
+  const proj = join(dir, `npm-${version}`);
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "p2p-matrix-baseline", private: true, version: "0.0.0" }));
+  const before = new Date(Math.max(...Object.values(want).map((w) => Date.parse(w.published))) + 1000).toISOString();
+  npm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", `--before=${before}`, ...Object.keys(want).map((n) => `${n}@${version}`)], proj);
+  try {
+    npm(["audit", "signatures"], proj);
+  } catch (e) {
+    throw new Error(`npm audit signatures failed for ${version}: ${String(e.stdout ?? "").slice(-400)} ${String(e.stderr ?? e.message ?? e).slice(-400)}`);
+  }
+  const lock = JSON.parse(readFileSync(join(proj, "package-lock.json"), "utf8"));
+  for (const [name, { integrity }] of Object.entries(want)) {
+    const got = lock.packages?.[`node_modules/${name}`];
+    if (got?.version !== version) throw new Error(`${name}: installed ${got?.version}, not ${version}`);
+    if (got.integrity !== integrity) throw new Error(`${name}@${version}: the lockfile's integrity ${got.integrity} is not the registry's ${integrity}`);
+  }
+  return installed(proj, `npm ${version}`, { kind: "npm", ref: `npm:${version}`, sha: `npm@${version}` });
+}
+
+/** scripts/release-pack.mjs's tarballs (`<dir>/manifest.json`) installed the same way, before they are published. */
+export function installFromTarballs(tarDir, dir) {
+  const m = JSON.parse(readFileSync(join(tarDir, "manifest.json"), "utf8"));
+  const proj = join(dir, `tarballs-${m.version}`);
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "p2p-matrix-baseline", private: true, version: "0.0.0" }));
+  // Every package's tarball, so the CLI's pinned internal dependencies resolve to them, not the registry.
+  npm(["install", "--ignore-scripts", "--no-audit", "--no-fund", ...m.publishOrder.map((p) => resolve(tarDir, p.tarball))], proj);
+  return installed(proj, `tarballs ${m.version}`, { kind: "tarballs", ref: `tarballs:${m.version}`, sha: `tarballs@${m.version}` });
+}
+
+function installed(proj, label, extra) {
+  const pkgDir = join(proj, "node_modules/@peer2peer/cli");
+  const bin = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")).bin?.p2p;
+  if (!bin) throw new Error(`${label}: @peer2peer/cli has no p2p bin`);
+  // ext-ix, when installed, is found as the CLI's sibling (extensions.ts siblingNodeModules): no P2P_EXTENSION_PATH.
+  const hasExt = existsSync(join(proj, "node_modules/@peer2peer/ext-ix/package.json"));
+  return { ...extra, label: `old ${label}`, file: join(pkgDir, bin), extPath: hasExt ? "" : undefined, source: distText(pkgDir) };
 }
 
 async function startRelay() {
@@ -83,7 +246,7 @@ class Peer {
 
   run(args, stdin) {
     return new Promise((done) => {
-      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { env: this.env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
+      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { cwd: this.home, env: this.env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
         this.stderr.push(...String(stderr).split("\n").filter(Boolean).map((l) => `${this.name}: p2p ${args[0]}: ${l}`));
         let json;
         try {
@@ -132,8 +295,9 @@ const sessKey = (own, sid) => `${own}|${sid}`;
  * One direction: `a` (the one that invites, creates the circle and sends first) and `b`.
  * Returns the checks that ran, each {name, ok, detail}.
  */
-async function scenario(a, b) {
+async function scenario(a, b, spawn) {
   const checks = [];
+  const extras = [];
   const check = async (name, fn) => {
     try {
       const detail = await fn();
@@ -221,6 +385,37 @@ async function scenario(a, b) {
     if (got.length !== 1 || got[0].data.outcome !== "shown") throw new Error(`receipts: ${JSON.stringify(got)}`);
     return "shown, end to end";
   });
+  await check("extension envelopes: rendered where the receiver has the extension, the plain fallback where it doesn't", async () => {
+    // x sends an x:ix.note to y. In the first pass the receiver has no extension enabled, so it must
+    // show the fallback (and keep nothing); in the second the receiver enabled it in its own turn.
+    const notes = [];
+    for (const [x, y, xs, ys] of [
+      [a, b, "sa", "sb"],
+      [b, a, "sb", "sa"],
+    ]) {
+      if (x.ext === undefined) {
+        notes.push(`${x.label} ships no ext-ix: nothing to send`);
+        continue;
+      }
+      await x.ok(["extensions", "enable", "ix"]);
+      x.extEnabled = true;
+      const before = y.events("p2p.ext").length;
+      const sent = await x.ok(["ix", "note", "--from-session", xs, "--to", `${ids[y.name]}/${ys}`, "--without-repo", "--stdin"], `an Ix note from ${x.label}`);
+      await y.ok(["ls"]);
+      const got = y.events("p2p.ext").slice(before).filter((e) => e.data.ext === "x:ix.note");
+      if (got.length !== 1) throw new Error(`${y.label} got ${got.length} x:ix.note items (sent: ${JSON.stringify(sent).slice(0, 300)})`);
+      const ev = got[0].data;
+      if (typeof ev.fallback !== "string" || ev.fallback === "") throw new Error(`no fallback line: ${JSON.stringify(ev).slice(0, 300)}`);
+      if (y.extEnabled) {
+        if (!ev.rendered) throw new Error(`${y.label} has ext-ix enabled but didn't render it: ${JSON.stringify(ev).slice(0, 300)}`);
+        notes.push(`${x.label} → ${y.label}: rendered`);
+      } else {
+        if (ev.rendered || ev._kept) throw new Error(`${y.label} has no extension enabled but interpreted the body: ${JSON.stringify(ev).slice(0, 300)}`);
+        notes.push(`${x.label} → ${y.label}: fallback`);
+      }
+    }
+    return notes.join("; ");
+  });
   await check("circle: create, invite, join", async () => {
     const cid = (await a.ok(["circle", "create", "matrix"])).cid;
     await a.ok(["circle", "invite", cid, ids[b.name]]);
@@ -255,6 +450,49 @@ async function scenario(a, b) {
     if (joined(c2) || held.length !== 1) throw new Error(`an older client: ${JSON.stringify({ mine, held })}`);
     return `${b.label} joined the first; the second waits for its approval`;
   });
+  await check("circle message: members who aren't friends see each other's sessions and message both ways", async () => {
+    // carl runs b's build and meets a only through an open circle a created: no invite code, no friendship.
+    const c = spawn("carl", b);
+    extras.push(c);
+    ids.carl = (await c.ok(["init", "--name", "carl", "--relay", RELAY_URL, "--yes"])).userId;
+    const made = await a.ok(["circle", "create", "members", "--open"]);
+    if (!made.link) throw new Error(`no link for an open circle: ${JSON.stringify(made)}`);
+    // The joiner asks the owner for the circle's history, and the owner's client answers when it
+    // next runs (these CLIs aren't daemons): ask, let the owner answer, then join again.
+    let j = await c.ok(["circle", "join", made.link, "--yes", "--wait", "0"]);
+    for (let i = 0; i < 4 && j.status !== "joined"; i++) {
+      await a.ok(["circle", "ls"]);
+      j = await c.ok(["circle", "join", made.link, "--yes", "--wait", "3"]);
+    }
+    if (j.status !== "joined") throw new Error(`carl's join: ${JSON.stringify(j)}`);
+    const stands = async (p, who) => ((await p.ok(["circle", "members", made.cid])).members ?? []).some((m) => m.userId === ids[who] && m.stands);
+    let both = false;
+    for (let i = 0; i < 4 && !both; i++) {
+      await a.ok(["circle", "ls"]);
+      await c.ok(["circle", "ls"]);
+      both = (await stands(a, "carl")) && (await stands(c, a.name));
+    }
+    if (!both) throw new Error("carl doesn't stand in the circle on both sides");
+    if ((await a.ok(["friends"])).friends.some((f) => f.userId === ids.carl)) throw new Error("a and carl are friends: this would test nothing new");
+    for (const [p, sid] of [
+      [a, "ca"],
+      [c, "cc"],
+    ]) {
+      if (p.projects) await p.ok(["project", "share", "--add", made.cid]);
+      await p.ok(["session", "roster", sid, "--circle", made.cid]);
+      await p.ok(["status", "--session", sid, "--state", "idle", "--label", sid]);
+    }
+    const sees = async (p, sid) => (await p.ok(["ls"])).peers.some((r) => r.sid === sid);
+    if (!(await sees(a, "cc")) || !(await sees(c, "ca"))) throw new Error("the circle sessions don't see each other");
+    await a.ok(["send", "--from-session", "ca", "--to", `${ids.carl}/cc`, "--stdin"], `circle hello from ${a.label}`);
+    await c.ok(["send", "--from-session", "cc", "--to", `${ids[a.name]}/ca`, "--stdin"], `circle hello from ${c.label}`);
+    await a.ok(["ls"]);
+    await c.ok(["ls"]);
+    const ga = a.events("p2p.message").map((e) => e.data.text);
+    const gc = c.events("p2p.message").map((e) => e.data.text);
+    if (!gc.includes(`circle hello from ${a.label}`) || !ga.includes(`circle hello from ${c.label}`)) throw new Error(`got ${JSON.stringify({ [a.name]: ga, carl: gc })}`);
+    return `${a.label} ↔ ${c.label}`;
+  });
   await check("offline queue (a session seen recently, not live)", async () => {
     const peers = a.doc("peers") ?? {};
     const k = sessKey(ids[b.name], "sb");
@@ -268,44 +506,69 @@ async function scenario(a, b) {
     if (!b.events("p2p.message").some((e) => e.data.text === "while you were away")) throw new Error("not delivered");
   });
   await check("no envelope rejected on either side", async () => {
-    const bad = [...a.stderr, ...b.stderr].filter((l) => /rejected an envelope|unknown field|malformed|unsupported-critical/.test(l));
+    const bad = [...a.stderr, ...b.stderr, ...extras.flatMap((p) => p.stderr)].filter((l) => /rejected an envelope|unknown field|malformed|unsupported-critical/.test(l));
     if (bad.length > 0) throw new Error(bad.slice(0, 5).join("\n"));
   });
+  for (const p of extras) p.cleanup();
   return checks;
 }
 
+// Feature probes, over a build's source text (the single-file bundle, or an installed package's dist).
 /** Does this build have delivery receipts (`p2p receipt`)? */
-function hasReceipts(bin) {
-  return readFileSync(bin, "utf8").includes('command("receipt <event>")');
-}
-
+const hasReceipts = (src) => src.includes('command("receipt <event>")');
 /** Does this build keep sessions within their project (`p2p project share`, projects.ts)? */
-function hasProjects(bin) {
-  return readFileSync(bin, "utf8").includes('command("share [circles...]")');
-}
-
+const hasProjects = (src) => src.includes('command("share [circles...]")');
 /** Does this build take invite links and codes for several circles (`p2p join --confirmed`)? */
-function hasInviteLinks(bin) {
-  return readFileSync(bin, "utf8").includes('"--confirmed"');
+const hasInviteLinks = (src) => src.includes('"--confirmed"');
+
+const list = (v) => (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+/**
+ * The baselines a run tests against: git refs and npm versions. Explicit options win, then
+ * P2P_COMPAT_REFS / P2P_COMPAT_NPM; with neither, the previous release tags (DEFAULT_REFS).
+ */
+export function baselinesOf(opts = {}, env = process.env) {
+  const npmVersions = opts.npm ?? list(env.P2P_COMPAT_NPM);
+  const refs = opts.refs ?? (list(env.P2P_COMPAT_REFS).length ? list(env.P2P_COMPAT_REFS) : npmVersions.length || opts.tarballs ? [] : releaseRefs());
+  // --npm-releases: each release tag among the refs is also tested as npm installs it.
+  const fromTags = opts.npmReleases || env.P2P_COMPAT_NPM_RELEASES === "1" ? refs.filter((r) => /^v\d+\.\d+\.\d+$/.test(r)).map((r) => r.slice(1)) : [];
+  return { refs, npm: [...new Set([...npmVersions, ...fromTags])], tarballs: opts.tarballs };
 }
 
 export async function runMatrix(opts = {}) {
-  const refs = opts.refs ?? (process.env.P2P_COMPAT_REFS ? process.env.P2P_COMPAT_REFS.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_REFS);
+  const base = baselinesOf(opts);
   const newBin = resolve(ROOT, opts.newBin ?? "mods/claude/peer2peer/bin/p2p.mjs");
+  const newSrc = readFileSync(newBin, "utf8");
+  // This tree's ext-ix copy, when the new CLI is this tree's bundle.
+  const newExt = existsSync(resolve(ROOT, EXT_COPY, "index.mjs")) ? resolve(ROOT, "mods/claude/peer2peer/ext") : undefined;
   const cache = mkdtempSync(join(tmpdir(), "p2p-matrix-bins-"));
   const results = [];
+  const skipped = [];
   try {
-    for (const ref of refs) {
-      const old = bundleAt(ref, cache);
+    const olds = [];
+    for (const ref of base.refs) checkRef(ref);
+    for (const ref of base.refs) olds.push(bundleAt(ref, cache));
+    for (const v of base.npm) {
+      const o = installFromNpm(v, cache);
+      if (o) olds.push(o);
+      else skipped.push({ ref: `npm:${v}`, reason: `@peer2peer/cli@${v} is not published on npm (yet): skipped` });
+    }
+    if (base.tarballs) olds.push(installFromTarballs(resolve(base.tarballs), cache));
+    for (const old of olds) {
       for (const dir of ["new→old", "old→new"]) {
         const relay = await startRelay();
-        const mk = (name, bin, label, env) => Object.assign(new Peer(name, bin, relay.port, label, env), { receipts: hasReceipts(bin), inviteLinks: hasInviteLinks(bin), projects: hasProjects(bin) });
-        const nw = mk("nina", newBin, "new", opts.newEnv ?? {});
-        const od = mk("otto", old.file, `old ${old.sha}`);
+        const mk = (name, side) => {
+          const env = { ...side.env, ...(side.extPath ? { P2P_EXTENSION_PATH: side.extPath } : {}) };
+          return Object.assign(new Peer(name, side.bin, relay.port, side.label, env), { side, ext: side.extPath, receipts: hasReceipts(side.src), inviteLinks: hasInviteLinks(side.src), projects: hasProjects(side.src) });
+        };
+        const newSide = { bin: newBin, src: newSrc, label: "new", extPath: newExt, env: opts.newEnv ?? {} };
+        const oldSide = { bin: old.file, src: old.source, label: old.label, extPath: old.extPath, env: {} };
+        const nw = mk("nina", newSide);
+        const od = mk("otto", oldSide);
         const [a, b] = dir === "new→old" ? [nw, od] : [od, nw];
         try {
-          const checks = await scenario(a, b);
-          results.push({ ref: old.ref, sha: old.sha, direction: dir, checks, ok: checks.every((c) => c.ok) });
+          const checks = await scenario(a, b, (name, like) => mk(name, like.side));
+          results.push({ ref: old.ref, sha: old.sha, kind: old.kind, direction: dir, checks, ok: checks.every((c) => c.ok) });
         } finally {
           await relay.close();
           nw.cleanup();
@@ -316,16 +579,19 @@ export async function runMatrix(opts = {}) {
   } finally {
     rmSync(cache, { recursive: true, force: true });
   }
-  return { ok: results.every((r) => r.ok), results };
+  const missing = opts.requireNpm && skipped.length > 0;
+  return { ok: results.length > 0 && results.every((r) => r.ok) && !missing, results, skipped };
 }
 
 function format(r) {
   const lines = [];
   for (const x of r.results) {
-    lines.push(`${x.ok ? "✓" : "✗"} ${x.direction} (old = ${x.ref}, ${x.sha})`);
+    lines.push(`${x.ok ? "✓" : "✗"} ${x.direction} (old = ${x.ref}${x.ref === x.sha ? "" : `, ${x.sha}`})`);
     for (const c of x.checks) lines.push(`    ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? `: ${c.detail}` : ""}`);
   }
-  lines.push("", r.ok ? "compatibility matrix: every shared feature works both ways" : "compatibility matrix: FAILED");
+  for (const s of r.skipped) lines.push(`- ${s.ref}: ${s.reason}`);
+  if (r.results.length === 0) lines.push("", "compatibility matrix: nothing to test against");
+  else lines.push("", r.ok ? "compatibility matrix: every shared feature works both ways" : "compatibility matrix: FAILED");
   return lines.join("\n");
 }
 
@@ -336,7 +602,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   const newEnv = Object.fromEntries(argv.flatMap((a, i) => (a === "--new-env" && argv[i + 1]?.includes("=") ? [argv[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
-  const r = await runMatrix({ ...(arg("--refs") ? { refs: arg("--refs").split(",") } : {}), ...(arg("--new") ? { newBin: arg("--new") } : {}), newEnv });
+  const r = await runMatrix({
+    ...(arg("--refs") !== undefined ? { refs: list(arg("--refs")) } : {}),
+    ...(arg("--npm") !== undefined ? { npm: list(arg("--npm")) } : {}),
+    ...(arg("--tarballs") ? { tarballs: arg("--tarballs") } : {}),
+    ...(arg("--new") ? { newBin: arg("--new") } : {}),
+    requireNpm: argv.includes("--require-npm"),
+    npmReleases: argv.includes("--npm-releases"),
+    newEnv,
+  });
   console.log(argv.includes("--json") ? JSON.stringify(r, null, 2) : format(r));
-  process.exit(r.ok ? 0 : 1);
+  // Nothing to test against (every npm version unpublished) is a clean skip, unless --require-npm.
+  process.exit(r.ok || (r.results.length === 0 && !argv.includes("--require-npm")) ? 0 : 1);
 }
