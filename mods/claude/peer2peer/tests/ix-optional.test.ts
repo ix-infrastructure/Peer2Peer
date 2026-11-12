@@ -60,7 +60,7 @@ describe('Ix install commands (pure)', () => {
     ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
-  test('fails toward asking: a stray quote, comment, heredoc or escape never hides a later install', () => {
+  test('quotes and comments are not read: a stray quote, comment, heredoc or escape never hides an install', () => {
     for (const c of [
       "# Ix isn't installed; install it\nnpm i -g @ix/cli",
       "# don't forget\nbrew install ix\n# won't hurt",
@@ -68,9 +68,18 @@ describe('Ix install commands (pure)', () => {
       "echo $'it\\'s'; npm i -g @ix/cli",
       'Write-Host "a`"b"; npm i -g @ix/cli',
       'echo "x; npm i -g @ix/cli',
-      // A comment never clears an install on its own line or a later one.
+      // A comment never hides an install on its own line or a later one.
       '# npm i -g @ix/cli',
       "echo 'done' # it's\nbrew install ix",
+      // Bypasses of a quote-reading clear step (it desynced from real shells; removed).
+      '& "C:\\Program Files\\nodejs\\npm.cmd" install -g @ix/cli',
+      '"npm" i -g @ix/cli',
+      '"/usr/local/bin/npm" install -g @ix/cli',
+      "'brew' install ix",
+      'cd "C:\\proj\\"; npm i -g @ix/cli; cd "C:\\other\\"',
+      "echo \\$'x\\' ; npm i -g @ix/cli ; echo \\$'y\\'",
+      "<# don't #>\nnpm i -g @ix/cli\n<# won't #>",
+      "cat <<A\nit's\nA\nbrew install ix\ncat <<B\nwon't\nB",
     ]) expect(isIxInstallCommand(c), JSON.stringify(c)).toBe(true)
   })
 
@@ -80,7 +89,7 @@ describe('Ix install commands (pure)', () => {
     }
   })
 
-  test("a shell's, eval's or su's string argument is code: read, never cleared", () => {
+  test("a shell's, eval's or su's string argument is seen (quotes aren't read)", () => {
     for (const c of [
       'bash -c "npm i -g @ix/cli"',
       "sh -c 'brew install ix'",
@@ -119,17 +128,22 @@ describe('Ix install commands (pure)', () => {
       'npm view @ix/cli',
       'brew info ix',
       'brew upgrade',
-      // Quoted text is one word, never a command.
-      'git commit -m "brew install ix docs"',
-      "git commit -m 'npm i -g @ix/cli in the README'",
-      'git commit -m "notes; brew install ix"',
-      'echo "sudo npm i -g @ix/cli"',
       'which npm brew',
       // A host that only looks like it, and a URL with no fetch.
       'curl https://ix-infra.com:443/p2p/invite',
       'echo https://ix-infra.com:443/install.sh',
       '',
     ]) expect(isIxInstallCommand(c), c).toBe(false)
+  })
+
+  test('asks (accepted false positives): an Ix install command mentioned inside quotes', () => {
+    // A loose text match that errs toward asking: the person approves or refuses once.
+    for (const c of [
+      'git commit -m "brew install ix docs"',
+      "git commit -m 'npm i -g @ix/cli in the README'",
+      'git commit -m "notes; brew install ix"',
+      'echo "sudo npm i -g @ix/cli"',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
   test('linear: 100 KB adversarial commands take about 10x what 10 KB ones do, never polynomially more', () => {
