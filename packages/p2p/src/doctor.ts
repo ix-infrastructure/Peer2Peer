@@ -62,7 +62,7 @@ import { EVENT_RETENTION_MS, type PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
 import { extIxInstalled, ixBinary, ixDeclined, IX_INSTALL_URL, ixInstallLine, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
 import { personHere } from "./projects.js";
-import { graphMemoryReport } from "./graph-memory.js";
+import { graphMemoryReport, type GraphMemoryDoc } from "./graph-memory.js";
 import { graphMemoryEnabled } from "./config.js";
 import { historySettings } from "./history.js";
 import { graphPlaintextNote, graphTargetLine, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir, type GraphTarget } from "./projects.js";
@@ -96,8 +96,20 @@ export interface DoctorResult {
 export const THREAT_MODEL_DOC = "docs/security/threat-model.md";
 /** What is encrypted and what isn't, on one page. */
 export const ENCRYPTION_DOC = "docs/security/encryption.md";
-/** What a relay sees besides an envelope's ciphertext (the threat model, "What each party can see"). */
-export const RELAY_METADATA: readonly string[] = ["which mailboxes send to which", "sizes", "timing", "each envelope's kind and session id", "IP addresses"];
+/**
+ * Some of what a relay sees besides an envelope's ciphertext (the threat model, "What each party can
+ * see", has the full list): never read as complete.
+ */
+export const RELAY_METADATA: readonly string[] = [
+  "who may reach whom (capabilities)",
+  "which mailboxes send to which",
+  "sizes",
+  "timing",
+  "each envelope's kind and session id",
+  "IP addresses",
+  "your public identity document",
+  "and a members-only relay that admits a circle's members holds that circle's signed chain: its name, owner, admins and members",
+];
 
 /**
  * Where each kind of data goes, as `p2p doctor` says it for this device. Facts, not checks: the
@@ -105,11 +117,15 @@ export const RELAY_METADATA: readonly string[] = ["which mailboxes send to which
  */
 export interface DataFlow {
   /** Messages, statuses, receipts, rosters and Ix items shared with peers: end-to-end encrypted envelopes. */
-  wire: { encryption: "end-to-end"; relaysSee: "ciphertext and metadata"; metadata: readonly string[]; doc: string };
+  wire: { encryption: "end-to-end"; relaysSee: "ciphertext and metadata"; /** Some of it, not all: `doc` has the full list. */ metadata: readonly string[]; doc: string };
   /** Message history (history.ts): never leaves this device; sealed at rest, with its key beside it. */
   history: { where: "this device only"; recording: boolean; encryptedAtRest: true; keyBesideIt: true; eventLogPlaintextDays: number };
-  /** Graph memory (graph-memory.ts): on only with Ix, the Ix extension, and an Ix with a local `ix note`. */
-  graphMemory: { on: boolean; detail: string };
+  /**
+   * Graph memory (graph-memory.ts): on only with Ix, the Ix extension, and an Ix with a local `ix note`.
+   * `on` is "unknown" when the doctor couldn't tell (`ix --help` didn't answer in time): `p2p watch`
+   * may still be writing, and `detail` says what it wrote and queued so far.
+   */
+  graphMemory: { on: boolean | "unknown"; detail: string };
   /** Each project's graph target (the project here first), at most MAX_GRAPH_ROWS of them. */
   graphs: { id: string; name: string; here: boolean; target: GraphTarget; line: string; plaintext: string }[];
   /** Projects not listed past MAX_GRAPH_ROWS. */
@@ -753,10 +769,20 @@ async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { end
     c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
   }
   if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
-  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${target.endpoint})` };
+  return graphMemoryState(support, doc, target.endpoint);
+}
+
+/**
+ * Graph memory's state for "Where your data goes", from what Ix answered (`support`: undefined when it
+ * didn't in time) and what `p2p watch` recorded. Not knowing is "unknown", never "off": the watch
+ * asks Ix itself and may be writing.
+ */
+export function graphMemoryState(support: "oss" | "pro" | "none" | undefined, doc: Pick<GraphMemoryDoc, "written" | "queue"> | undefined, endpoint: string): DataFlow["graphMemory"] {
+  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${endpoint})` };
   if (support === "pro") return { on: false, detail: "off: Ix Pro is installed (its `ix note` writes to the cloud), so nothing is written" };
   if (support === "none") return { on: false, detail: "off: this Ix has no local `ix note`" };
-  return { on: false, detail: "off until Peer2Peer can tell that this Ix has a local `ix note`" };
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  return { on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; ${counts} (to the local graph only, ${endpoint})` };
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1082,7 @@ export const DATA_FLOW_HEADING = "Where your data goes";
 /** "Where your data goes", in plain words: one line per kind of data, then one per project's graph. */
 export function formatDataFlow(d: DataFlow): string[] {
   const lines = [`${DATA_FLOW_HEADING} (${d.doc})`];
-  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays see only ciphertext plus metadata (${d.wire.metadata.join(", ")}): ${d.wire.doc}`);
+  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including ${d.wire.metadata.join(", ")} (all of it: ${d.wire.doc})`);
   lines.push(
     `  message history: ${d.history.recording ? "on this device only" : "not recording (history.enabled is false, or P2P_HISTORY=0); what was kept stays on this device only"}, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to ${d.history.eventLogPlaintextDays} days of recent messages in the clear`,
   );

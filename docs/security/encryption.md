@@ -6,22 +6,26 @@ This page says where each kind of Peer2Peer data goes, and who can read it there
 
 | Data | Where it goes | Who can read it |
 |---|---|---|
-| Messages, statuses, rosters, delivery receipts, circle updates, and Ix items you share with peers (notes, footprints) | To the peers who may see them, through relays, as envelopes encrypted end to end to the recipient's devices | The recipients. Relays see only ciphertext plus metadata (below) |
+| Messages, statuses, rosters, delivery receipts, circle updates sent to members, and Ix items you share with peers (notes, footprints) | To the peers who may see them, through relays, as envelopes encrypted end to end to the recipient's devices | The recipients. Relays can't read the content, but see metadata (below) |
+| A circle's signed chain (its name, owner, admins and members), on a **members-only relay** that admits that circle (`RELAY_ALLOW_CIRCLE`) | Pushed in plaintext (`circle-put`) by members, only to their own relays, so the relay can check who is a member | That relay's operator. Open relays and relays that don't follow the circle never get it |
 | Your identity document (devices, relays, optional profile) | Published to your relays | Anyone: it is public by design |
 | Message history (`p2p history`) | This device only: never synced, sent to a relay or shared | Encrypted at rest, but the key sits beside it (below) |
 | The event log `p2p watch` reads | This device only | Recent message text is in the clear (below) |
 | Graph memory and other Ix data | Your **local** Ix backend, for every project today | Ix stores it in plaintext on this machine |
-| The one-line status summary (Claude Code mod) | Your own model account, which makes the summary | Your model provider ([threat model](threat-model.md#what-each-party-can-see)); opt out with `P2P_SHARE_STATUS=0` |
+| Each prompt you type in a session whose project is shared (Claude Code mod) | Haiku on your own Claude account, which turns it into the one-line status summary | Your model provider ([threat model](threat-model.md#what-each-party-can-see)). A private session makes no such call, and `P2P_SHARE_STATUS=0` turns it off |
 
 Ix Infrastructure runs no servers in the Peer2Peer path and receives nothing ([no telemetry](../../README.md#no-data-collection-no-telemetry)).
 
 ## On the wire: end to end, but metadata shows
 
-Every envelope is encrypted to the recipient's devices (X25519 and XChaCha20-Poly1305) and signed by the sending device. A relay can't read or alter the content. It **does** see:
+Every envelope is encrypted to the recipient's devices (X25519 and XChaCha20-Poly1305) and signed by the sending device. A relay can't read or alter the content. It **does** see, among other things:
 
-- which mailboxes send to which (user and device ids), and which may reach which;
+- who may reach whom (from capabilities), and which mailboxes send to which (user and device ids);
 - envelope sizes and timing, and source IP addresses;
-- each envelope's plaintext header, including its **kind** (message, status, roster, an extension kind such as `x:ix.note`) and the target **session id**.
+- each envelope's plaintext header, including its **kind** (message, status, roster, an extension kind such as `x:ix.note`) and the target **session id**;
+- your public identity document (devices, relays, optional profile).
+
+**One exception to "content is encrypted": circles on a members-only relay.** A relay run with `RELAY_ALLOW_CIRCLE` admits a circle's current members, so it has to know who they are. Members push the circle's chain to it in plaintext (`circle-put`; see [Run a relay](../run-a-relay.md)): every version is signed, so the relay can't forge one, but it can read each version's name, owner, admins and members. A client pushes a chain only to its own relays (those in its identity document) and only for a circle it is a member of. An open relay, or one that doesn't follow that circle, never receives it.
 
 v3 doesn't hide metadata. Choose relays you trust with it, or run your own. Sealed sender, padding and timing cover are [planned](../roadmap.md#metadata-privacy), not built. The exact list is in the [threat model](threat-model.md#what-each-party-can-see).
 

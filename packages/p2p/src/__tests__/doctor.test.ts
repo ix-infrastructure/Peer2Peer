@@ -14,7 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { clockVerdict, DATA_FLOW_HEADING, ENCRYPTION_DOC, formatDataFlow, formatDoctor, modVersions, SKEW_FAIL_SEC, SKEW_OK_SEC, summarize, THREAT_MODEL_DOC, type Check, type DataFlow } from "../doctor.js";
+import { clockVerdict, DATA_FLOW_HEADING, ENCRYPTION_DOC, formatDataFlow, formatDoctor, graphMemoryState, modVersions, RELAY_METADATA, SKEW_FAIL_SEC, SKEW_OK_SEC, summarize, THREAT_MODEL_DOC, type Check, type DataFlow } from "../doctor.js";
+import { DATA_FLOW_WIDTH, prettyDoctor } from "../pretty.js";
 import { main } from "../cli.js";
 import { VERSION } from "../version.js";
 import { alongside, startRelay, User, type TestRelay } from "./harness.js";
@@ -239,7 +240,11 @@ describe("p2p doctor", () => {
     const d = r.dataFlow as DataFlow;
     expect(d.wire).toEqual({ encryption: "end-to-end", relaysSee: "ciphertext and metadata", metadata: expect.arrayContaining(["sizes", "timing"]), doc: THREAT_MODEL_DOC });
     expect(d.history).toEqual({ where: "this device only", recording: true, encryptedAtRest: true, keyBesideIt: true, eventLogPlaintextDays: 7 });
-    expect(d.graphMemory).toMatchObject({ on: expect.any(Boolean), detail: expect.any(String) });
+    expect([true, false, "unknown"]).toContain(d.graphMemory.on);
+    expect(d.graphMemory.detail).toEqual(expect.any(String));
+    // The metadata list names capabilities, the identity document and the members-only circle carve-out.
+    expect(d.wire.metadata).toEqual(RELAY_METADATA);
+    expect(d.wire.metadata.join(" ")).toMatch(/who may reach whom.*identity document.*members-only relay.*name, owner, admins and members/);
     expect(d.doc).toBe(ENCRYPTION_DOC);
     // Every project's target is local today, and each row is the same as its graph check (the chokepoint's wording).
     expect(d.graphs.length).toBeGreaterThan(0);
@@ -264,7 +269,8 @@ describe("p2p doctor", () => {
     expect(lines.slice(at).some((l) => /^\d+ ✓ {2}\d+ ✗ {2}\d+ \?$/.test(l))).toBe(true);
     const section = lines.slice(at).join("\n");
     expect(section).toContain(`${DATA_FLOW_HEADING} (${ENCRYPTION_DOC})`);
-    expect(section).toMatch(/messages, statuses, receipts: end-to-end encrypted; relays see only ciphertext plus metadata \(.*sizes, timing.*\): docs\/security\/threat-model\.md/);
+    expect(section).toMatch(/messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including .*sizes, timing.* \(all of it: docs\/security\/threat-model\.md\)/);
+    expect(section).not.toMatch(/relays see only/);
     expect(section).toMatch(/message history: on this device only, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to 7 days of recent messages in the clear/);
     expect(section).toMatch(/graph memory: (on|off)/);
     expect(section).toMatch(/graph of project .+ \(here\): local only \(http:\/\/localhost:8090\): .+ \(the local Ix backend keeps it in plaintext on this machine\)/);
@@ -376,7 +382,7 @@ describe("doctor: where your data goes (format)", () => {
   it("one line per kind of data, then each project's graph, and says no cloud graph is written", () => {
     expect(formatDataFlow(base)).toEqual([
       `${DATA_FLOW_HEADING} (${ENCRYPTION_DOC})`,
-      `  messages, statuses, receipts: end-to-end encrypted; relays see only ciphertext plus metadata (sizes, timing): ${THREAT_MODEL_DOC}`,
+      `  messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including sizes, timing (all of it: ${THREAT_MODEL_DOC})`,
       "  message history: on this device only, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to 7 days of recent messages in the clear",
       "  graph memory: off: Ix isn't installed",
       "  graph of project web (here): local only (http://localhost:8090): web is private (the local Ix backend keeps it in plaintext on this machine)",
@@ -407,6 +413,34 @@ describe("doctor: where your data goes (format)", () => {
     expect(out).toContain("  graph of project api: the shared graph of circle c-team (https://graph.example/team) (the shared graph keeps it in plaintext that its operator can read)");
     expect(out).toContain("  3 more projects not listed: run `p2p project show` in each");
     expect(out.some((l) => l.startsWith("  cloud graph: none"))).toBe(false);
+  });
+
+  it("graph memory: Ix's answer decides on/off; no answer in time is 'unknown' (never 'off'), with what the watch wrote and queued", () => {
+    const ep = "http://localhost:8090";
+    expect(graphMemoryState("oss", undefined, ep)).toEqual({ on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${ep})` });
+    expect(graphMemoryState("pro", { written: 3, queue: [] }, ep).on).toBe(false);
+    expect(graphMemoryState("none", undefined, ep).on).toBe(false);
+    // `ix --help` timed out (support undefined) while `p2p watch` has been writing.
+    const busy = graphMemoryState(undefined, { written: 5, queue: [{} as never, {} as never] }, ep);
+    expect(busy).toEqual({ on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; 5 written, 2 queued (to the local graph only, ${ep})` });
+    expect(graphMemoryState(undefined, undefined, ep)).toEqual({ on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; nothing written yet (to the local graph only, ${ep})` });
+    expect(formatDataFlow({ ...base, graphMemory: busy })).toContain(`  graph memory: ${busy.detail}`);
+  });
+
+  it("pretty output doesn't cut long data-flow rows at 400 columns (the checks keep their cap)", () => {
+    const why = "x".repeat(600);
+    const long: DataFlow = {
+      ...base,
+      graphs: [{ ...base.graphs[0], line: `local only (http://localhost:8090): ${why}`, target: { kind: "local", endpoint: "http://localhost:8090", why } }],
+    };
+    const checks: Check[] = [{ id: "a", status: "ok", title: "relay x", detail: "y".repeat(600) }];
+    const r = { scope: "device" as const, version: "0.1.0", checks, summary: summarize(checks), dataFlow: long };
+    const out = prettyDoctor(r, formatDoctor(r), { color: false, cols: 100 }).split("\n");
+    const row = out.find((l) => l.includes("graph of project web"))!;
+    expect(row).toContain(why);
+    expect(row.endsWith("(the local Ix backend keeps it in plaintext on this machine)")).toBe(true);
+    expect(row.length).toBeLessThanOrEqual(DATA_FLOW_WIDTH);
+    expect(out.find((l) => l.startsWith("✓ relay x"))!.length).toBeLessThanOrEqual(400);
   });
 
   it("formatDoctor puts the section between the checks and the summary", () => {

@@ -8,7 +8,10 @@ No. Message text, status contents, circle names and rosters are end-to-end encry
 - who may reach whom;
 - who sends to whom;
 - each envelope's plaintext header: the kind (message, status, roster, circle, extension kinds such as `x:ix.note`, …), the target session id, and sequence and timestamp counters;
-- sizes, timing and IPs. See the [threat model](security/threat-model.md#what-each-party-can-see). Metadata privacy is [planned](roadmap.md#metadata-privacy).
+- sizes, timing and IPs;
+- on a members-only relay that admits a circle's members (`RELAY_ALLOW_CIRCLE`), that circle's signed chain: its name, owner, admins and members.
+
+See the [threat model](security/threat-model.md#what-each-party-can-see). Metadata privacy is [planned](roadmap.md#metadata-privacy).
 
 **Is there a public relay I can just use?**
 No, and none is planned for launch. Peer2Peer is "bring your own relay": your group runs one, or uses one a friend runs. A relay is one Docker container (or one Node process and one SQLite file), small enough for a Raspberry Pi. See [run a relay](run-a-relay.md).

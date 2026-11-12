@@ -14,7 +14,7 @@ A Peer2Peer relay is a small store-and-forward server. Anyone can run one, and e
 - run short-lived (10-minute) link mailboxes for adding a device.
 
 **It can't:**
-- read messages, statuses, session names, circle names or rosters. They're end-to-end encrypted, and the relay never has a key;
+- read messages, statuses, session names or rosters. They're end-to-end encrypted, and the relay never has a key. (Circle names are too, with one exception: with `RELAY_ALLOW_CIRCLE`, members push that circle's signed chain to the relay so it can check who may connect, and the relay can read its name, owner, admins and members);
 - forge or redirect messages, because every envelope is signed by the sending device;
 - impersonate a user or claim someone else's mailbox.
 

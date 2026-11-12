@@ -222,12 +222,18 @@ export function prettyInvite(r: InviteCodeResult, p: Pretty): string {
   ].join("\n");
 }
 
+/** A "Where your data goes" row is cut only past this many columns (a graph row: name, endpoint, reason, note). */
+export const DATA_FLOW_WIDTH = 2000;
+
 export function prettyDoctor(r: DoctorResult, plain: string, p: Pretty): string {
   const st = styleOf(p);
+  let flow = false;
   return plain
     .split("\n")
     .map((l, i) => {
-      const s = cell(l, 400);
+      // "Where your data goes" rows (a graph target with its reason) can be long: wider, not cut short.
+      if (l.startsWith(DATA_FLOW_HEADING)) flow = true;
+      const s = cell(l, flow ? DATA_FLOW_WIDTH : 400);
       if (i === 0 || s.startsWith(DATA_FLOW_HEADING)) return st.bold(s);
       if (s.startsWith("✓")) return st.green("✓") + s.slice(1);
       if (s.startsWith("✗")) return st.red("✗") + s.slice(1);

@@ -4,7 +4,7 @@ This page says, in plain language, what Peer2Peer protects, against whom, and wh
 
 ## What we protect
 
-1. **Confidentiality of content:** message text, status contents (summaries, labels, files, agents), circle names and membership, rosters and friendship certificates. *Not* covered: the envelope's plaintext routing header (below), which includes the kind and the session id.
+1. **Confidentiality of content:** message text, status contents (summaries, labels, files, agents), circle names and membership, rosters and friendship certificates. *Not* covered: the envelope's plaintext routing header (below), which includes the kind and the session id, and a circle's chain (name and membership) on a members-only relay that admits that circle (below).
 2. **Authenticity:** every envelope comes from the device of the identity it claims. Nobody can impersonate a userId, claim another device's mailbox, or forge a circle version.
 3. **Consent:** without a capability you issued (friendship, a circle you joined, or a code you redeemed), nobody can message you. A stranger can only send a rate-limited **first-contact request** (an invite), which is **held** for your approval and never delivered to your agent. Nobody can enrol you into a circle. Your agent's tools never change who reaches you, and its shell is refused when it tries (best effort against an agent with your shell: see [project boundaries](#project-boundaries)).
 4. **Your agent's integrity:** peers' text can't instruct your agent, and a peer can't start unlimited work in your session.
@@ -39,7 +39,8 @@ This page says, in plain language, what Peer2Peer protects, against whom, and wh
 
   So a relay can tell a message from a status, roster, idle notice, sync, unfriend, contact or circle update, and can see extension kinds such as `x:ix.note`. The relay reads `kind` itself, for example to accept capability-less `contact` envelopes only. These fields are bound into the encryption's associated data, so a relay can't alter them, but it can read them;
 - source IP addresses;
-- identity documents, which are public by design (your device list, relays, optional profile and proofs).
+- identity documents, which are public by design (your device list, relays, optional profile and proofs);
+- on a **members-only relay** that admits a circle's members (`RELAY_ALLOW_CIRCLE`), that circle's signed chain: its name, owner, admins and members. Members push it in plaintext (`circle-put`; see [Run a relay](../run-a-relay.md)) so the relay can check membership, only to their own relays and only for a circle they are in. Open relays never receive it.
 
 The reference relay keeps the smallest record it can. Envelopes are stored with the recipient, size, arrival time and a *source tag* (a keyed hash of the sending IP bucket, whose key lives only in memory), and they're deleted on acknowledgement or after 7 days. It never stores capabilities, only domain-separated SHA-256 hashes of `(issuer, capid)`, kept when it has to remember a revocation or a use count. Its logs are counters-only. A modified relay can log more, and you can't verify which software a relay runs, so **choose relays you trust with metadata, or run your own.**
 

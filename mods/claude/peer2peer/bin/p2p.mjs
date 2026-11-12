@@ -37433,7 +37433,16 @@ init_history();
 init_projects();
 var THREAT_MODEL_DOC = "docs/security/threat-model.md";
 var ENCRYPTION_DOC = "docs/security/encryption.md";
-var RELAY_METADATA = ["which mailboxes send to which", "sizes", "timing", "each envelope's kind and session id", "IP addresses"];
+var RELAY_METADATA = [
+  "who may reach whom (capabilities)",
+  "which mailboxes send to which",
+  "sizes",
+  "timing",
+  "each envelope's kind and session id",
+  "IP addresses",
+  "your public identity document",
+  "and a members-only relay that admits a circle's members holds that circle's signed chain: its name, owner, admins and members"
+];
 var SKEW_OK_SEC = 30;
 var SKEW_FAIL_SEC = DEFAULT_SKEW_SEC;
 var DAY2 = 86400;
@@ -37915,10 +37924,14 @@ async function graphMemoryChecks(c, app, bin, target, ms) {
     c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
   }
   if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
-  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${target.endpoint})` };
+  return graphMemoryState(support, doc, target.endpoint);
+}
+function graphMemoryState(support, doc, endpoint) {
+  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${endpoint})` };
   if (support === "pro") return { on: false, detail: "off: Ix Pro is installed (its `ix note` writes to the cloud), so nothing is written" };
   if (support === "none") return { on: false, detail: "off: this Ix has no local `ix note`" };
-  return { on: false, detail: "off until Peer2Peer can tell that this Ix has a local `ix note`" };
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  return { on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; ${counts} (to the local graph only, ${endpoint})` };
 }
 async function refreshCapped(app, userId, relays) {
   const allowed = new Set(relays.slice(0, MAX_PEER_RELAYS));
@@ -38163,7 +38176,7 @@ async function versionChecks(c, app, userId) {
 var DATA_FLOW_HEADING = "Where your data goes";
 function formatDataFlow(d) {
   const lines = [`${DATA_FLOW_HEADING} (${d.doc})`];
-  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays see only ciphertext plus metadata (${d.wire.metadata.join(", ")}): ${d.wire.doc}`);
+  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including ${d.wire.metadata.join(", ")} (all of it: ${d.wire.doc})`);
   lines.push(
     `  message history: ${d.history.recording ? "on this device only" : "not recording (history.enabled is false, or P2P_HISTORY=0); what was kept stays on this device only"}, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to ${d.history.eventLogPlaintextDays} days of recent messages in the clear`
   );
@@ -39999,10 +40012,13 @@ function prettyInvite(r, p) {
     st.dim("Who joined: p2p invites · undo: p2p remove <user> · cancel: p2p invites revoke <code>")
   ].join("\n");
 }
+var DATA_FLOW_WIDTH = 2e3;
 function prettyDoctor(r, plain, p) {
   const st = styleOf(p);
+  let flow = false;
   return plain.split("\n").map((l, i) => {
-    const s2 = cell(l, 400);
+    if (l.startsWith(DATA_FLOW_HEADING)) flow = true;
+    const s2 = cell(l, flow ? DATA_FLOW_WIDTH : 400);
     if (i === 0 || s2.startsWith(DATA_FLOW_HEADING)) return st.bold(s2);
     if (s2.startsWith("✓")) return st.green("✓") + s2.slice(1);
     if (s2.startsWith("✗")) return st.red("✗") + s2.slice(1);
