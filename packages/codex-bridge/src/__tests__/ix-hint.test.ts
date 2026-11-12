@@ -30,10 +30,11 @@ describe("the Ix hint", () => {
     expect(ixAgentHint(parseIxAdvice(advice({ install: "a <b> c" })))).not.toContain("<b>");
   });
 
-  it("not installed, not declined: said once per session, never again", async () => {
+  it("not installed, not declined: said once, at SessionStart, never again", async () => {
     const { bridge, world } = await bridgeWith(advice());
     expect(world.calls.some((c) => c.argv[0] === "extensions")).toBe(true);
     const first = ctx(await bridge.onHook({ event: "SessionStart", sessionId: "thread-1" }));
+    expect(first).toContain("Ix isn't installed");
     const second = ctx(await bridge.onHook({ event: "UserPromptSubmit" }));
     const third = ctx(await bridge.onHook({ event: "UserPromptSubmit" }));
     const all = [first, second, third];
@@ -43,6 +44,14 @@ describe("the Ix hint", () => {
     expect(hint).toContain("suggest it to your user once");
     expect(hint).toContain("Never install it yourself");
     expect(hint).toContain(INSTALL);
+    await bridge.close();
+  });
+
+  it("only at SessionStart: a UserPromptSubmit (a queued or forged turn raises one too) never carries it", async () => {
+    const { bridge } = await bridgeWith(advice());
+    const prompts = [ctx(await bridge.onHook({ event: "UserPromptSubmit" })), ctx(await bridge.onHook({ event: "UserPromptSubmit" }))];
+    expect(prompts.join("\n")).not.toContain("Ix isn't installed");
+    expect(ctx(await bridge.onHook({ event: "SessionStart", sessionId: "thread-1" }))).toContain("Ix isn't installed");
     await bridge.close();
   });
 

@@ -37,8 +37,15 @@ describe("Ix advice (pure)", () => {
   });
 
   it("setupIx without Ix: says what to run, enables nothing; declined: says how to ask again", async () => {
-    const app = (file: Record<string, unknown>) => ({ env: { PATH: "/nonexistent-p2p-test" }, file, home: "/nonexistent-p2p-home", front: false }) as unknown as App;
+    // The person (their front end's token); an agent (its environment, no token).
+    const app = (file: Record<string, unknown>, agent = false) =>
+      ({ env: { PATH: "/nonexistent-p2p-test", ...(agent ? { CLAUDECODE: "1" } : {}) }, file, home: "/nonexistent-p2p-home", front: !agent }) as unknown as App;
     expect(await setupIx(app({}), true)).toMatchObject({ found: false, installed: false, recommended: true, enabled: false, install: ixInstallLine(), hint: expect.stringContaining("never installs it") });
+    // Read by an agent: ask the user, never "run it yourself".
+    const agentHint = (await setupIx(app({}, true), true)).hint ?? "";
+    expect(agentHint).toContain("ask your user");
+    expect(agentHint).toContain("in their own terminal");
+    expect(agentHint).not.toContain("yourself (");
     const declined = await setupIx(app({ ixDeclined: true }), true);
     expect(declined).toMatchObject({ recommended: false, declined: true, enabled: false, hint: expect.stringContaining("p2p setup --ix") });
   });
@@ -148,5 +155,6 @@ describe("p2p setup: the Ix offer", () => {
     expect(config(u).ixDeclined).toBeUndefined();
     expect(config(u).extensions).toBeUndefined();
     expect(r.out).toContain(ixInstallLine());
+    expect(r.out).toContain("ask your user");
   });
 });

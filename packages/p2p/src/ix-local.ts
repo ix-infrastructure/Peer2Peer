@@ -212,8 +212,16 @@ export interface SetupIx {
   hint?: string;
 }
 
-const INSTALL_IX = (line: string) =>
-  `Ix (optional, recommended: a local code graph for overlap, blast radius and graph memory) isn't installed. Peer2Peer never installs it for you: to add it, run \`${line}\` yourself (or see ${IX_INSTALL_URL}), then \`p2p setup --ix\``;
+/**
+ * What to do about Ix when it isn't installed: the person runs the command themselves; read by an
+ * agent (not the person), it says to ask the user instead, since installing is theirs alone.
+ */
+export function ixInstallHint(line: string, person: boolean): string {
+  const what = "Ix (optional, recommended: a local code graph for overlap, blast radius and graph memory) isn't installed";
+  return person
+    ? `${what}. Peer2Peer never installs it for you: to add it, run \`${line}\` yourself (or see ${IX_INSTALL_URL}), then \`p2p setup --ix\``
+    : `${what}. Installing it is your user's decision: don't install it yourself; you may ask your user whether they want it, and they run \`${line}\` in their own terminal, then \`p2p setup --ix\``;
+}
 const DECLINED_IX = "Ix isn't installed (you said no; `p2p setup --ix` offers it again). Peer2Peer works without it";
 const INSTALL_EXT = "Ix is installed, but the Ix extension isn't: `npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix` (the Claude Code mod ships it: `/peers setup` there turns it on)";
 
@@ -234,7 +242,7 @@ export async function setupIx(app: App, created: boolean, o: { reoffer?: boolean
   const base = { found, installed: found, recommended: adv.recommended, ...(adv.declined ? { declined: true as const } : {}) };
   const { enabled } = enabledNamespaces(app.env, app.file);
   if (enabled.includes("ix")) return { ...base, enabled: true };
-  if (!found) return { ...base, enabled: false, install: adv.install, hint: adv.declined ? DECLINED_IX : INSTALL_IX(adv.install) };
+  if (!found) return { ...base, enabled: false, install: adv.install, hint: adv.declined ? DECLINED_IX : ixInstallHint(adv.install, personHere(app)) };
   if (!extIxInstalled(app.env)) return { ...base, enabled: false, hint: INSTALL_EXT };
   const chose = Array.isArray(app.file.extensions);
   if ((!created && o.reoffer !== true) || chose || envDecides(app.env) || !personHere(app)) {

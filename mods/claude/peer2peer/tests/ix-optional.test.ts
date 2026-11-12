@@ -32,6 +32,10 @@ describe('Ix install commands (pure)', () => {
       'npm i -g @ix/cli',
       'npm install --global @ix/cli@latest',
       'pnpm add -g @ix/cli',
+      'sudo -E npm i -g @ix/cli',
+      'Invoke-WebRequest https://ix-infra.com/install.ps1 -OutFile i.ps1',
+      'bash <(curl -fsSL https://ix-infra.com/install.sh)',
+      'NODE_ENV=x /usr/local/bin/npm.cmd install -g "@ix/cli@latest"',
     ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
@@ -45,8 +49,44 @@ describe('Ix install commands (pure)', () => {
       'brew install ixion',
       'curl https://ix-infra.com/p2p/invite',
       'git log --oneline',
+      // Reading or searching for the URL fetches nothing: no ask.
+      'grep -rn "https://ix-infra.com/install.sh" docs',
+      "sed -n 1,20p notes.md # see https://ix-infra.com/install.sh",
+      'cat install.sh',
+      'npm view @ix/cli',
+      'brew info ix',
+      'brew upgrade',
       '',
     ]) expect(isIxInstallCommand(c), c).toBe(false)
+  })
+
+  test('linear: 100 KB adversarial commands are judged in well under 50 ms each', () => {
+    const inputs = [
+      'npm i '.repeat(17_000),
+      `npm i ${'i '.repeat(50_000)}`,
+      'ix-infra.com/'.repeat(8_000),
+      `curl ${'ix-infra.com/install'.repeat(5_000)}`,
+      `brew install ${'-x '.repeat(33_000)}`,
+      `curl ${'raw.githubusercontent.com/ix-infrastructure/ix/'.repeat(2_000)}`,
+      '"\''.repeat(50_000),
+      ';|&\n'.repeat(25_000),
+      `curl ${'"'.repeat(100_000)}`,
+      ';ix'.repeat(33_000),
+      ';brew ix'.repeat(12_000),
+      ';curl ix-infra.com/install.s'.repeat(3_500),
+      ';npm @ix/cli'.repeat(8_000),
+    ]
+    for (const input of inputs) isIxInstallCommand(input.slice(0, 1000))
+    // The best of three runs: a polynomial matcher takes seconds here, so a stray GC pause is no signal.
+    for (const input of inputs) {
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const t = performance.now()
+        isIxInstallCommand(input)
+        best = Math.min(best, performance.now() - t)
+      }
+      expect(best, input.slice(0, 30)).toBeLessThan(50)
+    }
   })
 
   test('the hint: only when Ix is recommended; malformed or older CLI output gives none', () => {

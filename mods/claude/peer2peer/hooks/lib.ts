@@ -3687,23 +3687,106 @@ export function queuedNote(address: string, r: { state?: string; lastSeen?: numb
 // ── Ix: optional, recommended, never installed by an agent ─────────────────
 
 /**
- * Commands that install Ix (or fetch one of its install scripts): the Ix installers at
- * ix-infra.com (`curl … install.sh | sh`, `irm … install.ps1 | iex`, wget, a saved copy), the Ix
- * repository's raw scripts, its Homebrew tap and formula, and a global npm-family install of the Ix
- * CLI package. A text match, not a parser: a command that builds the URL at run time isn't seen
- * (the person's own permission rules still apply to it).
+ * Commands that install Ix (or fetch one of its install scripts): a fetch (curl, wget, irm, iwr,
+ * Invoke-WebRequest, Invoke-RestMethod) of an Ix install script at ix-infra.com or in the Ix
+ * repository, its Homebrew tap and formula, and an npm-family install of the Ix CLI package. Read
+ * word by word in one linear pass (it runs on every shell command an agent makes, so no regular
+ * expression here may backtrack): segments split on newlines, `;`, `&` and `|`, words on blanks,
+ * quotes and substitution marks trimmed. Not a parser: a command that builds the URL at run time
+ * isn't seen (the person's own permission rules still apply to it).
  */
-const IX_INSTALL_RES: readonly RegExp[] = [
-  /ix-infra\.com\/[\w.-]*install[\w.-]*\.(?:sh|ps1)\b/i,
-  /githubusercontent\.com\/ix-infrastructure\/ix\/\S*install[\w.-]*\.(?:sh|ps1)\b/i,
-  /\bbrew\s+(?:tap|install|reinstall|upgrade)\b[^\n;&|]*\bix-infrastructure\/ix\b/i,
-  /\bbrew\s+install\s+(?:-\S+\s+)*ix(?=\s|$|[;&|])/i,
-  /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\s(?:i|in|install|add)\b[^\n;&|]*\s@ix\/cli(?:@\S*)?(?=\s|$|[;&|])/i,
-]
+const IX_SCRIPT_HOSTS = ['ix-infra.com/', 'raw.githubusercontent.com/ix-infrastructure/ix/']
+const FETCHERS = new Set(['curl', 'wget', 'irm', 'iwr', 'invoke-webrequest', 'invoke-restmethod'])
+const NPM_FAMILY = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const NPM_INSTALL = new Set(['i', 'in', 'install', 'add'])
+const BREW_VERBS = new Set(['tap', 'install', 'reinstall', 'upgrade'])
+const IX_MARKS = ['ix-infra.com/', 'ix-infrastructure/ix', '@ix/cli', 'brew']
+const PREFIXES = new Set(['sudo', 'doas', 'env', 'command', 'exec', 'nohup', 'time'])
+const TRIM = new Set(['"', "'", '`', '(', ')', '<', '$', '{', '}'])
+/** A URL path character as the matcher reads one (lower-cased input): a-z, 0-9, `_`, `.`, `/`, `-`. */
+const isUrlChar = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 46 || c === 47 || c === 45
 
-/** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. */
+/** A word with quotes, parentheses and substitution marks trimmed from both ends (a loop: no backtracking). */
+function bareWord(w: string): string {
+  let a = 0
+  let b = w.length
+  while (a < b && TRIM.has(w[a] ?? '')) a++
+  while (b > a && TRIM.has(w[b - 1] ?? '')) b--
+
+  return w.slice(a, b)
+}
+
+/** A program word as run: its base name, without a Windows extension. */
+function programName(w: string): string {
+  const base = w.slice(Math.max(w.lastIndexOf('/'), w.lastIndexOf('\\')) + 1)
+
+  return base.endsWith('.exe') || base.endsWith('.cmd') ? base.slice(0, -4) : base
+}
+
+/** The words of a segment from its program on: env assignments, `sudo`-like prefixes and their flags skipped. */
+function commandWords(words: readonly string[]): string[] {
+  let i = 0
+  while (i < words.length) {
+    const w = words[i] ?? ''
+    const eq = w.indexOf('=')
+    if (PREFIXES.has(programName(w)) || w.startsWith('-') || (eq > 0 && !w.slice(0, eq).includes('/'))) i++
+    else break
+  }
+
+  return words.slice(i)
+}
+
+/** Whether the segment names an Ix install script by URL (any occurrence). */
+function namesIxScript(segment: string): boolean {
+  for (const host of IX_SCRIPT_HOSTS) {
+    let at = segment.indexOf(host)
+    while (at >= 0) {
+      let end = at + host.length
+      while (end < segment.length && isUrlChar(segment.charCodeAt(end))) end++
+      const path = segment.slice(at + host.length, end)
+      if (path.includes('install') && (path.endsWith('.sh') || path.endsWith('.ps1'))) return true
+      at = segment.indexOf(host, end)
+    }
+  }
+
+  return false
+}
+
+function segmentInstallsIx(segment: string): boolean {
+  // Every form below names one of these: the rest (most commands) costs a few substring searches.
+  if (!IX_MARKS.some(m => segment.includes(m))) return false
+  const words: string[] = []
+  let from = 0
+  for (let i = 0; i <= segment.length; i++) {
+    const c = i < segment.length ? segment.charCodeAt(i) : 32
+    if (c !== 32 && c !== 9 && c !== 13) continue
+    if (i > from) {
+      const w = bareWord(segment.slice(from, i))
+      if (w !== '') words.push(w)
+    }
+    from = i + 1
+  }
+  if (words.length === 0) return false
+  if (words.some(w => FETCHERS.has(programName(w))) && namesIxScript(segment)) return true
+  const cmd = commandWords(words)
+  const program = programName(cmd[0] ?? '')
+  const rest = cmd.slice(1)
+  if (NPM_FAMILY.has(program)) return rest.some(w => NPM_INSTALL.has(w)) && rest.some(w => w === '@ix/cli' || w.startsWith('@ix/cli@'))
+  if (program === 'brew') {
+    const verb = rest.find(w => !w.startsWith('-')) ?? ''
+    const args = rest.slice(rest.indexOf(verb) + 1).filter(w => !w.startsWith('-'))
+
+    return BREW_VERBS.has(verb) && args.some(w => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/'))
+  }
+
+  return false
+}
+
+/** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. Linear in the command's length. */
 export function isIxInstallCommand(command: string): boolean {
-  return typeof command === 'string' && command !== '' && IX_INSTALL_RES.some(re => re.test(command))
+  if (typeof command !== 'string' || command === '') return false
+
+  return command.toLowerCase().split(/[\n;&|]/).some(segmentInstallsIx)
 }
 
 /** The reason the permission prompt shows for an agent's Ix install (and the model reads where nobody can be asked). */
