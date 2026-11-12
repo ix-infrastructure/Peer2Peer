@@ -4,7 +4,7 @@
 Yes. Your identity is a key generated on your device. There's no sign-up, email or phone number. Relays authenticate devices by signature.
 
 **Can the relay read my messages?**
-No. Message text, status contents, circle names and rosters are end-to-end encrypted. A relay *can* see:
+No. Message text, status contents, circle names and rosters are end-to-end encrypted (one exception below). A relay *can* see:
 - who may reach whom;
 - who sends to whom;
 - each envelope's plaintext header: the kind (message, status, roster, circle, extension kinds such as `x:ix.note`, …), the target session id, and sequence and timestamp counters;

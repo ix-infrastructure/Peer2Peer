@@ -108,7 +108,7 @@ export const RELAY_METADATA: readonly string[] = [
   "each envelope's kind and session id",
   "IP addresses",
   "your public identity document",
-  "and a members-only relay that admits a circle's members holds that circle's signed chain: its name, owner, admins and members",
+  "on a members-only relay that admits a circle's members, that circle's signed chain (its name, owner, admins and members)",
 ];
 
 /**
