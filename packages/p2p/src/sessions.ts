@@ -1085,9 +1085,9 @@ export async function sendSharing(app: App, o: SendOpts): Promise<{ result: Send
   const sid = checkSid(o.fromSession, "--from-session");
   const uid = await app.resolveUser(o.to.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/\/[^/]*$/, ""));
   let added: { ver: number; had: SessionDoc } | undefined;
-  const had = await getSession(app, sid);
-  if (uid !== app.userId && !(await rosterAudience(app, had)).includes(uid)) {
-    added = { ver: (await roster(app, sid, { add: [uid] })).ver, had };
+  if (uid !== app.userId) {
+    const had = await getSession(app, sid);
+    if (!(await rosterAudience(app, had)).includes(uid)) added = { ver: (await roster(app, sid, { add: [uid] })).ver, had };
   }
   const wire = { maybe: false };
   try {
