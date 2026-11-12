@@ -23,7 +23,7 @@
 // into <out>/pkg/<dir>, adds the repository LICENSE, and rewrites the copy's
 // package.json: every internal dependency is pinned to exactly <version>
 // (the optional peer on @peer2peer/cli becomes ^<version>), README links
-// point at the v<version> tag, and `scripts` and `devDependencies` are dropped. The repository itself is left
+// point at the v<version> tag, and `scripts`, `devDependencies` and `overrides` are dropped. The repository itself is left
 // untouched. The packages are versioned in lockstep: all five must carry the
 // same version, and so must the version constants compiled into them.
 //
@@ -169,6 +169,8 @@ for (const p of pkgs) {
   }
   delete json.scripts;
   delete json.devDependencies;
+  // Dev-only dependency pins (minimatch): meaningful only when installing the package itself.
+  delete json.overrides;
   if (flag("--no-provenance")) json.publishConfig = { ...json.publishConfig, provenance: false };
   writeFileSync(join(stage, "package.json"), `${JSON.stringify(json, null, 2)}\n`);
   for (const bin of Object.values(typeof json.bin === "string" ? { x: json.bin } : json.bin ?? {})) {
