@@ -56,7 +56,9 @@ const FAKES = {
 echo "npm $*" >>"$FAKE_LOG"
 case "$1" in
   --version) echo 10.9.2 ;;
-  prefix) echo "$FAKE_PREFIX" ;;
+  # npm masks UUID-shaped folder names as *** in what it prints (FAKE_PREFIX_SHOWN).
+  prefix) echo "\${FAKE_PREFIX_SHOWN:-$FAKE_PREFIX}" ;;
+  exec) echo "npm exec must never be called" >&2; exit 99 ;;
   install)
     [ -n "\${FAKE_NPM_FAIL:-}" ] && exit 1
     mkdir -p "$FAKE_PREFIX/bin" "$FAKE_PREFIX/lib/node_modules"
@@ -264,6 +266,25 @@ test("install.sh --version takes only an exact version", () => {
   assert.match(sh(["--bogus"]).err, /unknown option: --bogus/);
 });
 
+test("install.sh refuses a prefix npm masked as ***, before installing anything, and never runs npm exec", () => {
+  const box = sandbox();
+  const shown = box.prefix.replace(/run\d+/, "***");
+  for (const args of [["--no-setup"], ["--dry-run"]]) {
+    const r = sh(args, { FAKE_PREFIX_SHOWN: shown }, box);
+    assert.equal(r.code, 1, r.all);
+    assert.match(r.err, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\)\. Nothing was installed\./);
+    assert.match(r.err, /npm config set prefix .*or install directly: npm install -g @peer2peer\/cli@0\.1\.1 @peer2peer\/ext-ix@0\.1\.1/);
+    assert.doesNotMatch(r.calls, /npm install|npm exec/);
+    assert.doesNotMatch(r.out, /^\+ /m);
+  }
+  for (const bad of ["relative/npmg", "/a\n/b"]) {
+    const r = sh(["--dry-run"], { FAKE_PREFIX_SHOWN: bad });
+    assert.equal(r.code, 1, JSON.stringify(bad));
+    assert.match(r.err, /isn't a usable path/);
+  }
+  assert.doesNotMatch(readFileSync(SH, "utf8").replace(/^#.*$/gm, ""), /npm exec/);
+});
+
 test("install.sh fails clearly when npm fails", () => {
   const r = sh(["--no-setup"], { FAKE_NPM_FAIL: "1" });
   assert.notEqual(r.code, 0, r.all);
@@ -420,6 +441,26 @@ test("install.ps1 without Node 22 or npm prints how to get them (winget) and ins
     assert.doesNotMatch(r.calls, /npm install/);
     assert.doesNotMatch(r.out, /^\+ /m);
   }
+});
+
+test("install.ps1 refuses a prefix npm masked as ***, before installing anything, and never runs npm exec", (t) => {
+  if (!tool("pwsh", t)) return;
+  const box = sandbox();
+  const shown = box.prefix.replace(/run\d+/, "***");
+  for (const args of ["-NoSetup", "-DryRun"]) {
+    const r = pwsh(ps(args), { FAKE_PREFIX_SHOWN: shown }, box);
+    assert.notEqual(r.code, 0, r.all);
+    assert.match(r.all, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\)\. Nothing was installed\./);
+    assert.match(r.all, /or install directly: npm install -g @peer2peer\/cli@0\.1\.1 @peer2peer\/ext-ix@0\.1\.1/);
+    assert.doesNotMatch(r.calls, /npm install|npm exec/);
+    assert.doesNotMatch(r.out, /^\+ /m);
+  }
+  for (const bad of ["relative/npmg", "/a\n/b"]) {
+    const r = pwsh(ps("-DryRun"), { FAKE_PREFIX_SHOWN: bad });
+    assert.notEqual(r.code, 0, JSON.stringify(bad));
+    assert.match(r.all, /isn't a usable path/);
+  }
+  assert.doesNotMatch(readFileSync(PS1, "utf8").replace(/^\s*#.*$/gm, ""), /npm exec|'exec'/);
 });
 
 test("install.ps1 never elevates: an unwritable npm prefix gets the options and stops", (t) => {
