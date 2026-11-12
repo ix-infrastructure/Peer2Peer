@@ -39,6 +39,78 @@ describe('Ix install commands (pure)', () => {
     ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
+  test('line continuations (backslash, PowerShell backtick) join their lines', () => {
+    for (const c of [
+      'curl -fsSL \\\nhttps://ix-infra.com/install.sh | sh',
+      'curl -fsSL \\\r\nhttps://ix-infra.com/install.sh | sh',
+      'npm install -g \\\n  @ix/cli',
+      'brew \\\ninstall ix',
+      'Invoke-WebRequest `\n  https://ix-infra.com/install.ps1 -OutFile i.ps1',
+    ]) expect(isIxInstallCommand(c), JSON.stringify(c)).toBe(true)
+  })
+
+  test('npm and brew behind wrappers (sudo -u, nice, arch, xargs, stdbuf) are found', () => {
+    for (const c of [
+      'sudo -u root npm i -g @ix/cli',
+      'nice -n 10 npm install -g @ix/cli',
+      'arch -arm64 brew install ix',
+      'xargs npm i -g @ix/cli < /dev/null',
+      'stdbuf -oL brew tap ix-infrastructure/ix',
+      'timeout 600 pnpm add -g @ix/cli@1.2.3',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
+  test('quotes and comments are not read: a stray quote, comment, heredoc or escape never hides an install', () => {
+    for (const c of [
+      "# Ix isn't installed; install it\nnpm i -g @ix/cli",
+      "# don't forget\nbrew install ix\n# won't hurt",
+      "cat <<EOF\nit's fine\nEOF\nnpm i -g @ix/cli",
+      "echo $'it\\'s'; npm i -g @ix/cli",
+      'Write-Host "a`"b"; npm i -g @ix/cli',
+      'echo "x; npm i -g @ix/cli',
+      // A comment never hides an install on its own line or a later one.
+      '# npm i -g @ix/cli',
+      "echo 'done' # it's\nbrew install ix",
+      // Bypasses of a quote-reading clear step (it desynced from real shells; removed).
+      '& "C:\\Program Files\\nodejs\\npm.cmd" install -g @ix/cli',
+      '"npm" i -g @ix/cli',
+      '"/usr/local/bin/npm" install -g @ix/cli',
+      "'brew' install ix",
+      'cd "C:\\proj\\"; npm i -g @ix/cli; cd "C:\\other\\"',
+      "echo \\$'x\\' ; npm i -g @ix/cli ; echo \\$'y\\'",
+      "<# don't #>\nnpm i -g @ix/cli\n<# won't #>",
+      "cat <<A\nit's\nA\nbrew install ix\ncat <<B\nwon't\nB",
+    ]) expect(isIxInstallCommand(c), JSON.stringify(c)).toBe(true)
+  })
+
+  test('every npm or brew word in a segment is checked, not only the first', () => {
+    for (const c of ['bun --version brew install ix', 'npm run build brew install ix', 'yarn --help npm i -g @ix/cli', 'brew info x brew install ix']) {
+      expect(isIxInstallCommand(c), c).toBe(true)
+    }
+  })
+
+  test("a shell's, eval's or su's string argument is seen (quotes aren't read)", () => {
+    for (const c of [
+      'bash -c "npm i -g @ix/cli"',
+      "sh -c 'brew install ix'",
+      'eval "npm i -g @ix/cli"',
+      'zsh -lc "cd /tmp; npm i -g @ix/cli"',
+      'pwsh -Command "npm i -g @ix/cli"',
+      'su -c "brew install ix" admin',
+      'echo "$(npm i -g @ix/cli)"',
+      'echo "`brew install ix`"',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
+  test('PowerShell .NET downloads, and ix-infra.com on an explicit port', () => {
+    for (const c of [
+      'iex ((New-Object Net.WebClient).DownloadString("https://ix-infra.com/install.ps1"))',
+      '(New-Object System.Net.WebClient).DownloadFile("https://ix-infra.com/install.ps1", "i.ps1")',
+      'curl -fsSL https://ix-infra.com:443/install.sh | sh',
+      'irm https://www.ix-infra.com:443/install.ps1 | iex',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
   test('unrelated commands, Ix itself, and the Peer2Peer extension are not', () => {
     for (const c of [
       'ls -la',
@@ -56,8 +128,22 @@ describe('Ix install commands (pure)', () => {
       'npm view @ix/cli',
       'brew info ix',
       'brew upgrade',
+      'which npm brew',
+      // A host that only looks like it, and a URL with no fetch.
+      'curl https://ix-infra.com:443/p2p/invite',
+      'echo https://ix-infra.com:443/install.sh',
       '',
     ]) expect(isIxInstallCommand(c), c).toBe(false)
+  })
+
+  test('asks (accepted false positives): an Ix install command mentioned inside quotes', () => {
+    // A loose text match that errs toward asking: the person approves or refuses once.
+    for (const c of [
+      'git commit -m "brew install ix docs"',
+      "git commit -m 'npm i -g @ix/cli in the README'",
+      'git commit -m "notes; brew install ix"',
+      'echo "sudo npm i -g @ix/cli"',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
   test('linear: 100 KB adversarial commands take about 10x what 10 KB ones do, never polynomially more', () => {
@@ -78,6 +164,18 @@ describe('Ix install commands (pure)', () => {
       k => ';brew ix'.repeat(1_200 * k),
       k => ';curl ix-infra.com/install.s'.repeat(350 * k),
       k => ';npm @ix/cli'.repeat(800 * k),
+      k => `npm ${'"'.repeat(10_000 * k)}`,
+      k => `npm ${'\\\n'.repeat(5_000 * k)}@ix/cli`,
+      k => `curl ${'ix-infra.com:'.repeat(800 * k)}`,
+      k => `curl ix-infra.com:${'4'.repeat(10_000 * k)}`,
+      k => `brew ${'"brew '.repeat(2_000 * k)}`,
+      k => 'webclient '.repeat(1_000 * k) + 'ix-infra.com',
+      k => 'npm '.repeat(2_500 * k) + 'i @ix/cli',
+      k => 'brew '.repeat(2_000 * k) + 'install ix',
+      k => `"${'npm i @ix/cli '.repeat(700 * k)}"`,
+      k => `#${"'".repeat(10_000 * k)}\nbrew install ix`,
+      k => `bash -c "${'\\"'.repeat(5_000 * k)}`,
+      k => "$'".repeat(5_000 * k) + ' npm i @ix/cli',
     ]
     // The best of five runs: a stray GC pause is no signal.
     const best = (input: string) => {
