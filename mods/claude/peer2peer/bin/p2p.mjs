@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 445fc25bf49a9a60
+// @peer2peer/core 0.1.1 48a33801ac228251
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6963,9 +6963,12 @@ var init_identitydoc = __esm({
        *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
        *    rules once connected.
        *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
-       *    refresh (clearPending), and one issued in the future or past its `exp` is ignored. So a version only
-       *    the identity key could sign but no relay serves any more can't narrow the view for good.
-       *  - At most MAX_PENDING_HEADS, the highest `ver` first. Returns whether it changed anything.
+       *    refresh a majority of the listed relays answered (clearPending), and one issued in the future or past
+       *    its `exp` is ignored. So a version only the identity key could sign but no relay serves any more can't
+       *    narrow the view for good. A client never applies them to its own identity (re-review N1).
+       *  - At most MAX_PENDING_HEADS: first those no other candidate names as prev or merge (the tips among
+       *    them, so a long run of one branch can't push out another branch's revoking tip), then the highest
+       *    `ver`. Returns whether it changed anything.
        */
       notePending(docs, opts = {}) {
         if (this.versions.size === 0)
@@ -6979,7 +6982,15 @@ var init_identitydoc = __esm({
           if (d.ver > headVer && pendingUsable(d, opts))
             byHash.set(d.hash, d);
         }
-        this.pending = [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
+        const named = /* @__PURE__ */ new Set();
+        for (const d of byHash.values()) {
+          if (d.prev)
+            named.add(d.prev);
+          if (d.merge)
+            named.add(d.merge);
+        }
+        const tipFirst = (d) => named.has(d.hash) ? 1 : 0;
+        this.pending = [...byHash.values()].sort((a, b) => tipFirst(a) - tipFirst(b) || b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
         const after2 = this.pending.map((d) => d.hash);
         return after2.length !== before.length || after2.some((h) => !before.includes(h));
       }
@@ -10440,7 +10451,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     jumpTo = newest.jws;
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : c.clearPending();
+  const majority = answeredRelays.size * 2 > relays.length;
+  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false;
   const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && !pendingChange(chain);
   const jumped = unchanged ? false : await store2.updateIdentity(userId, (cur) => {
     const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur, { now, skewSec: opts.skewSec }) : new IdentityChain(userId);
@@ -10556,8 +10568,8 @@ function frozenCopy(v) {
   }
   return v;
 }
-function storeIdentityResolver(store2, fallback) {
-  return async (userId) => await getIdentityView(store2, userId) ?? await fallback?.(userId);
+function storeIdentityResolver(store2, fallback, opts = {}) {
+  return async (userId) => await getIdentityView(store2, userId, { now: opts.now, ignorePending: opts.own !== void 0 && userId === opts.own }) ?? await fallback?.(userId);
 }
 function storeCertResolver(store2, fallback, now) {
   return async (userId, did) => {
@@ -10602,7 +10614,7 @@ function storeSignerContext(store2, opts = {}) {
     now: opts.now,
     skewSec: opts.skewSec,
     resolveCert: storeCertResolver(store2, opts.resolveCert, opts.now),
-    resolveIdentity: storeIdentityResolver(store2, opts.resolveIdentity)
+    resolveIdentity: storeIdentityResolver(store2, opts.resolveIdentity, { own: opts.own, now: opts.now })
   };
 }
 async function freshnessLookup(store2, now = nowSec(), only) {
@@ -26730,8 +26742,9 @@ var init_app = __esm({
           return v;
         });
       }
+      /** The stored view of `userId`; our own identity's never narrowed by pending heads (#65 re-review N1, see ownView). */
       async view(userId) {
-        return getIdentityView(this.store, userId);
+        return getIdentityView(this.store, userId, userId === this.keys?.userId ? { ignorePending: true } : {});
       }
       /**
        * Network I/O for core's refreshIdentity (§5.6), per relay so core can cap
@@ -26825,6 +26838,7 @@ var init_app = __esm({
       /** Signer resolution for core verifiers, finding unknown identities on the relays (once per process). */
       signerCtx(hint = []) {
         return storeSignerContext(this.store, {
+          own: this.keys?.userId,
           resolveIdentity: (u) => this.discover(u, hint)
         });
       }

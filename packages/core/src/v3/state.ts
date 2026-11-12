@@ -173,8 +173,10 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    pending heads (#35): while any is above the head, the view trusts only
  *    the devices and key holders every one lists, so a committed intermediate
  *    version can't trust what a newer one already revoked. A complete refresh
- *    clears them; one issued in the future or past its `exp` is ignored; the
- *    owner's own view ignores them (getIdentityView `ignorePending`).
+ *    answered by a majority of the listed relays clears them (a minority's
+ *    only drops those its head reached); one issued in the future or past its
+ *    `exp` is ignored; a client's reads of its own identity ignore them
+ *    (getIdentityView `ignorePending`, storeSignerContext `own`).
  *  - The held chain is built and verified once; documents are placed in
  *    `ver` order, each once. Gaps are filled by walking back with the §5.6
  *    chain request.
@@ -469,9 +471,12 @@ export async function refreshIdentity(
   // #35: an incomplete refresh may commit an intermediate version (or none) below the verified tips. Those
   // above the head are recorded as pending heads, so until the stored head reaches them, the view trusts
   // only the devices and key holders each lists too: what they revoke applies now, not after a later
-  // refresh. A complete refresh clears them (review M1: one no relay serves any more can't narrow for good).
+  // refresh. A complete refresh answered by a majority of the listed relays clears them (review M1: one no
+  // relay serves any more can't narrow for good); one answered by a minority only drops those its head
+  // reached (re-review N2: like freshness, a stale minority answer mustn't lift a revocation).
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : c.clearPending());
+  const majority = answeredRelays.size * 2 > relays.length;
+  const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
   // Commit once, re-applied onto whatever is stored by now. Nothing new and no jump (the usual
   // refresh): nothing to write, and no need to queue for the store's lock to find that out.
   const unchanged = accepted.length === 0 && jumpTo === undefined && chain.size > 0 && !pendingChange(chain);
@@ -602,9 +607,11 @@ export async function reverifyFriendshipForApproval(
 }
 
 /**
- * The stored view of `userId`. Pending heads (#35) narrow it unless `ignorePending`: the owner's own
- * publishing path passes that (review M1), since narrowing is for trusting others' devices, and a version
- * only the identity key signed must not stop the owner from editing or rotating their identity. `now`
+ * The stored view of `userId`. Pending heads (#35) narrow it unless `ignorePending`: a client passes that
+ * for its own identity, in every read (review M1, re-review N1), since narrowing is for trusting others'
+ * devices, and a version only the identity key signed must not stop the owner's devices from editing,
+ * publishing or rotating the identity, or from accepting each other's syncs (the §2.8 rotation sync among
+ * them). `now`
  * (default: the wall clock) decides which pending heads are still usable.
  */
 export async function getIdentityView(store: TrustStoreV3, userId: string, opts: { now?: number; ignorePending?: boolean } = {}): Promise<IdentityView | undefined> {
@@ -644,8 +651,14 @@ const VIEW_CACHE_MAX = 4096;
 const viewCache = new WeakMap<TrustStoreV3, Map<string, { key: string; view: IdentityView }>>();
 
 /** Resolves identities from the store, then `fallback` (e.g. a document bundled with an invite). */
-export function storeIdentityResolver(store: TrustStoreV3, fallback?: IdentityResolver): IdentityResolver {
-  return async (userId) => (await getIdentityView(store, userId)) ?? (await fallback?.(userId));
+/**
+ * Resolves identities from the store, then `fallback` (e.g. a document bundled with an invite). `own`, this
+ * device's own userId, is resolved without pending heads (#65 re-review N1): the owner's devices keep
+ * verifying each other's envelopes (sync, the §2.8 rotation sync) while a version only the identity key
+ * signed sits pending.
+ */
+export function storeIdentityResolver(store: TrustStoreV3, fallback?: IdentityResolver, opts: { own?: string; now?: number } = {}): IdentityResolver {
+  return async (userId) => (await getIdentityView(store, userId, { now: opts.now, ignorePending: opts.own !== undefined && userId === opts.own })) ?? (await fallback?.(userId));
 }
 
 /** Resolves certificates from the store's cache, then the identity document's `certs`, then `fallback`. */
@@ -693,12 +706,15 @@ export function longestLived(certs: readonly string[], opts: TimeOptions = {}): 
   return rank(certs, true) ?? rank(certs, false);
 }
 
-export function storeSignerContext(store: TrustStoreV3, opts: TimeOptions & { resolveCert?: CertResolverV3; resolveIdentity?: IdentityResolver } = {}): SignerContext {
+export function storeSignerContext(
+  store: TrustStoreV3,
+  opts: TimeOptions & { resolveCert?: CertResolverV3; resolveIdentity?: IdentityResolver; /** This device's own userId: resolved without pending heads (N1). */ own?: string } = {},
+): SignerContext {
   return {
     now: opts.now,
     skewSec: opts.skewSec,
     resolveCert: storeCertResolver(store, opts.resolveCert, opts.now),
-    resolveIdentity: storeIdentityResolver(store, opts.resolveIdentity),
+    resolveIdentity: storeIdentityResolver(store, opts.resolveIdentity, { own: opts.own, now: opts.now }),
   };
 }
 

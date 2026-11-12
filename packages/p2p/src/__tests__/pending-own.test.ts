@@ -39,12 +39,16 @@ afterAll(async () => {
 });
 
 describe("M1: a pending head never narrows the owner's own view", () => {
-  it("others' view of the identity is narrowed; the owner's own isn't", async () => {
+  it("the identity's stored view is narrowed for others; none of the owner's own reads are", async () => {
     const app = await ann.app();
     await app.load();
     try {
       expect((await getIdentityView(app.store, userId))!.devices).toEqual([]);
       expect((await app.ownView()).devices).toEqual([keysOf(ann).did]);
+      // Re-review N1: every read of our own identity (self-sync checks, the §2.8 rotation sync, who to sync
+      // to) and the signer context that verifies our own devices' envelopes ignore the pending head too.
+      expect((await app.view(userId))!.devices).toEqual([keysOf(ann).did]);
+      expect((await app.signerCtx().resolveIdentity(userId))!.devices).toEqual([keysOf(ann).did]);
     } finally {
       await app.close();
     }

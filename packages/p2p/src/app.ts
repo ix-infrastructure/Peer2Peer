@@ -521,8 +521,9 @@ export class App {
     });
   }
 
+  /** The stored view of `userId`; our own identity's never narrowed by pending heads (#65 re-review N1, see ownView). */
   async view(userId: string): Promise<IdentityView | undefined> {
-    return getIdentityView(this.store, userId);
+    return getIdentityView(this.store, userId, userId === this.keys?.userId ? { ignorePending: true } : {});
   }
 
   /**
@@ -632,6 +633,7 @@ export class App {
   /** Signer resolution for core verifiers, finding unknown identities on the relays (once per process). */
   signerCtx(hint: readonly string[] = []): SignerContext {
     return storeSignerContext(this.store, {
+      own: this.keys?.userId,
       resolveIdentity: (u) => this.discover(u, hint),
     });
   }

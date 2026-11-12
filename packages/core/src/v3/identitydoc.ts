@@ -582,8 +582,8 @@ export interface StoredIdentityChain {
   /**
    * The versions above the held head that an incomplete refresh verified but couldn't connect yet (#35),
    * at most MAX_PENDING_HEADS. While any is newer than the held head, the view trusts only the devices and
-   * key holders every such one lists too. Cleared by the next complete refresh; one issued in the future or
-   * past its `exp` is ignored.
+   * key holders every such one lists too. Cleared by the next complete refresh a majority of the listed
+   * relays answered; one issued in the future or past its `exp` is ignored.
    */
   pendingHeads?: string[];
   /**
@@ -676,9 +676,12 @@ export class IdentityChain {
    *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
    *    rules once connected.
    *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
-   *    refresh (clearPending), and one issued in the future or past its `exp` is ignored. So a version only
-   *    the identity key could sign but no relay serves any more can't narrow the view for good.
-   *  - At most MAX_PENDING_HEADS, the highest `ver` first. Returns whether it changed anything.
+   *    refresh a majority of the listed relays answered (clearPending), and one issued in the future or past
+   *    its `exp` is ignored. So a version only the identity key could sign but no relay serves any more can't
+   *    narrow the view for good. A client never applies them to its own identity (re-review N1).
+   *  - At most MAX_PENDING_HEADS: first those no other candidate names as prev or merge (the tips among
+   *    them, so a long run of one branch can't push out another branch's revoking tip), then the highest
+   *    `ver`. Returns whether it changed anything.
    */
   notePending(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
     if (this.versions.size === 0) return false;
@@ -689,7 +692,13 @@ export class IdentityChain {
       if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
       if (d.ver > headVer && pendingUsable(d, opts)) byHash.set(d.hash, d);
     }
-    this.pending = [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
+    const named = new Set<string>();
+    for (const d of byHash.values()) {
+      if (d.prev) named.add(d.prev);
+      if (d.merge) named.add(d.merge);
+    }
+    const tipFirst = (d: VerifiedIdentityDoc) => (named.has(d.hash) ? 1 : 0);
+    this.pending = [...byHash.values()].sort((a, b) => tipFirst(a) - tipFirst(b) || b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
     const after = this.pending.map((d) => d.hash);
     return after.length !== before.length || after.some((h) => !before.includes(h));
   }

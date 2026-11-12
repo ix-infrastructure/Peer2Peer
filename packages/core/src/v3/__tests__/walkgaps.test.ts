@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import { createIdentityDoc, IdentityChain, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
-import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
+import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, storeSignerContext, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { b64uEncode } from "../../encoding.js";
 import { randomBytes } from "../../crypto.js";
@@ -419,5 +419,65 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
       chain: async (uid, rs, to, n) => (rs[0] === RELAYS[0] ? walkFrom(kept)(uid, rs, to, n) : ++junkPages > 1 ? hang() : junk),
     };
     await expect(refreshIdentity(gStore, g.userId, fetcher, { now: NOW, relays: RELAYS.slice(0, 2), checkMs: 1, fetchTimeoutMs: 50 })).rejects.toThrow(/chain-broken/);
+  });
+
+  it("re-review N2: a complete refresh answered only by a stale minority keeps the narrowing; a majority clears it", async () => {
+    // A slow machine: v1 held, the genuine v60 revokes the laptop; the first refresh is incomplete (pending v60).
+    const u = makeUser("alice");
+    const laptop = u.addDevice({ keyholder: true });
+    for (let i = 2; i < 60; i++) u.publish({ iat: NOW - 1000 + i });
+    const head = u.publish({ devices: [u.dev.did], keyholders: [u.dev.did], iat: NOW - 10 });
+    const store = await storeWith(u.docs.slice(0, 1));
+    const R = RELAYS.slice(0, 2);
+    const both: IdentityFetcher = { tips: async () => [head.jws], chain: walkFrom(u.docs) };
+    const first = await refreshIdentity(store, u.userId, both, { now: NOW, relays: R, checkMs: 1 });
+    expect(first.incomplete).toBe(true);
+    const held = first.head;
+    expect(held.devices).toContain(laptop.did);
+    expect(first.devices).not.toContain(laptop.did);
+    // Then the honest relay times out and the other answers the stale head the store already holds:
+    // complete, but by a minority (1 of 2), so the pending head stays.
+    const hang = () => new Promise<string[]>(() => {});
+    const stale: IdentityFetcher = { tips: async (_u, rs) => (rs[0] === R[0] ? hang() : [held.jws]), chain: async () => [] };
+    const second = await refreshIdentity(store, u.userId, stale, { now: NOW, relays: R, fetchTimeoutMs: 50 });
+    expect(second.incomplete).toBeUndefined();
+    expect(second.answeredRelays).toEqual([R[1]]);
+    expect(second.devices).not.toContain(laptop.did);
+    expect((await store.getIdentity(u.userId))!.pendingHeads).toEqual([head.jws]);
+    // Both relays answering (a majority, even with the same stale head) clears it, as freshness does.
+    const majority: IdentityFetcher = { tips: async () => [held.jws], chain: async () => [] };
+    const third = await refreshIdentity(store, u.userId, majority, { now: NOW, relays: R });
+    expect(third.incomplete).toBeUndefined();
+    expect((await store.getIdentity(u.userId))!.pendingHeads).toBeUndefined();
+  });
+
+  it("re-review N3: a long run of one branch can't push another branch's revoking tip out of the 8 kept", () => {
+    // Held v1..v4 (the laptop trusted). Candidates: the main branch's v5..v13 (9, each naming the last) and a
+    // fork x5 off v4 that drops the laptop. By ver alone, the 8 kept are v6..v13 and x5 is pushed out; the
+    // tips (v13, x5) come first now, so the laptop stays out.
+    const u = makeUser("alice");
+    const laptop = u.addDevice({ keyholder: true });
+    for (let i = 0; i < 3; i++) u.publish({ iat: NOW - 900 + i });
+    const v4 = u.doc;
+    const at = { now: NOW };
+    const c = IdentityChain.fromStored({ iss: u.userId, versions: u.docs.map((d) => d.jws) }, at);
+    expect(c.view().devices).toContain(laptop.did);
+    const x5 = doc(u, { ver: 5, prev: v4.hash, devices: [u.dev.did], keyholders: [u.dev.did], iat: NOW - 500 });
+    const run: VerifiedIdentityDoc[] = [];
+    for (let i = 0; i < 9; i++) run.push(u.publish({ iat: NOW - 400 + i }));
+    expect(c.notePending([x5, ...run], at)).toBe(true);
+    const kept = c.toStored().pendingHeads!;
+    expect(kept).toHaveLength(8);
+    expect(kept).toContain(x5.jws);
+    expect(kept).toContain(run[8].jws);
+    expect(c.view().devices).toEqual([u.dev.did]);
+  });
+
+  it("re-review N1: the signer context resolves this device's own identity without pending heads, others' with them", async () => {
+    const { u, laptop, store, R, hostile } = await forgedFarFuture(NOW - 5);
+    await refreshIdentity(store, u.userId, hostile, { now: NOW, relays: R });
+    const ctx = storeSignerContext(store, { now: NOW, own: u.userId });
+    expect((await ctx.resolveIdentity(u.userId))!.devices).toEqual([u.dev.did, laptop.did]);
+    expect((await storeSignerContext(store, { now: NOW }).resolveIdentity(u.userId))!.devices).toEqual([]);
   });
 });
