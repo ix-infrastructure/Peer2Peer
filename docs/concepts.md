@@ -133,3 +133,5 @@ Every message, status, invite or circle update is an **envelope**: encrypted (XC
 ## Extensions (§8)
 
 Optional features plug in as **extension kinds** (`x:<ns>.*`), each with a plain-text fallback, or as **trust providers** that add badges. An extension can add information, never authorisation. See [extensions.md](extensions.md).
+
+**Ix is optional and recommended; Peer2Peer never installs it for you.** Installing Ix is the person's decision and action: `p2p setup` at a terminal explains it and asks (default No), and prints the install command for the person to run. A no is remembered (`"ixDeclined": true` in config.json) until `p2p setup --ix`. Agents suggest, people decide: the Claude Code mod and the Codex bridge tell the agent once per session, when Ix isn't installed and the person hasn't said no, that it may suggest Ix once and must never install it. In Claude Code an agent's command that installs Ix goes to the person's permission prompt. Enabling the `ix` extension is the person's alone too (their front end's token, or their `yes` on the terminal).

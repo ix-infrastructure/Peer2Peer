@@ -1,8 +1,9 @@
 // Copyright 2026 Ix Infrastructure Inc.
 //
-// Ix on by default (epic #41 piece 1): finding the local Ix CLI, asking it about this machine
-// (version, backend, whether a checkout is mapped), and turning the `ix` extension on for a new
-// install when Ix is there. The CLI never imports an extension (scripts/check-boundaries.mjs), so
+// Ix: optional and recommended, never installed for the person (epic #41 piece 1): finding the
+// local Ix CLI, asking it about this machine (version, backend, whether a checkout is mapped),
+// recommending it when it isn't there (the person installs it, or says no and isn't asked again),
+// and turning the `ix` extension on for a new install, with the person's yes, when Ix is there. The CLI never imports an extension (scripts/check-boundaries.mjs), so
 // it runs `ix` itself here, the same way ext-ix does: by absolute path from PATH's absolute
 // entries (never a binary planted in the repository), by argv with no shell, bounded, with an
 // allowlisted environment pinned to the graph target (projects.ts), never the caller's IX_*
@@ -13,12 +14,73 @@ import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { sanitizePeerText } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
-import type { Env } from "./config.js";
+import { setFileConfigField, type Env, type FileConfig } from "./config.js";
 import { enabledNamespaces, extensionDirs, extensionPackageName, resolveIn, setExtensionEnabled } from "./extensions.js";
 import { personHere, type GraphTarget } from "./projects.js";
 
 /** Where to get Ix (and how p2p says it): never installed for the person. */
 export const IX_INSTALL_URL = "https://github.com/ix-infrastructure/Ix";
+
+/**
+ * The command(s) that install Ix on this platform, from the Ix README, for the person to run in their
+ * own terminal: Peer2Peer prints them and never runs them (it doesn't run a downloaded script). Intel
+ * Macs have no pre-built Ix package, so Homebrew builds it.
+ */
+export function ixInstallCommands(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string[] {
+  if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
+  if (platform === "darwin" && arch === "x64") return ["brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix", "brew install ix"];
+  return ["curl -fsSL https://ix-infra.com/install.sh | sh"];
+}
+
+/** The install command(s) as one line (`&&` between steps; Windows has one). */
+export function ixInstallLine(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string {
+  return ixInstallCommands(platform, arch).join(" && ");
+}
+
+/** What Ix adds, in a few lines, said when `p2p setup` recommends it. */
+export const IX_PITCH = [
+  "Ix (optional, recommended) maps your code into a local graph. With it, Peer2Peer can flag when a peer's",
+  "session works on code that overlaps yours, show a change's blast radius, and keep your sessions' context",
+  "as local graph memory. Everything stays on this machine. Peer2Peer works without it and never installs it for you.",
+];
+
+/** The person said no to Ix at `p2p setup` (FileConfig.ixDeclined): not asked again until `p2p setup --ix`. */
+export function ixDeclined(file: Pick<FileConfig, "ixDeclined">): boolean {
+  return file.ixDeclined === true;
+}
+
+/** Records the person's answer to the Ix offer (config.json `ixDeclined`); only `p2p setup`, at a terminal, writes it. */
+export function setIxDeclined(home: string, declined: boolean): void {
+  setFileConfigField(home, "ixDeclined", declined);
+}
+
+/** CI set (anything but empty, 0 or false): never a prompt. */
+export function ciEnv(env: Env): boolean {
+  const v = env.CI?.trim().toLowerCase();
+  return Boolean(v) && v !== "0" && v !== "false";
+}
+
+/**
+ * Whether p2p recommends Ix here (`p2p setup --json`, `p2p extensions --json`, and the hint the front
+ * ends give their agent): the Ix CLI isn't found and the person hasn't said no. `install` is the
+ * command for the person to run; nothing is ever installed for them.
+ */
+export interface IxAdvice {
+  /** The Ix CLI was found. */
+  installed: boolean;
+  /** The person said no at `p2p setup` (`p2p setup --ix` asks again). */
+  declined: boolean;
+  /** Ix isn't installed and the person hasn't said no. */
+  recommended: boolean;
+  /** The command that installs Ix on this platform, for the person to run themselves. */
+  install: string;
+}
+
+export function ixAdvice(env: Env, file: Pick<FileConfig, "ixDeclined">, o: { reoffer?: boolean } = {}): IxAdvice {
+  const installed = ixBinary(env) !== undefined;
+  const declined = ixDeclined(file) && o.reoffer !== true;
+  return { installed, declined, recommended: !installed && !declined, install: ixInstallLine() };
+}
 
 /**
  * `name` resolved to an absolute path through PATH's absolute entries (the same rule as ext-ix's
@@ -134,6 +196,14 @@ const envDecides = (env: Env) => env.P2P_EXTENSIONS !== undefined && env.P2P_EXT
 export interface SetupIx {
   /** The Ix CLI was found (its absolute path is local only, never sent anywhere). */
   found: boolean;
+  /** The same as `found` (IxAdvice's name). */
+  installed: boolean;
+  /** Ix isn't installed and the person hasn't said no: p2p recommends it (it never installs it). */
+  recommended: boolean;
+  /** The person said no to Ix at an earlier `p2p setup` (`--ix` asks again). */
+  declined?: true;
+  /** The command that installs Ix on this platform, for the person to run themselves (when it isn't installed). */
+  install?: string;
   /** The `ix` extension is enabled now (by this setup, or already). */
   enabled: boolean;
   /** This setup turned it on (a new install, Ix present, ext-ix installed, the person running it). */
@@ -142,50 +212,57 @@ export interface SetupIx {
   hint?: string;
 }
 
-const INSTALL_IX = `Ix (the local code graph peers' agents point into) isn't installed: get it from ${IX_INSTALL_URL}, then run \`p2p extensions enable ix\` (Peer2Peer works without it)`;
+const INSTALL_IX = (line: string) =>
+  `Ix (optional, recommended: a local code graph for overlap, blast radius and graph memory) isn't installed. Peer2Peer never installs it for you: to add it, run \`${line}\` yourself (or see ${IX_INSTALL_URL}), then \`p2p setup --ix\``;
+const DECLINED_IX = "Ix isn't installed (you said no; `p2p setup --ix` offers it again). Peer2Peer works without it";
 const INSTALL_EXT = "Ix is installed, but the Ix extension isn't: `npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix` (the Claude Code mod ships it: `/peers setup` there turns it on)";
 
 /**
- * Ix on by default, for `p2p setup`. A new install (`created`) gets the `ix` extension enabled when
- * the Ix CLI and ext-ix are both there and the person agrees: their front end's token (the Claude
- * mod's typed `/peers setup`), or, outside any agent's session (its environment or a Claude Code or
- * Codex ancestor), their "yes" typed on the controlling terminal, as for every other person-only
- * action (projects.ts). Otherwise nothing changes: an existing install is never switched silently
- * (it gets the one-time notice, ixNotice), an agent never enables an extension, and
- * P2P_EXTENSIONS, when set, decides alone.
+ * Ix for `p2p setup`: optional and recommended, never installed. Without the Ix CLI it says what to
+ * run (`recommended`, `install`), unless the person said no before (`--ix`, `reoffer`, asks again).
+ * With it, a new install (`created`; or any install, with `reoffer`) gets the `ix` extension enabled
+ * when ext-ix is there too and the person agrees: their front end's token (the Claude mod's typed
+ * `/peers setup`), or, outside any agent's session (its environment or a Claude Code or Codex
+ * ancestor), their "yes" typed on the controlling terminal, as for every other person-only action
+ * (projects.ts). Otherwise nothing changes: an existing install is never switched silently (it gets
+ * the one-time notice, ixNotice), an agent never enables an extension, and P2P_EXTENSIONS, when
+ * set, decides alone.
  */
-export async function setupIx(app: App, created: boolean): Promise<SetupIx> {
-  const found = ixBinary(app.env) !== undefined;
+export async function setupIx(app: App, created: boolean, o: { reoffer?: boolean } = {}): Promise<SetupIx> {
+  const adv = ixAdvice(app.env, app.file, o);
+  const found = adv.installed;
+  const base = { found, installed: found, recommended: adv.recommended, ...(adv.declined ? { declined: true as const } : {}) };
   const { enabled } = enabledNamespaces(app.env, app.file);
-  if (enabled.includes("ix")) return { found, enabled: true };
-  if (!found) return { found, enabled: false, hint: INSTALL_IX };
-  if (!extIxInstalled(app.env)) return { found, enabled: false, hint: INSTALL_EXT };
+  if (enabled.includes("ix")) return { ...base, enabled: true };
+  if (!found) return { ...base, enabled: false, install: adv.install, hint: adv.declined ? DECLINED_IX : INSTALL_IX(adv.install) };
+  if (!extIxInstalled(app.env)) return { ...base, enabled: false, hint: INSTALL_EXT };
   const chose = Array.isArray(app.file.extensions);
-  if (!created || chose || envDecides(app.env) || !personHere(app)) {
-    return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+  if ((!created && o.reoffer !== true) || chose || envDecides(app.env) || !personHere(app)) {
+    return { ...base, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
   }
   if (app.front !== true) {
     const yes = app.confirmTty ? await app.confirmTty("Ix is installed. Turn on the Ix extension, so your sessions can share Ix context with the people you share a project with? (Ix calls stay on this machine.)").catch(() => false) : false;
-    if (!yes) return { found, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
+    if (!yes) return { ...base, enabled: false, hint: "Ix is installed: `p2p extensions enable ix` lets your sessions share Ix context (notes, subgraph references, blast radius, footprints)" };
   }
   setExtensionEnabled(app.home, "ix", true);
-  return { found, enabled: true, enabledNow: true };
+  return { ...base, enabled: true, enabledNow: true };
 }
 
 /**
  * The one-time notice for an existing install (shown once per device, to the person at a terminal):
- * new installs turn the Ix extension on when Ix is present; this one wasn't changed. Undefined when
- * it was shown already, Ix isn't installed, or the extension is on (or P2P_EXTENSIONS decides).
+ * new installs offer to turn the Ix extension on when Ix is present; this one wasn't changed.
+ * Undefined when it was shown already, Ix isn't installed, the person said no to Ix, or the
+ * extension is on (or P2P_EXTENSIONS decides).
  */
 export async function ixNotice(app: App): Promise<string | undefined> {
-  if (envDecides(app.env)) return undefined;
+  if (envDecides(app.env) || ixDeclined(app.file)) return undefined;
   if (enabledNamespaces(app.env, app.file).enabled.includes("ix")) return undefined;
   if ((await app.state.get("ixNotice"))?.at !== undefined) return undefined;
   if (!ixBinary(app.env)) return undefined;
   const shown = await app.state.update("ixNotice", (cur) => (cur?.at !== undefined ? { result: false } : { next: { at: Date.now() }, result: true }));
   if (!shown) return undefined;
   const how = extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`";
-  return `Ix: new installs now turn the Ix extension on when Ix is installed, so sessions can share Ix context. Yours wasn't changed; to turn it on, run ${how}. Ix calls stay on this machine (\`p2p doctor\` shows each project's graph: local only)`;
+  return `Ix: \`p2p setup\` now offers to turn the Ix extension on when Ix is installed, so sessions can share Ix context. Yours wasn't changed; to turn it on, run ${how}. Ix calls stay on this machine (\`p2p doctor\` shows each project's graph: local only)`;
 }
 
 /**

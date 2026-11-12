@@ -55,7 +55,7 @@ import { readCapped, RelayConnection } from "./relay-client.js";
 import { rosterAudience, sessionRef } from "./sessions.js";
 import type { PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
-import { extIxInstalled, ixBinary, IX_INSTALL_URL, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
+import { extIxInstalled, ixBinary, ixDeclined, IX_INSTALL_URL, ixInstallLine, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
 import { graphMemoryReport } from "./graph-memory.js";
 import { graphMemoryEnabled } from "./config.js";
 import { describeGraphTarget, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir } from "./projects.js";
@@ -619,7 +619,13 @@ export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
   const bin = ixBinary(app.env);
   const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
   if (!bin) {
-    c.add("ix", "unknown", "Ix", "the Ix CLI isn't installed (Peer2Peer works without it; peers' Ix items show as plain text)", `install Ix (${IX_INSTALL_URL}), then \`p2p extensions enable ix\``);
+    c.add(
+      "ix",
+      "unknown",
+      "Ix",
+      `the Ix CLI isn't installed: it is optional (Peer2Peer works without it; peers' Ix items show as plain text)${ixDeclined(app.file) ? ", and you said no to it at setup" : ""}`,
+      `optional and recommended; Peer2Peer never installs it. To add it, run \`${ixInstallLine()}\` yourself (${IX_INSTALL_URL}), then \`p2p setup --ix\``,
+    );
   } else {
     const v = (await bounded(ixVersion(bin, app.env, target, ms), ms + 500)).value;
     if (v) c.add("ix", "ok", "Ix", `ix ${v} (${bin})`);

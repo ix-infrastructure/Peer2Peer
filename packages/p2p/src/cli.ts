@@ -228,7 +228,7 @@ export function buildProgram(deps: ProgramDeps): Command {
         if (json) io.out(safeJson(out.json));
         else if (deps.io.pretty && out.pretty) deps.io.out(pretty.safePretty(out.pretty(deps.io.pretty)));
         else if (out.human) io.out(safeTerminal(out.human));
-        // Ix on by default for new installs; an existing one hears it once, at a terminal, from the person (ix-local.ts).
+        // Ix is optional: new installs are offered it; an existing one hears it once, at a terminal, from the person (ix-local.ts).
         if (!json && !opts.readOnly && app.keys && deps.io.prompt && projects.personHere(app) && cmd.name() !== "setup") {
           const n = await ixLocal.ixNotice(app).catch(() => undefined);
           if (n) io.err(`p2p: ${n}`);
@@ -340,10 +340,11 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)")
     .option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)")
     .option("--no-backup", "Don't save or print the backup phrase now")
+    .option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension")
     .option("--json", "JSON output")
     .action(
       run(
-        async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; json?: boolean }) => {
+        async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; json?: boolean }) => {
           let mode: "file" | "print" | "none" | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
           const existed = await app.load(false);
           if (mode === undefined && !existed && !o.json && io.prompt) {
@@ -351,7 +352,7 @@ export function buildProgram(deps: ProgramDeps): Command {
             const a = (await io.prompt("Choose f, p or s: ")).trim().toLowerCase();
             mode = a === "p" ? "print" : a === "s" ? "none" : "file";
           }
-          const r = await ops.setup(app, { name: o.name, relays: o.relay, backup: mode, ...(typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {}) });
+          const r = await ops.setup(app, { name: o.name, relays: o.relay, backup: mode, ...(typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {}), ...(o.ix ? { ix: true } : {}) });
           const lines = [r.created ? `Created ${r.address}` : `Already set up: ${r.address}`, `  relays  ${r.relays.join(", ")}`];
           if (r.backup?.file) {
             lines.push(`  backup  saved to ${r.backup.file}`);
@@ -362,9 +363,33 @@ export function buildProgram(deps: ProgramDeps): Command {
           }
           if (r.backup?.phrase) lines.push(`\nWrite these 24 words down and keep them offline. Anyone with them is you:\n\n${r.backup.phrase}\n`);
           if (r.created && !r.backup) io.err("warning: no backup yet: if you lose this device, the identity is gone. Run `p2p backup show`.");
+          // Ix is optional and recommended: offered to the person at a terminal (default No), never
+          // installed. Never with --json, in CI, without a terminal, or inside an agent's session.
+          const offerIx =
+            r.ix !== undefined && !r.ix.found && r.ix.recommended && !o.json && Boolean(io.prompt || io.select) && !ixLocal.ciEnv(app.env) && projects.personHere(app);
           if (r.ix?.enabledNow) lines.push("  ix      Ix found: the Ix extension is on (`p2p extensions disable ix` turns it off). Ix calls stay on this machine (graph: local only)");
           else if (r.ix?.enabled) lines.push("  ix      the Ix extension is on (graph: local only)");
-          else if (r.ix?.hint) lines.push(`  ix      ${r.ix.hint}`);
+          else if (r.ix?.hint && !offerIx) lines.push(`  ix      ${r.ix.hint}`);
+          if (offerIx) {
+            io.out(lines.join("\n"));
+            lines.length = 0;
+            const yes = await confirmPrompt(["", ...ixLocal.IX_PITCH, "Install Ix?"].join("\n"));
+            if (yes) {
+              if (ixLocal.ixDeclined(app.file)) ixLocal.setIxDeclined(app.home, false);
+              // Printed, never run: installing is the person's own action, in their own terminal.
+              lines.push(
+                "",
+                "Peer2Peer doesn't run installers. To install Ix, run this in your terminal:",
+                "",
+                ...ixLocal.ixInstallCommands().map((c) => `    ${c}`),
+                "",
+                `(details: ${ixLocal.IX_INSTALL_URL}). Then run \`p2p setup --ix\` to turn on the Ix extension.`,
+              );
+            } else {
+              ixLocal.setIxDeclined(app.home, true);
+              lines.push("  ix      not installing Ix. You won't be asked again; `p2p setup --ix` offers it again");
+            }
+          }
           lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
           return { json: r, human: lines.join("\n") };
         },

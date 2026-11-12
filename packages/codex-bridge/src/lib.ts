@@ -1666,3 +1666,26 @@ export function idleNotice(address: string, reason: string): string {
 export function pickHolder(board: readonly { sid: string; activeAt: number }[]): string | undefined {
   return [...board].sort((a, b) => b.activeAt - a.activeAt || (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0))[0]?.sid;
 }
+
+// ── Ix: optional, recommended, never installed by an agent ─────────────────
+
+/** What `p2p extensions --json` says about Ix (packages/p2p ix-local.ts IxAdvice). */
+export type IxAdvice = { installed: boolean; declined: boolean; recommended: boolean; install: string };
+
+/** IxAdvice from `p2p extensions --json`'s `ix`, or undefined when absent or malformed (an older CLI). */
+export function parseIxAdvice(v: unknown): IxAdvice | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.installed !== "boolean" || typeof o.declined !== "boolean" || typeof o.recommended !== "boolean" || typeof o.install !== "string") return undefined;
+  return { installed: o.installed, declined: o.declined, recommended: o.recommended, install: o.install };
+}
+
+/**
+ * The once-per-session hint to the model when Ix isn't installed and the person hasn't said no: it
+ * may suggest Ix to its user once; installing is theirs. Undefined when there is nothing to say.
+ */
+export function ixAgentHint(ix: IxAdvice | undefined): string | undefined {
+  if (!ix || !ix.recommended || ix.installed || ix.declined) return undefined;
+  const cmd = inert(ix.install).slice(0, 200);
+  return `Peer2Peer: Ix isn't installed on this machine. It is optional: a local code graph that lets Peer2Peer flag semantic overlap with peers' sessions, show a change's blast radius, and keep local graph memory. You may suggest it to your user once, when it fits what they're doing, and ask whether they want it. Never install it yourself or run its installer: installing is your user's decision and action (they run \`${cmd}\` in their own terminal, then \`p2p setup --ix\`).`;
+}

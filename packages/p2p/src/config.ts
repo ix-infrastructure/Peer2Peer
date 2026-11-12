@@ -53,6 +53,11 @@ export interface FileConfig {
   /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
   ixMemory?: boolean;
   /**
+   * The person said no to Ix when `p2p setup` recommended it (ix-local.ts): not asked again, and no
+   * agent hint. `p2p setup --ix` offers it again. Ix is optional; Peer2Peer never installs it.
+   */
+  ixDeclined?: boolean;
+  /**
    * Messages from your own agent sessions skip the hold in a session that approves its own tool calls
    * (`p2p own-agents deliver`, person only). Off by default: they are held like a peer's. No variable
    * overrides it, so nothing an agent sets in its environment turns it on.

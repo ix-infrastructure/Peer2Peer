@@ -3683,3 +3683,52 @@ export function queuedNote(address: string, r: { state?: string; lastSeen?: numb
 
   return `${address} is offline${seen}; queued over Peer2Peer (end-to-end encrypted): it is delivered when that session reconnects (${expiry}). Don't send it again; its reply, if any, arrives as a <cross-session-message from="${address}">.`
 }
+
+// ── Ix: optional, recommended, never installed by an agent ─────────────────
+
+/**
+ * Commands that install Ix (or fetch one of its install scripts): the Ix installers at
+ * ix-infra.com (`curl … install.sh | sh`, `irm … install.ps1 | iex`, wget, a saved copy), the Ix
+ * repository's raw scripts, its Homebrew tap and formula, and a global npm-family install of the Ix
+ * CLI package. A text match, not a parser: a command that builds the URL at run time isn't seen
+ * (the person's own permission rules still apply to it).
+ */
+const IX_INSTALL_RES: readonly RegExp[] = [
+  /ix-infra\.com\/[\w.-]*install[\w.-]*\.(?:sh|ps1)\b/i,
+  /githubusercontent\.com\/ix-infrastructure\/ix\/\S*install[\w.-]*\.(?:sh|ps1)\b/i,
+  /\bbrew\s+(?:tap|install|reinstall|upgrade)\b[^\n;&|]*\bix-infrastructure\/ix\b/i,
+  /\bbrew\s+install\s+(?:-\S+\s+)*ix(?=\s|$|[;&|])/i,
+  /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\s(?:i|in|install|add)\b[^\n;&|]*\s@ix\/cli(?:@\S*)?(?=\s|$|[;&|])/i,
+]
+
+/** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. */
+export function isIxInstallCommand(command: string): boolean {
+  return typeof command === 'string' && command !== '' && IX_INSTALL_RES.some(re => re.test(command))
+}
+
+/** The reason the permission prompt shows for an agent's Ix install (and the model reads where nobody can be asked). */
+export const IX_INSTALL_ASK =
+  'Peer2Peer: this installs Ix. Ix is optional, and installing it is your decision: approve only if you asked for it.'
+
+/** What `p2p extensions --json` says about Ix (packages/p2p ix-local.ts IxAdvice). */
+export type IxAdvice = { installed: boolean; declined: boolean; recommended: boolean; install: string }
+
+/** IxAdvice from `p2p extensions --json`'s `ix`, or undefined when absent or malformed (an older CLI). */
+export function parseIxAdvice(v: unknown): IxAdvice | undefined {
+  if (typeof v !== 'object' || v === null) return undefined
+  const o = v as Record<string, unknown>
+  if (typeof o.installed !== 'boolean' || typeof o.declined !== 'boolean' || typeof o.recommended !== 'boolean' || typeof o.install !== 'string') return undefined
+
+  return { installed: o.installed, declined: o.declined, recommended: o.recommended, install: o.install }
+}
+
+/**
+ * The once-per-session hint to the agent when Ix isn't installed and the person hasn't said no:
+ * it may suggest Ix to its user once; installing is theirs. Undefined when there is nothing to say.
+ */
+export function ixAgentHint(ix: IxAdvice | undefined): string | undefined {
+  if (!ix || !ix.recommended || ix.installed || ix.declined) return undefined
+  const cmd = inert(ix.install).slice(0, 200)
+
+  return `<peer2peer-ix>Ix isn't installed on this machine. It is optional: a local code graph that lets Peer2Peer flag semantic overlap with peers' sessions, show a change's blast radius, and keep local graph memory. You may suggest it to your user once, when it fits what they're doing, and ask whether they want it. Never install it yourself or run its installer: installing is your user's decision and action (they run \`${cmd}\` in their own terminal, then \`p2p setup --ix\`).</peer2peer-ix>`
+}

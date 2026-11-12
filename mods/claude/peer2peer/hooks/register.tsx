@@ -66,6 +66,10 @@ import {
   parseAutoShare,
   recipientUserId,
   isAutoApproving,
+  isIxInstallCommand,
+  IX_INSTALL_ASK,
+  ixAgentHint,
+  parseIxAdvice,
   isFailure,
   isMutating,
   isPeer2PeerHelp,
@@ -273,6 +277,10 @@ const newSess = () => ({
   userExtPath: '',
   isIxLoaded: false,
   ixToolName: undefined as string | undefined,
+  // Ix isn't installed and the person hasn't said no (`p2p extensions --json` ix): the agent hears,
+  // once per session, that it may suggest Ix to its user and must never install it itself.
+  ixHint: undefined as string | undefined,
+  isIxHintGiven: false,
   // Notes and references shown in full by a typed `/peers ix import|resolve <id>`, awaiting its `confirm`.
   ixShown: new Map<string, string>(),
   ixResolveShown: new Map<string, string>(),
@@ -1754,6 +1762,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
 const detectIx = async (S: Sess, $: EngineInterface) => {
   const r = await (await client(S, $)).extensions()
   S.isIxLoaded = r.ok && r.value.extensions.some(e => e.ns === 'ix')
+  S.ixHint = r.ok ? ixAgentHint(parseIxAdvice(r.value.ix)) : undefined
   if (!S.isIxLoaded || S.ixToolName) return
   const reg = await $.tool.register(IX_TOOL).catch(() => null)
   if (reg) S.ixToolName = reg.tool
@@ -3324,6 +3333,24 @@ export const register: Register = on => {
     return /^(Bash|PowerShell)$/.test(String(e.tool)) && /p2p/i.test(JSON.stringify(e)) ? { deny: 'Peer2Peer: this command could not be checked; ask your user to run it.' } : next(e)
   })
 
+  const isIxInstallCall = (e: { tool: string; input: unknown }) => {
+    const command = (e.input as { command?: unknown } | null)?.command
+
+    return /^(Bash|PowerShell)$/.test(e.tool) && typeof command === 'string' && isIxInstallCommand(command)
+  }
+  // Ix is optional and the person's to install: an agent's shell call that installs it is put to the
+  // person's permission prompt, whatever the mode or rules would have allowed (where nobody can be
+  // asked, the engine refuses it). A refusal beneath stands. Every other command is untouched.
+  on('tool.check', async ($, e, next) => {
+    if (!isIxInstallCall(e)) return next(e)
+    const verdict = await next(e)
+    if (verdict.decision === 'deny') return verdict
+
+    return { decision: 'ask', reason: IX_INSTALL_ASK }
+  }).catch(($, e, next) => {
+    return isIxInstallCall(e) ? { decision: 'ask', reason: IX_INSTALL_ASK } : next(e)
+  })
+
   on('session.send', async ($, e, next) => {
     const S = await bindSess($, 'hook')
     // A Peer2Peer address never falls through to the built-in (nor anything else) without a session here.
@@ -3394,6 +3421,10 @@ export const register: Register = on => {
     const S = await bindSess($, 'hook')
     if (!S) return next(e)
     const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    // Once per session, beside a prompt the person typed: Ix is optional, the agent may suggest it, never install it.
+    const ixHint = typed && !e.isMeta && !e.command && S.ixHint && !S.isIxHintGiven ? S.ixHint : undefined
+    if (ixHint) S.isIxHintGiven = true
+    if (ixHint) e = { ...e, context: [...(e.context ?? []), ixHint] }
     // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again. Only the engine's own
     // stamps for the person (PromptOrigin: `composer`, Enter at the prompt; `bridge`, Remote Control); this
     // mod's `$.prompt.submit` arrives as `plugin`, another session's message as `peer`/`peer-send-message`.
