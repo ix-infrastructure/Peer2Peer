@@ -39,6 +39,36 @@ describe('Ix install commands (pure)', () => {
     ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
+  test('line continuations (backslash, PowerShell backtick) join their lines', () => {
+    for (const c of [
+      'curl -fsSL \\\nhttps://ix-infra.com/install.sh | sh',
+      'curl -fsSL \\\r\nhttps://ix-infra.com/install.sh | sh',
+      'npm install -g \\\n  @ix/cli',
+      'brew \\\ninstall ix',
+      'Invoke-WebRequest `\n  https://ix-infra.com/install.ps1 -OutFile i.ps1',
+    ]) expect(isIxInstallCommand(c), JSON.stringify(c)).toBe(true)
+  })
+
+  test('npm and brew behind wrappers (sudo -u, nice, arch, xargs, stdbuf) are found', () => {
+    for (const c of [
+      'sudo -u root npm i -g @ix/cli',
+      'nice -n 10 npm install -g @ix/cli',
+      'arch -arm64 brew install ix',
+      'xargs npm i -g @ix/cli < /dev/null',
+      'stdbuf -oL brew tap ix-infrastructure/ix',
+      'timeout 600 pnpm add -g @ix/cli@1.2.3',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
+  test('PowerShell .NET downloads, and ix-infra.com on an explicit port', () => {
+    for (const c of [
+      'iex ((New-Object Net.WebClient).DownloadString("https://ix-infra.com/install.ps1"))',
+      '(New-Object System.Net.WebClient).DownloadFile("https://ix-infra.com/install.ps1", "i.ps1")',
+      'curl -fsSL https://ix-infra.com:443/install.sh | sh',
+      'irm https://www.ix-infra.com:443/install.ps1 | iex',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
   test('unrelated commands, Ix itself, and the Peer2Peer extension are not', () => {
     for (const c of [
       'ls -la',
@@ -56,6 +86,15 @@ describe('Ix install commands (pure)', () => {
       'npm view @ix/cli',
       'brew info ix',
       'brew upgrade',
+      // Quoted text is one word, never a command.
+      'git commit -m "brew install ix docs"',
+      "git commit -m 'npm i -g @ix/cli in the README'",
+      'git commit -m "notes; brew install ix"',
+      'echo "sudo npm i -g @ix/cli"',
+      'which npm brew',
+      // A host that only looks like it, and a URL with no fetch.
+      'curl https://ix-infra.com:443/p2p/invite',
+      'echo https://ix-infra.com:443/install.sh',
       '',
     ]) expect(isIxInstallCommand(c), c).toBe(false)
   })
@@ -78,6 +117,12 @@ describe('Ix install commands (pure)', () => {
       k => ';brew ix'.repeat(1_200 * k),
       k => ';curl ix-infra.com/install.s'.repeat(350 * k),
       k => ';npm @ix/cli'.repeat(800 * k),
+      k => `npm ${'"'.repeat(10_000 * k)}`,
+      k => `npm ${'\\\n'.repeat(5_000 * k)}@ix/cli`,
+      k => `curl ${'ix-infra.com:'.repeat(800 * k)}`,
+      k => `curl ix-infra.com:${'4'.repeat(10_000 * k)}`,
+      k => `brew ${'"brew '.repeat(2_000 * k)}`,
+      k => 'webclient '.repeat(1_000 * k) + 'ix-infra.com',
     ]
     // The best of five runs: a stray GC pause is no signal.
     const best = (input: string) => {
