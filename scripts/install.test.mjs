@@ -56,7 +56,13 @@ const FAKES = {
 echo "npm $*" >>"$FAKE_LOG"
 case "$1" in
   --version) echo 10.9.2 ;;
-  prefix) echo "$FAKE_PREFIX" ;;
+  # npm masks UUID-shaped folder names as *** in what it prints (FAKE_PREFIX_SHOWN), but
+  # not in the environment of the shell \`npm exec -c\` starts.
+  prefix) echo "\${FAKE_PREFIX_SHOWN:-$FAKE_PREFIX}" ;;
+  exec)
+    [ -n "\${FAKE_EXEC_FAIL:-}" ] && exit 1
+    for a in "$@"; do cmd=$a; done
+    npm_config_global_prefix="$FAKE_PREFIX" sh -c "$cmd" ;;
   install)
     [ -n "\${FAKE_NPM_FAIL:-}" ] && exit 1
     mkdir -p "$FAKE_PREFIX/bin" "$FAKE_PREFIX/lib/node_modules"
@@ -264,6 +270,25 @@ test("install.sh --version takes only an exact version", () => {
   assert.match(sh(["--bogus"]).err, /unknown option: --bogus/);
 });
 
+test("install.sh reads npm's global folder again when npm masks part of it as ***", () => {
+  const box = sandbox();
+  const shown = box.prefix.replace(/run\d+/, "***");
+  const r = sh(["--no-setup"], { FAKE_PREFIX_SHOWN: shown }, box);
+  assert.equal(r.code, 0, r.all);
+  assert.match(r.calls, /^npm exec --loglevel=silent -c /m);
+  assert.ok(r.calls.includes(`npm ${INSTALL}\n`), r.calls);
+  assert.ok(r.out.includes(`Installed: p2p 0.1.1 (${box.prefix}/bin/p2p)`), r.out);
+  assert.doesNotMatch(r.out, /\*\*\*/);
+  // When that doesn't work either: a clear message, before anything is installed.
+  const failed = sh(["--no-setup"], { FAKE_PREFIX_SHOWN: shown, FAKE_EXEC_FAIL: "1" });
+  assert.equal(failed.code, 1, failed.all);
+  assert.match(failed.err, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\).*Nothing was installed.*npm config set prefix/);
+  assert.doesNotMatch(failed.calls, /npm install/);
+  const dry = sh(["--dry-run"], { FAKE_PREFIX_SHOWN: shown, FAKE_EXEC_FAIL: "1" });
+  assert.equal(dry.code, 1, dry.all);
+  assert.doesNotMatch(dry.out, /^\+ npm install/m);
+});
+
 test("install.sh fails clearly when npm fails", () => {
   const r = sh(["--no-setup"], { FAKE_NPM_FAIL: "1" });
   assert.notEqual(r.code, 0, r.all);
@@ -420,6 +445,23 @@ test("install.ps1 without Node 22 or npm prints how to get them (winget) and ins
     assert.doesNotMatch(r.calls, /npm install/);
     assert.doesNotMatch(r.out, /^\+ /m);
   }
+});
+
+test("install.ps1 reads npm's global folder again when npm masks part of it as ***", (t) => {
+  if (!tool("pwsh", t)) return;
+  const box = sandbox();
+  const shown = box.prefix.replace(/run\d+/, "***");
+  const r = pwsh(ps("-NoSetup"), { FAKE_PREFIX_SHOWN: shown }, box);
+  assert.equal(r.code, 0, r.all);
+  assert.match(r.calls, /^npm exec --loglevel=silent -c /m);
+  assert.ok(r.calls.includes(`npm ${INSTALL}\n`), r.calls);
+  assert.ok(r.out.includes(`into ${box.prefix} with npm`), r.out);
+  assert.match(r.out, /Installed: p2p 0\.1\.1/);
+  const failed = pwsh(ps("-NoSetup"), { FAKE_PREFIX_SHOWN: shown, FAKE_EXEC_FAIL: "1" });
+  assert.notEqual(failed.code, 0, failed.all);
+  assert.match(failed.all, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\)/);
+  assert.match(failed.all, /Nothing was installed/);
+  assert.doesNotMatch(failed.calls, /npm install/);
 });
 
 test("install.ps1 never elevates: an unwritable npm prefix gets the options and stops", (t) => {

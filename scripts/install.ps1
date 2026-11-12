@@ -149,8 +149,25 @@ if ($true) {
     }
 
     # npm's global folder: on Windows packages go into <prefix>\node_modules and shims into <prefix>.
+    # npm masks anything in its output that looks like a UUID (8-4-4-4-12 hex) or an npm token
+    # as "***" (@npmcli/redact), so `npm prefix -g` prints a path that doesn't exist when one of
+    # its folders is named like that. Then it is read again through `npm exec -c`: npm passes it
+    # to that shell as npm_config_global_prefix, and what the shell prints doesn't go through
+    # npm's output. `set` is a cmd.exe builtin (no PATH lookup) and prints the value as is.
     $prefix = ([string](Invoke-Native $npmExe @('prefix', '-g') | Select-Object -First 1)).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $prefix) { throw "couldn't read npm's global folder (npm prefix -g)" }
+    if ($prefix.Contains('***')) {
+        $shown = $prefix
+        $show = if ($onWindowsHost) { 'set npm_config_global_prefix' } else { 'env' }
+        $lines = @(Invoke-Native $npmExe @('exec', '--loglevel=silent', '-c', $show))
+        $prefix = ''
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($l in $lines) { $m = [regex]::Match([string]$l, '^(?i:npm_config_global_prefix)=(.+)$'); if ($m.Success) { $prefix = $m.Groups[1].Value.Trim(); break } }
+        }
+        if (-not $prefix -or $prefix.Contains('***') -or -not [IO.Path]::IsPathRooted($prefix)) {
+            throw "npm printed its global folder as '$shown', which isn't a usable path (npm hides folder names that look like IDs as ***), and asking it another way didn't work. Nothing was installed. Give npm a folder of your own without such a name, add it to your PATH, and run this again: npm config set prefix `"`$env:APPDATA\npm`""
+        }
+    }
     $cliDir = Join-Path (Join-Path (Join-Path $prefix 'node_modules') '@peer2peer') 'cli'
     $writable = Get-Detected 'P2P_DETECT_PREFIX_WRITABLE' {
         if ($DryRun) { return 'unchecked' }
