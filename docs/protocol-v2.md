@@ -40,7 +40,7 @@ Peer2Peer is a distributed network of its own. Trust decisions happen on the dev
 ## Objects signed by the authority (header `kid` = the authority's key id; key from JWKS)
 - **The authority's JWKS:** `GET /.well-known/p2p-jwks.json` returns `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"<id>","x":"<b64u pub>","use":"sig"}]}`.
   - It may list more than one key, for rotation.
-  - `<issuer>` below is the authority's fixed issuer string.
+  - `<issuer>` below is the authority's fixed issuer string. The dormant reference v2 code in `packages/core` uses the issuer `kartr` and the error codes `unknown-kartr-key` and `kartr-signature-invalid`; v3 doesn't use them.
   - Clients cache it for 1h and refetch on an unknown `kid`.
 - **Device certificate**, `typ: "p2p-device+jws"`:
   - Payload: `{ "iss":"<issuer>", "sub":"<userId>", "did":"<deviceId>", "spk":"<b64u ed25519 pub>", "kpk":"<b64u x25519 pub>", "iat":<s>, "exp":<s, iat+30d> }`.

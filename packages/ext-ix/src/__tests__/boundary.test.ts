@@ -91,7 +91,7 @@ describe("the dynamic loader", () => {
     const ix = reg.get("ix");
     expect(ix?.name).toBe("@peer2peer/ext-ix");
     expect(reg.forKind("x:ix.note")).toBe(ix);
-    expect(reg.forKind("x:kartr.badge")).toBeUndefined();
+    expect(reg.forKind("x:acme.badge")).toBeUndefined();
   });
 
   it("degrades cleanly when it isn't, or is turned off", async () => {
@@ -111,12 +111,14 @@ describe("the dynamic loader", () => {
       writeFileSync(join(dir, "index.js"), body);
     };
     pkg("ext-ix", 'export const extension = { api: 99, ns: "ix", name: "@peer2peer/ext-ix", version: "9" };\n');
-    pkg("ext-kartr", 'throw new Error("boom at import");\n');
+    // A package in a namespace that isn't registered (protocol §8.3): refused, never imported.
+    pkg("ext-acme", 'throw new Error("boom at import");\n');
     const logs: string[] = [];
-    const reg = await loadExtensions({ env: { P2P_EXTENSION_PATH: d, P2P_EXTENSIONS: "ix,kartr" }, selfUrl: nowhere(), warn: (m) => logs.push(m) });
+    const reg = await loadExtensions({ env: { P2P_EXTENSION_PATH: d, P2P_EXTENSIONS: "ix,acme" }, selfUrl: nowhere(), warn: (m) => logs.push(m) });
     expect(reg.list()).toEqual([]);
     expect(logs.join("\n")).toMatch(/ext-ix skipped: built for extension API 99/);
-    expect(logs.join("\n")).toMatch(/ext-kartr failed to load: boom at import/);
+    expect(logs.join("\n")).toMatch(/ignoring extensions that aren't registered \(protocol §8\.3\): acme/);
+    expect(logs.join("\n")).not.toMatch(/boom at import/);
   });
 
   it("the copy the Claude mod ships is what the sources build, and loads only once enabled", async () => {

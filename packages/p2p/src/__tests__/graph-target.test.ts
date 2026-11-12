@@ -369,6 +369,6 @@ describe("an ext-ix from before graph targets isn't loaded", () => {
     expect(checkExtension({ extension: { ...old, graphTargets: 0 } }, "ix").ext).toBeUndefined();
     expect(checkExtension({ extension: { ...old, graphTargets: "1" } }, "ix").ext).toBeUndefined();
     expect(checkExtension({ extension: { ...old, graphTargets: 1 } }, "ix").ext).toBeDefined();
-    expect(checkExtension({ extension: { ...old, ns: "kartr", name: "@peer2peer/ext-kartr" } }, "kartr").ext).toBeDefined();
+    expect(checkExtension({ extension: { ...old, ns: "acme", name: "@peer2peer/ext-acme" } }, "acme").ext).toBeDefined();
   });
 });
