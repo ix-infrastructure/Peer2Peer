@@ -50,7 +50,8 @@ echo "p2p $* (stdin-tty=$t)" >>"$FAKE_LOG"
 exit "\${FAKE_SETUP_EXIT:-0}"
 `;
 const FAKES = {
-  node: `#!/bin/sh\necho "v\${FAKE_NODE_VERSION:-22.14.0}"\n`,
+  // `node --version`, or `node <script> args` runs the fake CLI's bin.js (a shell script).
+  node: `#!/bin/sh\nif [ "$1" = --version ]; then echo "v\${FAKE_NODE_VERSION:-22.14.0}"; exit 0; fi\nexec sh "$@"\n`,
   npm: `#!/bin/sh
 echo "npm $*" >>"$FAKE_LOG"
 case "$1" in
@@ -60,7 +61,12 @@ case "$1" in
     [ -n "\${FAKE_NPM_FAIL:-}" ] && exit 1
     mkdir -p "$FAKE_PREFIX/bin" "$FAKE_PREFIX/lib/node_modules"
     cat "$FAKE_BIN/p2p-template" >"$FAKE_PREFIX/bin/p2p"; chmod +x "$FAKE_PREFIX/bin/p2p"
-    cat "$FAKE_BIN/p2p-template" >"$FAKE_PREFIX/p2p.cmd"; chmod +x "$FAKE_PREFIX/p2p.cmd" ;;
+    cat "$FAKE_BIN/p2p-template" >"$FAKE_PREFIX/p2p.cmd"; chmod +x "$FAKE_PREFIX/p2p.cmd"
+    # The Windows layout: <prefix>/node_modules/@peer2peer/cli, run as node <bin script>.
+    cli="$FAKE_PREFIX/node_modules/@peer2peer/cli"
+    mkdir -p "$cli/dist"
+    printf '{ "name": "@peer2peer/cli", "bin": { "p2p": "./dist/bin.js" } }\n' >"$cli/package.json"
+    cat "$FAKE_BIN/p2p-template" >"$cli/dist/bin.js" ;;
 esac
 `,
 };
@@ -86,7 +92,7 @@ function sandbox() {
 function sh(args, env = {}, box = sandbox()) {
   const r = spawnSync("sh", [SH, ...args], {
     cwd: work,
-    env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: work, FAKE_BIN: fakeBin, FAKE_LOG: box.log, FAKE_PREFIX: box.prefix, P2P_DETECT_TTY: "none", ...env },
+    env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: work, FAKE_BIN: fakeBin, FAKE_LOG: box.log, FAKE_PREFIX: box.prefix, P2P_INSTALL_TEST: "1", P2P_DETECT_TTY: "none", ...env },
     encoding: "utf8",
     input: "",
   });
@@ -109,9 +115,32 @@ test("install.sh parses under every available POSIX shell, and a truncated downl
     const r = spawnSync(shell, args, { encoding: "utf8" });
     assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
   }
-  const lines = readFileSync(SH, "utf8").trimEnd().split("\n");
-  assert.equal(lines.at(-1), 'main "$@"');
-  assert.equal(lines.filter((l) => /^main "/.test(l)).length, 1);
+  const text = readFileSync(SH, "utf8");
+  const lines = text.trimEnd().split("\n");
+  const last = '{ main "$@"; }';
+  assert.equal(lines.at(-1), last);
+  assert.equal(lines.filter((l) => /^\{ main "/.test(l)).length, 1);
+  // Cut the download at every byte of the last line (and just before it): nothing runs.
+  const head = text.slice(0, text.lastIndexOf(last));
+  for (let k = 0; k < last.length; k++) {
+    const file = join(work, `truncated-${k}.sh`);
+    writeFileSync(file, head + last.slice(0, k));
+    const box = sandbox();
+    const r = spawnSync("sh", [file, "--dry-run"], {
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: work, FAKE_BIN: fakeBin, FAKE_LOG: box.log, FAKE_PREFIX: box.prefix },
+      encoding: "utf8",
+      input: "",
+    });
+    assert.doesNotMatch(r.stdout, /detected:|dry run|\+ npm/, `cut at ${k}: ${JSON.stringify(last.slice(0, k))}`);
+    assert.equal(box.calls(), "", `cut at ${k}`);
+  }
+});
+
+test("install.sh ignores the P2P_DETECT_* overrides unless P2P_INSTALL_TEST=1", () => {
+  const r = sh(["--dry-run"], { P2P_INSTALL_TEST: undefined, P2P_DETECT_NODE: "", P2P_DETECT_OS: "Plan9" });
+  assert.equal(r.code, 0, r.all);
+  assert.match(r.out, /detected: os=\S+ node=22\.14\.0/);
+  assert.doesNotMatch(r.all, /Plan9/);
 });
 
 test("install.sh --dry-run prints the exact npm command and runs nothing", () => {
@@ -268,7 +297,7 @@ test("scripts/install.sha256 is up to date (npm run install-scripts:checksums in
 function pwsh(script, env = {}, box = sandbox()) {
   const r = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", script], {
     cwd: work,
-    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_BIN: fakeBin, FAKE_LOG: box.log, FAKE_PREFIX: box.prefix, P2P_DETECT_OS: "Windows", P2P_DETECT_TTY: "no", ...env },
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_BIN: fakeBin, FAKE_LOG: box.log, FAKE_PREFIX: box.prefix, P2P_INSTALL_TEST: "1", P2P_DETECT_OS: "Windows", P2P_DETECT_TTY: "no", ...env },
     encoding: "utf8",
   });
   const all = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").replace(/\n\s*\|\s*/g, " ");
@@ -298,7 +327,10 @@ test("install.ps1 -DryRun prints the exact npm command and runs nothing", (t) =>
   assert.match(r.out, /dry run: nothing will be changed/);
   assert.match(r.out, /detected: os=Windows node=v22\.14\.0 npm=10\.9\.2/);
   assert.match(r.out, new RegExp(`^\\+ \\S*npm ${INSTALL.replace(/[.^$*+?()[\]{}|\\/]/g, "\\$&")}$`, "m"));
-  assert.match(r.out, /p2p\.cmd --version {3}\(expect 0\.1\.1\)/);
+  // The CLI runs as <node> <bin script> by absolute path, never through the p2p.cmd shim.
+  assert.match(r.out, /^\+ \S*node \S+@peer2peer.cli.dist.bin\.js --version {3}\(expect 0\.1\.1\)$/m);
+  assert.match(r.out, /dry run: not checking that/);
+  assert.doesNotMatch(r.out, /\+ \S*p2p\.cmd/);
   assert.match(r.out, /Dry run done: nothing was installed/);
   assert.doesNotMatch(r.calls, /npm install/);
   assert.doesNotMatch(r.all, /RunAs|Administrator/);
@@ -311,9 +343,11 @@ test("install.ps1 installs the pinned packages, checks p2p --version, then hands
   assert.ok(r.calls.includes(`npm ${INSTALL}\n`), r.calls);
   assert.match(r.out, /Installed: p2p 0\.1\.1 \(\S+p2p\.cmd\)/);
   assert.match(r.calls, /^p2p setup /m);
+  assert.match(r.out, /^\+ \S*node \S+@peer2peer.cli.dist.bin\.js setup$/m);
   const none = pwsh(ps(), { P2P_DETECT_TTY: "no" });
   assert.equal(none.code, 0, none.all);
-  assert.match(none.out, /No console to ask questions on, so setup was skipped\. Next: run `p2p setup`/);
+  // In PowerShell, `p2p` would find npm's p2p.ps1 shim, which the default execution policy blocks.
+  assert.match(none.out, /No console to ask questions on, so setup was skipped\. Next: run `p2p\.cmd setup`/);
   assert.doesNotMatch(none.calls, /^p2p setup/m);
   const noSetup = pwsh(ps("-NoSetup"), { P2P_DETECT_TTY: "yes" });
   assert.equal(noSetup.code, 0, noSetup.all);
@@ -325,8 +359,17 @@ test("install.ps1 installs the pinned packages, checks p2p --version, then hands
 
 test("install.ps1 works through `| iex` with settings from the environment, and doesn't exit the host", (t) => {
   if (!tool("pwsh", t)) return;
-  const r = pwsh(`Get-Content -Raw '${PS1}' | Invoke-Expression 6>&1; 'host still here'`, { P2P_INSTALL_DRY_RUN: "1", P2P_INSTALL_VERSION: "0.2.0" });
+  // Under iex the script runs in the caller's scope: it must leave the caller's variables and
+  // functions alone, and work under the caller's StrictMode.
+  const r = pwsh(
+    `Set-StrictMode -Version Latest; $Version = 'mine'; $DryRun = 'mine'; $NoSetup = 'mine'; ` +
+      `Get-Content -Raw '${PS1}' | Invoke-Expression 6>&1; ` +
+      `"vars: $Version $DryRun $NoSetup"; "fns: $(@(Get-ChildItem function: | Where-Object Name -match 'P2P|Invoke-Native|Write-Say|Find-Exe').Count)"; 'host still here'`,
+    { P2P_INSTALL_DRY_RUN: "1", P2P_INSTALL_VERSION: "0.2.0" },
+  );
   assert.equal(r.code, 0, r.all);
+  assert.match(r.out, /vars: mine mine mine/);
+  assert.match(r.out, /fns: 0/);
   assert.match(r.out, /@peer2peer\/cli@0\.2\.0 @peer2peer\/ext-ix@0\.2\.0/);
   assert.doesNotMatch(r.calls, /npm install/);
   assert.match(r.out, /host still here/);

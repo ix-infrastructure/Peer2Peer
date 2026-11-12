@@ -6,6 +6,7 @@
 #
 #   curl -fsSL https://ix-infra.com/p2p/install.sh | sh
 #   curl -fsSL https://ix-infra.com/p2p/install.sh | sh -s -- --dry-run
+#   curl -fsSL https://ix-infra.com/p2p/install.sh | P2P_INSTALL_DRY_RUN=1 sh
 #   sh scripts/install.sh [options]                 # from a checkout or a download
 #
 # What it does:
@@ -31,11 +32,13 @@
 #
 # Every command is printed (as "+ ...") before it runs.
 #
-# Safe to pipe: everything is inside main(), called on the last line, so a
-# truncated download runs nothing. It never relies on its own path.
+# Safe to pipe: everything is inside main(), called on the last line as
+# `{ main "$@"; }`, so a download truncated anywhere, even inside that line,
+# runs nothing (a cut-off line is a syntax error). It never relies on its own path.
 #
-# Detection can be overridden for testing (an empty value means "not found"):
-#   P2P_DETECT_OS, P2P_DETECT_NODE, P2P_DETECT_NPM, P2P_DETECT_TTY (stdin, dev or none).
+# Tests (only with P2P_INSTALL_TEST=1) can override detection (an empty value
+# means "not found"): P2P_DETECT_OS, P2P_DETECT_NODE, P2P_DETECT_NPM,
+# P2P_DETECT_TTY (stdin, dev or none).
 
 # The release these scripts install; bumped after each release (docs/releasing.md, step 5).
 P2P_VERSION="0.1.1"
@@ -170,6 +173,7 @@ EOF
 
 main() {
   set -eu
+  if [ "${P2P_INSTALL_TEST:-}" != 1 ]; then unset P2P_DETECT_OS P2P_DETECT_NODE P2P_DETECT_NPM P2P_DETECT_TTY; fi
   VERSION=${P2P_INSTALL_VERSION:-$P2P_VERSION}
   DRY_RUN=0 NO_SETUP=0
   [ "${P2P_INSTALL_DRY_RUN:-}" = 1 ] && DRY_RUN=1
@@ -233,4 +237,4 @@ main() {
   [ "$DRY_RUN" = 0 ] || say "Dry run done: nothing was installed."
 }
 
-main "$@"
+{ main "$@"; }
