@@ -14,7 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { clockVerdict, formatDoctor, modVersions, SKEW_FAIL_SEC, SKEW_OK_SEC, summarize, type Check } from "../doctor.js";
+import { clockVerdict, DATA_FLOW_HEADING, ENCRYPTION_DOC, formatDataFlow, formatDoctor, graphMemoryState, modVersions, RELAY_METADATA, SKEW_FAIL_SEC, SKEW_OK_SEC, summarize, THREAT_MODEL_DOC, type Check, type DataFlow } from "../doctor.js";
+import { DATA_FLOW_WIDTH, prettyDoctor } from "../pretty.js";
 import { main } from "../cli.js";
 import { VERSION } from "../version.js";
 import { alongside, startRelay, User, type TestRelay } from "./harness.js";
@@ -234,6 +235,50 @@ describe("p2p doctor", () => {
     }
   }, 60_000);
 
+  it("where your data goes: the JSON fields, and the text section after the checks", async () => {
+    const r = await ann.ok(["doctor"]);
+    const d = r.dataFlow as DataFlow;
+    expect(d.wire).toEqual({ encryption: "end-to-end", relaysSee: "ciphertext and metadata", metadata: expect.arrayContaining(["sizes", "timing"]), doc: THREAT_MODEL_DOC });
+    expect(d.history).toEqual({ where: "this device only", recording: true, encryptedAtRest: true, keyBesideIt: true, eventLogPlaintextDays: 7 });
+    expect([true, false, "unknown"]).toContain(d.graphMemory.on);
+    expect(d.graphMemory.detail).toEqual(expect.any(String));
+    // The metadata list names capabilities, the identity document and the members-only circle carve-out.
+    expect(d.wire.metadata).toEqual(RELAY_METADATA);
+    expect(d.wire.metadata.join(" ")).toMatch(/who may reach whom.*identity document.*members-only relay.*name, owner, admins and members/);
+    expect(d.doc).toBe(ENCRYPTION_DOC);
+    // Every project's target is local today, and each row is the same as its graph check (the chokepoint's wording).
+    expect(d.graphs.length).toBeGreaterThan(0);
+    expect(d.graphs.filter((g) => g.here)).toHaveLength(1);
+    for (const g of d.graphs) {
+      expect(g.target).toMatchObject({ kind: "local", endpoint: "http://localhost:8090" });
+      expect(g.line).toMatch(/^local only \(http:\/\/localhost:8090\): /);
+      expect(g.plaintext).toBe("the local Ix backend keeps it in plaintext on this machine");
+      expect(byId(r.checks, `graph:${g.id}`)).toMatchObject({ status: "ok", detail: g.line });
+    }
+    expect(d.anyShared).toBe(false);
+    // The existing fields are all still there.
+    expect(r).toMatchObject({ scope: "device", version: VERSION, checks: expect.any(Array), summary: summarize(r.checks) });
+
+    const t = await ann.run(["doctor"], { json: false });
+    expect(t.code).toBe(0);
+    const lines = t.out.split("\n");
+    const at = lines.findIndex((l) => l.startsWith(DATA_FLOW_HEADING));
+    expect(at).toBeGreaterThan(0);
+    // After the checks, before the summary line.
+    expect(lines.slice(0, at).some((l) => l.startsWith("✓ identity:"))).toBe(true);
+    expect(lines.slice(at).some((l) => /^\d+ ✓ {2}\d+ ✗ {2}\d+ \?$/.test(l))).toBe(true);
+    const section = lines.slice(at).join("\n");
+    expect(section).toContain(`${DATA_FLOW_HEADING} (${ENCRYPTION_DOC})`);
+    expect(section).toMatch(/messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including .*sizes, timing.* \(all of it: docs\/security\/threat-model\.md\)/);
+    expect(section).not.toMatch(/relays see only/);
+    expect(section).toMatch(/message history: on this device only, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to 7 days of recent messages in the clear/);
+    expect(section).toMatch(/graph memory: (on|off)/);
+    expect(section).toMatch(/graph of project .+ \(here\): local only \(http:\/\/localhost:8090\): .+ \(the local Ix backend keeps it in plaintext on this machine\)/);
+    expect(section).toContain("cloud graph: none; no project writes to one (a shared team graph is planned: opt-in per circle, and its operator can read what it holds)");
+    // Nothing secret in either form.
+    expect(t.out).not.toMatch(/eyJ[A-Za-z0-9_-]{10}/);
+  });
+
   it("an unknown user, a blocked one", async () => {
     const r = await ann.ok(["doctor", "nobody-here"]);
     expect(r.checks).toEqual([expect.objectContaining({ id: "user", status: "fail", fix: expect.stringContaining("p2p invite") })]);
@@ -311,6 +356,99 @@ describe("p2p doctor", () => {
       "",
       "1 ✓  1 ✗  1 ?",
     ]);
+  });
+});
+
+describe("doctor: where your data goes (format)", () => {
+  const base: DataFlow = {
+    wire: { encryption: "end-to-end", relaysSee: "ciphertext and metadata", metadata: ["sizes", "timing"], doc: THREAT_MODEL_DOC },
+    history: { where: "this device only", recording: true, encryptedAtRest: true, keyBesideIt: true, eventLogPlaintextDays: 7 },
+    graphMemory: { on: false, detail: "off: Ix isn't installed" },
+    graphs: [
+      {
+        id: "p1",
+        name: "web",
+        here: true,
+        target: { kind: "local", endpoint: "http://localhost:8090", why: "web is private" },
+        line: "local only (http://localhost:8090): web is private",
+        plaintext: "the local Ix backend keeps it in plaintext on this machine",
+      },
+    ],
+    graphsNotListed: 0,
+    anyShared: false,
+    doc: ENCRYPTION_DOC,
+  };
+
+  it("one line per kind of data, then each project's graph, and says no cloud graph is written", () => {
+    expect(formatDataFlow(base)).toEqual([
+      `${DATA_FLOW_HEADING} (${ENCRYPTION_DOC})`,
+      `  messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including sizes, timing (all of it: ${THREAT_MODEL_DOC})`,
+      "  message history: on this device only, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to 7 days of recent messages in the clear",
+      "  graph memory: off: Ix isn't installed",
+      "  graph of project web (here): local only (http://localhost:8090): web is private (the local Ix backend keeps it in plaintext on this machine)",
+      "  cloud graph: none; no project writes to one (a shared team graph is planned: opt-in per circle, and its operator can read what it holds)",
+    ]);
+  });
+
+  it("history off, more projects than listed, and a shared target (no 'none' line then)", () => {
+    const shared: DataFlow = {
+      ...base,
+      history: { ...base.history, recording: false },
+      graphs: [
+        ...base.graphs,
+        {
+          id: "p2",
+          name: "api",
+          here: false,
+          target: { kind: "shared", circle: "c-team", endpoint: "https://graph.example/team" },
+          line: "the shared graph of circle c-team (https://graph.example/team)",
+          plaintext: "the shared graph keeps it in plaintext that its operator can read",
+        },
+      ],
+      graphsNotListed: 3,
+      anyShared: true,
+    };
+    const out = formatDataFlow(shared);
+    expect(out).toContain("  message history: not recording (history.enabled is false, or P2P_HISTORY=0); what was kept stays on this device only, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to 7 days of recent messages in the clear");
+    expect(out).toContain("  graph of project api: the shared graph of circle c-team (https://graph.example/team) (the shared graph keeps it in plaintext that its operator can read)");
+    expect(out).toContain("  3 more projects not listed: run `p2p project show` in each");
+    expect(out.some((l) => l.startsWith("  cloud graph: none"))).toBe(false);
+  });
+
+  it("graph memory: Ix's answer decides on/off; no answer in time is 'unknown' (never 'off'), with what the watch wrote and queued", () => {
+    const ep = "http://localhost:8090";
+    expect(graphMemoryState("oss", undefined, ep)).toEqual({ on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${ep})` });
+    expect(graphMemoryState("pro", { written: 3, queue: [] }, ep).on).toBe(false);
+    expect(graphMemoryState("none", undefined, ep).on).toBe(false);
+    // `ix --help` timed out (support undefined) while `p2p watch` has been writing.
+    const busy = graphMemoryState(undefined, { written: 5, queue: [{} as never, {} as never] }, ep);
+    expect(busy).toEqual({ on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; 5 written, 2 queued (to the local graph only, ${ep})` });
+    expect(graphMemoryState(undefined, undefined, ep)).toEqual({ on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; nothing written yet (to the local graph only, ${ep})` });
+    expect(formatDataFlow({ ...base, graphMemory: busy })).toContain(`  graph memory: ${busy.detail}`);
+  });
+
+  it("pretty output doesn't cut long data-flow rows at 400 columns (the checks keep their cap)", () => {
+    const why = "x".repeat(600);
+    const long: DataFlow = {
+      ...base,
+      graphs: [{ ...base.graphs[0], line: `local only (http://localhost:8090): ${why}`, target: { kind: "local", endpoint: "http://localhost:8090", why } }],
+    };
+    const checks: Check[] = [{ id: "a", status: "ok", title: "relay x", detail: "y".repeat(600) }];
+    const r = { scope: "device" as const, version: "0.1.0", checks, summary: summarize(checks), dataFlow: long };
+    const out = prettyDoctor(r, formatDoctor(r), { color: false, cols: 100 }).split("\n");
+    const row = out.find((l) => l.includes("graph of project web"))!;
+    expect(row).toContain(why);
+    expect(row.endsWith("(the local Ix backend keeps it in plaintext on this machine)")).toBe(true);
+    expect(row.length).toBeLessThanOrEqual(DATA_FLOW_WIDTH);
+    expect(out.find((l) => l.startsWith("✓ relay x"))!.length).toBeLessThanOrEqual(400);
+  });
+
+  it("formatDoctor puts the section between the checks and the summary", () => {
+    const checks: Check[] = [{ id: "a", status: "ok", title: "relay x", detail: "reachable" }];
+    const s = formatDoctor({ scope: "device", version: "0.1.0", checks, summary: summarize(checks), dataFlow: base }).split("\n");
+    expect(s.slice(0, 4)).toEqual(["p2p doctor: this device", "", "✓ relay x: reachable", ""]);
+    expect(s[4]).toBe(`${DATA_FLOW_HEADING} (${ENCRYPTION_DOC})`);
+    expect(s.slice(-2)).toEqual(["", "1 ✓  0 ✗  0 ?"]);
   });
 });
 
