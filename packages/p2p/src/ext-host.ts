@@ -27,6 +27,7 @@ import {
   type ExtStateValue,
   type P2PExtension,
 } from "./extensions.js";
+import { ixAdvice } from "./ix-local.js";
 import { ceilingAudience, graphPinnedEnv, graphTarget, localGraphEndpoint, PERSON_SESSION, sessionCeiling, sessionDirs, sessionWorkdir } from "./projects.js";
 import { listPeers, sendExtension, sessionAudience, sessionRef } from "./sessions.js";
 import { sessKey, type EventRec, type XStateRec } from "./state.js";
@@ -282,12 +283,15 @@ export function registerExtensionCommands(
           const loaded = reg.list().map((l) => ({ ns: l.ext.ns, name: l.ext.name, version: l.ext.version, from: l.from, commands: (l.ext.commands ?? []).map((c) => c.name) }));
           const { enabled, ignored } = enabledNamespaces(app.env, app.file);
           const missing = KNOWN_EXTENSIONS.filter((ns) => !reg.get(ns)).map(extensionPackageName);
+          // Ix is optional and recommended (never installed for the person): front ends read this to
+          // tell their agent it may suggest Ix once, and never install it itself.
+          const ix = ixAdvice(app.env, app.file);
           const human = [
             ...(loaded.length ? loaded.map((l) => `${l.name} ${l.version} (x:${l.ns}.*): ${l.from}`) : ["no extensions loaded"]),
             `enabled: ${enabled.length ? enabled.join(", ") : "none"}${app.env.P2P_EXTENSIONS !== undefined ? " (from P2P_EXTENSIONS)" : ""}`,
             ...(ignored.length ? [`ignored (not registered): ${ignored.join(", ")}`] : []),
           ].join("\n");
-          return { json: { extensions: loaded, enabled, missing, ...(ignored.length ? { ignored } : {}) }, human };
+          return { json: { extensions: loaded, enabled, missing, ...(ignored.length ? { ignored } : {}), ix }, human };
         },
         { requireIdentity: false },
       ),

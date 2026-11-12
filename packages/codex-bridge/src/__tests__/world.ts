@@ -32,6 +32,8 @@ export class World {
   trusted: TrustedMode | null = null;
   /** What `p2p own-agents` says (the person's setting). */
   ownAgents: { ownAgents: "hold" | "deliver"; devices: string[] | "all-other" } = { ownAgents: "hold", devices: [] };
+  /** What `p2p extensions` says about Ix (`ix`); undefined: an older CLI without the field. */
+  ix: unknown = undefined;
   t = 1_000_000;
   timers: { at: number; every?: number; fn: () => void; dead?: boolean }[] = [];
 
@@ -47,6 +49,7 @@ export class World {
       if (verb === "ls") return ok({ peers: this.peers, relays: { listed: ["wss://r/v3"], connected: ["wss://r/v3"], failed: [] } });
       if (verb === "held") return ok({ held: this.held });
       if (verb === "own-agents") return ok(this.ownAgents);
+      if (verb === "extensions") return ok({ extensions: [], enabled: [], missing: [], ...(this.ix === undefined ? {} : { ix: this.ix }) });
       if (verb === "history") return ok({ messages: this.history, truncated: false });
       if (verb === "send") {
         const to = (args.find((a) => a.startsWith("--to=")) ?? "").slice(5);

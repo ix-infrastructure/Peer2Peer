@@ -6,14 +6,14 @@ The never-enabled v2 draft is in [protocol-v2.md](protocol-v2.md), kept for the 
 
 | # | v2 | v3 |
 |---|---|---|
-| V1 | Kartr signs device certificates | The user's **own identity key** signs them; identities are self-certifying |
+| V1 | A hosted authority signs device certificates | The user's **own identity key** signs them; identities are self-certifying |
 | V2 | userId = verified email | userId = **key fingerprint**; emails and handles are optional proofs |
-| V3 | Workspace attestations from Kartr | **Circles**: membership lists signed by one owner and consented to by each member |
-| V4 | Kartr revocation list | A **hash-chained identity document** with a device allowlist |
+| V3 | Workspace attestations from the hosted authority | **Circles**: membership lists signed by one owner and consented to by each member |
+| V4 | The hosted authority's revocation list | A **hash-chained identity document** with a device allowlist |
 | V5 | A hosted relay behind an account login | **Open relays**: device-signature auth, mailbox capabilities, 7-day store |
 | V6 | Server-side presence | **`status` envelopes**, end-to-end encrypted |
 
-It also adds **extension kinds** (`x:`), the seam through which Ix and Kartr features plug in (see [architecture.md](architecture.md)).
+It also adds **extension kinds** (`x:`), the seam through which extension features, such as Ix's, plug in (see [architecture.md](architecture.md)).
 
 **Normative rule:** a conforming client implements this document and nothing from any extension. Every extension is optional, and a client without it still interoperates.
 
@@ -139,7 +139,7 @@ A proof is an optional claim that this identity also controls some other name.
 
 **Display:** clients render only proofs they verified themselves, always prefixed with the kind: "✓ github: alice".
 
-**Extension kinds:** other namespaces, such as `kartr.attest`, are checked by trust providers (§8.2).
+**Extension kinds:** proofs in an extension's namespace (`<ns>.<kind>`) are checked by trust providers (§8.2).
 
 ### 2.7 Backup (optional)
 Backup is a 24-word BIP-39 mnemonic encoding the 32-byte `ik` seed.
@@ -244,7 +244,7 @@ A circle is a group whose consenting members see each other's sessions by defaul
   - It refuses `promote`, `demote` and `remove` aimed at the owner.
 - **The owner** may also set a policy to hold proposals for approval.
 - **While the owner is offline,** proposals wait in the owner's relay mailboxes (up to 7 days). An admin re-sends a proposal older than that only while the head doesn't yet reflect it.
-- **Owner loss:** if the owner is gone for good, or in the §2.5 fail-closed state, the circle can no longer change, so removals stop working. Clients show members a "circle frozen: owner unavailable" notice. Members should leave and re-form it. An owner SHOULD hand ownership over (`transfer`) before going away, and managed circles (Kartr) SHOULD keep a recovery path for their owner identity.
+- **Owner loss:** if the owner is gone for good, or in the §2.5 fail-closed state, the circle can no longer change, so removals stop working. Clients show members a "circle frozen: owner unavailable" notice. Members should leave and re-form it. An owner SHOULD hand ownership over (`transfer`) before going away, and a circle whose owner is a service identity SHOULD keep a recovery path for that identity.
 - **Owner compromise:** the owner's key-holding devices MUST alert on any circle version of theirs that they didn't publish. A circle whose owner identity is compromised can't be recovered by rotation, and must be re-created under a new `cid`.
 - **Admin powers:** any admin's proposals can promote, demote or remove other admins. Owners who need tighter control set the hold-for-approval policy.
 
@@ -554,21 +554,20 @@ A capability is the recipient's signed permission for one sender to reach their 
 
 ## 8. Extensions
 ### 8.1 Namespaces
-Extension kinds and proofs use short namespaces: `ix` for Ix, and `kartr` for Kartr.
+Extension kinds and proofs use short namespaces, such as `ix` for Ix.
 - New namespaces are registered in this file by PR.
 - An extension MUST define a `fallback` text for each of its kinds, and MUST NOT change any rule in §2–§5.
 - An extension declares which of its kinds are state kinds (§4.3 "Extension state kinds"); a state kind is never sent as an ordinary (event) kind, and an event kind never carries `state`.
 
 ### 8.2 Trust providers
 A trust provider is a pluggable checker of proof kinds in its namespace. It returns `{ok, label, expiresAt?}`.
-- **Labels:** clients render a label **prefixed with the provider's namespace**, for example `✓ kartr: alice@example.com (Example Corp)`, so no provider can imitate another's badge.
+- **Labels:** clients render a label **prefixed with the provider's namespace**, for example `✓ example: alice@example.com (Example Corp)`, so no provider can imitate another's badge.
 - **Limits:** a provider can only add a badge. It can never grant authorisation, link devices, or change circle membership.
 
 ### 8.3 Registered
 | ns | kinds | proof kinds | spec |
 |---|---|---|---|
 | `ix` | `x:ix.note`, `x:ix.subgraph`, `x:ix.impact`; state kind `x:ix.footprint` (cap `x:ix.footprint.v1`, ttl 600 s) | — | [`packages/ext-ix/SPEC.md`](../packages/ext-ix/SPEC.md) (v1, Phase 6) |
-| `kartr` | — | `kartr.attest` | `packages/ext-kartr/SPEC.md` (Phase 7) |
 
 ## Draft 3 additions (Phase 2)
 Two small social features, implemented in `@peer2peer/core/v3`. Neither changes any rule above: they add optional fields that older clients ignore.

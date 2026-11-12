@@ -66,6 +66,10 @@ import {
   parseAutoShare,
   recipientUserId,
   isAutoApproving,
+  isIxInstallCommand,
+  IX_INSTALL_ASK,
+  ixAgentHint,
+  parseIxAdvice,
   isFailure,
   isMutating,
   isPeer2PeerHelp,
@@ -86,6 +90,7 @@ import {
   routableOf,
   toolPathsAll,
   isJobDir,
+  scratchEnv,
   sessionShowText,
   PERSON_TOKEN_SCRIPT,
   parsePeersArgs,
@@ -246,6 +251,12 @@ const freshHealth = (): Health => ({ isCliMissing: false, identity: { state: 'un
 const newSess = () => ({
   /** The engine session (`$.session.id()`) this is; undefined only on an engine that names none. */
   engineSession: undefined as string | undefined,
+  /**
+   * Where Claude Code keeps this session's own folders (lib scratchEnv), for P2P_SESSION_SCRATCH, and
+   * the engine session it was read for: a path in them binds no project of its own.
+   */
+  scratch: undefined as string | undefined,
+  scratchFor: undefined as string | undefined,
   /** The person token (`<P2P_HOME>/cli/person.key`): this mod's p2p runs pass it as P2P_PERSON_TOKEN, the model's shell never has it. */
   personToken: undefined as string | undefined,
   /** This conversation was forked (`claude --resume … --fork-session`): its folders can't be traced, so private. */
@@ -273,6 +284,10 @@ const newSess = () => ({
   userExtPath: '',
   isIxLoaded: false,
   ixToolName: undefined as string | undefined,
+  // Ix isn't installed and the person hasn't said no (`p2p extensions --json` ix): the agent hears,
+  // once per session, that it may suggest Ix to its user and must never install it itself.
+  ixHint: undefined as string | undefined,
+  isIxHintGiven: false,
   // Notes and references shown in full by a typed `/peers ix import|resolve <id>`, awaiting its `confirm`.
   ixShown: new Map<string, string>(),
   ixResolveShown: new Map<string, string>(),
@@ -490,6 +505,9 @@ const p2pEnv = (S: Sess, $: EngineInterface, dirs: readonly string[] = []): Reco
     ...(S.sessionDir ? { P2P_WORKDIR: S.sessionDir, P2P_EXTENSION_EXCLUDE: S.sessionDir } : {}),
     ...(dirs.length ? { P2P_PROJECT_DIRS: dirs.join(sep) } : {}),
     ...(over ? { P2P_PROJECT_DIRS_OVER: why || 'front' } : {}),
+    // This session's own folders in Claude Code (its tasks' output, saved tool results, its job folder):
+    // the CLI checks them on real paths, by this session's exact id, and binds no project for a path there.
+    ...(S.scratch ? { P2P_SESSION_SCRATCH: S.scratch } : {}),
     // This mod speaks for the person (their typed /peers, this session's own status and sends): the CLI
     // registers the session and lets typed /peers commands widen sharing. The model's shell has no token.
     ...(S.personToken ? { P2P_PERSON_TOKEN: S.personToken } : {}),
@@ -762,6 +780,25 @@ const restoreDirs = async (S: Sess, $: EngineInterface, current: Run) => {
     for (const w of why.length ? why : ['front']) markOver(current, w)
   }
   if (saved.untrusted === true) current.isEnvUntrusted = true
+}
+
+/**
+ * Where Claude Code keeps this engine session's own folders (lib scratchEnv), read from its
+ * environment once per engine session id (a /clear or resume has a new one).
+ */
+const refreshScratch = async (S: Sess, $: EngineInterface) => {
+  if (S.scratchFor !== undefined && S.scratchFor === S.engineSession) return
+  const val = (p: Promise<string | undefined>) => p.then(v => (typeof v === 'string' && v !== '' ? v : undefined), () => undefined)
+  const [config, home, profile, claudeTmp, tmp, job] = await Promise.all([
+    val($.env.get('CLAUDE_CONFIG_DIR')),
+    val($.env.get('HOME')),
+    val($.env.get('USERPROFILE')),
+    val($.env.get('CLAUDE_CODE_TMPDIR')),
+    val($.env.get('TMPDIR')),
+    val($.env.get('CLAUDE_JOB_DIR')),
+  ])
+  S.scratch = scratchEnv({ sid: S.engineSession, config, home: home ?? profile, tmp: [claudeTmp, tmp, '/tmp'], job })
+  S.scratchFor = S.engineSession
 }
 
 /** Private from now on (P2P_PROJECT_DIRS_OVER), and why. */
@@ -1754,6 +1791,7 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
 const detectIx = async (S: Sess, $: EngineInterface) => {
   const r = await (await client(S, $)).extensions()
   S.isIxLoaded = r.ok && r.value.extensions.some(e => e.ns === 'ix')
+  S.ixHint = r.ok ? ixAgentHint(parseIxAdvice(r.value.ix)) : undefined
   if (!S.isIxLoaded || S.ixToolName) return
   const reg = await $.tool.register(IX_TOOL).catch(() => null)
   if (reg) S.ixToolName = reg.tool
@@ -1908,6 +1946,7 @@ const startRun = async (S: Sess, $: EngineInterface) => {
     }
   }
   S.resolvedBin = await resolveBin(S, $)
+  await refreshScratch(S, $)
 
   const cwd = await $.session.cwd()
   const isAbsoluteCwd = /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(cwd)
@@ -3192,6 +3231,7 @@ export const register: Register = on => {
       // $TMPDIR, which the sandbox changes for the commands it runs.
       const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
       const all = toolPathsAll(e, cwd, home, { vars: { CLAUDE_JOB_DIR: jobDir && isJobDir(jobDir) ? jobDir : undefined }, untrusted: S.run.isEnvUntrusted })
+      await refreshScratch(S, $)
       const named = all.paths.map(x => (files.includes(x) ? dirOf(x) : x))
       // The repository (or .p2p-private) each new path is in, by its marker: bound too, so a shared folder
       // above never covers it once its files are gone; and a program's word that names a file that exists.
@@ -3324,6 +3364,24 @@ export const register: Register = on => {
     return /^(Bash|PowerShell)$/.test(String(e.tool)) && /p2p/i.test(JSON.stringify(e)) ? { deny: 'Peer2Peer: this command could not be checked; ask your user to run it.' } : next(e)
   })
 
+  const isIxInstallCall = (e: { tool: string; input: unknown }) => {
+    const command = (e.input as { command?: unknown } | null)?.command
+
+    return /^(Bash|PowerShell)$/.test(e.tool) && typeof command === 'string' && isIxInstallCommand(command)
+  }
+  // Ix is optional and the person's to install: an agent's shell call that installs it is put to the
+  // person's permission prompt, whatever the mode or rules would have allowed (where nobody can be
+  // asked, the engine refuses it). A refusal beneath stands. Every other command is untouched.
+  on('tool.check', async ($, e, next) => {
+    if (!isIxInstallCall(e)) return next(e)
+    const verdict = await next(e)
+    if (verdict.decision === 'deny') return verdict
+
+    return { decision: 'ask', reason: IX_INSTALL_ASK }
+  }).catch(($, e, next) => {
+    return isIxInstallCall(e) ? { decision: 'ask', reason: IX_INSTALL_ASK } : next(e)
+  })
+
   on('session.send', async ($, e, next) => {
     const S = await bindSess($, 'hook')
     // A Peer2Peer address never falls through to the built-in (nor anything else) without a session here.
@@ -3394,6 +3452,10 @@ export const register: Register = on => {
     const S = await bindSess($, 'hook')
     if (!S) return next(e)
     const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    // Once per session, beside a prompt the person typed: Ix is optional, the agent may suggest it, never install it.
+    const ixHint = typed && !e.isMeta && !e.command && S.ixHint && !S.isIxHintGiven ? S.ixHint : undefined
+    if (ixHint) S.isIxHintGiven = true
+    if (ixHint) e = { ...e, context: [...(e.context ?? []), ixHint] }
     // The person is here: own sessions may start their OWN_TURNS_UNATTENDED again. Only the engine's own
     // stamps for the person (PromptOrigin: `composer`, Enter at the prompt; `bridge`, Remote Control); this
     // mod's `$.prompt.submit` arrives as `plugin`, another session's message as `peer`/`peer-send-message`.

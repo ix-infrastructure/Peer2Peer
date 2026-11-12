@@ -1,7 +1,7 @@
 // Copyright 2026 Ix Infrastructure Inc.
 //
 // The extension seam (extensions.ts, ext-host.ts), with a throwaway
-// extension in the registered `kartr` namespace installed in a temp
+// extension in a namespace registered for this file only (`acme`), installed in a temp
 // directory (no real extension package):
 //   - loading is opt-in (P2P_EXTENSIONS or config.json `extensions`), from
 //     explicit directories only, and announced the first time per location;
@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { enabledNamespaces, extensionDirs, isInside, kindNamespace, loadExtensions, resolveIn, siblingNodeModules } from "../extensions.js";
+import { enabledNamespaces, extensionDirs, isInside, KNOWN_EXTENSIONS, kindNamespace, loadExtensions, resolveIn, siblingNodeModules } from "../extensions.js";
 import { eventLine } from "../watch.js";
 import { extWorkdir } from "../ext-host.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
@@ -25,11 +25,11 @@ const R = "wss://relay-ext.test/v3";
 const DEMO = `
 export const extension = {
   api: 1,
-  ns: "kartr",
-  name: "@peer2peer/ext-kartr",
+  ns: "acme",
+  name: "@peer2peer/ext-acme",
   version: "0.0.1",
   receive(input) {
-    if (input.kind !== "x:kartr.ping") return { ok: false, reason: "unknown demo kind" };
+    if (input.kind !== "x:acme.ping") return { ok: false, reason: "unknown demo kind" };
     if (typeof input.body?.n !== "number") return { ok: false, reason: "n must be a number" };
     return { ok: true, rendered: { type: "ping", n: input.body.n, digest: "[data from peer " + input.from.address + "]: ping " + input.body.n + " <b>" }, keep: input.body };
   },
@@ -40,7 +40,7 @@ export const extension = {
       description: "Send a demo ping",
       options: [{ flags: "--from-session <sid>", description: "session" }, { flags: "--to <address>", description: "peer" }, { flags: "--kind <kind>", description: "override the kind" }],
       async run(ctx, args, opts) {
-        const r = await ctx.send({ fromSession: opts.fromSession, to: opts.to, kind: opts.kind ?? "x:kartr.ping", v: 1, body: { n: Number(args[0]) }, fallback: "sent a demo ping: install @peer2peer/ext-kartr" });
+        const r = await ctx.send({ fromSession: opts.fromSession, to: opts.to, kind: opts.kind ?? "x:acme.ping", v: 1, body: { n: Number(args[0]) }, fallback: "sent a demo ping: install @peer2peer/ext-acme" });
         return { json: r, human: "pinged" };
       },
     },
@@ -83,16 +83,21 @@ let scratch: User;
 const ids: Record<string, string> = {};
 
 describe("extension seam", () => {
+  // Only `ix` is registered (protocol §8.3). This file registers `acme` for its demo extension, in
+  // this module instance only (vitest isolates test files); no environment or config can add one.
+  const known = KNOWN_EXTENSIONS as string[];
   beforeAll(async () => {
+    expect([...known]).toEqual(["ix"]);
+    known.push("acme");
     relay = await startRelay(R);
     const transport = { [R]: `ws://127.0.0.1:${relay.port}/v3` };
     scratch = new User("scratch", {});
     extDir = join(scratch.home, "exts");
-    installPkg(join(extDir, "node_modules"), "@peer2peer/ext-kartr", { "index.js": DEMO });
-    alice = new User("alice", transport, { P2P_EXTENSION_PATH: extDir, P2P_EXTENSIONS: "kartr" });
+    installPkg(join(extDir, "node_modules"), "@peer2peer/ext-acme", { "index.js": DEMO });
+    alice = new User("alice", transport, { P2P_EXTENSION_PATH: extDir, P2P_EXTENSIONS: "acme" });
     // bob enables it in config.json (below); carol enables it but hasn't installed it.
     bob = new User("bob", transport, { P2P_EXTENSION_PATH: extDir });
-    carol = new User("carol", transport, { P2P_EXTENSIONS: "kartr" });
+    carol = new User("carol", transport, { P2P_EXTENSIONS: "acme" });
     for (const u of [alice, bob, carol]) ids[u.name] = (await u.ok(["init", "--name", u.name, "--relay", R, "--yes"])).userId;
     for (const u of [bob, carol]) {
       const inv = await alice.ok(["invite", "--link"]);
@@ -109,13 +114,17 @@ describe("extension seam", () => {
   afterAll(async () => {
     await relay?.close().catch(() => {});
     for (const u of [alice, bob, carol, scratch]) u?.cleanup();
+    known.splice(known.indexOf("acme"), 1);
   });
 
   it("only registered namespaces can be enabled (L2); opt-in", () => {
     expect(enabledNamespaces({})).toEqual({ enabled: [], ignored: [] });
     expect(enabledNamespaces({}, { extensions: ["ix"] })).toEqual({ enabled: ["ix"], ignored: [] });
-    expect(enabledNamespaces({ P2P_EXTENSIONS: "@peer2peer/ext-ix, kartr ,demo,ix" }, { extensions: ["kartr"] })).toEqual({ enabled: ["ix", "kartr"], ignored: ["demo"] });
+    expect(enabledNamespaces({ P2P_EXTENSIONS: "@peer2peer/ext-ix, acme ,demo,ix" }, { extensions: ["acme"] })).toEqual({ enabled: ["ix", "acme"], ignored: ["demo"] });
     expect(enabledNamespaces({ P2P_EXTENSIONS: "none" }, { extensions: ["ix"] }).enabled).toEqual([]);
+    // A namespace that isn't registered is refused, whether it comes from the environment or config.json.
+    expect(enabledNamespaces({ P2P_EXTENSIONS: "@peer2peer/ext-other,other" }, { extensions: ["other"] })).toEqual({ enabled: [], ignored: ["@peer2peer/ext-other", "other"] });
+    expect(enabledNamespaces({}, { extensions: ["other", "ix"] })).toEqual({ enabled: ["ix"], ignored: ["other"] });
     // "config": only config.json counts (what the Claude mod passes, so a shell variable can't enable for it).
     expect(enabledNamespaces({ P2P_EXTENSIONS: "config" }, { extensions: ["ix"] }).enabled).toEqual(["ix"]);
     expect(enabledNamespaces({ P2P_EXTENSIONS: "config" }, {}).enabled).toEqual([]);
@@ -128,50 +137,50 @@ describe("extension seam", () => {
     expect((await loadExtensions({ env: { P2P_EXTENSION_PATH: extDir }, warn: (m) => warns.push(m) })).list()).toEqual([]);
     expect(warns).toEqual([]);
     expect((await bob.ok(["extensions"])).extensions).toEqual([]);
-    const r = await bob.run(["kartr", "ping", "1"]);
+    const r = await bob.run(["acme", "ping", "1"]);
     expect(r.json).toMatchObject({ error: "extension_missing" });
-    expect(r.json.reason).toMatch(/p2p extensions enable kartr/);
+    expect(r.json.reason).toMatch(/p2p extensions enable acme/);
   });
 
   it("enable/disable edit config.json; the first load from a location is announced once", async () => {
-    expect(await bob.ok(["extensions", "enable", "kartr"])).toEqual({ enabled: ["kartr"] });
+    expect(await bob.ok(["extensions", "enable", "acme"])).toEqual({ enabled: ["acme"] });
     const first = await bob.run(["extensions"]);
-    expect(first.json.extensions.map((e: any) => e.ns)).toEqual(["kartr"]);
-    expect(first.err).toMatch(/loading extension @peer2peer\/ext-kartr 0\.0\.1 from .*ext-kartr\/index\.js \(it runs with your p2p identity/);
+    expect(first.json.extensions.map((e: any) => e.ns)).toEqual(["acme"]);
+    expect(first.err).toMatch(/loading extension @peer2peer\/ext-acme 0\.0\.1 from .*ext-acme\/index\.js \(it runs with your p2p identity/);
     const again = await bob.run(["extensions"]);
     expect(again.err).not.toMatch(/loading extension/);
     expect((await bob.run(["extensions", "enable", "demo"])).json).toMatchObject({ error: "usage" });
-    expect(await bob.ok(["extensions", "disable", "kartr"])).toEqual({ enabled: [] });
+    expect(await bob.ok(["extensions", "disable", "acme"])).toEqual({ enabled: [] });
     expect((await bob.ok(["extensions"])).extensions).toEqual([]);
-    await bob.ok(["extensions", "enable", "kartr"]);
+    await bob.ok(["extensions", "enable", "acme"]);
   });
 
   it("resolves only inside the explicit directories: no walk-up, NODE_PATH or escapes (M3, L1)", async () => {
     const root = join(scratch.home, "resolve");
     // An ancestor node_modules and NODE_PATH both hold a package; neither is used.
-    installPkg(join(root, "node_modules"), "@peer2peer/ext-kartr", { "index.js": DEMO });
+    installPkg(join(root, "node_modules"), "@peer2peer/ext-acme", { "index.js": DEMO });
     mkdirSync(join(root, "sub", "deeper"), { recursive: true });
-    const env = { P2P_EXTENSIONS: "kartr", P2P_EXTENSION_PATH: join(root, "sub", "deeper"), NODE_PATH: join(root, "node_modules") };
+    const env = { P2P_EXTENSIONS: "acme", P2P_EXTENSION_PATH: join(root, "sub", "deeper"), NODE_PATH: join(root, "node_modules") };
     const warns: string[] = [];
     const nowhere = pathToFileURL(join(root, "sub", "x.js")).href;
     expect((await loadExtensions({ env, selfUrl: nowhere, warn: (m) => warns.push(m) })).list()).toEqual([]);
     expect(warns.join("\n")).toMatch(/enabled but not installed/);
     // An entry that points outside the package is refused, and that base skipped: the next base still loads.
     const bad = join(scratch.home, "bad");
-    installPkg(join(bad, "node_modules"), "@peer2peer/ext-kartr", {}, { exports: { ".": { default: "../../../../exts/node_modules/@peer2peer/ext-kartr/index.js" } } });
-    expect(() => resolveIn(join(bad, "node_modules"), "@peer2peer/ext-kartr")).toThrow(/outside the package/);
+    installPkg(join(bad, "node_modules"), "@peer2peer/ext-acme", {}, { exports: { ".": { default: "../../../../exts/node_modules/@peer2peer/ext-acme/index.js" } } });
+    expect(() => resolveIn(join(bad, "node_modules"), "@peer2peer/ext-acme")).toThrow(/outside the package/);
     const broken = join(scratch.home, "broken");
-    mkdirSync(join(broken, "node_modules", "@peer2peer", "ext-kartr"), { recursive: true });
-    writeFileSync(join(broken, "node_modules", "@peer2peer", "ext-kartr", "package.json"), "{not json");
+    mkdirSync(join(broken, "node_modules", "@peer2peer", "ext-acme"), { recursive: true });
+    writeFileSync(join(broken, "node_modules", "@peer2peer", "ext-acme", "package.json"), "{not json");
     const w2: string[] = [];
-    const reg = await loadExtensions({ env: { P2P_EXTENSIONS: "kartr", P2P_EXTENSION_PATH: [bad, broken, extDir].join(":") }, selfUrl: nowhere, warn: (m) => w2.push(m) });
-    expect(reg.get("kartr")?.version).toBe("0.0.1");
+    const reg = await loadExtensions({ env: { P2P_EXTENSIONS: "acme", P2P_EXTENSION_PATH: [bad, broken, extDir].join(":") }, selfUrl: nowhere, warn: (m) => w2.push(m) });
+    expect(reg.get("acme")?.version).toBe("0.0.1");
     expect(w2.filter((m) => /skipping/.test(m))).toHaveLength(2);
     // A symlinked package (npm link) is fine: the entry is inside its real directory.
     const linked = join(scratch.home, "linked", "node_modules", "@peer2peer");
     mkdirSync(linked, { recursive: true });
-    symlinkSync(join(extDir, "node_modules", "@peer2peer", "ext-kartr"), join(linked, "ext-kartr"), "dir");
-    expect(resolveIn(join(scratch.home, "linked", "node_modules"), "@peer2peer/ext-kartr")).toMatch(/exts\/node_modules\/@peer2peer\/ext-kartr\/index\.js$/);
+    symlinkSync(join(extDir, "node_modules", "@peer2peer", "ext-acme"), join(linked, "ext-acme"), "dir");
+    expect(resolveIn(join(scratch.home, "linked", "node_modules"), "@peer2peer/ext-acme")).toMatch(/exts\/node_modules\/@peer2peer\/ext-acme\/index\.js$/);
   });
 
   it("P2P_EXTENSION_EXCLUDE drops entries inside a directory by real path (a symlink can't hide it)", () => {
@@ -200,24 +209,24 @@ describe("extension seam", () => {
   it("an enabled namespace that isn't installed explains itself", async () => {
     const c = await carol.run(["extensions"]);
     expect(c.json.extensions).toEqual([]);
-    expect(c.err).toMatch(/@peer2peer\/ext-kartr is enabled but not installed/);
+    expect(c.err).toMatch(/@peer2peer\/ext-acme is enabled but not installed/);
     const r = await carol.run(["ix", "note", "--to", "x", "hello"]);
     expect(r.code).toBe(1);
     expect(r.json).toMatchObject({ error: "extension_missing", extension: "@peer2peer/ext-ix" });
   });
 
   it("renders with the extension; the fallback without it; kept bodies stay local", async () => {
-    const sent = await alice.ok(["kartr", "ping", "7", "--from-session", "as", "--to", "bob"]);
-    expect(sent).toMatchObject({ delivered: true, kind: "x:kartr.ping", to: { sid: "bob-s" } });
-    await alice.ok(["kartr", "ping", "8", "--from-session", "as", "--to", "carol"]);
+    const sent = await alice.ok(["acme", "ping", "7", "--from-session", "as", "--to", "bob"]);
+    expect(sent).toMatchObject({ delivered: true, kind: "x:acme.ping", to: { sid: "bob-s" } });
+    await alice.ok(["acme", "ping", "8", "--from-session", "as", "--to", "carol"]);
     const b = await bob.watch("bob-s", 1500);
     const be = b.find((e) => e.kind === "p2p.ext");
-    expect(be).toMatchObject({ ext: "x:kartr.ping", rendered: { type: "ping", n: 7 } });
+    expect(be).toMatchObject({ ext: "x:acme.ping", rendered: { type: "ping", n: 7 } });
     expect(be.rendered.digest).toMatch(/: ping 7 b$/); // sanitized by p2p too
-    expect(be.fallback).toMatch(/^alice@[a-z2-7-]+: sent a demo ping: install @peer2peer\/ext-kartr$/);
+    expect(be.fallback).toMatch(/^alice@[a-z2-7-]+: sent a demo ping: install @peer2peer\/ext-acme$/);
     expect(be._kept).toBeUndefined();
-    const seen = await bob.ok(["kartr", "seen"]);
-    expect(seen.events[0]).toMatchObject({ kind: "x:kartr.ping", kept: { v: 1, body: { n: 7 } } });
+    const seen = await bob.ok(["acme", "seen"]);
+    expect(seen.events[0]).toMatchObject({ kind: "x:acme.ping", kept: { v: 1, body: { n: 7 } } });
     expect(seen).toMatchObject({ count: 1, interactive: false });
     const c = await carol.watch("carol-s", 1500);
     const ce = c.find((e) => e.kind === "p2p.ext");
@@ -226,16 +235,16 @@ describe("extension seam", () => {
   });
 
   it("an invalid body shows the fallback with the reason", async () => {
-    await alice.ok(["kartr", "ping", "9", "--from-session", "as", "--to", "bob", "--kind", "x:kartr.other"]);
+    await alice.ok(["acme", "ping", "9", "--from-session", "as", "--to", "bob", "--kind", "x:acme.other"]);
     const be = (await bob.watch("bob-s", 1500)).find((e) => e.kind === "p2p.ext");
-    expect(be).toMatchObject({ ext: "x:kartr.other", extError: "unknown demo kind" });
+    expect(be).toMatchObject({ ext: "x:acme.other", extError: "unknown demo kind" });
     expect(be.rendered).toBeUndefined();
   });
 
   it("an extension can only send its own namespace; its errors keep their code", async () => {
-    const r = await alice.run(["kartr", "ping", "1", "--from-session", "as", "--to", "bob", "--kind", "x:ix.note"]);
-    expect(r.json).toMatchObject({ error: "usage", reason: expect.stringMatching(/may only send x:kartr/) });
-    const f = await alice.run(["kartr", "fail"]);
+    const r = await alice.run(["acme", "ping", "1", "--from-session", "as", "--to", "bob", "--kind", "x:ix.note"]);
+    expect(r.json).toMatchObject({ error: "usage", reason: expect.stringMatching(/may only send x:acme/) });
+    const f = await alice.run(["acme", "fail"]);
     expect(f.json).toEqual({ error: "demo_refused", reason: "demo says no" });
   });
 

@@ -2,7 +2,7 @@
 //
 // @peer2peer/codex-bridge: Peer2Peer for OpenAI Codex. An MCP server Codex
 // starts with each session, Codex hooks, and an installer, all over the
-// `p2p` CLI. Core software: it never imports Ix or Kartr.
+// `p2p` CLI. Core software: it never imports Ix or an extension.
 
 export * from "./lib.js";
 export { McpServer, lineFeeder, text, PROTOCOL_VERSION, type Tool, type ToolResult } from "./mcp.js";

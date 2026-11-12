@@ -12,7 +12,7 @@
 // can reach (the home directory, the identity and device keys). ExtContext
 // is the API it is meant to use, not a sandbox. So loading is opt-in:
 //   - Which: only namespaces registered in protocol §8.3 (KNOWN_EXTENSIONS)
-//     that the user enabled: P2P_EXTENSIONS ("ix,kartr"; "none" = none), else
+//     that the user enabled: P2P_EXTENSIONS ("ix"; "none" = none), else
 //     `extensions` in <home>/config.json (`p2p extensions enable ix`). Nothing
 //     enabled, nothing loaded.
 //   - Where: only explicit node_modules directories: each P2P_EXTENSION_PATH
@@ -48,7 +48,7 @@ import type { Env } from "./config.js";
 export const EXTENSION_API = 1;
 
 /** Namespaces registered in docs/protocol.md §8.3: the only ones that can be enabled. */
-export const KNOWN_EXTENSIONS: readonly string[] = ["ix", "kartr"];
+export const KNOWN_EXTENSIONS: readonly string[] = ["ix"];
 
 /** Cap on the JSON a `receive` digest may add to an event. */
 export const MAX_RENDERED_BYTES = 16 * 1024;

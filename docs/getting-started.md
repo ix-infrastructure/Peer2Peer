@@ -1,6 +1,6 @@
 # Getting started
 
-> **Pre-release:** the npm packages haven't been published yet ([roadmap](roadmap.md#launch)). The steps below work today from this repository.
+> **Early release:** the npm packages are published (v0.1.1; see the [CHANGELOG](../CHANGELOG.md)). The steps below also work from a checkout of this repository.
 
 Peer2Peer has no public relay and no central server. Your group brings its own relay: someone runs one (a single Docker container), or you use one a friend runs. Everyone then sets up with that relay, and invite codes carry it to the people you invite.
 
@@ -51,10 +51,24 @@ P2P_DEFAULT_RELAYS=wss://relay.example.org/v3 claude
 
 **Codex CLI:** follow [the Codex bridge install](../packages/codex-bridge/README.md#install), which comes down to one file plus `p2p codex install --write`.
 
-**Just the CLI** (any agent, or scripts):
+**Just the CLI** (any agent, or scripts). One line installs it, with Node.js 22 or newer already on the machine:
 
 ```sh
-npm i -g @peer2peer/cli
+curl -fsSL https://ix-infra.com/p2p/install.sh | sh          # macOS and Linux
+```
+
+```powershell
+irm https://ix-infra.com/p2p/install.ps1 | iex               # Windows (PowerShell 5.1 or 7, no admin)
+```
+
+The script checks for Node 22 and npm (and says how to get them if they're missing, without installing them), installs `@peer2peer/cli` and `@peer2peer/ext-ix` at one pinned version with `npm install -g`, checks `p2p --version`, then runs `p2p setup` when there is a terminal to answer it on. It never uses sudo or asks for Administrator rights, and it doesn't install Ix. Read it first if you like ([install.sh](../scripts/install.sh), [install.ps1](../scripts/install.ps1)): `--dry-run` prints every command without running any, `--no-setup` skips setup, and `--version X.Y.Z` picks another release. Piped, pass them as `curl -fsSL https://ix-infra.com/p2p/install.sh | sh -s -- --dry-run`; in PowerShell, `| iex` takes no parameters, so use `& ([scriptblock]::Create((irm https://ix-infra.com/p2p/install.ps1))) -DryRun` (also `-NoSetup`, `-Version X.Y.Z`). `https://ix-infra.com/p2p/install.sha256` has the scripts' SHA-256.
+
+In Windows PowerShell, `p2p` may fail with "running scripts is disabled on this system": npm also installs a `p2p.ps1`, which the default execution policy blocks. Type `p2p.cmd` instead (for example `p2p.cmd setup`), or allow locally installed scripts for your account with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. In cmd and in Git Bash, `p2p` works as is.
+
+Or do the same by hand:
+
+```sh
+npm i -g @peer2peer/cli @peer2peer/ext-ix
 # or from a checkout: node /path/to/Peer2Peer/mods/claude/peer2peer/bin/p2p.mjs <command>  (alias it as p2p)
 export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3     # 1–5, comma-separated
 ```
@@ -76,6 +90,8 @@ Your **24-word recovery phrase** is the only way to recover your identity if you
   - Run non-interactively without the flag, it saves nothing: run `p2p backup show` yourself, in your own terminal, later.
 
 Either way, copy the words somewhere offline (a password manager or paper), then delete the file. Never paste the phrase into an agent, a chat or a pipe.
+
+**Ix is optional and recommended; Peer2Peer never installs it for you.** [Ix](https://github.com/ix-infrastructure/Ix) is a local code graph. With it, Peer2Peer can flag when a peer's session works on code that overlaps yours, show a change's blast radius, and keep your sessions' context as local graph memory, all on your machine. When Ix isn't installed, `p2p setup` in your terminal explains this and asks `Install Ix? [y/N]` (default No). A yes prints the install command for you to run yourself, then `p2p setup --ix` turns on the Ix extension. A no is remembered, and `p2p setup --ix` asks again. Setup never offers Ix with `--json`, in CI, or inside an agent's session. Your agent may suggest Ix once, but installing is your decision and your action.
 
 The invite prints a one-time link like `https://ix-infra.com/p2p/invite#relay.example.org/K7QM-3XPD-9TWA-HF2N-6RJC`, the same code on its own (`relay.example.org/K7QM-3XPD-9TWA-HF2N-6RJC`), and a message to paste into Slack, Signal or email for someone who doesn't have Peer2Peer yet: the link, the three Claude Code commands that install the plugin (`/plugin marketplace add ix-infrastructure/Peer2Peer`, `/plugin install peer2peer@peer2peer`, `/reload-plugins`), then `/peers join <link>`, where the Codex instructions are, and `p2p join '<link>'` for people who already have the command. On a private relay (Tailscale, a LAN) both join lines carry `--allow-private-relay` and the message says to be on the same network. In Claude Code, `/peers invite` shows the message above the prompt with a **Copy message** button. Send it over a channel you trust. It works once and expires within 7 days; `p2p invites revoke <code>` cancels it. The part after `#` is the secret, and it never reaches the web server.
 

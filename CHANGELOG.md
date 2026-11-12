@@ -2,6 +2,18 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Behaviour changes
+
+- **Ix is optional and recommended; Peer2Peer never installs it for you.**
+  - `p2p setup`, run by you at a terminal, explains in a few lines what Ix adds (overlap with peers' sessions, a change's blast radius, local graph memory; all local) when it isn't installed, and asks `Install Ix? [y/N]`. The default is No. A yes prints the install command for your platform, for you to run in your own terminal, then `p2p setup --ix` turns on the Ix extension. Peer2Peer never runs an installer.
+  - A no is remembered (`"ixDeclined": true` in config.json) and setup doesn't ask again. `p2p setup --ix` asks again.
+  - Setup never offers Ix with `--json`, with `CI` set, without a terminal, or inside an agent's session. (Turning on the Ix extension when Ix is already installed still asks for your `yes` on the terminal, as before, even with `--json`.) `p2p setup --json` reports `ix.installed`, `ix.recommended` and `ix.install` (the command to run) instead. `p2p extensions --json` reports the same under `ix`.
+  - The Claude Code mod (beside the first prompt you type) and the Codex bridge (at session start) tell the agent once per session, when Ix isn't installed and you haven't said no, that Ix is optional, that it may suggest Ix to you once, and that it must never install Ix itself.
+  - In Claude Code, an agent's shell command that installs Ix (the Ix install scripts, its Homebrew tap or formula, or a global npm install of the Ix CLI package) goes to your permission prompt, even in a mode or under rules that would allow it. Where nobody can be asked, it is refused. A URL counts only in a segment that fetches it (curl, wget, irm, iwr, Invoke-WebRequest, Invoke-RestMethod), so reading or searching for it doesn't ask. Other commands are unaffected.
+  - Enabling the Ix extension is still yours alone, as before: the front end's token or your `yes` on the terminal, never from inside an agent's session. `p2p doctor` says Ix is optional and shows the install command.
+
 ## 0.1.1
 
 Nothing changes on the wire. 0.1.1 and 0.1.0 clients interoperate in both directions. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against v0.1.0 and 70b86c7, as committed at their tags and as npm installs them.

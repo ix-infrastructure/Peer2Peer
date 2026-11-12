@@ -1,0 +1,236 @@
+# Copyright 2026 Ix Infrastructure Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# install.ps1: install the Peer2Peer client (the `p2p` command) on Windows.
+# PowerShell 5.1 or newer; no Administrator rights needed.
+#
+#   irm https://ix-infra.com/p2p/install.ps1 | iex
+#   & ([scriptblock]::Create((irm https://ix-infra.com/p2p/install.ps1))) -DryRun
+#   .\install.ps1 [-Version X.Y.Z] [-NoSetup] [-DryRun]     # from a checkout or a download
+#
+# `| iex` can't pass parameters: use the scriptblock form above for -Version,
+# -NoSetup or -DryRun, or set P2P_INSTALL_VERSION, P2P_INSTALL_NO_SETUP=1 or
+# P2P_INSTALL_DRY_RUN=1 first (and Remove-Item Env:P2P_INSTALL_DRY_RUN after).
+#
+# What it does:
+#   1. Checks for Node.js >= 22 and npm. If either is missing or too old, it
+#      prints how to get them (winget, nodejs.org) and stops: it never
+#      installs Node itself.
+#   2. Checks that npm's global folder is writable by you. If it isn't, it
+#      explains how to point npm at a folder of your own and stops: it never
+#      asks for elevation.
+#   3. Runs `npm install -g` for @peer2peer/cli and @peer2peer/ext-ix, pinned
+#      to exactly $P2PVersion, and checks the result with `p2p --version`.
+#      npm checks each package against the registry's integrity hash; nothing
+#      is downloaded any other way, and no package install scripts run.
+#   4. In an interactive console, hands over to `p2p setup`, which asks its own
+#      questions. Without one it skips setup and says to run `p2p.cmd setup`.
+#   It doesn't install Ix or anything else.
+#
+# Every command is printed (as "+ ...") before it runs. The CLI is run as
+# <node.exe> <its bin script>, both by absolute path, never through npm's
+# p2p.cmd shim (which falls back to a `node` in the current directory), and
+# native commands run with NoDefaultCurrentDirectoryInExePath set.
+#
+# Safe to pipe: everything is one script block (`& { ... } @args`) inside an
+# `if ($true) {` whose closing brace is the last line, so a download truncated
+# anywhere, even inside `} @args`, doesn't parse and runs nothing. Under `| iex`
+# it defines no variables or functions in your session. It never relies on its own path, and it reports errors by
+# throwing, never with `exit`, so `| iex` can't close your PowerShell window.
+#
+# Tests (only with P2P_INSTALL_TEST=1) can override detection: P2P_DETECT_OS
+# (Windows), P2P_DETECT_NODE, P2P_DETECT_NPM, P2P_DETECT_PREFIX_WRITABLE
+# (yes/no), P2P_DETECT_TTY (yes/no). "none" means "not found".
+
+# Closed on the last line: a truncated download is a parse error.
+if ($true) {
+& {
+    [CmdletBinding()]
+    param(
+        [string]$Version = '',
+        [switch]$NoSetup,
+        [switch]$DryRun
+    )
+    Set-StrictMode -Version 2.0
+    $ErrorActionPreference = 'Stop'
+
+    # The release these scripts install; bumped after each release (docs/releasing.md, step 5).
+    $P2PVersion = '0.1.1'
+    $packages = @('@peer2peer/cli', '@peer2peer/ext-ix')
+    $minNode = [version]'22.0.0'
+    $testing = $env:P2P_INSTALL_TEST -eq '1'
+
+    function Write-Say([string]$Message) { Write-Information -MessageData $Message -InformationAction Continue }
+
+    # Runs a native command with stderr warnings tolerated (exit code decides) and
+    # without the current directory on the executable search path. Returns its output.
+    function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+        $oldNoCwd = $env:NoDefaultCurrentDirectoryInExePath
+        $oldEap = $ErrorActionPreference
+        try {
+            $env:NoDefaultCurrentDirectoryInExePath = '1'
+            $ErrorActionPreference = 'Continue'
+            & $Exe @Arguments
+        } finally {
+            $ErrorActionPreference = $oldEap
+            if ($null -eq $oldNoCwd) { Remove-Item Env:NoDefaultCurrentDirectoryInExePath -ErrorAction SilentlyContinue }
+            else { $env:NoDefaultCurrentDirectoryInExePath = $oldNoCwd }
+        }
+    }
+
+    function Format-Command([string]$Exe, [string[]]$Arguments) {
+        (@($Exe) + $Arguments | ForEach-Object { if ($_ -match '[\s"]') { "'" + $_ + "'" } else { $_ } }) -join ' '
+    }
+
+    # Prints a native command, then runs it unless this is a dry run.
+    function Invoke-Step([string]$Exe, [string[]]$Arguments) {
+        Write-Say ('+ ' + (Format-Command $Exe $Arguments))
+        if ($DryRun) { return }
+        Invoke-Native $Exe $Arguments
+        if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+    }
+
+    function Get-Detected([string]$Var, [scriptblock]$Probe) {
+        if ($testing) {
+            $v = [Environment]::GetEnvironmentVariable($Var)
+            if ($null -ne $v -and $v -ne '') { if ($v -eq 'none') { return '' } else { return $v } }
+        }
+        try { return [string](& $Probe) } catch { return '' }
+    }
+
+    function ConvertTo-Version([string]$Text) {
+        $m = [regex]::Match($Text, '^\D*(\d+)\.(\d+)\.(\d+)')
+        if (-not $m.Success) { return $null }
+        return [version]("{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value)
+    }
+
+    # On Windows npm is npm.cmd: calling it directly (not the npm.ps1 shim) works
+    # whatever the execution policy is. Get-Command never looks in the current directory.
+    $onWindowsHost = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    function Find-Exe([string]$Name, [string[]]$Extensions) {
+        $names = if ($onWindowsHost) { @($Extensions | ForEach-Object { "$Name$_" }) } else { @($Name) }
+        foreach ($n in $names) {
+            $c = Get-Command -Name $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($c) { return $c.Source }
+        }
+        return ''
+    }
+
+    # Parameters win; with `| iex` there are none, so the environment can set them.
+    if (-not $Version -and $env:P2P_INSTALL_VERSION) { $Version = $env:P2P_INSTALL_VERSION }
+    if (-not $Version) { $Version = $P2PVersion }
+    if (-not $NoSetup -and $env:P2P_INSTALL_NO_SETUP -eq '1') { $NoSetup = [switch]$true }
+    if (-not $DryRun -and $env:P2P_INSTALL_DRY_RUN -eq '1') { $DryRun = [switch]$true }
+
+    # An exact npm version (1.2.3 or 1.2.3-rc.1), never a range or a tag.
+    if ($Version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?\z') {
+        throw "-Version must be an exact version such as $P2PVersion (got '$Version')."
+    }
+    $specs = @($packages | ForEach-Object { "$_@$Version" })
+    if ($DryRun) { Write-Say 'dry run: nothing will be changed' }
+
+    $os = Get-Detected 'P2P_DETECT_OS' { if ($onWindowsHost) { 'Windows' } else { 'other' } }
+    if ($os -ne 'Windows') { throw "This script is for Windows; on macOS and Linux use install.sh (curl -fsSL https://ix-infra.com/p2p/install.sh | sh). (detected: $os)" }
+    $npmExe = Find-Exe 'npm' @('.cmd', '.exe')
+    $nodeExe = Find-Exe 'node' @('.exe')
+    $nodeV = Get-Detected 'P2P_DETECT_NODE' { if ($nodeExe) { Invoke-Native $nodeExe @('--version') } }
+    $npmV = Get-Detected 'P2P_DETECT_NPM' { if ($npmExe) { Invoke-Native $npmExe @('--version') } }
+    Write-Say "detected: os=$os node=$(if ($nodeV) { $nodeV } else { 'none' }) npm=$(if ($npmV) { $npmV } else { 'none' }) powershell=$($PSVersionTable.PSVersion)"
+
+    $nodeVer = ConvertTo-Version $nodeV
+    if (-not $nodeVer -or -not $npmV -or -not $npmExe -or -not $nodeExe -or $nodeVer -lt $minNode) {
+        Write-Say ''
+        Write-Say "Peer2Peer needs Node.js $minNode or newer, with npm. Found: node $(if ($nodeV) { $nodeV } else { 'none' }), npm $(if ($npmV) { $npmV } else { 'none' })."
+        Write-Say "This script doesn't install Node. Pick one, then run it again in a new PowerShell window:"
+        Write-Say '  - winget (Windows 10/11): winget install OpenJS.NodeJS.LTS'
+        Write-Say '  - The installer from https://nodejs.org/en/download (LTS)'
+        Write-Say '  - nvm for Windows (several Node versions side by side): https://github.com/coreybutler/nvm-windows, then: nvm install 22'
+        throw "Node.js $minNode or newer and npm are needed (see above)."
+    }
+
+    # npm's global folder: on Windows packages go into <prefix>\node_modules and shims into <prefix>.
+    # npm masks anything in its output that looks like a UUID (8-4-4-4-12 hex) or an npm token
+    # as "***" (@npmcli/redact), so `npm prefix -g` prints a path that doesn't exist when one of
+    # its folders is named like that. That is refused, before anything is installed. (Asking npm
+    # another way, through `npm exec -c`, would run in the current folder's project context: its
+    # .npmrc and node_modules\.bin could pick the shell or fake the folder.) The path must also be
+    # fully qualified: C:\... or \\server\share\... ([IO.Path]::IsPathRooted accepts C:foo and \foo).
+    $prefixLines = @(Invoke-Native $npmExe @('prefix', '-g') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0 -or $prefixLines.Count -eq 0) { throw "couldn't read npm's global folder (npm prefix -g)" }
+    $prefix = $prefixLines -join ' '
+    $qualified = if ($onWindowsHost) { '\A(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)' } else { '\A/' }
+    if ($prefixLines.Count -ne 1 -or $prefix.Contains('***') -or $prefix -notmatch $qualified) {
+        throw "npm printed its global folder as '$prefix', which isn't a usable path (npm hides folder names that look like IDs as ***). Nothing was installed. Either give npm a folder of your own without such a name, add it to your PATH, and run this again: npm config set prefix `"`$env:APPDATA\npm`"; or install directly: npm install -g $($specs -join ' ')"
+    }
+    $cliDir = Join-Path (Join-Path (Join-Path $prefix 'node_modules') '@peer2peer') 'cli'
+    $writable = Get-Detected 'P2P_DETECT_PREFIX_WRITABLE' {
+        if ($DryRun) { return 'unchecked' }
+        try {
+            $dir = $prefix
+            while ($dir -and -not (Test-Path -LiteralPath $dir)) { $dir = Split-Path -Parent $dir }
+            $probe = Join-Path $dir ('.p2p-install-probe-' + [guid]::NewGuid().ToString('N'))
+            [IO.File]::WriteAllText($probe, '')
+            Remove-Item -LiteralPath $probe -Force
+            'yes'
+        } catch { 'no' }
+    }
+    if ($writable -eq 'no') {
+        Write-Say ''
+        Write-Say "npm installs global packages into $prefix, which isn't writable by you."
+        Write-Say "This script doesn't ask for Administrator rights. Point npm at a folder of your own, add it to your PATH, and run this again:"
+        Write-Say '    npm config set prefix "$env:APPDATA\npm"'
+        Write-Say '    [Environment]::SetEnvironmentVariable(''Path'', [Environment]::GetEnvironmentVariable(''Path'', ''User'') + '';'' + "$env:APPDATA\npm", ''User'')'
+        throw "npm's global folder $prefix isn't writable (see above)."
+    }
+    if ($writable -eq 'unchecked') { Write-Say "(dry run: not checking that $prefix is writable)" }
+
+    Write-Say "plan: install $($specs -join ' ') into $prefix with npm, then check p2p --version"
+    Invoke-Step $npmExe (@('install', '-g', '--ignore-scripts', '--no-fund', '--no-audit') + $specs)
+
+    # The CLI's own entry script (package.json "bin": dist/bin.js), run with node.exe by
+    # absolute path. Fixed here, not read from the installed package.json, and checked to
+    # resolve inside the package folder.
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $binJs = [IO.Path]::GetFullPath((Join-Path (Join-Path $cliDir 'dist') 'bin.js'))
+    $cliRoot = [IO.Path]::GetFullPath($cliDir).TrimEnd($sep) + $sep
+    if (-not $binJs.StartsWith($cliRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "internal: $binJs isn't inside $cliRoot" }
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $binJs -PathType Leaf)) {
+        throw "npm finished but $binJs isn't there; run: npm ls -g @peer2peer/cli"
+    }
+    Write-Say ('+ ' + (Format-Command $nodeExe @($binJs, '--version')) + "   (expect $Version)")
+    if (-not $DryRun) {
+        $got = ([string](Invoke-Native $nodeExe @($binJs, '--version') | Select-Object -First 1)).Trim()
+        if ($got -ne $Version) { throw "p2p --version printed '$got', expected $Version" }
+        Write-Say "Installed: p2p $got ($(Join-Path $prefix 'p2p.cmd'))"
+    }
+
+    $onPath = @(([string]$env:Path -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq $prefix.TrimEnd('\') }).Count -gt 0
+    if (-not $onPath) {
+        Write-Warning "$prefix isn't on your PATH: add it (Settings > System > About > Advanced system settings > Environment Variables), or open a new PowerShell window."
+    }
+    # In Windows PowerShell, `p2p` finds npm's p2p.ps1 shim, which the default execution policy blocks.
+    $next = 'Next: run `p2p.cmd setup` to create your identity (in PowerShell, p2p.cmd works whatever the execution policy; in cmd or a new terminal, `p2p setup`).'
+
+    if ($NoSetup) {
+        Write-Say $next
+    } else {
+        $tty = Get-Detected 'P2P_DETECT_TTY' {
+            $nonInteractive = [Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }
+            if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not $nonInteractive) { 'yes' } else { 'no' }
+        }
+        if ($tty -eq 'yes') {
+            Write-Say ''
+            Write-Say 'Now setting up your identity (p2p setup):'
+            Write-Say ('+ ' + (Format-Command $nodeExe @($binJs, 'setup')))
+            if (-not $DryRun) {
+                # Not piped anywhere, so setup keeps the console for its questions.
+                Invoke-Native $nodeExe @($binJs, 'setup')
+                if ($LASTEXITCODE -ne 0) { Write-Warning 'p2p setup did not finish; run `p2p.cmd setup` to try again.' }
+            }
+        } else {
+            Write-Say "No console to ask questions on, so setup was skipped. $next"
+        }
+    }
+    if ($DryRun) { Write-Say 'Dry run done: nothing was installed.' }
+} @args
+}

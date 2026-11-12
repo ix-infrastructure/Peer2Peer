@@ -1,6 +1,6 @@
 # Releasing the npm packages
 
-Peer2Peer's free, open-source packages publish to the public npm registry under the `@peer2peer` scope. The scope belongs to the npm organization `peer2peer`, owned by the Ix Infrastructure company account. Paid company add-ons (such as ext-kartr) will publish under a separate `@ix-infra` scope later; nothing here touches it.
+Peer2Peer's free, open-source packages publish to the public npm registry under the `@peer2peer` scope. The scope belongs to the npm organization `peer2peer`, owned by the Ix Infrastructure company account. Any paid company add-on would publish under a separate scope; nothing here touches it.
 
 | Package | Directory | Depends on (at runtime) |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ These need an owner of the npm organization `peer2peer` and an admin of the GitH
 
 5. **The relay install scripts' source.** The same tag run also attaches `peer2peer-<version>-src.tar.gz` and `SHA256SUMS` to the tag's GitHub release (the `github-release` job, `contents: write` only, after the publish job). The tarball is `git archive` of the tag with the commit's time as every file's mtime, compressed with `gzip -n`, so the same commit always gives the same bytes; the build job makes it twice and compares them, and a rerun never replaces an asset that is already there. A manual (dry) run uploads the same files as the `peer2peer-source` artifact.
 
-   The install scripts download that tarball when they aren't run from a checkout. A script can't pin the release it ships in (its own bytes are in the tarball), so pin it in a follow-up PR: set `RELAY_VERSION` and `RELAY_SOURCE_SHA256` (from the release's `SHA256SUMS`) in both `scripts/install-relay.sh` and `scripts/install-relay.ps1`, run `npm run install-scripts:checksums` in `packages/relay`, and merge. The website serves the scripts and `install-relay.sha256` from that commit.
+   The install scripts download that tarball when they aren't run from a checkout. A script can't pin the release it ships in (its own bytes are in the tarball), so pin it in a follow-up PR: set `RELAY_VERSION` and `RELAY_SOURCE_SHA256` (from the release's `SHA256SUMS`) in both `scripts/install-relay.sh` and `scripts/install-relay.ps1`, set `P2P_VERSION` in `scripts/install.sh` and `$P2PVersion` in `scripts/install.ps1` (the client installers, which `npm install -g` exactly that version of `@peer2peer/cli` and `@peer2peer/ext-ix`; pin it only once the publish job has finished), run `npm run install-scripts:checksums` in `packages/relay` (it rewrites both `install-relay.sha256` and `install.sha256`), and merge. The website serves the scripts and both checksum files from that commit.
 
 ### Release checklist
 
