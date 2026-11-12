@@ -23,7 +23,7 @@
 
 import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
@@ -89,8 +89,12 @@ export function overWhys(v: unknown): OverWhy[] {
 /** At most this many folders a front end passes per call; past it the session is private. */
 export const MAX_SESSION_DIRS = 512;
 
-/** At most this many projects per session; past it the session is private. */
-export const MAX_SESSION_PROJECTS = 16;
+/**
+ * At most this many projects per session; past it the session is private. A storage bound only:
+ * a session's ceiling is the intersection of all its projects' policies, so a higher cap never
+ * lets a session reach anyone a smaller one wouldn't.
+ */
+export const MAX_SESSION_PROJECTS = 64;
 /** Bindings of sessions not seen for this long are dropped. */
 export const SESSION_BINDING_TTL_MS = 30 * 24 * 3600 * 1000;
 /** At most this many circles and people in one project's policy. */
@@ -108,6 +112,8 @@ export interface ProjectRef {
   remote?: string;
   /** The repository asks to stay private (a committed PRIVATE_MARKER at `root`). */
   repoPrivate?: true;
+  /** A `.git` is there but can't be read as a repository (a folder project at that level). */
+  brokenGit?: true;
 }
 
 export type ProjectShare = "private" | { circles: string[]; people: string[] };
@@ -206,9 +212,42 @@ function real(p: string): string {
   }
 }
 
-/** The nearest existing directory at or above `p`, as a real path. */
+/** Whether a path, as written, has a `..` segment (`a/../b`, `..`, `a/..`). */
+export function hasDotDot(p: string): boolean {
+  return p.split(/[\\/]/).includes("..");
+}
+
+/**
+ * `p` as the file system walks it (POSIX): each existing prefix is resolved through its symlinks
+ * before the next segment applies, so `link/../x` is the link's target's parent's `x`, never the
+ * `x` beside the link (path.resolve collapses `..` as text). Past the first segment that doesn't
+ * exist, the rest is applied as text. Relative paths start at the process's cwd. On Windows,
+ * path.resolve.
+ */
+export function physicalPath(p: string): string {
+  const abs = isAbsolute(p) ? p : `${process.cwd()}${sep}${p}`;
+  if (process.platform === "win32") return resolve(abs);
+  let cur = "/";
+  for (const c of abs.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c === "..") {
+      cur = dirname(cur);
+      continue;
+    }
+    const next = cur === "/" ? `/${c}` : `${cur}/${c}`;
+    try {
+      lstatSync(next);
+      cur = real(next);
+    } catch {
+      cur = next;
+    }
+  }
+  return cur;
+}
+
+/** The nearest existing directory at or above `p` (walked as the file system does: physicalPath), as a real path. */
 function existingDir(p: string): string {
-  let cur = resolve(p);
+  let cur = physicalPath(p);
   for (let i = 0; i < 4096; i++) {
     try {
       const st = statSync(cur);
@@ -435,7 +474,8 @@ function present(p: string): boolean {
  * Without `doc` (sharing, `project show`): the folder itself.
  */
 export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
-  const given = resolve(dir);
+  // As the file system walks it: `link/../x` is beside the link's target, not beside the link.
+  const given = physicalPath(dir);
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
@@ -464,7 +504,7 @@ export function projectOf(dir: string, doc?: ProjectsDoc): ProjectRef {
       }
       if (!gitDir || !existsSync(gitDir)) {
         // A .git that can't be read as one: a folder project at this level (private until shared).
-        return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur };
+        return { id: dirProjectId(cur), name: clean(basename(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
     }
@@ -747,6 +787,144 @@ export async function showProject(app: App, dir: string): Promise<ProjectView> {
 }
 
 // ---------------------------------------------------------------------------
+// A session's own scratch
+
+/**
+ * The folders an agent keeps for this one session (Claude Code: its background tasks' output, the
+ * large tool results it saved, its subagents' transcripts, a background job's folder), which its
+ * front end names in SCRATCH_ENV. What is in them came from the session's own tool calls, whose
+ * real paths were bound already, so a path in them is the session, not a project of its own.
+ * Each is matched by the session's exact id, on real paths:
+ *  - `bases`: a folder whose `<one folder>/<sid>` subtree is this session's: `<tmp>/claude-<uid>`
+ *    (`<tmp>/claude-<uid>/<project>/<sid>/tasks/…`) and `<config>/projects`
+ *    (`<config>/projects/<project>/<sid>/tool-results/…`, `…/subagents/…`). Never what is shared
+ *    across sessions there (`<config>/projects/<project>/memory`, other sessions' transcripts);
+ *  - `jobs`: the session's background job folder (`<config>/jobs/<id>`, `<id>` the start of `sid`,
+ *    so a job's next conversation after a /clear, which has a new id, has none).
+ */
+export interface SessionScratch {
+  sid: string;
+  bases: string[];
+  jobs: string[];
+}
+
+/** The variable a front end names its session's scratch in (JSON: `{sid, tmp: [..], config, job}`). */
+export const SCRATCH_ENV = "P2P_SESSION_SCRATCH";
+
+/** At most this many entries a scratch folder is scanned for symlinks; past it nothing in it is skipped (fails closed: paths there bind). */
+export const SCRATCH_SCAN_ENTRIES = 4096;
+
+const SCRATCH_SID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
+const JOB_ID_RE = /^[A-Za-z0-9][\w.-]{7,127}$/;
+
+/** `p` as a real path, when it is a folder of this user's own and not a symlink itself. */
+function ownDir(p: string): string | undefined {
+  if (!isAbsolute(p)) return undefined;
+  try {
+    const st = lstatSync(p);
+    if (!st.isDirectory() || st.isSymbolicLink()) return undefined;
+    const uid = process.getuid?.();
+    if (uid !== undefined && st.uid !== uid) return undefined;
+    return real(p);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The scratch a front end named (SCRATCH_ENV), checked: the id's shape; each folder there this
+ * user's own and not a symlink; the temporary one named as Claude Code names it (`claude-<uid>`);
+ * the job folder right in `<config>/jobs`, its name the start of the id. Anything else: none.
+ */
+export function sessionScratch(raw: string | undefined): SessionScratch | undefined {
+  // Not on Windows until it is verified there (no owner check, no per-user folder name).
+  if (process.platform === "win32") return undefined;
+  if (typeof raw !== "string" || raw === "" || raw.length > 16 * 1024) return undefined;
+  let o: Record<string, unknown>;
+  try {
+    const j = JSON.parse(raw) as unknown;
+    if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
+    o = j as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  const sid = o.sid;
+  if (typeof sid !== "string" || !SCRATCH_SID_RE.test(sid)) return undefined;
+  const path = (v: unknown) => (typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute(v) ? resolve(v) : undefined);
+  const bases = new Set<string>();
+  const jobs = new Set<string>();
+  // Claude Code's per-user temporary folder (`claude-<uid>`; 0 where there is no uid), in each temporary root it may use.
+  const tmpName = `claude-${process.getuid?.() ?? 0}`;
+  for (const t of Array.isArray(o.tmp) ? o.tmp.slice(0, 4) : []) {
+    const at = path(t);
+    const b = at === undefined ? undefined : ownDir(join(at, tmpName));
+    if (b) bases.add(b);
+  }
+  const config = path(o.config);
+  if (config !== undefined) {
+    const projects = ownDir(join(config, "projects"));
+    if (projects) bases.add(projects);
+    const job = path(o.job);
+    const jobsDir = ownDir(join(config, "jobs"));
+    if (job !== undefined && jobsDir !== undefined && dirname(job) === join(config, "jobs")) {
+      const id = basename(job);
+      const r = JOB_ID_RE.test(id) && sid.startsWith(id) ? ownDir(job) : undefined;
+      if (r && dirname(r) === jobsDir) jobs.add(r);
+    }
+  }
+  return bases.size + jobs.size > 0 ? { sid, bases: [...bases], jobs: [...jobs] } : undefined;
+}
+
+/** The scratch folder (`<base>/<project>/<sid>`, or the job folder) the real folder `dir` is in, if any. */
+export function scratchRoot(dir: string, s: SessionScratch): string | undefined {
+  for (const j of s.jobs) if (within(dir, j)) return j;
+  for (const b of s.bases) {
+    if (dir === b || !within(dir, b)) continue;
+    const parts = dir.slice(b.endsWith(sep) ? b.length : b.length + 1).split(sep);
+    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s.sid) return join(b, parts[0], parts[1]);
+  }
+  return undefined;
+}
+
+/**
+ * What every symlink anywhere in a scratch folder points at: a link out of it, read through
+ * `link/…`, `link/../…` or as a file in a folder, binds its target. Undefined when that can't be
+ * told (a folder or link that can't be read, more than SCRATCH_SCAN_ENTRIES entries): then
+ * nothing in that scratch folder is skipped.
+ */
+function scratchLinks(root: string): string[] | undefined {
+  const out: string[] = [];
+  const stack = [root];
+  let seen = 0;
+  while (stack.length > 0) {
+    const d = stack.pop() as string;
+    let ents: Dirent[];
+    try {
+      ents = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const e of ents) {
+      if (++seen > SCRATCH_SCAN_ENTRIES) return undefined;
+      const p = join(d, e.name);
+      if (e.isSymbolicLink()) {
+        try {
+          out.push(realpathSync(p));
+        } catch {
+          // Dangling, or a loop: where it points.
+          try {
+            out.push(resolve(d, readlinkSync(p)));
+          } catch {
+            return undefined;
+          }
+        }
+      } else if (e.isDirectory()) stack.push(p);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 
 /**
@@ -759,7 +937,7 @@ export async function bindSession(
   app: App,
   sid: string,
   dirs: readonly string[],
-  o: { person?: boolean; over?: boolean | readonly OverWhy[]; constraint?: ProjectShare; inbound?: boolean } = {},
+  o: { person?: boolean; over?: boolean | readonly OverWhy[]; constraint?: ProjectShare; inbound?: boolean; scratch?: SessionScratch } = {},
 ): Promise<SessionBinding | undefined> {
   if (sid === PERSON_SESSION) {
     if (o.person) return undefined;
@@ -768,11 +946,7 @@ export async function bindSession(
   // Folder projects follow the policies (a shared folder covers its subfolders): read once, before the lock.
   const doc = dirs.length > 0 ? await projectsDoc(app) : undefined;
   const refs = new Map<string, { ref: ProjectRef; under: Set<string> }>();
-  for (const d of dirs) {
-    if (typeof d !== "string" || d.trim() === "") continue;
-    // A device or pseudo file (2>/dev/null) is no project; a path that isn't there yet still binds its parent's.
-    if (pseudoPath(d)) continue;
-    const r = projectOf(d, doc);
+  const add = (d: string, r: ProjectRef) => {
     const one = refs.get(r.id) ?? { ref: r, under: new Set<string>() };
     // A folder a shared folder above covered: remembered, so a policy it gets later still narrows this session.
     if (r.kind === "dir") {
@@ -780,6 +954,43 @@ export async function bindSession(
       if (at !== r.root && within(at, r.root)) one.under.add(at);
     }
     refs.set(r.id, one);
+  };
+  // The session's own scratch (SessionScratch) is the session, not a project: a path in it binds
+  // nothing, unless it is a repository or `.p2p-private` (a clone made there keeps its identity),
+  // a folder the person gave a policy of its own, or a path that names a `.git` or `.p2p-private`
+  // (namedStop: a command that may remove one), or a `.git` that can't be read. A symlink in it
+  // binds what it points at. A path written with a `..` segment never gets the exemption: it binds
+  // where the file system takes it, as everywhere else.
+  const scans = new Map<string, string[] | undefined>();
+  const scratchOf = (d: string, r: ProjectRef): string | undefined => {
+    const s = o.scratch;
+    if (!s || r.kind !== "dir" || r.repoPrivate || r.brokenGit || hasDotDot(d) || doc?.projects[r.id] !== undefined || namedStop(physicalPath(d)) !== undefined) return undefined;
+    return scratchRoot(r.root, s);
+  };
+  // Binds what a scratch folder's symlinks point at (once per folder; one into another scratch folder
+  // of this session's has that one's bound too). False when they couldn't all be read: then a path
+  // in it binds as any folder's.
+  const scanned = (root: string): boolean => {
+    if (!scans.has(root)) {
+      const links = scratchLinks(root);
+      scans.set(root, links);
+      for (const t of links ?? []) {
+        if (pseudoPath(t)) continue;
+        const tr = projectOf(t, doc);
+        const at = scratchOf(t, tr);
+        if (at === undefined || !scanned(at)) add(t, tr);
+      }
+    }
+    return scans.get(root) !== undefined;
+  };
+  for (const d of dirs) {
+    if (typeof d !== "string" || d.trim() === "") continue;
+    // A device or pseudo file (2>/dev/null) is no project; a path that isn't there yet still binds its parent's.
+    if (pseudoPath(d)) continue;
+    const r = projectOf(d, doc);
+    const root = scratchOf(d, r);
+    if (root !== undefined && scanned(root)) continue;
+    add(d, r);
   }
   // Who may speak for a session (statuses, sends): its front end (the person token), or, for a session
   // no front end registered, a caller outside any agent's session. An agent's own shell never may.
@@ -1113,7 +1324,7 @@ export async function sessionCeiling(app: App, sid: string, binding?: SessionBin
   const ppl = [...(people ?? [])].filter((u) => !blocks.has(u) && u !== app.userId && friends.has(u));
   if (joined.length + ppl.length === 0) {
     const names = [...new Set(shares.map((x) => x.name))];
-    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${names.join(", ")}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
+    return privateOf([{ cause: "disjoint", why: names.length > 1 ? `its projects (${nameList(names)}) share nobody in common` : `${names[0]} shares nobody you can reach` }], names);
   }
   return { kind: "shared", circles: joined.sort(), people: ppl.sort() };
 }
@@ -1147,9 +1358,15 @@ export async function ceilingAudience(app: App, c: Ceiling): Promise<Set<string>
   return out;
 }
 
+/** Project names for a message: the first MESSAGE_NAMES, then how many more (`p2p session show` lists them all). */
+const MESSAGE_NAMES = 16;
+function nameList(names: readonly string[]): string {
+  return `${names.slice(0, MESSAGE_NAMES).join(", ")}${names.length > MESSAGE_NAMES ? ` and ${names.length - MESSAGE_NAMES} more` : ""}`;
+}
+
 /** How to tell the person to share, for an error a model may read: the person's command, never a flag for the caller. */
 export function shareHint(names: string[]): string {
-  const what = names.length === 1 ? `the project ${names[0]}` : `each of ${names.join(", ")}`;
+  const what = names.length === 1 ? `the project ${names[0]}` : `each of ${nameList(names)}`;
   return `only the person can widen this, by sharing ${what} themselves: \`p2p project share <circle or friend>\` run in it (or /peers project share in Claude Code)`;
 }
 
@@ -1168,7 +1385,7 @@ export async function assertMayReach(app: App, sid: string, userId: string, o: {
   const who = o.address ?? (await app.addressOf(userId));
   const why = c.kind === "private" ? c.why : `${who} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
   const remedy = c.kind === "private" ? privateRemedy(c.causes, c.blocking?.length ? c.blocking : names) : shareHint(names);
-  throw new CliError("not_shared", `session ${sid} works in ${names.join(", ") || "a project"}, and Peer2Peer won't carry anything from it to ${who}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
+  throw new CliError("not_shared", `session ${sid} works in ${nameList(names) || "a project"}, and Peer2Peer won't carry anything from it to ${who}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
     delivered: false,
     project: { names, policy: c.kind, ...(c.kind === "private" ? { causes: c.causes, ...(stickyPrivate(c) ? { sticky: true } : {}) } : {}) },
   });
