@@ -22,6 +22,8 @@ Anything with 1 GB of RAM or more, a 64-bit x86 or ARM CPU, and either Docker 20
 
 ## Quick install
 
+These scripts install a relay. To install the client (the `p2p` command) instead: `curl -fsSL https://ix-infra.com/p2p/install.sh | sh`, or on Windows `irm https://ix-infra.com/p2p/install.ps1 | iex` ([getting started](getting-started.md#3-install)).
+
 The install scripts detect what the machine has and set the relay up the way this guide describes: Docker if it's new enough, otherwise Node 22 as a system service, otherwise a list of what's missing. Both listen on localhost only and finish by printing the URL to give your team. Read the [script itself](../scripts/install-relay.sh) before running it; `--dry-run` / `-DryRun` prints the plan without changing anything.
 
 **From a checkout** (works today; the scripts build from the current directory only when it is a git checkout of this repository, or from the folder you name in `P2P_SOURCE_DIR`):

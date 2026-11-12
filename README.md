@@ -134,7 +134,17 @@ To share *all* new sessions with a team, create a circle and make it your defaul
 
 #### In a terminal (any agent, or none)
 
-Until the npm release, `p2p` is `node mods/claude/peer2peer/bin/p2p.mjs`, a single committed file. Ann and Ben are on two machines, each in a checkout of the same repo (here the folder is `api`). Both have their group's relay in the environment (`p2p setup --relay <url>` works too):
+Install the `p2p` command (Node.js 22 or newer):
+
+```sh
+curl -fsSL https://ix-infra.com/p2p/install.sh | sh          # macOS and Linux
+```
+
+```powershell
+irm https://ix-infra.com/p2p/install.ps1 | iex               # Windows
+```
+
+The script installs `@peer2peer/cli` and `@peer2peer/ext-ix` with npm at a pinned version, then runs `p2p setup`; `--dry-run` shows what it would run ([getting started](docs/getting-started.md#3-install) has the details). Or run `npm i -g @peer2peer/cli` yourself, or `node mods/claude/peer2peer/bin/p2p.mjs` from a checkout. Ann and Ben are on two machines, each in a checkout of the same repo (here the folder is `api`). Both have their group's relay in the environment (`p2p setup --relay <url>` works too):
 
 ```sh
 export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3
@@ -278,7 +288,7 @@ More detail: [Getting started](docs/getting-started.md) · [CLI reference](packa
 | **Open relay** | One Node process and one SQLite file. It authenticates by device signature, checks mailbox capabilities, keeps envelopes for 7 days, has layered rate limits and optional, operator-configured proof-of-work for first contacts (off by default, `POW_BITS=0`), and keeps counters-only logs. A Docker image is optional. |
 | **`p2p doctor`** | Explains in plain words why someone's sessions are or aren't visible, with a one-line fix for each problem. |
 | **`p2p tui`** | A full-screen terminal UI for when no agent is open: people and their live sessions, held items, messages with delivery receipts, sending, and relay health. See [Terminal UI](packages/p2p/README.md#terminal-ui). |
-| **Ix extension (opt-in)** | Share Ix notes, subgraph references and blast-radius reports, and get *semantic* conflict flags. See [Extensions](docs/extensions.md). |
+| **Ix extension (opt-in)** | Share Ix notes, subgraph references and blast-radius reports, and get *semantic* conflict flags. Ix is optional and recommended; Peer2Peer never installs it for you. See [Extensions](docs/extensions.md). |
 
 **On the roadmap** (not built yet): published npm packages, richer footprints and overlap detection, project circles and open-source discovery, circle compute (shared CI runners and local model inference within a trusted circle), a generic adapter for local and open-source models and more agents, metadata privacy (sealed sender, cover traffic, relay-to-relay onion routing, opt-in Tor), and an OS keychain backend. See [docs/roadmap.md](docs/roadmap.md).
 
@@ -362,7 +372,7 @@ The network is **free and open source, forever**. Messaging, status, friends, ci
 
 Two optional extensions plug in through the protocol's extension seam. They can add information or a badge, never permissions:
 
-- **Ix** (open source, Apache-2.0, [`packages/ext-ix`](packages/ext-ix/README.md)): share notes, subgraph references and blast-radius reports from your [Ix](https://github.com/ix-infrastructure/Ix) code graph, and get semantic conflict flags. Some features need Ix installed. Notes need Ix Pro.
+- **Ix** (open source, Apache-2.0, [`packages/ext-ix`](packages/ext-ix/README.md)): share notes, subgraph references and blast-radius reports from your [Ix](https://github.com/ix-infrastructure/Ix) code graph, and get semantic conflict flags. Some features need Ix installed. Ix is optional and recommended; Peer2Peer never installs it for you: `p2p setup` asks, and gives you the command to run yourself.
 - **Kartr** (paid, for organisations, *planned*): a verified "this key is this person at this org" badge, org-managed circles that follow SSO, and a hosted relay with uptime and data-residency guarantees. It isn't in this repository yet.
 
 Both are made by Ix Infrastructure, which also maintains Peer2Peer.

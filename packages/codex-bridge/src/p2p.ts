@@ -167,6 +167,12 @@ export class P2P {
     return { ok: true, value: { messages, truncated: r.value.truncated === true } };
   }
 
+  /** `p2p extensions`, read only: what it says about Ix (optional; recommended when not installed and not declined). */
+  async ixAdvice(): Promise<Outcome<unknown>> {
+    const r = await this.call<{ ix?: unknown }>(["extensions"]);
+    return r.ok ? { ok: true, value: r.value.ix } : r;
+  }
+
   async held(): Promise<Outcome<HeldItem[]>> {
     const r = await this.call<{ held: HeldItem[] }>(["held"]);
     return r.ok ? { ok: true, value: Array.isArray(r.value.held) ? r.value.held : [] } : r;

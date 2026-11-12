@@ -150,7 +150,7 @@ export class P2P {
   }
 
   /** Loaded and enabled extensions (`p2p extensions`). */
-  extensions(): Promise<Outcome<{ extensions: { ns: string; name: string; version: string; commands: string[] }[]; enabled: string[] }>> {
+  extensions(): Promise<Outcome<{ extensions: { ns: string; name: string; version: string; commands: string[] }[]; enabled: string[]; ix?: unknown }>> {
     return this.call(['extensions'])
   }
 

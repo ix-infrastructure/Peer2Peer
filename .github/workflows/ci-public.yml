@@ -216,7 +216,7 @@ jobs:
         run: node --test deploy/relay/backup-sh.test.mjs
       - name: "soak harness: its pass/fail checks"
         run: node --test scripts/soak/checks.test.mjs
-      - name: "relay install scripts: shellcheck, PSScriptAnalyzer, dry runs, checksums"
+      - name: "install scripts (relay and client): shellcheck, PSScriptAnalyzer, dry runs, checksums"
         env:
           # The Linux runner has shellcheck and pwsh; there the linters must run, not skip.
           P2P_REQUIRE_INSTALLER_TOOLS: ${{ runner.os == 'Linux' && '1' || '0' }}
@@ -225,7 +225,7 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             pwsh -NoProfile -Command "Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force"
           fi
-          node --test scripts/install-relay.test.mjs
+          node --test scripts/install-relay.test.mjs scripts/install.test.mjs
 
       - name: save the npm cache (runs on main only)
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
