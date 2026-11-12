@@ -51,10 +51,24 @@ P2P_DEFAULT_RELAYS=wss://relay.example.org/v3 claude
 
 **Codex CLI:** follow [the Codex bridge install](../packages/codex-bridge/README.md#install), which comes down to one file plus `p2p codex install --write`.
 
-**Just the CLI** (any agent, or scripts):
+**Just the CLI** (any agent, or scripts). One line installs it, with Node.js 22 or newer already on the machine:
 
 ```sh
-npm i -g @peer2peer/cli
+curl -fsSL https://ix-infra.com/p2p/install.sh | sh          # macOS and Linux
+```
+
+```powershell
+irm https://ix-infra.com/p2p/install.ps1 | iex               # Windows (PowerShell 5.1 or 7, no admin)
+```
+
+The script checks for Node 22 and npm (and says how to get them if they're missing, without installing them), installs `@peer2peer/cli` and `@peer2peer/ext-ix` at one pinned version with `npm install -g`, checks `p2p --version`, then runs `p2p setup` when there is a terminal to answer it on. It never uses sudo or asks for Administrator rights, and it doesn't install Ix. Read it first if you like ([install.sh](../scripts/install.sh), [install.ps1](../scripts/install.ps1)): `--dry-run` prints every command without running any, `--no-setup` skips setup, and `--version X.Y.Z` picks another release. Piped, pass them as `curl -fsSL https://ix-infra.com/p2p/install.sh | sh -s -- --dry-run`; in PowerShell, `| iex` takes no parameters, so use `& ([scriptblock]::Create((irm https://ix-infra.com/p2p/install.ps1))) -DryRun` (also `-NoSetup`, `-Version X.Y.Z`). `https://ix-infra.com/p2p/install.sha256` has the scripts' SHA-256.
+
+In Windows PowerShell, `p2p` may fail with "running scripts is disabled on this system": npm also installs a `p2p.ps1`, which the default execution policy blocks. Type `p2p.cmd` instead (for example `p2p.cmd setup`), or allow locally installed scripts for your account with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. In cmd and in Git Bash, `p2p` works as is.
+
+Or do the same by hand:
+
+```sh
+npm i -g @peer2peer/cli @peer2peer/ext-ix
 # or from a checkout: node /path/to/Peer2Peer/mods/claude/peer2peer/bin/p2p.mjs <command>  (alias it as p2p)
 export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3     # 1–5, comma-separated
 ```

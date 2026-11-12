@@ -134,7 +134,17 @@ To share *all* new sessions with a team, create a circle and make it your defaul
 
 #### In a terminal (any agent, or none)
 
-Until the npm release, `p2p` is `node mods/claude/peer2peer/bin/p2p.mjs`, a single committed file. Ann and Ben are on two machines, each in a checkout of the same repo (here the folder is `api`). Both have their group's relay in the environment (`p2p setup --relay <url>` works too):
+Install the `p2p` command (Node.js 22 or newer):
+
+```sh
+curl -fsSL https://ix-infra.com/p2p/install.sh | sh          # macOS and Linux
+```
+
+```powershell
+irm https://ix-infra.com/p2p/install.ps1 | iex               # Windows
+```
+
+The script installs `@peer2peer/cli` and `@peer2peer/ext-ix` with npm at a pinned version, then runs `p2p setup`; `--dry-run` shows what it would run ([getting started](docs/getting-started.md#3-install) has the details). Or run `npm i -g @peer2peer/cli` yourself, or `node mods/claude/peer2peer/bin/p2p.mjs` from a checkout. Ann and Ben are on two machines, each in a checkout of the same repo (here the folder is `api`). Both have their group's relay in the environment (`p2p setup --relay <url>` works too):
 
 ```sh
 export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3
