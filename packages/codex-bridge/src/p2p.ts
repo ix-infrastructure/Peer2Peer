@@ -68,7 +68,20 @@ export type RosterView = { sid: string; ref: string; vis: "circle" | "private"; 
 export type SendResult = { delivered: boolean; to: { userId: string; address: string; own: string; sid: string; ref: string }; relays: number };
 /** What `p2p status` says about the session's projects (projects.ts). */
 export type ProjectInfo = { projects: { id: string; name: string }[]; policy: "private" | "shared" | "none"; why?: string; circles?: string[]; people?: string[] };
-export type RelaysInfo = { listed: string[]; connected: string[]; failed: { url: string; reason: string }[] };
+/** One record of `p2p history --json` (packages/p2p history.ts): peer text, data only. */
+export type HistoryRecord = {
+  id: string;
+  at: number;
+  dir: "in" | "out";
+  type: "message" | "ext";
+  session?: string;
+  peer: { userId: string; address: string; self?: true };
+  peerSession?: { own: string; sid: string; ref: string };
+  text: string;
+  ext?: string;
+  state?: string;
+};
+export type RelaysInfo ={ listed: string[]; connected: string[]; failed: { url: string; reason: string }[] };
 
 export class P2P {
   constructor(
@@ -126,10 +139,32 @@ export class P2P {
     return this.call<SendResult>(["send", `--from-session=${o.fromSession}`, `--to=${o.to}`, ...(o.notifyWhenIdle ? ["--notify-when-idle"] : []), ...dirs, "--stdin"], { stdin: o.text });
   }
 
+  /**
+   * `p2p own-agents`, read only: whether this user's agent sessions' messages skip the hold
+   * (`deliver`), or only those from some other devices (`devices`). Setting it is the person's, in a terminal.
+   */
+  ownAgents(): Promise<Outcome<{ ownAgents: "hold" | "deliver"; devices: string[] | "all-other" }>> {
+    return this.call(["own-agents"]);
+  }
+
   /** This session's roster, read only (the default circle, else private). Changing it is the person's, in a terminal. */
   async roster(sid: string): Promise<Outcome<RosterView>> {
     const r = await this.call<{ roster: RosterView }>(["session", "roster", "--", sid]);
     return r.ok ? { ok: true, value: r.value.roster } : r;
+  }
+
+  /**
+   * `p2p history --session <sid>`: this session's own message history (the CLI reads only a session
+   * a front end registered, and only within its projects; never the person's inbox).
+   */
+  async history(o: { session: string; since?: string; limit?: number }): Promise<Outcome<{ messages: HistoryRecord[]; truncated: boolean }>> {
+    const args = ["history", `--session=${o.session}`];
+    if (o.since) args.push(`--since=${o.since}`);
+    if (o.limit !== undefined) args.push(`--limit=${o.limit}`);
+    const r = await this.call<{ messages?: unknown; truncated?: unknown }>(args);
+    if (!r.ok) return r;
+    const messages = Array.isArray(r.value.messages) ? (r.value.messages as HistoryRecord[]).filter((m) => m && typeof m.text === "string" && typeof m.at === "number" && (m.dir === "in" || m.dir === "out")) : [];
+    return { ok: true, value: { messages, truncated: r.value.truncated === true } };
   }
 
   async held(): Promise<Outcome<HeldItem[]>> {

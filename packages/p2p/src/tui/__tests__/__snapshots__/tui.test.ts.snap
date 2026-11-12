@@ -12,14 +12,14 @@ exports[`frames > modals: help, confirm and a message's full text 1`] = `
   │ Held: a accept (invites, joins) or deliver (held messages); x decline; t │  
   │ always deliver from the sender (asks first)                              │  
   │ Messages: Enter opens one; r replies (this window sends no read          │  
-  │ receipts)                                                                │  
+  │ receipts); h your inbox only or every session (history: kept encrypted   │  
+  │ on this device, 30 days by default)                                      │  
   │ Send: pick, write, Enter sends; Esc cancels                              │  
   │ Health: r runs the doctor again                                          │  
   │ q or Ctrl-C quits. Nothing is accepted, sent or trusted except on your   │  
   │ key press.                                                               │  
   │ Esc closes                                                               │  
   └──────────────────────────────────────────────────────────────────────────┘  
-                                                                                
                                                                                 
                                                                                 
                                                                                 
@@ -218,7 +218,7 @@ exports[`frames > screen 3 at 80x24 1`] = `
                                                                                 
                                                                                 
                                                                                 
- ↑↓ move · Enter open · r reply · 1-5 screens · ? help · q quit                 "
+ ↑↓ move · Enter open · r reply · h inbox/all · 1-5 screens · ? help · q quit   "
 `;
 
 exports[`frames > screen 3 at 120x40 1`] = `
@@ -261,7 +261,7 @@ exports[`frames > screen 3 at 120x40 1`] = `
                                                                                                                         
                                                                                                                         
                                                                                                                         
- ↑↓ move · Enter open · r reply · 1-5 screens · ? help · q quit                                                         "
+ ↑↓ move · Enter open · r reply · h inbox/all · 1-5 screens · ? help · q quit                                           "
 `;
 
 exports[`frames > screen 4 at 80x24 1`] = `

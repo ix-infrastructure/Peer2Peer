@@ -39,6 +39,80 @@ export interface FileConfig {
   trust?: { users?: string[]; circles?: string[] };
   /** Publish this device's caps and version in the identity document (`dinfo`); off until step 2 (docs/compatibility.md). P2P_DEVICE_INFO wins. */
   deviceInfo?: boolean;
+  /** The local Ix backend (projects.ts localGraphEndpoint): honoured only as a loopback URL. Default http://localhost:8090. */
+  ixEndpoint?: string;
+  /**
+   * Trust a root-owned listener on the local Ix endpoint's port (ext-ix listener.ts): Docker's port
+   * proxy on Linux runs as root whoever started the container, so on a machine whose Docker others
+   * use too it may be a teammate's backend. Off by default; only this file turns it on (hand-edited:
+   * no command writes it, and no environment variable overrides it).
+   */
+  ixTrustRootListener?: boolean;
+  /** Message history (history.ts): on by default, kept `retentionDays` (30) and at most `maxBytes` (8 MiB). P2P_HISTORY=0 turns recording off. */
+  history?: { enabled?: boolean; retentionDays?: number; maxBytes?: number };
+  /** Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph; on by default with the Ix extension, `false` turns it off. P2P_IX_MEMORY=0 turns it off too. */
+  ixMemory?: boolean;
+  /**
+   * Messages from your own agent sessions skip the hold in a session that approves its own tool calls
+   * (`p2p own-agents deliver`, person only). Off by default: they are held like a peer's. No variable
+   * overrides it, so nothing an agent sets in its environment turns it on.
+   */
+  ownAgentsDeliver?: boolean;
+  /**
+   * Narrower (`p2p own-agents deliver --devices <did…|all-other>`, person only): messages from your own
+   * sessions on these other devices skip the hold, while this device's agent sessions stay held. Another
+   * device can't say whether you typed a message (that needs the wire field of RFC #48), so this trusts
+   * every session there.
+   */
+  ownDevicesDeliver?: string[] | "all-other";
+}
+
+/**
+ * Whether `p2p watch` writes this device's sessions' context into the local Ix graph (graph-memory.ts):
+ * on by default (it needs the Ix extension and an Ix with the OSS `ix note`). `"ixMemory": false` in
+ * config.json turns it off, and so does P2P_IX_MEMORY=0 (or `false`). The environment can only turn it
+ * off: it never overrides the person's `false`.
+ */
+export function graphMemoryEnabled(env: Env, home: string): boolean {
+  const v = env.P2P_IX_MEMORY?.trim().toLowerCase();
+  if (v === "0" || v === "false") return false;
+  try {
+    return readFileConfig(home).ixMemory !== false;
+  } catch {
+    return true;
+  }
+}
+
+/** Whether your own agent sessions' messages skip the hold (FileConfig.ownAgentsDeliver). */
+export function ownAgentsDeliver(home: string): boolean {
+  try {
+    return readFileConfig(home).ownAgentsDeliver === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The other devices whose sessions skip the hold (FileConfig.ownDevicesDeliver): none, a list, or every other one. */
+export function ownDevicesDeliver(home: string): string[] | "all-other" {
+  try {
+    const v = readFileConfig(home).ownDevicesDeliver;
+    if (v === "all-other") return v;
+    return Array.isArray(v) ? v.filter((d): d is string => typeof d === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether a message from one of your own agent sessions on device `did` skips the hold now (read at
+ * delivery time, never stamped on an event): `own-agents deliver`, or `--devices` naming that device
+ * (another device than this one).
+ */
+export function ownAgentsDeliverFrom(home: string, did: string, thisDevice: string): boolean {
+  if (ownAgentsDeliver(home)) return true;
+  if (did === thisDevice) return false;
+  const devices = ownDevicesDeliver(home);
+  return devices === "all-other" || devices.includes(did);
 }
 
 /**

@@ -225,7 +225,7 @@ function summary(b: FootprintBody): string {
 }
 
 export interface FootprintHelpers {
-  runner(ctx: ExtContext, deps: Deps): IxRunner;
+  runner(ctx: ExtContext, deps: Deps, sid?: string): IxRunner;
   repoOf(ctx: ExtContext): Promise<Here>;
 }
 
@@ -252,7 +252,7 @@ export function footprintCommands(deps: Deps, h: FootprintHelpers): ExtCommand[]
           nameKey: repoNameKey,
         });
         let fallback: unknown[] = [];
-        if (opts.fallback && r.withoutFootprint.length) fallback = await conflictPeersWithoutFootprint(ctx, sid, r.withoutFootprint, h.runner(ctx, deps));
+        if (opts.fallback && r.withoutFootprint.length) fallback = await conflictPeersWithoutFootprint(ctx, sid, r.withoutFootprint, h.runner(ctx, deps, sid));
         // Readable names (`detail`) only for a person at a terminal; --json (what a client, or a
         // model's shell, reads) carries the model-safe line only.
         const lines = r.overlaps.map((o) => (ctx.interactive ? o.detail : o.message));
@@ -298,7 +298,7 @@ export function footprintCommands(deps: Deps, h: FootprintHelpers): ExtCommand[]
         const here = await h.repoOf(ctx);
         if (!here.root) throw new IxExtError("not_a_repo", "not in a git repository: a footprint needs the session's repo (P2P_WORKDIR)");
         if (!here.ref) throw new IxExtError("no_remote", "this repository has no origin remote: a footprint names its repo by its remote");
-        const ix = h.runner(ctx, deps);
+        const ix = h.runner(ctx, deps, sid);
         // No Ix: no footprint, one clear error (a client stops asking for this run).
         if (!(await ixAvailable(ix))) throw new IxExtError("ix_missing", "Ix isn't installed: https://github.com/ix-infrastructure/Ix");
         const env = { ...process.env, ...ctx.env } as NodeJS.ProcessEnv;

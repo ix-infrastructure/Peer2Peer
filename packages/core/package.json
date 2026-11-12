@@ -1,6 +1,6 @@
 {
   "name": "@peer2peer/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Peer2Peer client crypto core: self-certifying identities, device certificates, friendships, circles, rosters and end-to-end encrypted envelopes (v3 at @peer2peer/core/v3; the root export is the frozen v2 API)",
   "keywords": [
     "peer2peer",

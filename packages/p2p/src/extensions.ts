@@ -112,6 +112,12 @@ export interface ExtCommand {
 
 export interface P2PExtension {
   api: number;
+  /**
+   * The graph-target contract this extension implements (1: every Ix call takes its endpoint only from
+   * ExtContext.graphTarget). Required of the `ix` namespace (REQUIRED_GRAPH_TARGETS): an ext-ix from
+   * before it would run Ix with the caller's environment and config, which Ix Pro routes to the cloud.
+   */
+  graphTargets?: number;
   /** Its §8.1 namespace: the package must be `@peer2peer/ext-<ns>`. */
   ns: string;
   name: string;
@@ -127,6 +133,62 @@ export interface P2PExtension {
    * advertises `<kind>.v1` for each.
    */
   state?: Record<string, ExtStateKind>;
+  /**
+   * Graph memory (epic #41 piece 2): writes this device's own sessions' context (their record, status
+   * one-liners, the files they edit) into the person's local graph. `p2p watch` gathers it from the
+   * statuses this device posted, queues it (bounded) and hands it over in batches, off the hook path.
+   * Optional: an extension without it (an older ext-ix) is simply never asked. Each batch is for one
+   * session and has already been checked local by graphTarget; the extension checks again.
+   */
+  memory?: ExtMemory;
+}
+
+/** One thing to remember about a session (graph-memory.ts). Every string is local, the person's own. */
+export interface ExtMemoryItem {
+  kind: "start" | "status" | "files" | "end";
+  /** When it happened (ms). */
+  at: number;
+  /** start: the session's label, repository and branch. */
+  label?: string;
+  repo?: string;
+  branch?: string;
+  /** status: the one-line status. */
+  summary?: string;
+  /** files: repo-relative files edited since the last batch. */
+  files?: string[];
+}
+
+/** Why memory can't be written now; `message` says what the person can do. */
+export interface ExtMemoryUnavailable {
+  ok: false;
+  /** e.g. `ix_missing`, `ix_upgrade` (no local `ix note`), `ix_pro` (Ix Pro answers: cloud). */
+  reason: string;
+  message: string;
+}
+
+export interface ExtMemoryResult {
+  written: number;
+  /** Items not written, by reason (counted as dropped). */
+  failed?: { reason: string; n: number; message?: string }[];
+  /** Stop asking for now (the same as available() turning false). */
+  unavailable?: ExtMemoryUnavailable;
+}
+
+export interface ExtMemory {
+  v: 1;
+  /** Whether the writes can go to the local graph at all (asked before anything is gathered). */
+  available(ctx: ExtContext): Promise<{ ok: true } | ExtMemoryUnavailable>;
+  /**
+   * Writes one session's items. `signal` aborts when the host's time for the batch is up: the writer
+   * must check it before every write and write nothing after it fires (the host waits for it to settle).
+   */
+  write(ctx: ExtContext, batch: { sid: string; items: ExtMemoryItem[]; signal?: AbortSignal }): Promise<ExtMemoryResult>;
+}
+
+/** `ext.memory` when it is a usable v1 memory writer; undefined otherwise (absent or malformed: never asked). */
+export function memoryOf(ext: P2PExtension | undefined): ExtMemory | undefined {
+  const m = ext?.memory as Partial<ExtMemory> | undefined;
+  return m && typeof m === "object" && m.v === 1 && typeof m.available === "function" && typeof m.write === "function" ? (m as ExtMemory) : undefined;
 }
 
 export interface ExtStateKind {
@@ -252,11 +314,28 @@ export interface ExtAudience {
   orgs?: number;
 }
 
+/**
+ * Which Ix graph a call may reach (projects.ts graphTarget, the chokepoint): this machine's backend,
+ * or one circle's shared graph. An extension that runs Ix takes the endpoint (and any token) only
+ * from here, never from its environment.
+ */
+export type ExtGraphTarget =
+  /** `trustRootListener`: the person set `ixTrustRootListener: true` in config.json (a root-owned listener on the port, Docker's proxy on Linux, is theirs). */
+  | { kind: "local"; endpoint: string; why: string; trustRootListener?: true }
+  | { kind: "shared"; circle: string; endpoint: string; token?: string };
+
 /** What a command gets from `p2p`: no keys, no store, only these. */
 export interface ExtContext {
   env: Env;
   /** The user's working directory: P2P_WORKDIR (an existing absolute directory), else the process's. */
   cwd: string;
+  /**
+   * The graph target for a call made for session `sid` (when given), working in this context's folders
+   * (P2P_WORKDIR, P2P_PROJECT_DIRS and the process's cwd) and naming `paths` (absolute: the call's
+   * targets, `--path`, `--changed`, the child's cwd; every one is intersected in): projects.ts
+   * graphTarget. Absent on clients from before graph targets: an extension then treats every call as local.
+   */
+  graphTarget?(opts?: { sid?: string; paths?: readonly string[] }): Promise<ExtGraphTarget>;
   /** stdout lines are for `--json`-less output only; use the returned `human`. */
   io: { err(s: string): void; readStdin?: () => Promise<string> };
   /** Whether --json was given (no prompts then). */
@@ -298,6 +377,13 @@ export interface ExtContext {
    * file tools): store the MAC with the setting and honour the setting only when it verifies.
    */
   localMac?(data: string): string;
+  /**
+   * Whether session `fromSid` may pass on context recorded for session `ofSid` (graph memory's
+   * records, ExtMemory): the same session, or both bound to projects whose ceilings are shared, with
+   * `fromSid`'s audience within `ofSid`'s and the same graph target. Absent on older clients: a
+   * caller then refuses anything but the same session.
+   */
+  mayShareSessionContext?(ofSid: string, fromSid: string): Promise<boolean>;
   /** Own sessions' last posted statuses on this device. */
   ownStatus(sid: string): Promise<{ repo?: string; files: string[]; caps?: string[]; agents?: StatusAgent[] } | undefined>;
 }
@@ -346,6 +432,9 @@ export interface LoadOptions {
   selfUrl?: string;
 }
 
+/** Namespaces that run Ix, and the graph-target contract version each must declare to load. */
+export const REQUIRED_GRAPH_TARGETS: Readonly<Record<string, number>> = { ix: 1 };
+
 /** Validates what a module exports; undefined (with a reason) when it isn't a usable extension. */
 export function checkExtension(mod: unknown, ns: string): { ext?: P2PExtension; why?: string } {
   const m = mod as { extension?: unknown; default?: unknown } | null;
@@ -353,6 +442,10 @@ export function checkExtension(mod: unknown, ns: string): { ext?: P2PExtension; 
   if (!ext || typeof ext !== "object") return { why: "exports no `extension`" };
   if (ext.api !== EXTENSION_API) return { why: `built for extension API ${String(ext.api)}, this p2p has ${EXTENSION_API}` };
   if (ext.ns !== ns) return { why: `declares namespace ${String(ext.ns)}, expected ${ns}` };
+  const need = REQUIRED_GRAPH_TARGETS[ns];
+  if (need !== undefined && !(typeof ext.graphTargets === "number" && ext.graphTargets >= need)) {
+    return { why: `it predates graph targets (it would run Ix with your environment and config, which Ix Pro can route to the cloud): update ${extensionPackageName(ns)} (npm i -g ${extensionPackageName(ns)}@latest; the Claude Code mod ships a current copy)` };
+  }
   if (ext.receive !== undefined && typeof ext.receive !== "function") return { why: "receive is not a function" };
   if (ext.state !== undefined) {
     if (typeof ext.state !== "object" || ext.state === null || Array.isArray(ext.state)) return { why: "state is malformed" };

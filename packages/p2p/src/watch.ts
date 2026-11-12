@@ -33,6 +33,7 @@ import { safeJson } from "./format.js";
 import { alertForeignRotations, noteDocRotations, retryRotationJoins } from "./rotation.js";
 import { flushOutbox, OUTBOX_RETRY_MS } from "./outbox.js";
 import { markRunning, unmarkRunning } from "./running.js";
+import { graphMemoryLoop, graphMemoryTickMs } from "./graph-memory.js";
 
 export interface WatchOptions {
   session: string;
@@ -187,6 +188,11 @@ export async function watch(app: App, opts: WatchOptions): Promise<number> {
     await renewOpenJoinCaps(app);
   });
   every(3600_000, () => maintain(app));
+  // Graph memory (graph-memory.ts): this device's sessions' context into the local Ix graph, gathered
+  // from the statuses they posted and written in the background, a batch at a time. Off without the
+  // Ix extension, without Ix, or when the person turned it off; never on the hook path.
+  const memory = graphMemoryLoop(app, { log: opts.log });
+  every(graphMemoryTickMs(app.env), () => memory.tick());
   void maintain(app).catch(() => {});
 
   const pollMs = opts.pollMs ?? 300;

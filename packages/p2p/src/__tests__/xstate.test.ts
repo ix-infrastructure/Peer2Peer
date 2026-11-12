@@ -41,6 +41,7 @@ const KIND = "x:ix.footprint";
 /** A stand-in for ext-ix: one state kind, whose body must be {n}. */
 const testExt: P2PExtension = {
   api: 1,
+  graphTargets: 1,
   ns: "ix",
   name: "@peer2peer/ext-ix",
   version: "0.0.0-test",

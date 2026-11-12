@@ -54,6 +54,11 @@ import { CliError } from "./errors.js";
 import { readCapped, RelayConnection } from "./relay-client.js";
 import { rosterAudience, sessionRef } from "./sessions.js";
 import type { PeerStatusRec } from "./state.js";
+import { enabledNamespaces } from "./extensions.js";
+import { extIxInstalled, ixBinary, IX_INSTALL_URL, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
+import { graphMemoryReport } from "./graph-memory.js";
+import { graphMemoryEnabled } from "./config.js";
+import { describeGraphTarget, listProjects, localGraphEndpoint, projectOf, projectsDoc, projectGraphTarget, sessionWorkdir } from "./projects.js";
 
 export type CheckStatus = "ok" | "fail" | "unknown";
 
@@ -166,13 +171,13 @@ export interface HttpProbe {
 }
 
 /** One bounded GET (the relay's document API), with its latency and the server's Date header. */
-export async function httpProbe(url: string, timeoutMs: number, opts: { maxBody?: number } = {}): Promise<HttpProbe> {
+export async function httpProbe(url: string, timeoutMs: number, opts: { maxBody?: number; noRedirect?: boolean } = {}): Promise<HttpProbe> {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   t.unref?.();
   const t0 = Date.now();
   try {
-    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" } });
+    const res = await fetch(url, { signal: ctl.signal, headers: { accept: "application/json" }, ...(opts.noRedirect ? { redirect: "error" as const } : {}) });
     const t1 = Date.now();
     const date = res.headers.get("date");
     const serverMs = date ? Date.parse(date) : NaN;
@@ -590,7 +595,101 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
     );
   }
 
+  await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
+}
+
+
+// ---------------------------------------------------------------------------
+// Ix (epic #41): the local CLI, its backend, this checkout's map, and each project's graph target
+
+/** At most this many projects' graph targets are listed. */
+const MAX_GRAPH_ROWS = 10;
+
+/**
+ * The Ix section: the binary and its version, the local backend (reachable at the local endpoint),
+ * whether the project here is mapped, and the graph target of the project here and of each project
+ * with a policy ("local only" today). Without Ix nothing is a failure: Peer2Peer works without it.
+ * `ix` runs as ext-ix runs it (ix-local.ts): absolute path, allowlisted environment, the local
+ * endpoint pinned, read-only commands, bounded.
+ */
+export async function ixChecks(c: Checks, app: App, ms: number): Promise<void> {
+  const local = localGraphEndpoint(app.env, app.file);
+  const target = { endpoint: local };
+  const bin = ixBinary(app.env);
+  const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
+  if (!bin) {
+    c.add("ix", "unknown", "Ix", "the Ix CLI isn't installed (Peer2Peer works without it; peers' Ix items show as plain text)", `install Ix (${IX_INSTALL_URL}), then \`p2p extensions enable ix\``);
+  } else {
+    const v = (await bounded(ixVersion(bin, app.env, target, ms), ms + 500)).value;
+    if (v) c.add("ix", "ok", "Ix", `ix ${v} (${bin})`);
+    else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
+    if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
+    else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
+    if (on) await graphMemoryChecks(c, app, bin, target, ms);
+    // Never followed elsewhere: a loopback listener that redirects is not the local backend.
+    const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
+    if (h.ok && h.status !== undefined && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
+    else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
+    const here = projectOf(sessionWorkdir(app.env));
+    if (here.kind === "git" && h.ok) {
+      const st = (await bounded(runIx(bin, ["status", "--format", "json", "--root", here.root], { env: app.env, target, cwd: here.root, timeoutMs: ms }), ms + 500)).value;
+      let mapped: boolean | undefined;
+      try {
+        const j = st && st.code === 0 ? (JSON.parse(st.stdout) as { graphCompleted?: unknown }) : undefined;
+        mapped = j ? j.graphCompleted === true : undefined;
+      } catch {
+        mapped = undefined;
+      }
+      if (mapped === true) c.add("ix-workspace", "ok", "Ix workspace", `${here.name} is mapped`);
+      else if (mapped === false) c.add("ix-workspace", "unknown", "Ix workspace", `${here.name} isn't mapped yet`, `run \`ix map\` in ${here.root}`);
+      else c.add("ix-workspace", "unknown", "Ix workspace", `couldn't tell whether ${here.name} is mapped`, "run `ix status` in it");
+    }
+  }
+  // Graph targets: the project here first, then each project with a policy.
+  const doc = (await bounded(projectsDoc(app), ms)).value ?? { v: 1 as const, projects: {} };
+  const here = projectOf(sessionWorkdir(app.env));
+  const rows: { id: string; name: string; repoPrivate?: true }[] = [{ id: here.id, name: here.name, ...(here.repoPrivate ? { repoPrivate: true as const } : {}) }];
+  const all = (await bounded(listProjects(app), ms)).value ?? [];
+  for (const p of all) if (!rows.some((r) => r.id === p.id)) rows.push({ id: p.id, name: p.name });
+  for (const r of rows.slice(0, MAX_GRAPH_ROWS)) {
+    const t = projectGraphTarget(app, r, doc);
+    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t)}${t.kind === "local" ? `: ${t.why}` : ""}`);
+  }
+  if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
+}
+
+/**
+ * Graph memory (graph-memory.ts): whether this Ix has the OSS `ix note` (local) or Ix Pro's (cloud,
+ * so memory stays off), and what `p2p watch` wrote, queued and dropped. Never a failure: Peer2Peer
+ * works without it.
+ */
+async function graphMemoryChecks(c: Checks, app: App, bin: string, target: { endpoint: string }, ms: number): Promise<void> {
+  if (!graphMemoryEnabled(app.env, app.home)) {
+    c.add("ix-memory", "ok", "Ix graph memory", 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)');
+    return;
+  }
+  const support = (await bounded(ixMemorySupport(bin, app.env, target, ms), ms + 500)).value;
+  const doc = (await bounded(graphMemoryReport(app), ms)).value;
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  const dropped = doc ? Object.entries(doc.dropped).filter(([, n]) => n > 0) : [];
+  if (support === "oss") c.add("ix-memory", "ok", "Ix graph memory", `on: sessions' records, statuses and edited files go to the local graph only (${target.endpoint}); ${counts}`);
+  else if (support === "pro") c.add("ix-memory", "unknown", "Ix graph memory", "off: Ix Pro is installed, and its `ix note` writes to your cloud org; Peer2Peer keeps graph writes local", "use an Ix without Pro for local notes (or leave it off)");
+  else if (support === "none") c.add("ix-memory", "unknown", "Ix graph memory", "off: this Ix has no local `ix note` (it came after Ix 0.13.0)", "upgrade Ix (`ix upgrade`)");
+  else c.add("ix-memory", "unknown", "Ix graph memory", `couldn't tell whether this Ix has a local \`ix note\`; ${counts}`, "run `ix --help` in a terminal");
+  if (dropped.length > 0) {
+    const total = dropped.reduce((a, [, n]) => a + n, 0);
+    c.add("ix-memory-dropped", "unknown", "Ix graph memory dropped", `${total} item${total === 1 ? "" : "s"} not written (${dropped.map(([r, n]) => `${peer(r)}: ${n}`).join(", ")})`, "best effort: each reason is counted; the queue holds 64 items");
+  }
+  if (doc?.unavailable && support === "oss") {
+    // Who holds the local endpoint's port wasn't this user (ext-ix listener.ts): say what to do.
+    const fix =
+      doc.unavailable.reason === "ix_listener"
+        ? `start your Ix backend (\`ix docker start\`); if another user's process holds the port, use a port of yours (\`ixEndpoint\` in config.json). On Linux, Docker's port proxy runs as root: if this machine's Docker is only yours, set "ixTrustRootListener": true in config.json (by hand)`
+        : undefined;
+    c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
+  }
+  if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
 }
 
 // ---------------------------------------------------------------------------

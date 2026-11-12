@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { clockVerdict, formatDoctor, modVersions, SKEW_FAIL_SEC, SKEW_OK_SEC, summarize, type Check } from "../doctor.js";
 import { main } from "../cli.js";
+import { VERSION } from "../version.js";
 import { alongside, startRelay, User, type TestRelay } from "./harness.js";
 
 /** The ext-ix copy the Claude mod ships (what it passes as P2P_EXTENSION_PATH). */
@@ -287,8 +288,8 @@ describe("p2p doctor", () => {
     const dee = new User("dee", t, { P2P_DOCTOR_TIMEOUT_MS: "800", P2P_MOD_ROOT: root });
     homes.push(dee.home);
     const r = await dee.ok(["doctor"]);
-    expect(byId(r.checks, "version")).toMatchObject({ status: "fail", detail: "this p2p is 0.1.0 but the mod (0.1.0) bundles 0.0.9", fix: expect.stringContaining("P2P_BIN") });
-    writeFileSync(join(root, "bin", "p2p.mjs"), 'var VERSION = "0.1.0";\n');
+    expect(byId(r.checks, "version")).toMatchObject({ status: "fail", detail: `this p2p is ${VERSION} but the mod (0.1.0) bundles 0.0.9`, fix: expect.stringContaining("P2P_BIN") });
+    writeFileSync(join(root, "bin", "p2p.mjs"), `var VERSION = "${VERSION}";\n`);
     expect(byId((await dee.ok(["doctor"])).checks, "version")).toMatchObject({ status: "ok" });
   });
 
