@@ -24997,7 +24997,9 @@ __export(projects_exports, {
   dirProjectId: () => dirProjectId,
   friendIds: () => friendIds,
   graphPinnedEnv: () => graphPinnedEnv,
+  graphPlaintextNote: () => graphPlaintextNote,
   graphTarget: () => graphTarget,
+  graphTargetLine: () => graphTargetLine,
   graphTargetOf: () => graphTargetOf,
   hasDotDot: () => hasDotDot,
   isAgentProcess: () => isAgentProcess,
@@ -26057,6 +26059,12 @@ function projectGraphTarget(app, ref, doc) {
 }
 function describeGraphTarget(t2) {
   return t2.kind === "local" ? `${GRAPH_LOCAL_ONLY} (${t2.endpoint})` : `the shared graph of circle ${t2.circle} (${t2.endpoint})`;
+}
+function graphTargetLine(t2) {
+  return `${describeGraphTarget(t2)}${t2.kind === "local" && t2.why ? `: ${t2.why}` : ""}`;
+}
+function graphPlaintextNote(t2) {
+  return t2.kind === "local" ? "the local Ix backend keeps it in plaintext on this machine" : "the shared graph keeps it in plaintext that its operator can read";
 }
 function graphPinnedEnv(env, target, base = process.env) {
   const out = { ...env };
@@ -37531,6 +37539,7 @@ init_config();
 init_errors2();
 init_relay_client();
 init_sessions();
+init_state2();
 init_extensions();
 init_ix_local();
 init_projects();
@@ -37539,7 +37548,20 @@ import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname7, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
+init_history();
 init_projects();
+var THREAT_MODEL_DOC = "docs/security/threat-model.md";
+var ENCRYPTION_DOC = "docs/security/encryption.md";
+var RELAY_METADATA = [
+  "who may reach whom (capabilities)",
+  "which mailboxes send to which",
+  "sizes",
+  "timing",
+  "each envelope's kind and session id",
+  "IP addresses",
+  "your public identity document",
+  "on a members-only relay that admits a circle's members, that circle's signed chain (its name, owner, admins and members)"
+];
 var SKEW_OK_SEC = 30;
 var SKEW_FAIL_SEC = DEFAULT_SKEW_SEC;
 var DAY2 = 86400;
@@ -37929,8 +37951,18 @@ async function deviceChecks(c, app, o, ms, reports) {
       "if messages from someone seem missing, ask them to send again; P2P_DEBUG=1 on `p2p ls` shows why one fails"
     );
   }
-  await ixChecks(c, app, ms);
+  const ix = await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
+  return dataFlowOf(app, ix);
+}
+function dataFlowOf(app, ix) {
+  return {
+    wire: { encryption: "end-to-end", relaysSee: "ciphertext and metadata", metadata: RELAY_METADATA, doc: THREAT_MODEL_DOC },
+    history: { where: "this device only", recording: historySettings(app).enabled, encryptedAtRest: true, keyBesideIt: true, eventLogPlaintextDays: Math.round(EVENT_RETENTION_MS / 864e5) },
+    ...ix,
+    anyShared: ix.graphs.some((g) => g.target.kind === "shared"),
+    doc: ENCRYPTION_DOC
+  };
 }
 var MAX_GRAPH_ROWS = 10;
 async function ixChecks(c, app, ms) {
@@ -37938,7 +37970,9 @@ async function ixChecks(c, app, ms) {
   const target = { endpoint: local };
   const bin = ixBinary(app.env);
   const on = enabledNamespaces(app.env, app.file).enabled.includes("ix");
+  let memory;
   if (!bin) {
+    memory = { on: false, detail: "off: Ix isn't installed" };
     c.add(
       "ix",
       "unknown",
@@ -37952,7 +37986,7 @@ async function ixChecks(c, app, ms) {
     else c.add("ix", "unknown", "Ix", `${bin} didn't answer \`ix --version\` in time`, "run `ix --version` in a terminal");
     if (on) c.add("ix-extension", "ok", "Ix extension", "enabled: sessions can share Ix context");
     else c.add("ix-extension", "unknown", "Ix extension", "not enabled", extIxInstalled(app.env) ? "`p2p extensions enable ix`" : "`npm i -g @peer2peer/ext-ix`, then `p2p extensions enable ix`");
-    if (on) await graphMemoryChecks(c, app, bin, target, ms);
+    memory = on ? await graphMemoryChecks(c, app, bin, target, ms) : { on: false, detail: "off: the Ix extension isn't enabled" };
     const h = await httpProbe(`${local}/v1/health`, ms, { noRedirect: true });
     if (h.ok && h.status !== void 0 && h.status < 500) c.add("ix-backend", "ok", "Ix backend", `reachable at ${local} (${h.ms} ms)`);
     else c.add("ix-backend", "fail", "Ix backend", `nothing answers at ${local}${h.error ? `: ${h.error}` : h.status ? ` (HTTP ${h.status})` : ""}`, "start it with `ix docker start` (or set `ixEndpoint` in config.json to your local backend)");
@@ -37976,16 +38010,21 @@ async function ixChecks(c, app, ms) {
   const rows = [{ id: here.id, name: here.name, ...here.repoPrivate ? { repoPrivate: true } : {} }];
   const all = (await bounded(listProjects(app), ms)).value ?? [];
   for (const p of all) if (!rows.some((r) => r.id === p.id)) rows.push({ id: p.id, name: p.name });
+  const graphs = [];
   for (const r of rows.slice(0, MAX_GRAPH_ROWS)) {
     const t2 = projectGraphTarget(app, r, doc);
-    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, `${describeGraphTarget(t2)}${t2.kind === "local" ? `: ${t2.why}` : ""}`);
+    const line = graphTargetLine(t2);
+    graphs.push({ id: r.id, name: peer(r.name), here: r.id === here.id, target: t2, line, plaintext: graphPlaintextNote(t2) });
+    c.add(`graph:${r.id}`, "ok", `graph of project ${peer(r.name)}${r.id === here.id ? " (here)" : ""}`, line);
   }
-  if (rows.length > MAX_GRAPH_ROWS) c.add("graph:more", "ok", "graphs of other projects", `${rows.length - MAX_GRAPH_ROWS} more not listed (run \`p2p project show\` in each)`);
+  const more = Math.max(0, rows.length - MAX_GRAPH_ROWS);
+  if (more > 0) c.add("graph:more", "ok", "graphs of other projects", `${more} more not listed (run \`p2p project show\` in each)`);
+  return { graphMemory: memory, graphs, graphsNotListed: more };
 }
 async function graphMemoryChecks(c, app, bin, target, ms) {
   if (!graphMemoryEnabled(app.env, app.home)) {
     c.add("ix-memory", "ok", "Ix graph memory", 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)');
-    return;
+    return { on: false, detail: 'off ("ixMemory": false in config.json, or P2P_IX_MEMORY=0)' };
   }
   const support = (await bounded(ixMemorySupport(bin, app.env, target, ms), ms + 500)).value;
   const doc = (await bounded(graphMemoryReport(app), ms)).value;
@@ -38004,6 +38043,14 @@ async function graphMemoryChecks(c, app, bin, target, ms) {
     c.add("ix-memory-last", "unknown", "Ix graph memory", `last stopped: ${peer(doc.unavailable.message, 300)}`, fix);
   }
   if (app.file.ixTrustRootListener === true) c.add("ix-memory-root", "ok", "Ix graph memory", 'a root-owned listener on the local port counts as yours ("ixTrustRootListener": true in config.json)');
+  return graphMemoryState(support, doc, target.endpoint);
+}
+function graphMemoryState(support, doc, endpoint) {
+  if (support === "oss") return { on: true, detail: `on: your sessions in shared projects are recorded in the local graph only (${endpoint})` };
+  if (support === "pro") return { on: false, detail: "off: Ix Pro is installed (its `ix note` writes to the cloud), so nothing is written" };
+  if (support === "none") return { on: false, detail: "off: this Ix has no local `ix note`" };
+  const counts = doc ? `${doc.written} written, ${doc.queue.length} queued` : "nothing written yet";
+  return { on: "unknown", detail: `unknown: couldn't tell whether this Ix has a local \`ix note\`; ${counts} (to the local graph only, ${endpoint})` };
 }
 async function refreshCapped(app, userId, relays) {
   const allowed = new Set(relays.slice(0, MAX_PEER_RELAYS));
@@ -38188,8 +38235,8 @@ async function doctor(app, o) {
   }
   const reports = await probeRelays(app, app.relays, ms, true, app.userId);
   if (scope === "device") {
-    await deviceChecks(c, app, o, ms, reports);
-    return { scope, version: o.version, checks: c.list, summary: summarize2(c.list) };
+    const dataFlow = await deviceChecks(c, app, o, ms, reports);
+    return { scope, version: o.version, checks: c.list, summary: summarize2(c.list), dataFlow };
   }
   const input = o.user.trim();
   let userId;
@@ -38207,8 +38254,8 @@ async function doctor(app, o) {
     return { scope, version: o.version, user: { input }, checks: c.list, summary: summarize2(c.list) };
   }
   if (userId === app.userId) {
-    await deviceChecks(c, app, o, ms, reports);
-    return { scope: "device", version: o.version, user: { input, userId, address: await app.addressOf(userId) }, checks: c.list, summary: summarize2(c.list) };
+    const dataFlow = await deviceChecks(c, app, o, ms, reports);
+    return { scope: "device", version: o.version, user: { input, userId, address: await app.addressOf(userId) }, checks: c.list, summary: summarize2(c.list), dataFlow };
   }
   const dev = new Checks();
   await deviceChecks(dev, app, o, ms, reports);
@@ -38245,6 +38292,19 @@ async function versionChecks(c, app, userId) {
   }
   return { devices: devices2, unavailable };
 }
+var DATA_FLOW_HEADING = "Where your data goes";
+function formatDataFlow(d) {
+  const lines = [`${DATA_FLOW_HEADING} (${d.doc})`];
+  lines.push(`  messages, statuses, receipts: end-to-end encrypted; relays can't read their content, but see metadata, including ${d.wire.metadata.join(", ")} (all of it: ${d.wire.doc})`);
+  lines.push(
+    `  message history: ${d.history.recording ? "on this device only" : "not recording (history.enabled is false, or P2P_HISTORY=0); what was kept stays on this device only"}, encrypted at rest, but its key sits beside it in P2P_HOME; the event log keeps up to ${d.history.eventLogPlaintextDays} days of recent messages in the clear`
+  );
+  lines.push(`  graph memory: ${d.graphMemory.detail}`);
+  for (const g of d.graphs) lines.push(`  graph of project ${g.name}${g.here ? " (here)" : ""}: ${g.line} (${g.plaintext})`);
+  if (d.graphsNotListed > 0) lines.push(`  ${d.graphsNotListed} more project${d.graphsNotListed === 1 ? "" : "s"} not listed: run \`p2p project show\` in each`);
+  if (!d.anyShared) lines.push(`  cloud graph: none; no ${d.graphsNotListed > 0 ? "listed " : ""}project writes to one (a shared team graph is planned: opt-in per circle, and its operator can read what it holds)`);
+  return lines;
+}
 function formatDoctor(r) {
   const head = r.scope === "user" && r.user ? `p2p doctor: can you see ${r.user.address ?? r.user.input}?` : "p2p doctor: this device";
   const lines = [head, ""];
@@ -38252,6 +38312,7 @@ function formatDoctor(r) {
     lines.push(`${MARK2[x.status]} ${x.title}: ${x.detail}`);
     if (x.fix) lines.push(`    ${x.status === "unknown" ? "to tell" : "fix"}: ${x.fix}`);
   }
+  if (r.dataFlow) lines.push("", ...formatDataFlow(r.dataFlow));
   lines.push("", `${r.summary.ok} ✓  ${r.summary.fail} ✗  ${r.summary.unknown} ?`);
   return lines.join("\n");
 }
@@ -40070,11 +40131,14 @@ function prettyInvite(r, p) {
     st.dim("Who joined: p2p invites · undo: p2p remove <user> · cancel: p2p invites revoke <code>")
   ].join("\n");
 }
+var DATA_FLOW_WIDTH = 2e3;
 function prettyDoctor(r, plain, p) {
   const st = styleOf(p);
+  let flow = false;
   return plain.split("\n").map((l, i) => {
-    const s2 = cell(l, 400);
-    if (i === 0) return st.bold(s2);
+    if (l.startsWith(DATA_FLOW_HEADING)) flow = true;
+    const s2 = cell(l, flow ? DATA_FLOW_WIDTH : 400);
+    if (i === 0 || s2.startsWith(DATA_FLOW_HEADING)) return st.bold(s2);
     if (s2.startsWith("✓")) return st.green("✓") + s2.slice(1);
     if (s2.startsWith("✗")) return st.red("✗") + s2.slice(1);
     if (s2.startsWith("?")) return st.yellow("?") + s2.slice(1);
@@ -41234,7 +41298,7 @@ ${formatRoster(r.roster)}`,
     if (v.policy === "private") lines.push(`  only your own devices see its sessions${v.why === "unmapped" ? " (never shared: `p2p project share <circle>` in it)" : v.why ? ` (${v.why})` : ""}`);
     for (const c of v.circles) lines.push(`  circle ${c.name ?? c.cid} (${c.cid})${c.open ? ", open: anyone its owner admits" : ""}${c.joined ? "" : ", not joined: ignored"}`);
     for (const p of v.people) lines.push(`  ${p.address}`);
-    if (v.graph) lines.push(`  graph: ${describeGraphTarget(v.graph)}${v.graph.kind === "local" && v.graph.why ? `: ${v.graph.why}` : ""}`);
+    if (v.graph) lines.push(`  graph: ${graphTargetLine(v.graph)}`, `    (${graphPlaintextNote(v.graph)})`);
     return lines.join("\n");
   };
   project.command("share [circles...]").description("Share the project here with circles you joined (and friends with --person); on a terminal with none named, pick them").option("--person <user>", "A friend to share it with too (repeatable)", collect).option("--add", "Keep what it is shared with already (default: replace it)").option("--subfolders", "A folder outside git: the share covers its subfolders too (never past a repository, a .p2p-private or a folder with its own policy; refused for a home, temporary or system folder). Without it, the share is for that folder alone").option("--dir <path>", "The project's folder (default: P2P_WORKDIR, else the current directory)").option("--json", "JSON output").action(

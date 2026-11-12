@@ -542,7 +542,7 @@ A capability is the recipient's signed permission for one sender to reach their 
   - every envelope's plaintext outer fields (§4.1): `from`, `fdid`, `to`, `tdid`, `own`, `sid`, `seq`, `ts` and `kind`. So a relay can tell the kinds apart (`msg`, `status`, `roster`, `idle`, `sync`, `unfriend`, `contact`, `circle` and extension kinds such as `x:ix.note`), and sees the target session id and the sequence and timestamp counters. These fields are bound into the AEAD's associated data, so they can't be altered, but they aren't hidden. A relay reads `kind` itself (§5.4: only `contact` is accepted without a cap);
   - identity documents, which are public by design.
 
-  Content (message text, status contents including labels, summaries and files), circle names and membership, rosters and friendship certificates are end-to-end encrypted. Metadata-private routing is out of scope for v3 as written; the accepted privacy phase is in [Roadmap and open questions](#roadmap-and-open-questions).
+  Content (message text, status contents including labels, summaries and files), circle names and membership (except a circle's chain on a members-only relay that follows it, §5: name, owner, admins, members), rosters and friendship certificates are end-to-end encrypted. Metadata-private routing is out of scope for v3 as written; the accepted privacy phase is in [Roadmap and open questions](#roadmap-and-open-questions).
 - **Names:** `name` is unauthenticated. Addresses show 80 bits of fingerprint (§2.1); petnames and verified proofs are how people tell lookalikes apart.
 - **Identity:** a userId is self-certifying. Whether it *is the person you think* rests on the invite channel, petnames and proofs.
 - **Device loss:**
