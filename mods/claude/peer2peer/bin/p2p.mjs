@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 50dab37a08236127
+// @peer2peer/core 0.1.1 445fc25bf49a9a60
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6851,6 +6851,19 @@ function mergeFields(a, b) {
     name: prev.name
   };
 }
+function pendingUsable(d, opts) {
+  const now = opts.now ?? nowSec();
+  return d.iat <= now + (opts.skewSec ?? DEFAULT_SKEW_SEC) && now < d.exp;
+}
+function usablePendingHeads(s2, opts = {}) {
+  return (s2.pendingHeads ?? []).filter((j) => {
+    try {
+      return pendingUsable(peekIdentityDoc(j), opts);
+    } catch {
+      return true;
+    }
+  });
+}
 function docCertFor(doc, did) {
   for (const c of doc.certs ?? []) {
     try {
@@ -6862,7 +6875,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6887,28 +6900,33 @@ var init_identitydoc = __esm({
     REPUBLISH_WINDOW_SEC = 3 * DAY;
     MERGE_TAKEOVER_SEC = 24 * HOUR;
     MAX_CHAIN_VERSIONS = 1024;
+    MAX_PENDING_HEADS = 8;
     IdentityChain = class _IdentityChain {
       iss;
       versions = /* @__PURE__ */ new Map();
       gap = false;
       /** Revocation denylist carried across jumps (R1). */
       denied = /* @__PURE__ */ new Set();
-      /** A verified newer version that doesn't connect yet (#35, see notePending). */
-      pending;
+      /** Verified newer versions that don't connect yet (#35, see notePending). */
+      pending = [];
       constructor(iss) {
         this.iss = iss;
       }
-      /** Rebuilds from storage, re-verifying every link. */
-      static fromStored(s2) {
+      /**
+       * Rebuilds from storage, re-verifying every link. `opts` (default: the wall clock) only decides which
+       * pending heads are still usable (#35).
+       */
+      static fromStored(s2, opts = {}) {
         const c = new _IdentityChain(s2.iss);
         const docs = s2.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
         c.gap = s2.historyGap ?? false;
         c.denied = new Set(s2.denied ?? []);
-        if (s2.pendingHead !== void 0) {
-          const p = verifyIdentityDocSignature(s2.pendingHead);
+        for (const j of s2.pendingHeads ?? []) {
+          const p = verifyIdentityDocSignature(j);
           if (p.iss !== s2.iss)
             fail("issuer-mismatch", "stored pending head of another identity");
-          c.pending = p;
+          if (pendingUsable(p, opts))
+            c.pending.push(p);
         }
         for (const d of docs) {
           if (d.iss !== s2.iss)
@@ -6931,34 +6949,52 @@ var init_identitydoc = __esm({
           versions: [...this.versions.values()].map((d) => d.jws),
           ...this.gap ? { historyGap: true } : {},
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
-          // Dropped once the held head reaches it.
-          ...this.pendingCap() ? { pendingHead: this.pending.jws } : {}
+          // Each dropped once the held head reaches its ver.
+          ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}
         };
       }
       /**
-       * Records `doc`, a signature-verified version of this identity newer than the held head that doesn't
-       * connect to the held history yet (an incomplete refresh, #35). Until the held head reaches its `ver`,
-       * the view trusts only the devices and key holders `doc` lists too, so versions committed on the way
-       * there can't trust a device or key that `doc` already removed. Narrowing only, and temporary: nothing
-       * is denied for good, since a device `doc` leaves out may be one a merge dropped and a later version
-       * re-adds (S2), and a revocation along held history is enforced by the chain rules once connected.
-       * The higher `ver` of two is kept. Returns whether it changed anything.
+       * Records `docs`, signature-verified versions of this identity newer than the held head that don't connect
+       * to the held history yet (an incomplete refresh, #35), beside those already pending. While any is newer
+       * than the held head, the view trusts only the devices and key holders every such one lists too (each tip
+       * above the head, so a fork branch's revocation counts as well), so versions committed on the way there
+       * can't trust a device or key one of them already removed.
+       *  - Narrowing only, and never the permanent denylist: a device one of them leaves out may be one a merge
+       *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
+       *    rules once connected.
+       *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
+       *    refresh (clearPending), and one issued in the future or past its `exp` is ignored. So a version only
+       *    the identity key could sign but no relay serves any more can't narrow the view for good.
+       *  - At most MAX_PENDING_HEADS, the highest `ver` first. Returns whether it changed anything.
        */
-      notePending(doc) {
-        if (doc.iss !== this.iss)
-          fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
-        if (this.versions.size === 0 || doc.ver <= this.view().head.ver)
+      notePending(docs, opts = {}) {
+        if (this.versions.size === 0)
           return false;
-        if (this.pending !== void 0 && this.pending.ver >= doc.ver)
-          return false;
-        this.pending = doc;
-        return true;
+        const headVer = this.tips()[0].ver;
+        const before = this.pendingCap().map((d) => d.hash);
+        const byHash = new Map(this.pendingCap().map((d) => [d.hash, d]));
+        for (const d of docs) {
+          if (d.iss !== this.iss)
+            fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+          if (d.ver > headVer && pendingUsable(d, opts))
+            byHash.set(d.hash, d);
+        }
+        this.pending = [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
+        const after2 = this.pending.map((d) => d.hash);
+        return after2.length !== before.length || after2.some((h) => !before.includes(h));
       }
-      /** The pending head while it is newer than the held head (#35); undefined once the head reaches it. */
+      /** Drops every pending head (a complete refresh, #35). Returns whether there was one. */
+      clearPending() {
+        const had = this.pendingCap().length > 0;
+        this.pending = [];
+        return had;
+      }
+      /** The pending heads still newer than the held head (#35). */
       pendingCap() {
-        if (this.pending === void 0 || this.versions.size === 0)
-          return void 0;
-        return this.pending.ver > this.tips()[0].ver ? this.pending : void 0;
+        if (this.pending.length === 0 || this.versions.size === 0)
+          return [];
+        const headVer = this.tips()[0].ver;
+        return this.pending.filter((d) => d.ver > headVer);
       }
       get size() {
         return this.versions.size;
@@ -7142,8 +7178,8 @@ var init_identitydoc = __esm({
           fail("identity-unknown", `no identity document for ${this.iss}`);
         const head = tips[0];
         const cap2 = this.pendingCap();
-        const devices2 = head.devices.filter((d) => tips.every((t2) => t2.devices.includes(d)) && !this.denied.has(d) && (cap2 === void 0 || cap2.devices.includes(d)));
-        const keyholders = head.keyholders.filter((d) => tips.every((t2) => t2.keyholders.includes(d)) && devices2.includes(d) && (cap2 === void 0 || cap2.keyholders.includes(d)));
+        const devices2 = head.devices.filter((d) => tips.every((t2) => t2.devices.includes(d)) && !this.denied.has(d) && cap2.every((p) => p.devices.includes(d)));
+        const keyholders = head.keyholders.filter((d) => tips.every((t2) => t2.keyholders.includes(d)) && devices2.includes(d) && cap2.every((p) => p.keyholders.includes(d)));
         const relays = [...new Set(tips.flatMap((t2) => t2.relays))];
         return {
           iss: this.iss,
@@ -10174,7 +10210,7 @@ var init_store = __esm({
 async function addIdentityVersion(store2, jws, opts = {}) {
   const iss = peekIdentityDoc(jws).iss;
   return store2.updateIdentity(iss, (stored2) => {
-    const chain = stored2 ? IdentityChain.fromStored(stored2) : new IdentityChain(iss);
+    const chain = stored2 ? IdentityChain.fromStored(stored2, opts) : new IdentityChain(iss);
     const r = chain.add(jws, opts);
     return r.status === "accepted" ? { next: chain.toStored(), result: r } : { result: r };
   });
@@ -10182,7 +10218,7 @@ async function addIdentityVersion(store2, jws, opts = {}) {
 async function jumpIdentity(store2, jws, opts = {}) {
   const iss = peekIdentityDoc(jws).iss;
   return store2.updateIdentity(iss, (stored2) => {
-    const chain = stored2 ? IdentityChain.fromStored(stored2) : new IdentityChain(iss);
+    const chain = stored2 ? IdentityChain.fromStored(stored2, opts) : new IdentityChain(iss);
     const doc = chain.jumpTo(jws, opts);
     return { next: chain.toStored(), result: doc };
   });
@@ -10237,7 +10273,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const stored2 = await store2.getIdentity(userId);
   begin2();
-  const chain = stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored(stored2) : new IdentityChain(userId);
+  const chain = stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored(stored2, { now, skewSec: opts.skewSec }) : new IdentityChain(userId);
   const before = chain.size > 0 ? chain.view() : void 0;
   const anchoredBefore = chain.size > 0 && chain.anchored;
   end();
@@ -10248,6 +10284,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const seen = /* @__PURE__ */ new Set();
   const admit = (list, keep, quota, walk = false, shareMs = Infinity) => {
     const t0 = performance.now();
+    if (walk && list.length > keep)
+      return { docs: [], cut: false, used: 0, ms: 0, unchecked: [] };
     const sorted = list.filter((j) => typeof j === "string").slice(0, MAX_EXAMINED_PER_RELAY * 4).map((j) => {
       try {
         const p = decodeJws(j).payload;
@@ -10287,7 +10325,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
           throw e;
       }
     }
-    const unchecked = walk && list.length <= keep ? sorted.slice(used).map((x) => x.h) : [];
+    const unchecked = walk ? sorted.slice(used).map((x) => x.h) : [];
     return { docs: out, cut, used, ms: performance.now() - t0, unchecked };
   };
   const accepted = [];
@@ -10318,6 +10356,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / 2 / relays.length]));
   const spent = (r) => walkTimeLeft.get(r) <= 0 || walkLeft.get(r) <= 0;
   const walkUnchecked = /* @__PURE__ */ new Set();
+  const walkSupplied = /* @__PURE__ */ new Set();
   const fetchEach = async (f, keep, walk = false) => {
     const asked = walk ? relays.filter((r) => !spent(r)) : relays;
     if (walk && asked.length === 0)
@@ -10342,6 +10381,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
         walkTimeLeft.set(r, walkTimeLeft.get(r) - a.ms);
         for (const h of a.unchecked)
           walkUnchecked.add(h);
+        if (a.docs.length > 0)
+          walkSupplied.add(r);
       }
       return { answered: res !== void 0, ...a };
     });
@@ -10371,15 +10412,19 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     place(page);
     end();
   }
+  let probeUnanswered = false;
   if (chainOf && stalled && gaps.length > 0) {
     const need = lowestGap().need;
     const probed = relays.filter(spent);
     const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], need, CHAIN_WALK_PAGE), timeoutMs) })));
-    for (const { r, res } of answers)
+    for (const { r, res } of answers) {
+      if (res === void 0 && walkSupplied.has(r))
+        probeUnanswered = true;
       for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked)
         walkUnchecked.add(h);
+    }
   }
-  const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || gaps.some((g) => walkUnchecked.has(g.need));
+  const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
@@ -10394,10 +10439,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     }
     jumpTo = newest.jws;
   }
-  const pending = incomplete && newest !== void 0 ? newest : void 0;
-  const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && (pending === void 0 || !chain.notePending(pending));
+  const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
+  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : c.clearPending();
+  const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && !pendingChange(chain);
   const jumped = unchanged ? false : await store2.updateIdentity(userId, (cur) => {
-    const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur) : new IdentityChain(userId);
+    const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur, { now, skewSec: opts.skewSec }) : new IdentityChain(userId);
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
@@ -10412,12 +10458,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
       didJump = true;
     }
-    const narrowed = pending !== void 0 && c.size > 0 && c.notePending(pending);
+    const narrowed = c.size > 0 && pendingChange(c);
     if (accepted.length === 0 && !didJump && !narrowed && cur)
       return { result: false };
     return { next: c.toStored(), result: didJump };
   });
-  const view = await getIdentityView(store2, userId);
+  const view = await getIdentityView(store2, userId, { now });
   if (!view)
     return fail("identity-unknown", `no usable identity document for ${userId}`);
   if (!incomplete && newest !== void 0 && view.head.ver < newest.ver) {
@@ -10478,18 +10524,20 @@ async function reverifyFriendshipForApproval(store2, proof, fetch2, opts) {
   reverified.set(out, out.reverifiedAt);
   return out;
 }
-async function getIdentityView(store2, userId) {
-  const stored2 = await store2.getIdentity(userId);
-  if (!stored2 || stored2.versions.length === 0)
+async function getIdentityView(store2, userId, opts = {}) {
+  const raw = await store2.getIdentity(userId);
+  if (!raw || raw.versions.length === 0)
     return void 0;
-  const key = `${stored2.historyGap ? "g" : "a"}:${jwsHash(stored2.versions.join("."))}:${stored2.pendingHead !== void 0 ? jwsHash(stored2.pendingHead) : ""}`;
+  const pendingHeads = opts.ignorePending ? [] : usablePendingHeads(raw, { now: opts.now });
+  const stored2 = { ...raw, pendingHeads };
+  const key = `${stored2.historyGap ? "g" : "a"}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
   let cache2 = viewCache.get(store2);
   if (!cache2)
     viewCache.set(store2, cache2 = /* @__PURE__ */ new Map());
   const hit = cache2.get(userId);
   if (hit && hit.key === key)
     return frozenCopy(hit.view);
-  const view = IdentityChain.fromStored(stored2).view();
+  const view = IdentityChain.fromStored(stored2, { now: opts.now }).view();
   cache2.set(userId, { key, view });
   if (cache2.size > VIEW_CACHE_MAX)
     cache2.delete(cache2.keys().next().value);
@@ -21157,7 +21205,7 @@ function certLabel(cert) {
 }
 async function ownChain(app) {
   const stored2 = await app.store.getIdentity(app.userId);
-  return stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored(stored2) : void 0;
+  return stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored({ ...stored2, pendingHeads: [] }) : void 0;
 }
 async function preRotationHead(app) {
   const chain = await ownChain(app);
@@ -26663,8 +26711,13 @@ var init_app = __esm({
       }
       // -------------------------------------------------------------------------
       // Identity documents (§2.5, §5.6)
+      /**
+       * Our own identity's view. Pending heads (core #35) never narrow it: they are for trusting others'
+       * devices, and a version only the identity key signed must not stop this device from editing or
+       * rotating the identity (#65 review M1).
+       */
       ownView() {
-        return getIdentityView(this.store, this.userId).then((v) => {
+        return getIdentityView(this.store, this.userId, { ignorePending: true }).then((v) => {
           if (!v) throw new CliError("no_identity", "this device holds no identity document for its user");
           return v;
         });
@@ -26903,7 +26956,7 @@ var init_app = __esm({
         }
         const head = view.head;
         const stored2 = await this.store.getIdentity(this.userId);
-        const plan = stored2 && merges.length > 0 ? planReadd(IdentityChain.fromStored(stored2), preTips, unionDevices, view.devices, head.hash, stored2.denied ?? []) : { readd: [], skipped: [] };
+        const plan = stored2 && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored2, pendingHeads: [] }), preTips, unionDevices, view.devices, head.hash, stored2.denied ?? []) : { readd: [], skipped: [] };
         for (const d of plan.skipped) this.warn(`device ${d} was dropped by the merge of your identity document's branches; link it again (this device's copy of the history can't prove it wasn't revoked)`);
         const readd = plan.readd;
         const devices2 = [...view.devices, ...readd].slice(0, MAX_DEVICES);
