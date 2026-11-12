@@ -2919,6 +2919,37 @@ export function isJobDir(dir: string): boolean {
   return /^(\/|[A-Za-z]:[\\/])/.test(dir) && parts.length >= 3 && parts[parts.length - 2] === 'jobs' && /^[\w.-]{1,128}$/.test(parts[parts.length - 1] as string) && !/[\0\n]/.test(dir)
 }
 
+/** What Claude Code's own folders for this session are found from (scratchEnv). */
+export type ScratchWhere = {
+  /** The engine session's id (`$.session.id()`): Claude Code names the session's folders by it. */
+  sid?: string
+  /** CLAUDE_CONFIG_DIR, else `<home>/.claude`. */
+  config?: string
+  home?: string
+  /** The temporary roots Claude Code may use (CLAUDE_CODE_TMPDIR, its TMPDIR, /tmp). */
+  tmp: readonly (string | undefined)[]
+  /** CLAUDE_JOB_DIR, used only when it has a job folder's shape (isJobDir). */
+  job?: string
+}
+
+/**
+ * P2P_SESSION_SCRATCH for the CLI (packages/p2p projects.ts SessionScratch): this session's id and
+ * where Claude Code keeps its per-session folders (`<tmp>/claude-<uid>/<project>/<sid>`,
+ * `<config>/projects/<project>/<sid>`, the job folder). The CLI checks every one of them on real
+ * paths and matches the exact id; a path there binds no project of its own. Undefined without an id.
+ */
+export function scratchEnv(w: ScratchWhere): string | undefined {
+  const abs = (x: string | undefined) => (typeof x === 'string' && x.length <= 4096 && /^(\/|[A-Za-z]:[\\/])/.test(x) && !/[\0\n]/.test(x) ? x.replace(/(.)[\\/]+$/, '$1') : undefined)
+  if (typeof w.sid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(w.sid)) return undefined
+  const home = abs(w.home)
+  const config = abs(w.config) ?? (home ? `${home}${/^[A-Za-z]:\\/.test(home) ? '\\' : '/'}.claude` : undefined)
+  const tmp = [...new Set(w.tmp.map(abs).filter((x): x is string => x !== undefined))].slice(0, 4)
+  const job = w.job && isJobDir(w.job) ? abs(w.job) : undefined
+  if (config === undefined && tmp.length === 0) return undefined
+
+  return JSON.stringify({ sid: w.sid, tmp, ...(config ? { config } : {}), ...(job ? { job } : {}) })
+}
+
 /** Whether `path` is `dir` or under it (either separator, case-insensitive on a drive path). */
 export function isUnder(path: string, dir: string): boolean {
   const norm = (x: string) => x.replace(/\\/g, '/').replace(/\/+$/, '')

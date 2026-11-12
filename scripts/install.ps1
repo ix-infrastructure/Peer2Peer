@@ -149,8 +149,19 @@ if ($true) {
     }
 
     # npm's global folder: on Windows packages go into <prefix>\node_modules and shims into <prefix>.
-    $prefix = ([string](Invoke-Native $npmExe @('prefix', '-g') | Select-Object -First 1)).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $prefix) { throw "couldn't read npm's global folder (npm prefix -g)" }
+    # npm masks anything in its output that looks like a UUID (8-4-4-4-12 hex) or an npm token
+    # as "***" (@npmcli/redact), so `npm prefix -g` prints a path that doesn't exist when one of
+    # its folders is named like that. That is refused, before anything is installed. (Asking npm
+    # another way, through `npm exec -c`, would run in the current folder's project context: its
+    # .npmrc and node_modules\.bin could pick the shell or fake the folder.) The path must also be
+    # fully qualified: C:\... or \\server\share\... ([IO.Path]::IsPathRooted accepts C:foo and \foo).
+    $prefixLines = @(Invoke-Native $npmExe @('prefix', '-g') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0 -or $prefixLines.Count -eq 0) { throw "couldn't read npm's global folder (npm prefix -g)" }
+    $prefix = $prefixLines -join ' '
+    $qualified = if ($onWindowsHost) { '\A(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)' } else { '\A/' }
+    if ($prefixLines.Count -ne 1 -or $prefix.Contains('***') -or $prefix -notmatch $qualified) {
+        throw "npm printed its global folder as '$prefix', which isn't a usable path (npm hides folder names that look like IDs as ***). Nothing was installed. Either give npm a folder of your own without such a name, add it to your PATH, and run this again: npm config set prefix `"`$env:APPDATA\npm`"; or install directly: npm install -g $($specs -join ' ')"
+    }
     $cliDir = Join-Path (Join-Path (Join-Path $prefix 'node_modules') '@peer2peer') 'cli'
     $writable = Get-Detected 'P2P_DETECT_PREFIX_WRITABLE' {
         if ($DryRun) { return 'unchecked' }

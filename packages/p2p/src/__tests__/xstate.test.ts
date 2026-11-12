@@ -78,12 +78,12 @@ describe("checkExtension: state declarations", () => {
   it("only kinds of its own namespace, with a valid cap and ttl", () => {
     expect(checkExtension({ extension: testExt }, "ix").ext).toBe(testExt);
     const bad = (state: unknown) => checkExtension({ extension: { ...testExt, state } }, "ix").why;
-    expect(bad({ "x:kartr.badge": {} })).toMatch(/not an x:ix/);
+    expect(bad({ "x:acme.badge": {} })).toMatch(/not an x:ix/);
     expect(bad({ "x:ix.footprint": { ttl: 5 } })).toMatch(/ttl/);
     expect(bad({ "x:ix.footprint": { ttl: 99999 } })).toMatch(/ttl/);
-    // x:kartr.<32 characters> is a valid kind, but `<kind>.v1` would be over 40 characters.
-    const long = `x:kartr.${"a".repeat(32)}`;
-    expect(checkExtension({ extension: { ...testExt, ns: "kartr", state: { [long]: {} } } }, "kartr").why).toMatch(/too long for its cap/);
+    // x:acme.<32 characters> is a valid kind, but `<kind>.v1` would be over 40 characters.
+    const long = `x:acme.${"a".repeat(32)}`;
+    expect(checkExtension({ extension: { ...testExt, ns: "acme", state: { [long]: {} } } }, "acme").why).toMatch(/too long for its cap/);
     expect(bad([])).toMatch(/malformed/);
   });
 });

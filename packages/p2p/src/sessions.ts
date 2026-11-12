@@ -75,6 +75,8 @@ import {
   sessionDirs,
   sessionWorkdir,
   MAX_SESSION_DIRS,
+  SCRATCH_ENV,
+  sessionScratch,
   overWhys,
   privateRemedy,
   shareHint,
@@ -1329,7 +1331,9 @@ export async function bindFromEnv(app: App, sid: string, extra: readonly string[
   // Past the cap in folders named on the command line too: private, never the first N.
   const over = new Set<OverWhy>([...why, ...(o.over ?? [])]);
   if (extra.length > MAX_SESSION_DIRS) over.add("folders");
-  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over.size > 0 ? { over: [...over] } : {}) });
+  // The session's own scratch, as its front end names it: only a front end holding the person token.
+  const scratch = app.front === true ? sessionScratch(app.env[SCRATCH_ENV]) : undefined;
+  await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...(o.person ? { person: true } : {}), ...(over.size > 0 ? { over: [...over] } : {}), ...(scratch ? { scratch } : {}) });
 }
 
 /** A front end's `--project-dirs-over` as reasons: a bare flag (an older front end) is `front`. */

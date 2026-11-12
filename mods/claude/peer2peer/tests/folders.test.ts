@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { isMutating, markerExtras, parseMarkerProbe, parsePeersArgs, sessionShowText, shellPaths, toolPathsAll } from '../hooks/lib'
+import { isMutating, markerExtras, parseMarkerProbe, parsePeersArgs, scratchEnv, sessionShowText, shellPaths, toolPathsAll } from '../hooks/lib'
 import { ran, settle, sidOf, slash, start, world, type World } from './world'
 
 const handed = (w: World, verb = 'status') => ran(w, verb).flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':').filter(Boolean))
@@ -287,5 +287,30 @@ describe('/peers session: this session\'s bindings, for the person', () => {
   test('sessionShowText: a session bound to nothing yet, and a shared one', () => {
     expect(sessionShowText({ policy: 'none', projects: [], reasons: [] })).toContain('not bound to any project yet')
     expect(sessionShowText({ policy: 'shared', projects: [{ name: 'web', kind: 'git', remote: 'github.com/acme/web', policy: 'shared', circles: [{ cid: 'c_t', name: 'team', joined: true }] }], reasons: [] })).toContain('web (git github.com/acme/web): shared with circle team')
+  })
+})
+
+describe("this session's own scratch: the mod names it, the CLI checks it", () => {
+  test('scratchEnv: the engine session id, Claude Code\'s config and temporary roots, and a job folder only with its shape', () => {
+    const j = JSON.parse(scratchEnv({ sid: 'ec76abec-0b12-44d8-977c-705a1cdb2537', home: '/home/u', tmp: [undefined, '/tmp/', '/tmp', 'relative/tmp'], job: '/home/u/.claude/jobs/ec76abec' }) ?? '{}')
+    expect(j).toEqual({ sid: 'ec76abec-0b12-44d8-977c-705a1cdb2537', tmp: ['/tmp'], config: '/home/u/.claude', job: '/home/u/.claude/jobs/ec76abec' })
+    // CLAUDE_CONFIG_DIR wins over <home>/.claude.
+    expect(JSON.parse(scratchEnv({ sid: 'ec76abec-0b12', config: '/cfg/claude', home: '/home/u', tmp: [] }) ?? '{}').config).toBe('/cfg/claude')
+    // A CLAUDE_JOB_DIR that isn't a job folder is left out (the CLI also wants it in <config>/jobs, named by the id's start).
+    expect(JSON.parse(scratchEnv({ sid: 'ec76abec-0b12', home: '/home/u', tmp: [], job: '/work/secret' }) ?? '{}').job).toBeUndefined()
+    // No engine session id, or one of another shape: nothing, so nothing is skipped.
+    for (const sid of [undefined, '', '../x', 'short', 'a b c d e f g h']) expect(scratchEnv({ sid, home: '/home/u', tmp: ['/tmp'] })).toBeUndefined()
+    expect(scratchEnv({ sid: 'ec76abec-0b12', tmp: [] })).toBeUndefined()
+  })
+
+  test('every binding run carries it, for this engine session', async ($, on) => {
+    const w = world(on, { gitTop: '/work/web', env: { HOME: '/home/u', CLAUDE_JOB_DIR: JOB, TMPDIR: '/var/tmp/x' } })
+    await start($, w)
+    await $.tool.call({ tool: 'Read', tool_use_id: 's1', file_path: `/tmp/claude-1000/-work-web/${w.sessionId}/tasks/b1.output` } as never)
+    await settle(w, () => handed(w).some(d => d.includes('/tasks')))
+    const run = ran(w, 'status').at(-1)
+    expect(JSON.parse(run?.env?.P2P_SESSION_SCRATCH ?? '{}')).toEqual({ sid: w.sessionId, tmp: ['/var/tmp/x', '/tmp'], config: '/home/u/.claude', job: JOB })
+    // The folder still goes to the CLI, which decides on real paths (a symlink out binds its target).
+    expect(handed(w)).toContain(`/tmp/claude-1000/-work-web/${w.sessionId}/tasks`)
   })
 })

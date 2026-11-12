@@ -17,7 +17,7 @@
 
 | Understand it | |
 |---|---|
-| [Architecture](architecture.md) | The three layers (core, Ix, Kartr) and the rules that keep them apart |
+| [Architecture](architecture.md) | The two layers (core and the optional Ix extension) and the rules that keep them apart |
 | [Protocol](protocol.md) | The normative wire spec, v3 draft 3, with its review log |
 | [Compatibility](compatibility.md) | How peers on different versions interoperate: the policy, the `crit` rule, device caps, and the cross-version matrix |
 | [Threat model](security/threat-model.md) | What's protected, from whom, what relays see, and the known limits |

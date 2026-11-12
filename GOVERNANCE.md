@@ -68,7 +68,7 @@ The full policy, and what each release must interoperate with, is [docs/compatib
 
 ### Extension namespaces
 
-New namespaces (`x:<ns>.*`) are registered by PR to §8.3 of the spec, with a SPEC.md for the kinds and a plain-text fallback for each. Registration is first come, first served, for any project that follows §8. The `ix` and `kartr` namespaces are reserved by their current registrations.
+New namespaces (`x:<ns>.*`) are registered by PR to §8.3 of the spec, with a SPEC.md for the kinds and a plain-text fallback for each. Registration is first come, first served, for any project that follows §8. The `ix` namespace is reserved by its current registration.
 
 ## Releases
 
@@ -76,7 +76,7 @@ Maintainers cut releases following [docs/releasing.md](docs/releasing.md): locks
 
 ## Relationship with Ix Infrastructure
 
-Ix Infrastructure, Inc. created Peer2Peer, holds the copyright for its own contributions, employs maintainers, and sells optional add-ons ([Kartr](README.md#free-core-optional-add-ons)). Ix Infrastructure commits to this:
+Ix Infrastructure, Inc. created Peer2Peer, holds the copyright for its own contributions, employs maintainers, and sells optional add-ons ([free core, optional add-ons](README.md#free-core-optional-add-ons)). Ix Infrastructure commits to this:
 
 - the core network (messaging, status, friends, circles, the clients and self-hosting) stays free and Apache-2.0;
 - paid features never gate the network, and extensions can never grant authorisation;
