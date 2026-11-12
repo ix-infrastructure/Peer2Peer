@@ -60,6 +60,39 @@ describe('Ix install commands (pure)', () => {
     ]) expect(isIxInstallCommand(c), c).toBe(true)
   })
 
+  test('fails toward asking: a stray quote, comment, heredoc or escape never hides a later install', () => {
+    for (const c of [
+      "# Ix isn't installed; install it\nnpm i -g @ix/cli",
+      "# don't forget\nbrew install ix\n# won't hurt",
+      "cat <<EOF\nit's fine\nEOF\nnpm i -g @ix/cli",
+      "echo $'it\\'s'; npm i -g @ix/cli",
+      'Write-Host "a`"b"; npm i -g @ix/cli',
+      'echo "x; npm i -g @ix/cli',
+      // A comment never clears an install on its own line or a later one.
+      '# npm i -g @ix/cli',
+      "echo 'done' # it's\nbrew install ix",
+    ]) expect(isIxInstallCommand(c), JSON.stringify(c)).toBe(true)
+  })
+
+  test('every npm or brew word in a segment is checked, not only the first', () => {
+    for (const c of ['bun --version brew install ix', 'npm run build brew install ix', 'yarn --help npm i -g @ix/cli', 'brew info x brew install ix']) {
+      expect(isIxInstallCommand(c), c).toBe(true)
+    }
+  })
+
+  test("a shell's, eval's or su's string argument is code: read, never cleared", () => {
+    for (const c of [
+      'bash -c "npm i -g @ix/cli"',
+      "sh -c 'brew install ix'",
+      'eval "npm i -g @ix/cli"',
+      'zsh -lc "cd /tmp; npm i -g @ix/cli"',
+      'pwsh -Command "npm i -g @ix/cli"',
+      'su -c "brew install ix" admin',
+      'echo "$(npm i -g @ix/cli)"',
+      'echo "`brew install ix`"',
+    ]) expect(isIxInstallCommand(c), c).toBe(true)
+  })
+
   test('PowerShell .NET downloads, and ix-infra.com on an explicit port', () => {
     for (const c of [
       'iex ((New-Object Net.WebClient).DownloadString("https://ix-infra.com/install.ps1"))',
@@ -123,6 +156,12 @@ describe('Ix install commands (pure)', () => {
       k => `curl ix-infra.com:${'4'.repeat(10_000 * k)}`,
       k => `brew ${'"brew '.repeat(2_000 * k)}`,
       k => 'webclient '.repeat(1_000 * k) + 'ix-infra.com',
+      k => 'npm '.repeat(2_500 * k) + 'i @ix/cli',
+      k => 'brew '.repeat(2_000 * k) + 'install ix',
+      k => `"${'npm i @ix/cli '.repeat(700 * k)}"`,
+      k => `#${"'".repeat(10_000 * k)}\nbrew install ix`,
+      k => `bash -c "${'\\"'.repeat(5_000 * k)}`,
+      k => "$'".repeat(5_000 * k) + ' npm i @ix/cli',
     ]
     // The best of five runs: a stray GC pause is no signal.
     const best = (input: string) => {

@@ -3696,11 +3696,13 @@ export function queuedNote(address: string, r: { state?: string; lastSeen?: numb
  * agent makes, so no regular expression here may backtrack). Not a parser: a command that builds
  * the URL or package name at run time isn't seen (the person's own permission rules still apply).
  *
- * Two readings of each command:
- *  - script URLs: segments split on every newline, `;`, `&` and `|` (quoted or not, so a fetch
- *    inside `bash -c "…"` is seen), words on blanks;
- *  - npm and brew: segments split on unquoted separators only, words on unquoted blanks, so text
- *    inside quotes (`git commit -m "brew install ix"`) is one word and never a command.
+ * It fails toward asking. Every check reads the command loosely: segments split on every newline,
+ * `;`, `&` and `|` (quoted or not, so a fetch inside `bash -c "…"` is seen), words on blanks, and
+ * every npm or brew word in a segment is a candidate. A quote scan then only clears a candidate
+ * whose npm or brew word sits inside a quote that cleanly opens and closes and holds no code (a
+ * shell's or eval's string argument, `$(…)` or backticks inside double quotes): `git commit -m
+ * "brew install ix"` doesn't ask. When the scan isn't sure (a quote still open at the end, as an
+ * apostrophe in a heredoc leaves it), nothing is cleared. A comment never clears anything.
  */
 const IX_SCRIPT_HOSTS: readonly (readonly [host: string, under: string])[] = [
   ['ix-infra.com', ''],
@@ -3714,6 +3716,8 @@ const NPM_INSTALL = new Set(['i', 'in', 'install', 'add'])
 const BREW_VERBS = new Set(['tap', 'install', 'reinstall', 'upgrade'])
 const URL_MARKS = ['ix-infra.com', 'ix-infrastructure/ix']
 const RUN_MARKS = ['@ix/cli', 'brew']
+/** Programs whose string argument is code: a quote after one of them is never cleared. */
+const CODE_RUNNERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'pwsh', 'powershell', 'cmd', 'eval', 'source', 'su', 'runuser', 'ssh'])
 const TRIM = new Set(['"', "'", '`', '(', ')', '<', '$', '{', '}'])
 /** A URL path character as the matcher reads one (lower-cased input): a-z, 0-9, `_`, `.`, `/`, `-`. */
 const isUrlChar = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 46 || c === 47 || c === 45
@@ -3755,53 +3759,66 @@ function looseWords(segment: string): string[] {
 }
 
 /**
- * The command's segments and words as a shell reads quotes, in one pass: segments split on
- * unquoted newlines, `;`, `&` and `|`; words on unquoted blanks, their quote characters dropped
- * (`"@ix/cli@latest"` is `@ix/cli@latest`; `"brew install ix"` is one word); a backslash outside
- * single quotes escapes the next character.
+ * Where the command's quoted text is plain data, in one pass: a mask of the characters inside quotes
+ * that cleanly open and close and hold no code, and whether a quote was still open at the end (the
+ * scan wasn't sure: then nothing is cleared). Single quotes, double quotes, bash's `$'…'` (backslash
+ * escapes), a backslash escape outside single quotes, and PowerShell's backtick escape inside double
+ * quotes are read. A quote is code, never cleared, after a shell, eval or the like in its segment, or
+ * when it holds `$(` or a backtick (inside double quotes). An unquoted `#` at a word's start is a
+ * comment to the end of its line: skipped, never cleared.
  */
-function quotedSegments(text: string): string[][] {
-  const segments: string[][] = []
-  let words: string[] = []
-  let word = ''
-  let inWord = false
+function plainQuotes(text: string): { mask: Uint8Array; isOpen: boolean } {
+  const mask = new Uint8Array(text.length)
   let quote = 0
+  let start = 0
+  let isCode = false
+  let runsCode = false
+  let word = ''
+  let atWordStart = true
   const endWord = () => {
-    if (inWord) {
-      const w = bareWord(word)
-      if (w !== '') words.push(w)
-    }
+    if (word !== '' && CODE_RUNNERS.has(programName(bareWord(word)))) runsCode = true
     word = ''
-    inWord = false
   }
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i)
     if (quote !== 0) {
-      if (c === quote) quote = 0
-      else if (c === 92 && quote === 34 && i + 1 < text.length) word += text[++i]
-      else word += text[i]
+      if (quote === 34 && (c === 96 || (c === 36 && text.charCodeAt(i + 1) === 40))) isCode = true
+      if ((quote === 34 && (c === 92 || c === 96)) || (quote === 1 && c === 92)) {
+        i++
+        continue
+      }
+      if (c === (quote === 1 ? 39 : quote)) {
+        if (!isCode) mask.fill(1, start, i)
+        quote = 0
+      }
       continue
     }
-    if (c === 34 || c === 39) {
-      quote = c
-      inWord = true
-    } else if (c === 92 && i + 1 < text.length) {
-      word += text[++i]
-      inWord = true
+    if (c === 35 && atWordStart) {
+      while (i + 1 < text.length && text.charCodeAt(i + 1) !== 10) i++
+      continue
+    }
+    if (c === 39 || c === 34) {
+      quote = c === 39 && i > 0 && text.charCodeAt(i - 1) === 36 ? 1 : c
+      start = i + 1
+      isCode = runsCode
+      atWordStart = false
+    } else if (c === 92) {
+      i++
+      atWordStart = false
     } else if (isSeparator(c)) {
       endWord()
-      segments.push(words)
-      words = []
-    } else if (isBlank(c)) endWord()
-    else {
+      runsCode = false
+      atWordStart = true
+    } else if (isBlank(c)) {
+      endWord()
+      atWordStart = true
+    } else {
       word += text[i]
-      inWord = true
+      atWordStart = false
     }
   }
-  endWord()
-  segments.push(words)
 
-  return segments
+  return { mask, isOpen: quote !== 0 }
 }
 
 /** Whether the segment names an Ix install script by URL (any occurrence; ix-infra.com on any port). */
@@ -3838,19 +3855,57 @@ function fetchesIxScript(segment: string): boolean {
   return FETCH_MARKS.some(m => segment.includes(m)) || looseWords(segment).some(w => FETCHERS.has(programName(w)))
 }
 
-/** An npm-family install of the Ix CLI, or a brew tap/install of Ix, wherever npm or brew sits in the words. */
-function runsIxInstaller(words: readonly string[]): boolean {
-  const at = words.findIndex(w => {
+/** Words split on blanks (bareWord-trimmed), with the offset in the command of each one's first kept character. */
+function wordsAt(segment: string, base: number): { words: string[]; at: number[] } {
+  const words: string[] = []
+  const at: number[] = []
+  let from = 0
+  for (let i = 0; i <= segment.length; i++) {
+    if (i < segment.length && !isBlank(segment.charCodeAt(i))) continue
+    if (i > from) {
+      let a = from
+      while (a < i && TRIM.has(segment[a] ?? '')) a++
+      const w = bareWord(segment.slice(from, i))
+      if (w !== '') {
+        words.push(w)
+        at.push(base + a)
+      }
+    }
+    from = i + 1
+  }
+
+  return { words, at }
+}
+
+const isIxCli = (w: string) => w === '@ix/cli' || w.startsWith('@ix/cli@')
+const isIxFormula = (w: string) => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/')
+
+/**
+ * The offsets of every npm or brew word in the segment that installs Ix from there on: npm (pnpm,
+ * yarn, bun) with an install verb and `@ix/cli` later in the segment; brew whose next non-flag word
+ * is tap/install/reinstall/upgrade with an Ix formula after it. One backward pass (every npm or brew
+ * word is checked, still linear).
+ */
+function installerHits(words: readonly string[], at: readonly number[]): number[] {
+  const hits: number[] = []
+  let verbAfter = false
+  let cliAfter = false
+  let formulaAfter = false
+  let nextArg = -1
+  const formulaAfterAt: boolean[] = new Array<boolean>(words.length).fill(false)
+  for (let k = words.length - 1; k >= 0; k--) {
+    const w = words[k] ?? ''
     const p = programName(w)
+    if (NPM_FAMILY.has(p) && verbAfter && cliAfter) hits.push(at[k] ?? 0)
+    if (p === 'brew' && nextArg >= 0 && BREW_VERBS.has(words[nextArg] ?? '') && formulaAfterAt[nextArg]) hits.push(at[k] ?? 0)
+    formulaAfterAt[k] = formulaAfter
+    if (NPM_INSTALL.has(w)) verbAfter = true
+    if (isIxCli(w)) cliAfter = true
+    if (isIxFormula(w)) formulaAfter = true
+    if (!w.startsWith('-')) nextArg = k
+  }
 
-    return NPM_FAMILY.has(p) || p === 'brew'
-  })
-  if (at < 0) return false
-  const rest = words.slice(at + 1)
-  if (programName(words[at] ?? '') !== 'brew') return rest.some(w => NPM_INSTALL.has(w)) && rest.some(w => w === '@ix/cli' || w.startsWith('@ix/cli@'))
-  const args = rest.filter(w => !w.startsWith('-'))
-
-  return BREW_VERBS.has(args[0] ?? '') && args.slice(1).some(w => w === 'ix' || w === 'ix-infrastructure/ix' || w.startsWith('ix-infrastructure/ix/'))
+  return hits
 }
 
 /** Whether a shell command installs Ix: an agent's call of it goes to the person's permission prompt. Linear in the command's length. */
@@ -3859,8 +3914,19 @@ export function isIxInstallCommand(command: string): boolean {
   // Line continuations join their lines (one fixed-shape alternative each: no backtracking).
   const text = command.toLowerCase().replace(/\\\r?\n|`\r?\n/g, ' ')
   if (URL_MARKS.some(m => text.includes(m)) && text.split(/[\n;&|]/).some(fetchesIxScript)) return true
+  if (!RUN_MARKS.some(m => text.includes(m))) return false
+  // Candidates from the loose reading; the quote scan only clears one that is plainly quoted data.
+  const hits: number[] = []
+  let base = 0
+  for (const segment of text.split(/[\n;&|]/)) {
+    const { words, at } = wordsAt(segment, base)
+    if (words.length > 0) for (const h of installerHits(words, at)) hits.push(h)
+    base += segment.length + 1
+  }
+  if (hits.length === 0) return false
+  const { mask, isOpen } = plainQuotes(text)
 
-  return RUN_MARKS.some(m => text.includes(m)) && quotedSegments(text).some(words => words.length > 0 && runsIxInstaller(words))
+  return isOpen || hits.some(h => mask[h] !== 1)
 }
 
 /** The reason the permission prompt shows for an agent's Ix install (and the model reads where nobody can be asked). */
