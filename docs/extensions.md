@@ -11,8 +11,8 @@ Extensions add optional features to Peer2Peer without changing the core network.
 
 When `p2p` loads `@peer2peer/ext-<ns>`, that code runs **inside the `p2p` process**, with access to `~/.p2p` and your keys. `ExtContext` is the API an extension is meant to use, but **it isn't a sandbox**. So loading is:
 
-- **opt-in:** `p2p extensions enable <ns>` (or `P2P_EXTENSIONS=<ns>` in your own shell). Nothing is enabled by default;
-- **limited to registered namespaces** (`ix`, `kartr`);
+- **opt-in:** `p2p extensions enable <ns>` (or `P2P_EXTENSIONS=<ns>` in your own shell). Nothing is enabled until you enable it: `p2p setup` offers to enable `ix` only when it finds Ix and `@peer2peer/ext-ix` already installed, installs nothing, and needs your own consent;
+- **limited to registered namespaces** (protocol §8.3);
 - **limited to explicit directories:** `P2P_EXTENSION_PATH` entries and the CLI's own sibling `node_modules`. There's no walk-up, no `NODE_PATH` and no globals, and never the repository your agent is working in;
 - **announced** the first time it loads from a new location;
 - **degrading:** a missing or broken extension is a warning, and its kinds show their fallback.
@@ -29,11 +29,7 @@ In the Claude Code mod and the Codex bridge, the model can't enable extensions. 
 - **Footprints** (`x:ix.footprint`, a state kind): what each session and its subagents are changing as your Ix sees it (changed symbols, one hop downstream, regions), kept by peers as the session's latest value and never shown to a model. File, symbol and region names are hashed by default for every audience; readable names are opt-in per circle (`p2p ix config --circle <cid> names=plain`).
 - **Semantic conflicts:** flag peers changing files *connected* to yours in your Ix graph (`P2P_IX_SEMANTIC_CONFLICTS=1` in the Claude Code mod).
 
-Previewing what peers send needs only the extension. Sending impact reports, resolving references, importing notes and conflict detection need [Ix](https://github.com/ix-infrastructure/Ix) installed. Notes use `ix note` from Ix Pro. The Claude Code mod bundles the extension, but it stays off until you enable it.
-
-## Planned: Kartr (`kartr`, paid, for organisations)
-
-Not in this repository yet. Planned: a `kartr.attest` trust provider (a verified "this key is this person at this org" badge), managed circles that follow SSO, and a hosted relay. See the [roadmap](roadmap.md#organisations-kartr-paid-optional).
+Previewing what peers send needs only the extension. Sending impact reports, resolving references, importing notes and conflict detection need [Ix](https://github.com/ix-infrastructure/Ix) installed. Importing notes and graph memory use the open-source `ix note` (Ix after 0.13.0) against your local graph only. The Claude Code mod bundles the extension, but it stays off until you enable it.
 
 ## Writing an extension
 

@@ -2,7 +2,7 @@
 
 `@peer2peer/cli` is the standalone `p2p` command for [Peer2Peer v3](../../docs/protocol.md). It gives you an identity with no account, friends and circles, end-to-end encrypted messages between agent sessions, and live session status. Everything goes over open relays that anyone can run.
 
-It is core software: it never imports Ix or Kartr (`node scripts/check-boundaries.mjs`).
+It is core software: it never imports Ix or an extension (`node scripts/check-boundaries.mjs`).
 
 ## Two friends in two minutes
 
@@ -215,7 +215,7 @@ Then this home becomes the new identity's; the old one is archived in `<home>/ro
 
 That is why loading is opt-in (`src/extensions.ts`):
 
-- **Which:** only the namespaces registered in docs/protocol.md §8.3 (`ix`, `kartr`), and only those you enabled: `p2p extensions enable ix` (writes `extensions: ["ix"]` to `<home>/config.json`; `p2p extensions disable ix` undoes it), or `P2P_EXTENSIONS=ix` set in your own shell for one environment (`none` turns all off; it overrides config.json; `config` defers to config.json, which is what the Claude mod passes so that only config.json opt-in counts for the `p2p` it runs). Anything else in the list is ignored with a warning. Nothing enabled, nothing loaded, even when a package is installed.
+- **Which:** only the namespaces registered in docs/protocol.md §8.3 (such as `ix`), and only those you enabled: `p2p extensions enable ix` (writes `extensions: ["ix"]` to `<home>/config.json`; `p2p extensions disable ix` undoes it), or `P2P_EXTENSIONS=ix` set in your own shell for one environment (`none` turns all off; it overrides config.json; `config` defers to config.json, which is what the Claude mod passes so that only config.json opt-in counts for the `p2p` it runs). Anything else in the list is ignored with a warning. Nothing enabled, nothing loaded, even when a package is installed.
 - **Where:** only explicit `node_modules` directories: each `P2P_EXTENSION_PATH` entry (a directory or its `node_modules`), then the CLI's own sibling `node_modules` when the CLI is installed as a package (a global `npm i -g @peer2peer/cli @peer2peer/ext-ix` puts both there). There is no walk-up through parent directories, no `NODE_PATH` and no global folders; the package's entry file must lie inside the package.
 - **Announced:** the first time an extension loads from a new location, `p2p` says so on stderr, with the resolved file (`<home>/extension-locations.json` remembers it).
 - **How:** the resolved file is loaded with a dynamic `import()` of its URL. That loader is the one computed import `check-boundaries` allows in core (with the committed bundle that inlines it); static and literal-dynamic imports of `@peer2peer/ext-*` stay forbidden, and no core `package.json` may list one.

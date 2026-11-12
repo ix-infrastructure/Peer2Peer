@@ -2,25 +2,45 @@
 
 > **Everything on this page is planned, not built**, unless it's marked ✅. The order is a rough priority, and the dates aren't promises. Protocol-level items go through the [RFC process](../GOVERNANCE.md#how-the-protocol-evolves) before any code merges, and their details may change there.
 
-Each item has an issue labelled `roadmap`: [roadmap issues](https://github.com/ix-infrastructure/Peer2Peer/issues?q=is%3Aissue+label%3Aroadmap). Comment on any issue, or pick one up.
+Each item has an issue labelled `roadmap`: [roadmap issues](https://github.com/ix-infrastructure/Peer2Peer/issues?q=is%3Aissue+label%3Aroadmap), with the short list in [#14](https://github.com/ix-infrastructure/Peer2Peer/issues/14). Comment on any issue, or pick one up.
 
 ## Where we are today ✅
 
+- **Released on npm:** `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, **v0.1.0** and **v0.1.1**, published with provenance and always at the same version ([CHANGELOG](../CHANGELOG.md), [releasing.md](releasing.md)). The relay install scripts are pinned to the v0.1.1 source.
 - Protocol **v3, draft 3**: identities, devices, rotation, friends, circles (including open circles), rosters, envelopes, open relays, short-code invites, profiles, proofs, status `caps` and `agents`.
-- The `p2p` CLI, the open relay, the Claude Code mod, the Codex bridge and the opt-in Ix extension, working end to end with integration tests over real relays.
+- The `p2p` CLI, the open relay, the Claude Code mod, the Codex bridge and the optional Ix extension, working end to end with integration tests over real relays.
 - **Invite links** that make someone a friend and join them to the circles you chose, in one step.
 - **`p2p tui`**, a full-screen terminal UI: people and their sessions, held items, messages, send and health.
-- **Compatibility across versions (protocol 3.1):** peers on different versions work together on every feature they share, and a feature only one side has drops out quietly. See [compatibility.md](compatibility.md).
+- **Compatibility across versions (protocol 3.1):** peers on different versions work together on every feature they share, and a feature only one side has drops out quietly. A cross-version matrix checks every pull request and release against the previous two releases. See [compatibility.md](compatibility.md).
 - **Per-person trust:** `p2p trust` decides whose messages reach a session that approves its own tool calls without being held.
 - **Members-only relays, and relays on any machine:** a relay can admit only its group, and one install script runs a relay on Linux, macOS, Windows or a small board, with a small-device preset. See [run-a-relay-on-any-machine.md](run-a-relay-on-any-machine.md).
 - **Delivery receipts** (`shown`, `held`, `declined`, …), end-to-end encrypted, and **offline delivery**: messages wait at the relays for an offline session, or in this device's outbox when no relay can be reached.
-- Release tooling for the `@peer2peer/*` npm packages, built and verified but **not yet published**.
+- **Project boundaries:** a session reaches only who every project it works in is shared with, and a private project keeps it private.
 
-## Launch
+New in **v0.1.1**:
 
-- **Public repository and first npm release** of `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, with provenance, and the relay image. A launch checklist tracks it, together with the known bugs to fix first.
+- **Message history** (`p2p history`, `/peers history`, the TUI's Messages screen): what this device sent and received, encrypted at rest and kept only on this device (30 days by default).
+- **Send to another session on the same device** (`p2p send --to "<you> [ref]"`), with your agent sessions' messages held like a peer's in a session that approves its own tool calls (`p2p own-agents`), and turn caps for your own sessions.
+- **Shares that cover subfolders** (`p2p project share --subfolders`, opt-in) and **`p2p session show`**, which says what a session is bound to, who it reaches and why it is private.
+- **Ix, optional and recommended:** `p2p setup` enables the `ix` extension when it finds Ix and `@peer2peer/ext-ix` already installed, with your consent, and says how to get them otherwise. Nothing is ever installed for you. `p2p doctor` has an Ix section.
+- **Local graph memory:** with the Ix extension enabled, your own sessions in shared projects are recorded into your **local** Ix graph as they run. Every Ix call goes through one graph-target chokepoint, which today is always local.
+
+## Ix as the context layer
+
+Epic [#41](https://github.com/ix-infrastructure/Peer2Peer/issues/41). Peer2Peer carries live events between agents and people, and Ix graphs are the durable context they point into: a local graph on every machine that has Ix, and optionally a shared graph for a team. The protocol core (`packages/core`, the relay, the wire format) stays free of Ix code, so the open network works for any client, and Ix stays optional.
+
+1. ✅ **Ix, optional and recommended** (v0.1.1). `p2p setup` detects Ix and `@peer2peer/ext-ix` and offers to enable the extension; it never installs anything. Without Ix everything still works, with today's fallbacks.
+2. ✅ **Local graph as memory** (v0.1.1). Sessions in shared projects are written into your local graph as they happen. Private projects are never recorded.
+3. **Shared graph** (next). A team graph in the cloud: a project shared with a circle writes its sessions, notes and context there, so every member's agents can query it as well as receive pushed events. Its API contract is settled first.
+4. **Real time over Peer2Peer, durable in the graph** (planned). Live events (status, messages, "changed X, affects Y") stay end-to-end encrypted envelopes, and each one links to graph nodes, so an agent can pull full context on demand.
+5. **Project boundaries apply to graphs** (planned; partly built). A private project never writes to a shared graph, and a shared project writes only to the shared graph of the circle it's shared with. The chokepoint this needs shipped in v0.1.1: every Ix call already resolves its graph target there, and every target is local until shared graphs exist.
+6. **An honest encryption story** (planned). Relays see only ciphertext; a cloud graph holds plaintext its operator can read. The docs and `p2p doctor` say which graph a project writes to (`p2p project show` and `p2p doctor` already print each project's graph target), and "local only" stays first class.
+
+## Relays
+
 - **Bring your own relay.** There's no public relay at launch: each group runs its own (one Docker container, small enough for a Raspberry Pi) or uses one a friend runs, and invite codes carry the inviter's relays. No relay is built into the source, so `p2p setup` takes your group's relay URL. A public relay may come later; the draft recipe is in [future/public-relay.md](future/public-relay.md).
-- **Relays on any hardware:** the Windows installer and the small-device preset verified on real machines, then a relay conformance kit, and possibly a very small relay for tiny devices.
+- **Relays on any hardware** ([#4](https://github.com/ix-infrastructure/Peer2Peer/issues/4)): the Windows installer and the small-device preset verified on real machines, then a relay conformance kit, and possibly a very small relay for tiny devices.
+- **Tailcat as a transport** ([#29](https://github.com/ix-infrastructure/Peer2Peer/issues/29); the direct path needs an RFC): reach a relay at home without a domain, a TLS certificate or port forwarding, through a WireGuard tunnel with NAT traversal, and later a direct path between two online devices, with the relay mailbox as the fallback. End-to-end envelope encryption stays the security boundary either way.
 
 ## A friendlier CLI
 
@@ -44,17 +64,19 @@ Every handle is **verified by the client** (DNS, HTTPS or GitHub, with caching a
 
 ## Core support for UIs
 
-Changes to core that let UIs, such as `p2p tui` and team web UIs, work well:
+Changes to core that let UIs, such as `p2p tui` and team web UIs, work well ([#6](https://github.com/ix-infrastructure/Peer2Peer/issues/6)):
 
-- **Send to a named session on the same device**, so a local UI can message your other local sessions.
+- ✅ **Send to a named session on the same device** (v0.1.1), so a local UI can message your other local sessions.
 - **Forward provenance:** a forwarded message carries its original sender, signed, so the receiving side applies *that* sender's hold and trust rules, not yours.
-- **The sending session id** on messages to someone else's session, so replies go to the right session.
+- **The sending session id** on messages to someone else's session, so replies go to the right session. For your own sessions, [RFC #48](https://github.com/ix-infrastructure/Peer2Peer/issues/48) proposes `fromRef` (the sending session) and `via` (whether you or an agent sent it), so another device of yours can deliver your own messages instead of holding them.
 - **Inbox sessions:** a long-lived UI session is left out when you address a person without naming a session, and its presence and receipts are opt-in.
 
-## After launch
+## Protocol and identity
 
 - **Protocol 3.1, step 2:** once peers are on 3.1, device caps go on by default, so peers learn each other's features directly (see [compatibility.md](compatibility.md)).
 - **An OS keychain backend** for keys (macOS Keychain, Windows Credential Manager, libsecret), with migration of existing keys, and `p2p doctor` reporting the backend in use. Today keys are in 0600 files under `~/.p2p`.
+- **Circle version floors** ([RFC #37](https://github.com/ix-infrastructure/Peer2Peer/issues/37)): an optional, signed minimum version for a circle ("this circle needs Peer2Peer ≥ X"), so a feature that only makes sense circle-wide can be required. Members below it stay members and are told to update; it takes effect at least 14 days after it is announced, and is never a maximum.
+- **Fork detection when a relay is cut short** ([#28](https://github.com/ix-infrastructure/Peer2Peer/issues/28)): find a forked identity document (a rotation signed with a stolen key, beside the real head) even when a relay's answer is cut short, without letting one hostile relay force every refresh incomplete.
 
 ## Footprints and overlap
 
@@ -101,10 +123,6 @@ Next:
 - **Generalising the MCP server**, so its hold rule can use a client-declared, verifiable approval mode instead of Codex-specific records.
 - **A Codex plugin package** (`.codex-plugin`) instead of the installer.
 - **Model-agnostic status summaries:** the Claude Code mod uses Haiku today. Let users pick any model, including a local one, or none.
-
-## Organisations (Kartr, paid, optional)
-
-Planned as a separate extension that plugs in through the extension seam (not in this repository yet): verified org badges, managed circles that follow SSO, and a hosted relay with uptime and data residency. Under the [architecture rules](architecture.md#the-rules-that-keep-the-layers-apart), it can never gate the free network or grant authorisation.
 
 ## Have an idea?
 

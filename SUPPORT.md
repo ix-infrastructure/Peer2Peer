@@ -30,7 +30,7 @@ If a command seems stuck, run it again with `P2P_DEBUG=1`. That logs every netwo
 | A protocol change | [Open a protocol RFC](https://github.com/ix-infrastructure/Peer2Peer/issues/new?template=protocol_rfc.yml) |
 | Running a relay for your group | [Relay operator issue](https://github.com/ix-infrastructure/Peer2Peer/issues/new?template=relay_operator.yml) |
 | **A security problem** | **Privately**, per [SECURITY.md](SECURITY.md). Never in a public issue |
-| Kartr (the paid org add-on) | [contact@ix-infra.com](mailto:contact@ix-infra.com) |
+| Paid add-ons from Ix Infrastructure | [contact@ix-infra.com](mailto:contact@ix-infra.com) |
 
 **Before posting**, remove anything secret: backup phrases, invite or link codes (`relay/XXXX-…`, `p2p-link:…`), anything from `~/.p2p`, and private repo or file names you don't want public. Addresses (`name@xxxx-xxxx-xxxx-xxxx`) and relay URLs are fine.
 

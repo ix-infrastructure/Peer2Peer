@@ -1,6 +1,6 @@
 # Releasing the npm packages
 
-Peer2Peer's free, open-source packages publish to the public npm registry under the `@peer2peer` scope. The scope belongs to the npm organization `peer2peer`, owned by the Ix Infrastructure company account. Paid company add-ons (such as ext-kartr) will publish under a separate `@ix-infra` scope later; nothing here touches it.
+Peer2Peer's free, open-source packages publish to the public npm registry under the `@peer2peer` scope. The scope belongs to the npm organization `peer2peer`, owned by the Ix Infrastructure company account. Any paid company add-on would publish under a separate scope; nothing here touches it.
 
 | Package | Directory | Depends on (at runtime) |
 | --- | --- | --- |
