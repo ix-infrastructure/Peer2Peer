@@ -14,7 +14,7 @@ import type { Readable, Writable } from "node:stream";
 import * as codex from "@peer2peer/codex-bridge";
 import { Command, CommanderError, Option } from "commander";
 import { App, type Io } from "./app.js";
-import { ownAgentsDeliver, ownAgentsDeliverFrom, ownDevicesDeliver, readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
+import { defaultRelays, normalizeRelays, ownAgentsDeliver, ownAgentsDeliverFrom, ownDevicesDeliver, readFileConfig, resolveHome, updateFileConfigField, type Env, type FileConfig } from "./config.js";
 import { receiptsSetting, sendReceipt } from "./receipts.js";
 import * as trustOps from "./trust.js";
 import { CliError, toErrorJson } from "./errors.js";
@@ -291,6 +291,91 @@ export function buildProgram(deps: ProgramDeps): Command {
     (await ops.listCircles(app)).filter(which).map((c) => ({ value: c.cid, label: c.name, detail: `${fmt.plural(c.members, "member")} · ${c.policy} · ${c.role}${c.isDefault ? " · default" : ""}` }));
   const heldChoices = async (app: App): Promise<Choice[]> => (await ops.listHeld(app)).map((h) => ({ value: h.id, label: `${h.address}: ${h.summary}`, detail: h.type }));
 
+  /** What `p2p join` says it did (setup's invite path says the same). */
+  const joinLines = (r: Awaited<ReturnType<Ops["joinCode"]>>): string[] => {
+    const lines = [`You and ${r.friend.address} are friends${r.delivered && r.delivered.relays.length === 0 ? " (they'll know once the accept is delivered: run this again later)" : ""}.`];
+    for (const c of r.circles) {
+      if (c.status === "joined" || c.status === "already") lines.push(`${c.status === "joined" ? "Joined" : "Already in"} "${c.name}"${c.default ? "; it is your default circle (new sessions start in it; running ones stay as they are)" : ""}.`);
+      else if (c.status === "pending") lines.push(`${r.friend.address} adds you to "${c.name}" when their client next runs; your next p2p command finishes the join.`);
+      else if (c.status === "held") lines.push(`Not joined "${c.name}" from this code (${c.reason}): if its invite comes, \`p2p held\` lists it for you to approve on its own.`);
+      else lines.push(`"${c.name}" couldn't be confirmed with a second member (§3.3): \`p2p held approve ${c.held}\` to join anyway.`);
+    }
+    return lines;
+  };
+
+  // ── setup's questions (a person at a terminal only: io.prompt) ──
+  /** One of `letters`, asked at most three times; then nothing is done. */
+  const askLetter = async (q: string, letters: string[]): Promise<string> => {
+    for (let i = 0; i < 3; i++) {
+      const a = (await io.prompt!(q)).trim().toLowerCase();
+      if (letters.includes(a)) return a;
+      io.err(`Type ${letters.slice(0, -1).join(", ")} or ${letters[letters.length - 1]}.`);
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup` again)");
+  };
+  const askNonEmpty = async (q: string, what: string): Promise<string> => {
+    for (let i = 0; i < 3; i++) {
+      const a = (await io.prompt!(q)).trim();
+      if (a !== "") return a;
+      io.err(`Type ${what}, or press Ctrl-C to stop.`);
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup` again)");
+  };
+  /** How a person with no identity here is joining (setup): before any key is made. */
+  const askJoinPath = async (p2p: string): Promise<"link" | "invite" | "new"> => {
+    io.out(
+      [
+        "How are you joining Peer2Peer?",
+        "  [l] I already use Peer2Peer on another device: link this device to it",
+        "  [i] I have an invite link or code from someone",
+        "  [n] Start a new identity (my first device)",
+        `(Already have an identity? Choose l: a new one here would be a second, separate identity. ${p2p} link join and ${p2p} join do the same later.)`,
+      ].join("\n"),
+    );
+    const a = await askLetter("Choose l, i or n: ", ["l", "i", "n"]);
+    return a === "l" ? "link" : a === "i" ? "invite" : "new";
+  };
+  /** The group's relay for a new identity (no default relay: bring your own), as a canonical wss:// URL. */
+  const askRelay = async (): Promise<string> => {
+    io.out("\nPeer2Peer has no default relay: each group runs its own. Ask whoever runs yours for its address (wss://…).");
+    for (let i = 0; i < 3; i++) {
+      let a = (await io.prompt!("Relay URL (wss://…): ")).trim();
+      // A bare host means wss:// (the only scheme a relay URL has); any other scheme is refused.
+      if (a !== "" && !/^[a-z][a-z0-9+.-]*:\/\//i.test(a)) a = `wss://${a}`;
+      if (!/^wss:\/\//i.test(a)) {
+        io.err(a === "" ? "Type the relay's address (wss://…)." : "A relay URL starts with wss:// (ws://, http:// and https:// aren't relay URLs).");
+        continue;
+      }
+      try {
+        return normalizeRelays([a])[0];
+      } catch (e) {
+        io.err(e instanceof CliError ? String(e.message) : `${a} is not a relay URL`);
+      }
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup --relay wss://…` again)");
+  };
+  /** setup, "I already use Peer2Peer on another device": `p2p link join`, inline. No identity is made here, so no backup is asked. */
+  const setupByLink = async (app: App, p2p: string): Promise<Output> => {
+    await projects.assertPersonForWidening(app, "link join", confirmTty);
+    io.out(
+      [
+        "",
+        "Link this device to the identity you already have:",
+        "  1. On your other device run:  p2p link start",
+        "     (Windows PowerShell: p2p.cmd link start; in Claude Code: /peers link start)",
+        "  2. It shows a one-time link code (p2p-link:…). Type it here.",
+      ].join("\n"),
+    );
+    const code = await askNonEmpty("Link code: ", "the link code");
+    const j = await ops.linkJoin(app, code, {});
+    io.out(`Compare code: ${j.compareCode}\nCheck the other device shows the same code, and confirm there. Waiting…`);
+    const r = await j.wait();
+    return {
+      json: { linked: r },
+      human: [`This device is now ${r.address} (${r.did})${r.keyholder ? ", a key holder" : ""}.`, "", `Check it: ${p2p} whoami    Invite someone: ${p2p} invite <their name>`].join("\n"),
+    };
+  };
+
   // ── identity ──────────────────────────────────────────────────────────────
   program
     .command("init")
@@ -334,7 +419,7 @@ export function buildProgram(deps: ProgramDeps): Command {
 
   program
     .command("setup")
-    .description("Get started: create your identity with sensible defaults (safe to run again)")
+    .description("Get started: link this device to your identity, join with an invite, or create a new identity (safe to run again)")
     .option("--name <name>", "Your display name (default: your OS user name)")
     .option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS, config.json, or the relays shipped with the CLI", collect)
     .option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)")
@@ -345,15 +430,61 @@ export function buildProgram(deps: ProgramDeps): Command {
     .action(
       run(
         async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; json?: boolean }) => {
-          let mode: "file" | "print" | "none" | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
+          let mode: identity.BackupMode | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
           const existed = await app.load(false);
-          if (mode === undefined && !existed && !o.json && io.prompt) {
-            io.out("Your identity key will live only on this device. A 24-word backup phrase restores it if the device is lost.\n  [f] save it to a file only you can read (0600), on this device: copy it off later\n  [p] print it now, for a password manager or paper (best)\n  [s] skip for now (p2p backup show later)");
-            const a = (await io.prompt("Choose f, p or s: ")).trim().toLowerCase();
-            mode = a === "p" ? "print" : a === "s" ? "none" : "file";
+          const p2p = identity.p2pCommand();
+          // Asked only once an identity exists here (its key was just made): never before.
+          const askBackup = async (): Promise<identity.BackupMode> => {
+            io.out(`\nYour identity key lives only on this device. A 24-word backup phrase restores it if the device is lost.\n  [f] save it to a file only you can read (0600), on this device: copy it off later\n  [p] print it now, for a password manager or paper (best)\n  [s] skip for now (${p2p} backup show later)`);
+            const a = (await io.prompt!("Choose f, p or s: ")).trim().toLowerCase();
+            return a === "p" ? "print" : a === "s" ? "none" : "file";
+          };
+          // A person at a terminal with no identity here says how they're joining first, before any key
+          // is made: someone who already has an identity links this device to it instead of making a
+          // second one. Never with --json, in CI, without a terminal, or inside an agent's session.
+          const asking = !existed && !o.json && Boolean(io.prompt) && !ixLocal.ciEnv(app.env) && projects.personHere(app);
+          const how = asking ? await askJoinPath(p2p) : "new";
+          if (how === "link") return setupByLink(app, p2p);
+          let createdHere = false;
+          if (how === "invite") {
+            await projects.assertPersonForWidening(app, "join", confirmTty);
+            io.out("\nPaste the invite link (https://…/p2p/invite#…) or the code you were sent. It carries the relays your inviter uses.");
+            const code = await askNonEmpty("Invite link or code: ", "an invite link or code");
+            const j = await ops.joinCode(app, code, {
+              name: o.name,
+              confirm: (q) => confirmPrompt(q, false, ["Join", "Cancel"]),
+              create: async (a, x) => {
+                const c = await ops.init(a, x);
+                receiving(a);
+                createdHere = true;
+                io.out(`Created ${c.address}`);
+                return { userId: c.userId, address: c.address, relays: c.relays };
+              },
+            });
+            io.out(joinLines(j).join("\n"));
+            if (createdHere && mode === undefined) mode = await askBackup();
           }
-          const r = await ops.setup(app, { name: o.name, relays: o.relay, backup: mode, ...(typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {}), ...(o.ix ? { ix: true } : {}) });
-          const lines = [r.created ? `Created ${r.address}` : `Already set up: ${r.address}`, `  relays  ${r.relays.join(", ")}`];
+          let relays = o.relay;
+          // There is no default relay (bring your own): a new identity starts on the group's relay.
+          if (how === "new" && asking && !(relays && relays.length > 0) && defaultRelays(app.env, app.file).length === 0) relays = [await askRelay()];
+          const chooseBackup =
+            how === "new" && mode === undefined && !o.json && io.prompt
+              ? async (c: identity.InitResult) => {
+                  createdHere = true;
+                  io.out(`Created ${c.address}`);
+                  return askBackup();
+                }
+              : undefined;
+          const r = await ops.setup(app, {
+            name: o.name,
+            relays,
+            backup: mode,
+            ...(typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {}),
+            ...(o.ix ? { ix: true } : {}),
+            ...(chooseBackup ? { chooseBackup } : {}),
+          });
+          const created = r.created || createdHere;
+          const lines = [...(createdHere ? [`Your identity: ${r.address}`] : [r.created ? `Created ${r.address}` : `Already set up: ${r.address}`]), `  relays  ${r.relays.join(", ")}`];
           if (r.backup?.file) {
             lines.push(`  backup  saved to ${r.backup.file}`);
             // review L4: the default file sits next to the key it backs up.
@@ -362,7 +493,7 @@ export function buildProgram(deps: ProgramDeps): Command {
             );
           }
           if (r.backup?.phrase) lines.push(`\nWrite these 24 words down and keep them offline. Anyone with them is you:\n\n${r.backup.phrase}\n`);
-          if (r.created && !r.backup) io.err("warning: no backup yet: if you lose this device, the identity is gone. Run `p2p backup show`.");
+          if (created && !r.backup) io.err(`warning: no backup yet: if you lose this device, the identity is gone. Run \`${p2p} backup show\`.`);
           // Ix is optional and recommended: offered to the person at a terminal (default No), never
           // installed. Never with --json, in CI, without a terminal, or inside an agent's session.
           const offerIx =
@@ -842,14 +973,7 @@ export function buildProgram(deps: ProgramDeps): Command {
               return { userId: c.userId, address: c.address, relays: c.relays };
             },
           });
-          const lines = [`You and ${r.friend.address} are friends${r.delivered && r.delivered.relays.length === 0 ? " (they'll know once the accept is delivered: run this again later)" : ""}.`];
-          for (const c of r.circles) {
-            if (c.status === "joined" || c.status === "already") lines.push(`${c.status === "joined" ? "Joined" : "Already in"} "${c.name}"${c.default ? "; it is your default circle (new sessions start in it; running ones stay as they are)" : ""}.`);
-            else if (c.status === "pending") lines.push(`${r.friend.address} adds you to "${c.name}" when their client next runs; your next p2p command finishes the join.`);
-            else if (c.status === "held") lines.push(`Not joined "${c.name}" from this code (${c.reason}): if its invite comes, \`p2p held\` lists it for you to approve on its own.`);
-            else lines.push(`"${c.name}" couldn't be confirmed with a second member (§3.3): \`p2p held approve ${c.held}\` to join anyway.`);
-          }
-          return { json: r, human: lines.join("\n") };
+          return { json: r, human: joinLines(r).join("\n") };
         },
         { requireIdentity: false, waitDefault: 15 },
       ),

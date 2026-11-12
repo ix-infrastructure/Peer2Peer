@@ -80,12 +80,28 @@ export interface InitResult {
   failed: { relay: string; code: string }[];
 }
 
+/** The `p2p` command as the person types it here (Windows PowerShell blocks npm's p2p.ps1 shim; p2p.cmd works everywhere on Windows). */
+export function p2pCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "p2p.cmd" : "p2p";
+}
+
+/**
+ * Why a new identity can't be made here (no relay anywhere), naming the three ways in. There is
+ * no default relay, by design (bring your own relay).
+ */
+export function noRelaysReason(home: string, platform: NodeJS.Platform = process.platform): string {
+  const p = p2pCommand(platform);
+  return (
+    `no relays configured. Already use Peer2Peer on another device? Run \`p2p link start\` there, then \`${p} link join <code>\` here (one identity, not a second one). ` +
+    `Have an invite? \`${p} join <invite link or code>\`. ` +
+    `Starting a new identity? Pass --relay wss://… (1–5, your group's relay), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${home}/config.json`
+  );
+}
+
 export async function init(app: App, opts: { name?: string; relays?: string[] }): Promise<InitResult> {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
   const relays = opts.relays && opts.relays.length > 0 ? normalizeRelays(opts.relays) : defaultRelays(app.env, app.file);
-  if (relays.length === 0) {
-    throw new CliError("no_relays", `no relays configured: pass --relay wss://… (1–5), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${app.home}/config.json`);
-  }
+  if (relays.length === 0) throw new CliError("no_relays", noRelaysReason(app.home));
   const name = opts.name ?? defaultName();
   if (!isValidName(name)) throw new CliError("usage", "--name must match [a-z0-9._-]{1,32}");
   const ik = generateIdentityKey();
@@ -131,13 +147,28 @@ export interface SetupResult {
 
 export const BACKUP_FILE_NAME = "backup-phrase.txt";
 
-export async function setup(app: App, opts: { name?: string; relays?: string[]; backup?: "file" | "print" | "none"; backupFile?: string; ix?: boolean }): Promise<SetupResult> {
+export type BackupMode = "file" | "print" | "none";
+
+export async function setup(
+  app: App,
+  opts: {
+    name?: string;
+    relays?: string[];
+    backup?: BackupMode;
+    backupFile?: string;
+    ix?: boolean;
+    /** Asked only once an identity was created here (never before its key exists), when `backup` isn't given. */
+    chooseBackup?: (created: InitResult) => Promise<BackupMode>;
+  },
+): Promise<SetupResult> {
   let created = false;
   let pub: { published: string[]; failed: { relay: string; code: string }[] } | undefined;
+  let backupMode = opts.backup;
   if (!(await app.load(false))) {
     const r = await init(app, { name: opts.name, relays: opts.relays });
     created = true;
     pub = { published: r.published, failed: r.failed };
+    if (backupMode === undefined && opts.chooseBackup) backupMode = await opts.chooseBackup(r);
   }
   const v = await app.ownView();
   const out: SetupResult = {
@@ -155,7 +186,7 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     // Never fails a setup: Ix is optional.
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
   }
-  if (opts.backup === "file") {
+  if (backupMode === "file") {
     const path = opts.backupFile ?? join(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
@@ -167,7 +198,7 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     }
     await chmod(path, 0o600);
     out.backup = { file: path };
-  } else if (opts.backup === "print") {
+  } else if (backupMode === "print") {
     out.backup = { phrase: (await backupShow(app)).phrase };
   }
   return out;

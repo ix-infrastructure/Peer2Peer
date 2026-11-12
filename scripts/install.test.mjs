@@ -171,6 +171,8 @@ test("install.sh installs the pinned packages with npm, checks p2p --version, th
   assert.ok(r.out.indexOf(`+ npm ${INSTALL}`) < r.out.indexOf("Installed:"), r.out);
   assert.match(r.out, /\+ \S+\/prefix\/bin\/p2p setup\n/);
   assert.match(r.calls, /^p2p setup \(stdin-tty=no\)$/m);
+  // Someone who already has an identity is told to link this device, not make a second one.
+  assert.match(r.out, /Already use Peer2Peer on another device\? Choose to link this device in setup \(and run `p2p link start` on that device\)/);
   // The fake prefix isn't on PATH: say so.
   assert.match(r.err, /isn't on your PATH/);
 });
@@ -178,7 +180,8 @@ test("install.sh installs the pinned packages with npm, checks p2p --version, th
 test("install.sh piped without a terminal skips setup; with /dev/tty it reads answers from there", () => {
   const none = sh([], { P2P_DETECT_TTY: "none" });
   assert.equal(none.code, 0, none.all);
-  assert.match(none.out, /No terminal to ask questions on, so setup was skipped\. Next: run `p2p setup`/);
+  assert.match(none.out, /No terminal to ask questions on, so setup was skipped\. Next: run `p2p setup` to link this device to your identity, join with an invite, or create a new identity\./);
+  assert.match(none.out, /Already use Peer2Peer on another device\?/);
   assert.doesNotMatch(none.calls, /^p2p /m);
   const dev = sh(["--dry-run"], { P2P_DETECT_TTY: "dev" });
   assert.match(dev.out, /\+ \S+\/prefix\/bin\/p2p setup <\/dev\/tty\n/);
@@ -191,7 +194,8 @@ test("install.sh piped without a terminal skips setup; with /dev/tty it reads an
 test("install.sh --no-setup never runs p2p setup; a failed setup doesn't fail the install", () => {
   const r = sh(["--no-setup"], { P2P_DETECT_TTY: "stdin" });
   assert.equal(r.code, 0, r.all);
-  assert.match(r.out, /Next: run `p2p setup`/);
+  assert.match(r.out, /Next: run `p2p setup` to link this device to your identity/);
+  assert.match(r.out, /run `p2p link start` on that device/);
   assert.doesNotMatch(r.calls, /^p2p setup/m);
   const env = sh([], { P2P_DETECT_TTY: "stdin", P2P_INSTALL_NO_SETUP: "1" });
   assert.doesNotMatch(env.calls, /^p2p setup/m);
@@ -365,14 +369,21 @@ test("install.ps1 installs the pinned packages, checks p2p --version, then hands
   assert.match(r.out, /Installed: p2p 0\.1\.1 \(\S+p2p\.cmd\)/);
   assert.match(r.calls, /^p2p setup /m);
   assert.match(r.out, /^\+ \S*node \S+@peer2peer.cli.dist.bin\.js setup$/m);
+  // Every "+ <command>" echo ends its line: the next output starts on a line of its own.
+  assert.match(r.out, /\(expect 0\.1\.1\)\r?\nInstalled: p2p 0\.1\.1/);
+  for (const l of r.out.split(/\r?\n/).filter((x) => x.startsWith("+ "))) assert.doesNotMatch(l, /\(expect [^)]*\)\S|bin\.js setup\S/, l);
+  assert.match(r.out, /Already use Peer2Peer on another device\? Choose to link this device in setup \(and run `p2p link start` on that device\)/);
   const none = pwsh(ps(), { P2P_DETECT_TTY: "no" });
   assert.equal(none.code, 0, none.all);
   // In PowerShell, `p2p` would find npm's p2p.ps1 shim, which the default execution policy blocks.
-  assert.match(none.out, /No console to ask questions on, so setup was skipped\. Next: run `p2p\.cmd setup`/);
+  assert.match(none.out, /No console to ask questions on, so setup was skipped\. Next: run `p2p\.cmd setup` to link this device to your identity, join with an invite, or create a new identity/);
+  assert.match(none.out, /Already use Peer2Peer on another device\?/);
   assert.doesNotMatch(none.calls, /^p2p setup/m);
   const noSetup = pwsh(ps("-NoSetup"), { P2P_DETECT_TTY: "yes" });
   assert.equal(noSetup.code, 0, noSetup.all);
   assert.doesNotMatch(noSetup.calls, /^p2p setup/m);
+  assert.match(noSetup.out, /Next: run `p2p\.cmd setup` to link this device to your identity/);
+  assert.match(noSetup.out, /run `p2p link start` on that device/);
   const mismatch = pwsh(ps("-NoSetup"), { FAKE_P2P_VERSION: "0.0.9" });
   assert.notEqual(mismatch.code, 0, mismatch.all);
   assert.match(mismatch.all, /printed '0\.0\.9', expected 0\.1\.1/);

@@ -6,6 +6,14 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
 
 ### Behaviour changes
 
+- **`p2p setup` asks how you're joining before it makes any key.** At your terminal, with no identity on this device, setup first asks: `[l]` I already use Peer2Peer on another device, `[i]` I have an invite link or code, or `[n]` start a new identity.
+  - `l` links this device to the identity you already have (the same as `p2p link join`, inline): run `p2p link start` on the other device (or `/peers link start` in Claude Code), then type the code it shows. Before, setup could only make a new identity, so someone who already had one ended up with a second, separate identity.
+  - `i` redeems the invite (the same as `p2p join`, inline): the new identity uses the relay in the code, so no relay is asked for.
+  - `n` asks for your group's relay URL when none is given (`--relay`, `P2P_DEFAULT_RELAYS` or `defaultRelays` in config.json). Only `wss://` relay URLs are taken (a bare host means `wss://`). There is no default relay: bring your own.
+  - The backup question (file, print or skip) now comes only after the identity exists, never before its key is made: a setup that stopped with `no_relays` used to ask it first.
+  - `l` and `i` keep their person-only gates (the front end's token, or your `yes` on the terminal). Agents are never asked: setup stays refused in the Claude Code mod and the Codex bridge.
+  - With `--json`, `CI` set, without a terminal or inside an agent's session, setup behaves as before. With no relay configured, its `no_relays` error now names all three ways in: `p2p link start` and `link join <code>`, `join <invite>`, or `--relay wss://…` (`p2p.cmd` on Windows).
+  - The installers' hand-off says that someone who already uses Peer2Peer on another device should link this device in setup.
 - **Ix is optional and recommended; Peer2Peer never installs it for you.**
   - `p2p setup`, run by you at a terminal, explains in a few lines what Ix adds (overlap with peers' sessions, a change's blast radius, local graph memory; all local) when it isn't installed, and asks `Install Ix? [y/N]`. The default is No. A yes prints the install command for your platform, for you to run in your own terminal, then `p2p setup --ix` turns on the Ix extension. Peer2Peer never runs an installer.
   - A no is remembered (`"ixDeclined": true` in config.json) and setup doesn't ask again. `p2p setup --ix` asks again.
