@@ -378,6 +378,37 @@ test("install.ps1 works through `| iex` with settings from the environment, and 
   assert.match(fail.out, /host still here/);
 });
 
+test("install.ps1 truncated anywhere inside its script block runs nothing (as a file and through iex)", (t) => {
+  if (!tool("pwsh", t)) return;
+  const text = readFileSync(PS1, "utf8");
+  const open = text.indexOf("\nif ($true) {\n& {\n") + 1;
+  const close = text.lastIndexOf("} @args\n}");
+  assert.ok(open > 0 && close > open, "the script is one & { ... } @args block inside if ($true) { ... }");
+  assert.ok(text.endsWith("} @args\n}\n"));
+  // Just inside the block, a few points in the middle, and every byte of the closing lines
+  // (a cut right after "}" or inside "@args" must not run the block either).
+  const cuts = [open + 5, open + 15, Math.floor((open + close) / 3), Math.floor((open + close) / 2)];
+  for (let k = close - 1; k < text.length - 2; k++) cuts.push(k);
+  for (const cut of cuts) {
+    const file = join(work, `truncated-${cut}.ps1`);
+    writeFileSync(file, text.slice(0, cut));
+    for (const how of [`& '${file}' -DryRun 6>&1`, `Get-Content -Raw '${file}' | Invoke-Expression 6>&1`]) {
+      const r = pwsh(how);
+      assert.doesNotMatch(r.out, /dry run:|detected:|^\+ /m, `cut at ${cut}: ${how}`);
+      assert.equal(r.calls, "", `cut at ${cut}: ${how}`);
+    }
+  }
+});
+
+test("install.ps1 ignores the P2P_DETECT_* overrides unless P2P_INSTALL_TEST=1", (t) => {
+  if (!tool("pwsh", t)) return;
+  // On Linux, without the test switch, the real OS check wins over P2P_DETECT_OS=Windows.
+  const r = pwsh(ps("-DryRun"), { P2P_INSTALL_TEST: undefined });
+  assert.notEqual(r.code, 0, r.all);
+  assert.match(r.all, /use install\.sh .*\(detected: other\)/);
+  assert.doesNotMatch(r.calls, /npm install/);
+});
+
 test("install.ps1 without Node 22 or npm prints how to get them (winget) and installs nothing", (t) => {
   if (!tool("pwsh", t)) return;
   for (const env of [{ P2P_DETECT_NODE: "none" }, { P2P_DETECT_NODE: "v20.18.1" }, { P2P_DETECT_NPM: "none" }]) {

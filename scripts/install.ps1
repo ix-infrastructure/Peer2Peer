@@ -32,16 +32,18 @@
 # p2p.cmd shim (which falls back to a `node` in the current directory), and
 # native commands run with NoDefaultCurrentDirectoryInExePath set.
 #
-# Safe to pipe: everything is one script block, invoked by the `& {` on its
-# first code line and closed on the last, so a truncated download doesn't
-# parse and runs nothing. Under `| iex` it defines no variables or functions in
-# your session. It never relies on its own path, and it reports errors by
+# Safe to pipe: everything is one script block (`& { ... } @args`) inside an
+# `if ($true) {` whose closing brace is the last line, so a download truncated
+# anywhere, even inside `} @args`, doesn't parse and runs nothing. Under `| iex`
+# it defines no variables or functions in your session. It never relies on its own path, and it reports errors by
 # throwing, never with `exit`, so `| iex` can't close your PowerShell window.
 #
 # Tests (only with P2P_INSTALL_TEST=1) can override detection: P2P_DETECT_OS
 # (Windows), P2P_DETECT_NODE, P2P_DETECT_NPM, P2P_DETECT_PREFIX_WRITABLE
 # (yes/no), P2P_DETECT_TTY (yes/no). "none" means "not found".
 
+# Closed on the last line: a truncated download is a parse error.
+if ($true) {
 & {
     [CmdletBinding()]
     param(
@@ -174,17 +176,15 @@
     Write-Say "plan: install $($specs -join ' ') into $prefix with npm, then check p2p --version"
     Invoke-Step $npmExe (@('install', '-g', '--ignore-scripts', '--no-fund', '--no-audit') + $specs)
 
-    # The CLI's own entry script, from its package.json, run with node.exe by absolute path.
-    function Join-Rel([string]$Rel) { [IO.Path]::Combine([string[]](@($cliDir) + ($Rel -replace '^\./', '' -split '/'))) }
-    $binJs = Join-Rel 'dist/bin.js'
-    if (-not $DryRun) {
-        $pkgJson = Join-Path $cliDir 'package.json'
-        if (-not (Test-Path -LiteralPath $pkgJson)) { throw "npm finished but $cliDir isn't there; run: npm ls -g @peer2peer/cli" }
-        $bin = (Get-Content -Raw -LiteralPath $pkgJson | ConvertFrom-Json).bin
-        $rel = if ($bin -is [string]) { $bin } else { [string]$bin.p2p }
-        if (-not $rel -or $rel -match '\.\.') { throw "can't find the p2p entry in $pkgJson" }
-        $binJs = Join-Rel $rel
-        if (-not (Test-Path -LiteralPath $binJs)) { throw "npm finished but $binJs isn't there; run: npm ls -g @peer2peer/cli" }
+    # The CLI's own entry script (package.json "bin": dist/bin.js), run with node.exe by
+    # absolute path. Fixed here, not read from the installed package.json, and checked to
+    # resolve inside the package folder.
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $binJs = [IO.Path]::GetFullPath((Join-Path (Join-Path $cliDir 'dist') 'bin.js'))
+    $cliRoot = [IO.Path]::GetFullPath($cliDir).TrimEnd($sep) + $sep
+    if (-not $binJs.StartsWith($cliRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "internal: $binJs isn't inside $cliRoot" }
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $binJs -PathType Leaf)) {
+        throw "npm finished but $binJs isn't there; run: npm ls -g @peer2peer/cli"
     }
     Write-Say ('+ ' + (Format-Command $nodeExe @($binJs, '--version')) + "   (expect $Version)")
     if (-not $DryRun) {
@@ -222,3 +222,4 @@
     }
     if ($DryRun) { Write-Say 'Dry run done: nothing was installed.' }
 } @args
+}
