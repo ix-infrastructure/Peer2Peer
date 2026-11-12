@@ -3372,6 +3372,19 @@ export const register: Register = on => {
     return { text: [builtin?.text, `Peer2Peer:\n${ours}`].filter(Boolean).join('\n\n'), ...(builtin?.context ? { context: builtin.context } : {}) }
   }).catch(($, e, next) => next(e))
 
+  // The built-in /list-agents builds its listing without the ListAgents tool, so the tool hook
+  // above never sees it: append the same Peer2Peer section here.
+  on('command.run', { command: 'list-agents' }, async ($, e, next) => {
+    const S = await bindSess($, 'hook')
+    if (!S || !isLive(S.run)) return next(e)
+    const builtin = await next(e)
+    const listed = await refreshPeers(S, $)
+    const section = groupedSection(listed, socialOf(S.friendsInfo, S.circleList))
+    if (section === '') return builtin
+
+    return { ...builtin, text: `${builtin.text ?? ''}${section}` }
+  }).catch(($, e, next) => next(e))
+
   on('command.describe', { command: 'peers' }, async ($, e, next) => {
     const S = await bindSess($, 'hook')
     if (!S) return next(e)

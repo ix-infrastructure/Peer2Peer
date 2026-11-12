@@ -269,6 +269,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: { tool: `mcp__peer2peer__${e.name}` } }
   })
   on('command.run', { command: 'peers' }, () => ({ text: 'Local sessions: researcher [3fa9c1]' }))
+  on('command.run', { command: 'list-agents' }, () => ({ text: 'Other Claude sessions (1):\n  researcher [3fa9c1]' }))
   on('ui.status', (_$, e) => {
     w.statuses.push((e as { text?: string }).text)
 
