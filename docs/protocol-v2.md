@@ -14,13 +14,13 @@
 >
 > They are summarised under "Draft 2 changes" at the end.
 
-Binding spec shared by the Kartr attestation authority, the client core (`packages/core`), and a hosted v2 relay.
+Binding spec shared by the hosted attestation authority ("the authority" below), the client core (`packages/core`), and a hosted v2 relay.
 
-## Relationship to Kartr
-Peer2Peer is a distributed network of its own. Trust decisions happen on the devices, and the relay is dumb. Kartr is its identity root:
-- **Eligibility:** any authenticated Kartr account (a Firebase/Identity Platform sign-in with an active membership in at least one workspace) may register devices. There is no subscription or billing gate.
-- **What Kartr signs:** device certificates (key ↔ account), workspace attestations (account ↔ orgs) and the revocation list. It never holds private keys, and it never sees friendships, rosters or message content.
-- **If Kartr is down:** existing certificates and attestations keep working offline until they expire (30 days and 24 hours respectively). Only new devices and renewals need Kartr.
+## Relationship to the authority
+Peer2Peer is a distributed network of its own. Trust decisions happen on the devices, and the relay is dumb. The authority is its identity root:
+- **Eligibility:** any authenticated account at the authority (an SSO sign-in with an active membership in at least one workspace) may register devices. There is no subscription or billing gate.
+- **What the authority signs:** device certificates (key ↔ account), workspace attestations (account ↔ orgs) and the revocation list. It never holds private keys, and it never sees friendships, rosters or message content.
+- **If the authority is down:** existing certificates and attestations keep working offline until they expire (30 days and 24 hours respectively). Only new devices and renewals need the authority.
 
 ## Primitives
 - **Signatures:** Ed25519 (RFC 8032).
@@ -37,20 +37,21 @@ Peer2Peer is a distributed network of its own. Trust decisions happen on the dev
   - The private halves never leave the device; they are stored in the OS keychain.
   - A host application may reach the keychain through a host capability, with service `ix-p2p` and account `<userId>/<deviceId>`.
 
-## Objects signed by Kartr (header `kid` = Kartr key id; key from JWKS)
-- **Kartr JWKS:** `GET /.well-known/p2p-jwks.json` returns `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"<id>","x":"<b64u pub>","use":"sig"}]}`.
+## Objects signed by the authority (header `kid` = the authority's key id; key from JWKS)
+- **The authority's JWKS:** `GET /.well-known/p2p-jwks.json` returns `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"<id>","x":"<b64u pub>","use":"sig"}]}`.
   - It may list more than one key, for rotation.
+  - `<issuer>` below is the authority's fixed issuer string. The dormant reference v2 code in `packages/core` uses the issuer `kartr` and the error codes `unknown-kartr-key` and `kartr-signature-invalid`; v3 doesn't use them.
   - Clients cache it for 1h and refetch on an unknown `kid`.
 - **Device certificate**, `typ: "p2p-device+jws"`:
-  - Payload: `{ "iss":"kartr", "sub":"<userId>", "did":"<deviceId>", "spk":"<b64u ed25519 pub>", "kpk":"<b64u x25519 pub>", "iat":<s>, "exp":<s, iat+30d> }`.
+  - Payload: `{ "iss":"<issuer>", "sub":"<userId>", "did":"<deviceId>", "spk":"<b64u ed25519 pub>", "kpk":"<b64u x25519 pub>", "iat":<s>, "exp":<s, iat+30d> }`.
 - **Workspace attestation**, `typ: "p2p-workspace+jws"`:
-  - Payload: `{ "iss":"kartr", "sub":"<userId>", "orgs":["<orgId>",...], "iat":<s>, "exp":<s, iat+24h> }`.
+  - Payload: `{ "iss":"<issuer>", "sub":"<userId>", "orgs":["<orgId>",...], "iat":<s>, "exp":<s, iat+24h> }`.
 - **Revocation list**, `typ: "p2p-revocations+jws"`:
-  - Payload: `{ "iss":"kartr", "dids":["<deviceId>",...], "iat":<s> }`.
+  - Payload: `{ "iss":"<issuer>", "dids":["<deviceId>",...], "iat":<s> }`.
   - Clients poll it every 10 min and reject anything signed by a listed device.
 
 ## Objects signed by a device (header `kid` = deviceId)
-Every device-signed object travels with the signer's device certificate. A verifier checks the certificate first (Kartr signature, expiry, not revoked, `did == kid`), then verifies the object with the certificate's `spk`.
+Every device-signed object travels with the signer's device certificate. A verifier checks the certificate first (the authority's signature, expiry, not revoked, `did == kid`), then verifies the object with the certificate's `spk`.
 
 - **Friend invite**, `typ: "p2p-invite+jws"`, signed by the inviter:
   - Payload: `{ "iss":"<inviterUserId>", "did":"<deviceId>", "aud":"<inviteeUserId>" | "*", "nonce":"<b64u 16B>", "iat":<s>, "exp":<s, ≤ iat+14d> }`.
@@ -82,8 +83,8 @@ A user satisfies the rules when:
 - (b) `roster.vis == "workspace"` and the user's valid workspace attestation includes `roster.org`;
 - (c) the user is in `roster.parts` **and** (there is a valid friendship between the user and `roster.iss` **or** the user's workspace attestation includes `roster.org`).
 
-**[draft 2, D9]** `roster.org` is chosen freely by the roster's owner, so on its own it proves nothing. Rules (b) and the org half of (c) apply, on the sender side and on the viewer side alike, only when the **owner** is attested in `roster.org`. That means a Kartr workspace attestation that verifies (Kartr signature, unexpired), has `sub == roster.iss`, and includes `roster.org`. The receiver gets it from `plaintext.ownerWorkspace`, or, when the sender is the owner, from `plaintext.sender.workspace`.
-- An owner attestation that is present but invalid rejects the envelope (`kartr-signature-invalid` / `unknown-kartr-key` / `expired` / `owner-workspace-mismatch`).
+**[draft 2, D9]** `roster.org` is chosen freely by the roster's owner, so on its own it proves nothing. Rules (b) and the org half of (c) apply, on the sender side and on the viewer side alike, only when the **owner** is attested in `roster.org`. That means a workspace attestation from the authority that verifies (the authority's signature, unexpired), has `sub == roster.iss`, and includes `roster.org`. The receiver gets it from `plaintext.ownerWorkspace`, or, when the sender is the owner, from `plaintext.sender.workspace`.
+- An owner attestation that is present but invalid rejects the envelope (an invalid authority signature, an unknown authority key, `expired` or `owner-workspace-mismatch`).
 - Without a valid one, `vis:"workspace"` grants nobody, and only rule (a) (owner) and rule (c) through friendship remain. A party who would have qualified only through the org is rejected with `owner-not-in-org`, on either side.
 - Where the receiver finds the owner attestation, in order:
   1. carried in the envelope: `plaintext.ownerWorkspace`, or `sender.workspace` when the sender is the owner;
@@ -103,7 +104,7 @@ Non-owners can't re-share; only an owner signs a roster.
   "sid":"<sessionId>", "seq":<int per (fdid,tdid,own,sid)>, "ts":<ms>, "n":"<b64u 24B nonce>",
   "epk":"<b64u ephemeral x25519 pub>", "ct":"<b64u ciphertext>" , "kind":"msg"|"roster"|"idle"|"sync"|"unfriend"|"contact" }
 ```
-- **[draft 2] `fcert`** is the sender device's certificate. The receiver verifies it **before** opening the envelope: Kartr signature, expiry, not revoked, `did == fdid == kid`, `sub == from`. It then verifies the envelope signature with the certificate's `spk` and opens with its `kpk`. The relay already sees `from` and `fdid`, so `fcert` reveals nothing new. `GET /v1/p2p/devices` remains only for the **sender** to find a recipient's `kpk`; on first contact the sender presents its invite as `X-P2P-Proof`.
+- **[draft 2] `fcert`** is the sender device's certificate. The receiver verifies it **before** opening the envelope: the authority's signature, expiry, not revoked, `did == fdid == kid`, `sub == from`. It then verifies the envelope signature with the certificate's `spk` and opens with its `kpk`. The relay already sees `from` and `fdid`, so `fcert` reveals nothing new. `GET /v1/p2p/devices` remains only for the **sender** to find a recipient's `kpk`; on first contact the sender presents its invite as `X-P2P-Proof`.
 - **[draft 2] `own`** is the session owner. A session is identified by `(own, sid)`. Receivers look rosters up by `(own, sid)` and reject a roster whose `iss != own`. Replay `seq` floors are kept per `(fdid, own, sid)`.
 - **Sealing**, per recipient device:
   - `ikm = X25519(eph, tdid.kpk) || X25519(sender.kpk_priv, tdid.kpk)`.
@@ -142,7 +143,7 @@ Non-owners can't re-share; only an owner signs a roster.
   **[review fix L1]** Draft 1's "gap under 1000" restart reset is removed: `H` only rises. Senders persist `seq`, and a reinstall gets a new `did`.
 - **What the relay sees:** only the outer JWS (from, fdid, fcert, to, tdid, own, sid, seq, ts, kind, sizes).
 
-## Kartr authority HTTP (human SSO JWT unless noted)
+## Authority HTTP (human SSO JWT unless noted)
 - `POST /v1/p2p/devices`
   - Body: `{ "did", "spk", "kpk", "proof":"<p2p-devreg+jws over {did, spk, kpk, sub, nonce, iat}, signed with spk>" }`. The proof shows the device holds the private key.
   - Returns `{ "device":"<cert>", "workspace":"<attestation>" }`. Re-posting the same `did` renews it.
@@ -199,7 +200,7 @@ Final outer payload field order, as emitted by `packages/core`: `v, from, fdid, 
 
 ## Clarifications made while implementing `packages/core`
 
-The draft 1 text was copied from the version agreed with the Kartr authority. The draft 2 edits above are marked inline. These are the places where the draft was ambiguous or incomplete, and the reading `packages/core` takes. Items that draft 2 resolved say so.
+The draft 1 text was copied from the version agreed with the authority. The draft 2 edits above are marked inline. These are the places where the draft was ambiguous or incomplete, and the reading `packages/core` takes. Items that draft 2 resolved say so.
 
 **C1. Envelope AAD.** Draft 1 gave two AADs. The core uses only the fixed string, which draft 2 adopts (D5). `|` is forbidden in `from`, `to`, `own` and `sid` so the string stays unambiguous. `n` and `epk` are not in the AAD; they are bound by the outer signature and by the KDF.
 
@@ -208,7 +209,7 @@ The draft 1 text was copied from the version agreed with the Kartr authority. Th
 **C3. `mayExchange` rule (c) precedence.** The rule reads as *sender ∈ parts* **and** (*a live friendship with `roster.iss`* **or** *an attestation that includes `roster.org`*). The other reading, (parts ∧ friendship) ∨ attestation, would let any workspace member post into a `private` roster, which would make `vis` meaningless.
 
 **C4. Friendship validity.**
-- Both signer certificates (the invite's and the accept's) must verify now: Kartr signature, unexpired, not revoked. Renewal keeps the same `did` and keys, so a long-lived friendship survives the 30-day certificate expiry. Revoking either signing device ends the friendship ("reject anything signed by a listed device").
+- Both signer certificates (the invite's and the accept's) must verify now: the authority's signature, unexpired, not revoked. Renewal keeps the same `did` and keys, so a long-lived friendship survives the 30-day certificate expiry. Revoking either signing device ends the friendship ("reject anything signed by a listed device").
 - "Unexpired invite" is judged when the invite was accepted: `invite.iat - skew <= accept.iat < invite.exp`.
 - **[H1, re-review]** An unfriend between a pair (from either side) ends a friendship of that pair when either:
   - it names that friendship's invite (`inv`). The accept's `iat` is not compared, because a re-signed accept for the same, still-unexpired invite would otherwise revive the friendship;

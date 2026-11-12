@@ -38,10 +38,10 @@ Check the fingerprint (`ben@ayrn-mrvm-…`) over a channel you trust, set a petn
 If it was an ordinary device: `p2p devices revoke <did>` from another device. If it held your identity key: `p2p identity rotate --exclude <did>` (or `/peers rotate`) on a key holder you still have, or `p2p backup restore` with your phrase on a new device and then rotate.
 
 **Where are my keys?**
-In `~/.p2p` (or `P2P_HOME`): 0700 directories and 0600 files. There's no OS keychain backend yet; it's [planned](roadmap.md#launch).
+In `~/.p2p` (or `P2P_HOME`): 0700 directories and 0600 files. There's no OS keychain backend yet; it's [planned](roadmap.md#protocol-and-identity).
 
-**What's the difference between Peer2Peer, Ix and Kartr?**
-Peer2Peer is the free, open network. Ix is an open-source code-graph tool with an optional extension for richer sharing. Kartr is a planned paid add-on for organisations. Paid features never gate the network. See [architecture.md](architecture.md).
+**What's the difference between Peer2Peer and Ix?**
+Peer2Peer is the free, open network. Ix is an open-source code-graph tool with an optional, recommended extension for richer sharing and graph memory. You install Ix yourself; Peer2Peer never installs it. Paid features never gate the network. See [architecture.md](architecture.md).
 
 **Does it work on Windows?**
 The CLI does (Windows 10/11, Node 22). See [the Windows notes](../packages/p2p/README.md#windows). The Codex bridge fails closed on releasing held messages there.

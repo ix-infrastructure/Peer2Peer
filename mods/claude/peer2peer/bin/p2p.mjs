@@ -12717,7 +12717,7 @@ var init_extensions = __esm({
     "use strict";
     init_v3();
     EXTENSION_API = 1;
-    KNOWN_EXTENSIONS = ["ix", "kartr"];
+    KNOWN_EXTENSIONS = ["ix"];
     MAX_RENDERED_BYTES = 16 * 1024;
     MAX_KEPT_BYTES = 24 * 1024;
     MAX_RENDERED_STRING = 4e3;
