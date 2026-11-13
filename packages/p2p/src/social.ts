@@ -351,9 +351,20 @@ export async function onUnfriendKind(app: App, env: string, r: AcceptedMessageV3
 }
 
 async function afterUnfriend(app: App, peer: string): Promise<void> {
+  // Only when it ended the last friendship with them (issue #3). An unfriend that arrives after a
+  // re-friend (a late copy, another device's, one queued while this device was away) ends only the
+  // friendships invited at or before it: the new one stands, and so must the caps it exchanged
+  // (caps name no friendship). Revoking them anyway left a "friend" neither side could message.
+  if (await stillFriends(app, peer)) return;
   const caps = await capsToRevokeOnUnfriend(app.store, peer);
   await app.revokeCaps(caps).catch(() => 0);
   await app.store.removeCapsHeld((c) => c.iss === peer);
+}
+
+/** A friendship with `peer` that no unfriend this device holds ends. */
+async function stillFriends(app: App, peer: string): Promise<boolean> {
+  const unfriends = await app.store.listUnfriends();
+  return (await liveFriendshipsV3(app.store, app.signerCtx())).some((f) => (f.inviter === peer || f.invitee === peer) && !unfriends.some((u) => unfriendApplies(f, u)));
 }
 
 export async function unfriend(app: App, who: string): Promise<{ unfriended: string; address: string; delivered: Delivery[]; revoked: number }> {

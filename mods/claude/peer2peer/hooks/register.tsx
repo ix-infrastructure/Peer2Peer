@@ -2039,7 +2039,15 @@ const stopRun = async (S: Sess, $: EngineInterface, current: Run) => {
     S.deliverTimer = null
   }
   bg($.store.delete(`${BOARD_PREFIX}${current.sid}`))
-  // The final idle status, so peers see this session stop rather than linger busy.
+  // The final idle status, so peers see this session stop rather than linger busy. After any status
+  // still on its way (issue #3): peers keep the one sealed last, so a `busy` that went out after this
+  // idle (its CLI started later) left the ended session busy until it aged out. Bounded.
+  if (current.announcing) {
+    // A timer cancelled once the status settles, so no 8 s wait outlives it.
+    let bound: { cancel(): void } | undefined
+    await Promise.race([current.announcing.catch(() => undefined), new Promise<void>(resolve => { bound = $.clock.after(FINAL_STATUS_TIMEOUT_MS, resolve) })])
+    bound?.cancel()
+  }
   if (current.isOnline) await sendStatus(S, $, current, 'idle', FINAL_STATUS_TIMEOUT_MS).catch(() => undefined)
 }
 

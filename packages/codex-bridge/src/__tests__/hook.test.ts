@@ -131,7 +131,8 @@ describe("project boundaries in the Codex guard (packages/p2p/src/projects.ts)",
   it("the model's shell speaks only for this bridge's session, however it quotes the id (H5)", () => {
     expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" }, [], "codex-1")).toBeNull();
     expect(guard("Bash", { command: "p2p send --from-session=fake --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
-    expect(guard("Bash", { command: "p2p send --from-session=''codex-1x --to ben hi" }, [], "codex-1")).toContain("speaks only for this Codex session");
+    // Quoted, the send guard refuses it first (a word it can't read as written fails closed: review of #66).
+    expect(guard("Bash", { command: "p2p send --from-session=''codex-1x --to ben hi" }, [], "codex-1")).toMatch(/speaks only for this Codex session|send \(no --from-session\)/);
     // No bridge found for this call: no session id at all.
     expect(guard("Bash", { command: "p2p send --from-session=codex-1 --to ben hi" })).toContain("speaks only for this Codex session");
   });

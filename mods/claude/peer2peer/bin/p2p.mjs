@@ -14552,18 +14552,26 @@ async function tuiTaintNote(app, toUserId, now = Date.now()) {
 async function sendSharing(app, o) {
   const sid = checkSid(o.fromSession, "--from-session");
   const uid = await app.resolveUser(o.to.replace(/\s*\[[^\]]*\]\s*$/, "").replace(/\/[^/]*$/, ""));
-  let added = false;
-  if (uid !== app.userId && !(await rosterAudience(app, await getSession(app, sid))).includes(uid)) {
-    await roster(app, sid, { add: [uid] });
-    added = true;
+  let added;
+  if (uid !== app.userId) {
+    const had = await getSession(app, sid);
+    if (!(await rosterAudience(app, had)).includes(uid)) added = { ver: (await roster(app, sid, { add: [uid] })).ver, had };
   }
+  const wire = { maybe: false };
   try {
-    const result = await sendMessage(app, { ...o, person: true });
+    const result = await sendMessage(app, { ...o, person: true, wire });
     return added ? { result, shared: { userId: uid, address: await app.addressOf(uid) } } : { result };
   } catch (e) {
-    if (added) await roster(app, sid, { remove: [uid] }).catch(() => void 0);
+    if (added && !wire.maybe) await unshare(app, sid, uid, added).catch(() => void 0);
     throw e;
   }
+}
+async function unshare(app, sid, uid, added) {
+  await writeRoster(app, sid, (have) => {
+    if (!have || have.ver !== added.ver) return void 0;
+    const parts = added.had.parts.includes(uid) ? have.parts : have.parts.filter((u) => u !== uid);
+    return { vis: have.vis, ...have.circle ? { circle: have.circle } : {}, parts, ...added.had.auto !== void 0 ? { auto: added.had.auto } : {} };
+  });
 }
 async function sendMessage(app, o) {
   const fromSession = checkSid(o.fromSession, "--from-session");
@@ -14580,17 +14588,37 @@ async function sendMessage(app, o) {
   let d;
   let outboxed;
   const rcpt = o.text !== "" && !offline2 && offlineSince === void 0 && await asksReceipts(app, target.own, target.sid) ? newReceiptId() : void 0;
+  let receiptAsked = rcpt !== void 0;
   if (o.text !== "") {
     if (!offline2) await flushOutbox(app).catch(() => void 0);
     const rosterJws = await rosterFor(app, target);
     const plaintext = { text: o.text, ...rcpt ? { rcpt } : {}, ...rosterJws ? { roster: rosterJws } : {}, ...o.person ? {} : await ownBound(app, fromSession, target, userId) };
     if (rcpt) await rememberWanted(app, rcpt, { to: userId, own: target.own, ref: to.ref, fromSession });
-    d = await app.deliver(userId, "msg", target, plaintext, userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {});
+    const local = userId === app.userId && target.did ? { onlyDevices: [target.did], ...localSend(app, target, fromSession, o.person === true) } : {};
+    d = await app.deliver(userId, "msg", target, plaintext, {
+      ...local,
+      beforeSend: async (copies) => {
+        if (o.wire) o.wire.maybe = true;
+        await local.beforeSend?.(copies);
+      }
+    });
     const unsent = d.unsent ?? [];
+    const written = new Set((d.errors ?? []).filter((e) => e.written).map((e) => e.did));
+    if (o.wire) o.wire.maybe = d.relays.length > 0 || written.size > 0;
     if (d.relays.length === 0 && !retryable(unsent)) {
       throw new CliError("undelivered", `delivered via 0 relays${d.errors?.length ? ` (${[...new Set(d.errors.map((e) => e.code))].join(", ")})` : ""}`, { delivered: false, to });
     }
-    const later = d.relays.length === 0 ? unsent : unsent.filter((u) => u.codes.every((c) => OUTBOX_RETRYABLE.has(c)));
+    let later = d.relays.length === 0 ? unsent : unsent.filter((u) => u.codes.every((c) => OUTBOX_RETRYABLE.has(c)));
+    if (rcpt && later.length > 0) {
+      const fresh = later.filter((u) => !written.has(u.did));
+      if (fresh.length > 0) {
+        const { rcpt: _asked, ...plain } = plaintext;
+        void _asked;
+        const resealed = await app.seal(userId, "msg", target, plain, { onlyDevices: fresh.map((u) => u.did), ...local.beforeSend ? { beforeSend: local.beforeSend } : {} });
+        later = [...later.filter((u) => written.has(u.did)), ...resealed.map((c) => ({ ...c, codes: [] }))];
+      }
+      receiptAsked = d.relays.length > 0 || later.some((u) => written.has(u.did));
+    }
     if (later.length > 0) outboxed = await enqueue(app, later, { kind: "msg", dest: to, fromSession });
   }
   if (target.own !== app.userId) {
@@ -14613,7 +14641,7 @@ async function sendMessage(app, o) {
     ...d ? { messageId: `m${Date.now().toString(36)}` } : {},
     ...o.notifyWhenIdle ? { notifyWhenIdle: true } : {},
     ...queued,
-    ...d ? rcpt ? { receipts: "requested", receiptId: rcpt } : { receipts: "unsupported" } : {}
+    ...d ? rcpt && receiptAsked ? { receipts: "requested", receiptId: rcpt } : { receipts: "unsupported" } : {}
   };
 }
 async function sendExtension(app, o) {
@@ -23237,9 +23265,14 @@ async function onUnfriendKind(app, env, r) {
   return [makeEvent(env, "p2p.unfriend", r.envelope.ts, { from: await fromOf(app, r), peer: r.envelope.from })];
 }
 async function afterUnfriend(app, peer2) {
+  if (await stillFriends(app, peer2)) return;
   const caps = await capsToRevokeOnUnfriend(app.store, peer2);
   await app.revokeCaps(caps).catch(() => 0);
   await app.store.removeCapsHeld((c) => c.iss === peer2);
+}
+async function stillFriends(app, peer2) {
+  const unfriends = await app.store.listUnfriends();
+  return (await liveFriendshipsV3(app.store, app.signerCtx())).some((f) => (f.inviter === peer2 || f.invitee === peer2) && !unfriends.some((u) => unfriendApplies(f, u)));
 }
 async function unfriend(app, who2) {
   const peer2 = await app.resolveUser(who2);
@@ -27071,13 +27104,32 @@ var init_app = __esm({
        */
       async deliver(to, kind, session, plaintext, opts = {}) {
         const pool = this.pool ?? await this.connect();
+        const { targets, outgoing, errors, sealed } = await this.sealCopies(to, kind, session, plaintext, opts);
+        const sentVia = /* @__PURE__ */ new Set();
+        const results = await Promise.all(outgoing.map(({ d, env }) => pool.sendEnvelope(env, to, d, kind, targets)));
+        const unsent = [];
+        for (const [i, res] of results.entries()) {
+          for (const r of res.sent) sentVia.add(r);
+          for (const e of res.errors) errors.push({ did: outgoing[i].d, relay: e.relay, code: e.code, ...e.written ? { written: true } : {} });
+          if (res.sent.length === 0) unsent.push({ did: outgoing[i].d, env: outgoing[i].env, targets, codes: res.errors.map((e) => e.code) });
+        }
+        return { userId: to, devices: sealed, relays: [...sentVia], ...errors.length > 0 ? { errors } : {}, ...unsent.length > 0 ? { unsent } : {} };
+      }
+      /**
+       * Seals `plaintext` for `to` exactly as deliver does (the same devices, a fresh seq each, the same
+       * relays and caps) and sends nothing: copies for the outbox to send later (outbox.ts).
+       */
+      async seal(to, kind, session, plaintext, opts = {}) {
+        const { targets, outgoing } = await this.sealCopies(to, kind, session, plaintext, opts);
+        return outgoing.map(({ d, env }) => ({ did: d, env, targets }));
+      }
+      async sealCopies(to, kind, session, plaintext, opts) {
         const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
         if (!view) throw new CliError("unknown_user", `no identity document for ${to}: can't find their devices or relays`);
         const devices2 = view.devices.filter((d) => (to !== this.userId || d !== this.did || opts.onlyDevices?.includes(d) === true) && (!opts.onlyDevices || opts.onlyDevices.includes(d)));
         const relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
         const caps = await this.capsFor(to, kind, opts.extraCaps);
         const resolveCert = storeCertResolver(this.store);
-        const sentVia = /* @__PURE__ */ new Set();
         const errors = [];
         const ready = [];
         for (const d of devices2) {
@@ -27115,15 +27167,7 @@ var init_app = __esm({
           if (targets.length === 0) errors.push({ did: d, relay: "", code: "no-cap" });
           else outgoing.push({ d, env });
         }
-        const sealed = ready.length;
-        const results = await Promise.all(outgoing.map(({ d, env }) => pool.sendEnvelope(env, to, d, kind, targets)));
-        const unsent = [];
-        for (const [i, res] of results.entries()) {
-          for (const r of res.sent) sentVia.add(r);
-          for (const e of res.errors) errors.push({ did: outgoing[i].d, relay: e.relay, code: e.code, ...e.written ? { written: true } : {} });
-          if (res.sent.length === 0) unsent.push({ did: outgoing[i].d, env: outgoing[i].env, targets, codes: res.errors.map((e) => e.code) });
-        }
-        return { userId: to, devices: sealed, relays: [...sentVia], ...errors.length > 0 ? { errors } : {}, ...unsent.length > 0 ? { unsent } : {} };
+        return { targets, outgoing, errors, sealed: ready.length };
       }
       /** Delivers to our other devices, when there are any (sync, §4.3). */
       async syncOwn(body) {
@@ -27443,8 +27487,44 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "project private"
 ]);
 var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
-function shellWords(segment) {
-  return shellTokens(segment);
+var SEND_VALUE_OPTIONS = /* @__PURE__ */ new Set(["--to", "--project-dir"]);
+var NOT_PLAIN = "$`{}*?[]~\\'\"<>\r";
+function isPlainWord(raw) {
+  if (raw === void 0 || raw === "" || raw.includes("__SUB__"))
+    return false;
+  for (const ch of raw)
+    if (NOT_PLAIN.includes(ch))
+      return false;
+  return true;
+}
+function sendNamesFromSession(args, raws) {
+  const end = args.indexOf("--");
+  const words = [];
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k] ?? "";
+    if (w === "--no-input" && (end < 0 || k < end) && isPlainWord(raws[k]))
+      continue;
+    words.push({ w, raw: raws[k] });
+  }
+  for (let i = 0; i < words.length; i++) {
+    const { w, raw } = words[i];
+    if (!isPlainWord(raw))
+      return false;
+    if (w === "--")
+      return false;
+    if (w === "--from-session" || w.startsWith("--from-session="))
+      return true;
+    if (SEND_VALUE_OPTIONS.has(w)) {
+      i++;
+      if (!isPlainWord(words[i]?.raw))
+        return false;
+    }
+  }
+  return false;
+}
+function cliBinJs(word) {
+  const w = word.replace(/\\/g, "/").toLowerCase();
+  return w.endsWith("/p2p/dist/bin.js") || w.endsWith("@peer2peer/cli/dist/bin.js");
 }
 function mutatingP2PVerb(command, binNames = [], depth = 0) {
   if (depth > 3)
@@ -27453,10 +27533,11 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
     const base = w.split(/[\\/]/).pop() ?? w;
-    return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || binNames.includes(w);
+    return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || cliBinJs(w) || binNames.includes(w);
   };
   for (const segment of segments) {
-    const words = shellWords(segment);
+    const raws = [];
+    const words = shellTokens(segment, false, void 0, void 0, raws);
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
       if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
@@ -27487,7 +27568,7 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
     for (const w of after2)
       if (MUTATING_ONE.has(w))
         return w;
-    if (plain[0] === "send" && !after2.some((w) => /^--from-session(=|$)/.test(w)))
+    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1)))
       return "send (no --from-session)";
   }
   return null;
@@ -27657,14 +27738,18 @@ function editedFiles(toolName, input) {
   return [...out];
 }
 var LITERAL = "";
-function shellTokens(command, markLiteral = false, substs, starts) {
+function shellTokens(command, markLiteral = false, substs, starts, raws) {
   const out = [];
   let cur = "";
   let has = false;
   let q = "";
   let fresh = true;
-  const push = () => {
+  let start = -1;
+  let redir = false;
+  const push = (end) => {
     if (has) {
+      raws?.push((redir ? "<" : "") + (command[start - 1] === "\r" ? "\r" : "") + command.slice(start, end) + (command[end] === "\r" ? "\r" : ""));
+      redir = false;
       if (fresh)
         starts?.add(out.length);
       fresh = false;
@@ -27672,9 +27757,12 @@ function shellTokens(command, markLiteral = false, substs, starts) {
     }
     cur = "";
     has = false;
+    start = -1;
   };
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
+    if (start < 0 && !" 	\n\r;|&()<>".includes(c))
+      start = i;
     if (q === "'") {
       if (c === "'")
         q = "";
@@ -27729,7 +27817,9 @@ function shellTokens(command, markLiteral = false, substs, starts) {
       continue;
     }
     if (c === " " || c === "	" || c === "\n" || c === "\r" || ";|&()<>".includes(c)) {
-      push();
+      push(i);
+      if (c === "<" || c === ">")
+        redir = true;
       if (c === "\n" || ";|&()".includes(c))
         fresh = true;
       continue;
@@ -27737,7 +27827,7 @@ function shellTokens(command, markLiteral = false, substs, starts) {
     cur += c;
     has = true;
   }
-  push();
+  push(command.length);
   return out;
 }
 function closingParen(s2, j) {
@@ -29774,6 +29864,11 @@ var Bridge = class {
     for (const t2 of this.timers)
       t2.cancel();
     this.queueTimer?.cancel();
+    if (this.announcing) {
+      const settled = new AbortController();
+      await Promise.race([this.announcing.catch(() => void 0), this.clock.sleep(FINAL_STATUS_TIMEOUT_MS, settled.signal)]);
+      settled.abort();
+    }
     if (this.isOnline) {
       await this.deps.p2p.status({ session: this.sid, state: "idle", label: this.label, ...this.where() }, FINAL_STATUS_TIMEOUT_MS).catch(() => void 0);
     }

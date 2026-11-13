@@ -220,7 +220,11 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     const w = world(on)
     await start($, w)
     const r = await $.tool.call({ tool: 'Bash', tool_use_id: 'q1', command: "p2p send --from-session=''fake --to ben hi" } as never)
-    expect(JSON.stringify(r)).toContain('speaks only for this session')
+    // Quoted, the send guard refuses it first (a word it can't read as written fails closed: review of #66).
+    expect(JSON.stringify(r)).toMatch(/speaks only for this session|send \(no --from-session\)/)
+    const plain = await $.tool.call({ tool: 'Bash', tool_use_id: 'q2', command: 'p2p send --from-session=fake --to ben hi' } as never)
+    expect(JSON.stringify(plain)).toContain('speaks only for this session')
+    expect(ran(w, 'send')).toHaveLength(0)
   })
 
   test('folders stay pending through runs that don\'t bind (ix inbox, a dry run): only a run that answers bound: true clears them (R2)', async ($, on) => {
