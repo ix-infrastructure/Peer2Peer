@@ -16,6 +16,29 @@ const USER_ID_RE = /^p2p:[a-z2-7]{20,}$/;
 const REF_RE = /^[0-9a-f]{6}$/;
 const LABEL_MAX = 40;
 
+// ── linear scans ────────────────────────────────────────────────────────────
+// Peer and agent text reaches these, so no backtracking regex: each is one pass.
+
+/** `s` without any of `chars` at its end (and at its start when `start`). */
+export function trimChars(s: string, chars: string, start = false): string {
+  let i = 0;
+  let j = s.length;
+  if (start) while (i < j && chars.includes(s.charAt(i))) i++;
+  while (j > i && chars.includes(s.charAt(j - 1))) j--;
+  return s.slice(i, j);
+}
+
+/** `<head> [ref]` → [head, ref], the head without trailing whitespace; null without a trailing ref. */
+export function splitRef(s: string): [string, string] | null {
+  const n = s.length;
+  if (n < 8 || s.charAt(n - 1) !== "]" || s.charAt(n - 8) !== "[") return null;
+  const ref = s.slice(n - 7, n - 1);
+  if (!REF_RE.test(ref)) return null;
+  const head = s.slice(0, n - 8).trimEnd();
+  // As /^(.*?)\s*\[([0-9a-f]{6})\]$/ did: `.` never spans a line break.
+  return /[\n\r\u2028\u2029]/.test(head) ? null : [head, ref];
+}
+
 // ── untrusted text ──────────────────────────────────────────────────────────
 
 /** Control, format (bidi overrides, zero-width, tags) and line/paragraph separator characters. */
@@ -40,22 +63,16 @@ export function inertMax(text: string, max: number): string {
 
 /** A session label as the bridge sends it: `[a-z0-9._-]`, at most 40. */
 export function sanitizeLabel(raw: string): string {
-  const label = raw
+  const dashed = raw
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, LABEL_MAX);
+    .replace(/[^a-z0-9._-]+/g, "-");
+  const label = trimChars(dashed, "-", true).slice(0, LABEL_MAX);
   return label === "" ? "session" : label;
 }
 
 /** A peer's label as it appears inside an address: inert, no spaces, slashes or brackets. */
 export function addressLabel(label: string): string {
-  return (
-    inert(label)
-      .replace(/[\s[\]/"&:]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 64) || "session"
-  );
+  return trimChars(inert(label).replace(/[\s[\]/"&:]+/g, "-"), "-", true).slice(0, 64) || "session";
 }
 
 /** Message text with control and format characters gone; line breaks and tabs kept. */
@@ -102,9 +119,9 @@ export type ParsedAddress = { user: string; label?: string; ref?: string };
  */
 export function parseAddress(to: string): ParsedAddress | null {
   const s = to.trim();
-  const ref = /^(.*?)\s*\[([0-9a-f]{6})\]$/.exec(s);
-  const head = (ref ? ref[1] : s)?.trim() ?? "";
-  const pick = ref?.[2];
+  const ref = splitRef(s);
+  const head = (ref ? ref[0] : s).trim();
+  const pick = ref?.[1];
   if (USER_ID_RE.test(head)) return { user: head, ...(pick ? { ref: pick } : {}) };
   const body = head.startsWith(P2P_PREFIX) ? head.slice(P2P_PREFIX.length) : head;
   const m = new RegExp(`^([^\\s/@[\\]]+@${FP})(?:/([^\\s/[\\]]+))?$`).exec(body);
@@ -348,7 +365,7 @@ const isWindowsPath = (p: string) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("
 
 /** The last segment of a path, whichever separator it uses. */
 export function pathBasename(path: string): string | undefined {
-  const trimmed = path.replace(/[\\/]+$/, "");
+  const trimmed = trimChars(path, "\\/");
   return trimmed.split(/[\\/]/).pop() || undefined;
 }
 
@@ -399,12 +416,11 @@ export function stripPaths(line: string): string {
 
 /** A summary as one shareable line (no absolute paths, at most 200 characters), or undefined. */
 export function cleanSummary(text: string): string | undefined {
-  const line = String(text)
+  const folded = String(text)
     .replace(/\s+/g, " ")
     .replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "")
-    .trim()
-    .replace(/^["'`]+|["'`]+$/g, "")
     .trim();
+  const line = trimChars(folded, "\"'`", true).trim();
   if (line === "" || /^(none|n\/a|unknown)\.?$/i.test(line)) return undefined;
   const scrubbed = stripPaths(line);
   if (scrubbed !== line) return cleanSummary(scrubbed);
@@ -1121,7 +1137,7 @@ export function turnContextOf(line: string): { mode: CodexMode; turnId?: string;
 /** Whether `path` is `root` or inside it (both already resolved; case-insensitive on macOS/Windows). */
 export function isInside(path: string, root: string, caseless = process.platform === "darwin" || process.platform === "win32"): boolean {
   const norm = (s: string) => {
-    const t = s.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+    const t = trimChars(s.replace(/\\/g, "/"), "/") || "/";
     return caseless ? t.toLowerCase() : t;
   };
   const p = norm(path);
