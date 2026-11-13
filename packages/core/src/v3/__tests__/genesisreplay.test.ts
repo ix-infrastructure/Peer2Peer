@@ -461,3 +461,56 @@ describe("#74 re-review: pruned histories and walk anchors", () => {
     expect(IdentityChain.fromStored((await store.getIdentity(u.userId))!).anchored).toBe(false);
   });
 });
+
+/** Follow-up to #76: a replay of pruned ancestry is known history, whatever the chain's size. */
+describe("#76 follow-up: a pruned genesis isn't stored again", () => {
+  /** v1..v5, a fork v6' off v5, then the head branch adds T2 and grows past the cap (pruning drops v1..v5). */
+  function forkedLong() {
+    const u = makeUser("alice");
+    const c = new IdentityChain(u.userId);
+    c.add(u.doc.jws, { now: NOW });
+    for (let v = 2; v <= 5; v++) c.add(u.publish({ iat: NOW - 900 + v }).jws, { now: NOW });
+    const v5 = u.doc;
+    const fork = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 6, prev: v5.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 880 }),
+    );
+    c.add(fork.jws, { now: NOW });
+    const t2 = u.addDevice({ keyholder: false });
+    for (let i = 0; i < MAX_CHAIN_VERSIONS + 10; i++) c.add(u.publish({ iat: NOW - 400 }).jws, { now: NOW });
+    expect(c.has(u.docs[0].hash)).toBe(false);
+    expect(c.has(fork.hash)).toBe(true);
+    expect(c.view().forked).toBe(true);
+    expect(c.view().devices).not.toContain(t2.did);
+    return { u, c, fork, t2 };
+  }
+
+  it("DOWNGRADE: replaying the pruned v1..v5 doesn't turn the counted low fork into a stray", () => {
+    const { u, c, fork, t2 } = forkedLong();
+    expect(c.add(u.docs[0].jws, { now: NOW }).status).toBe("duplicate");
+    for (const d of u.docs.slice(0, 5)) c.add(d.jws, { now: NOW });
+    expect(c.has(u.docs[0].hash)).toBe(false);
+    const view = c.view();
+    expect(view.forked).toBe(true);
+    expect(view.tips.map((t) => t.hash)).toContain(fork.hash);
+    expect(view.devices).not.toContain(t2.did);
+  });
+
+  it("DOWNGRADE below the cap: a stored chain with room to spare still refuses the pruned genesis", () => {
+    const { u, c, fork, t2 } = forkedLong();
+    // Fewer versions held than the cap (as after a store kept only part of the history): pruning wouldn't
+    // drop a re-stored v1 again, so only add() itself keeps it out.
+    const s = c.toStored();
+    const head = c.view().head;
+    const keep = s.versions.filter((j) => {
+      const d = verifyIdentityDocSignature(j);
+      return d.hash === fork.hash || d.ver > 40 || d.hash === head.hash;
+    });
+    const small = IdentityChain.fromStored({ ...s, versions: keep });
+    expect(small.size).toBeLessThan(MAX_CHAIN_VERSIONS);
+    expect(small.view().forked).toBe(true);
+    for (const d of u.docs.slice(0, 5)) small.add(d.jws, { now: NOW });
+    expect(small.has(u.docs[0].hash)).toBe(false);
+    expect(small.view().forked).toBe(true);
+    expect(small.view().devices).not.toContain(t2.did);
+  });
+});

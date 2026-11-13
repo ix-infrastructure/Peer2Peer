@@ -942,6 +942,9 @@ export class IdentityChain {
     if (peek.prev === null) {
       const doc = verifyIdentityDocLink(undefined, jws, opts);
       if (held && held.ik !== doc.ik) fail("issuer-mismatch", "a different ik for this userId");
+      // The genesis pruning dropped from counted history (anchoredGenesis) is known history: not stored again,
+      // so a replay of the pruned ancestry can't reconnect to an old fork tip and make it a stray (#76).
+      if (this.anchoredGenesis.has(doc.hash)) return { status: "duplicate", doc };
       // A second genesis is a fork at ver 1: keep it. Below unanchored history it is kept but not counted
       // until it connects (strays, #74): anyone can replay the public ver 1.
       this.put(doc);
