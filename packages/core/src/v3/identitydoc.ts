@@ -580,6 +580,13 @@ export interface StoredIdentityChain {
   /** Devices revoked on history this client jumped over (pre-release review R1): never allowed again. */
   denied?: string[];
   /**
+   * The versions above the held head that an incomplete refresh verified but couldn't connect yet (#35),
+   * at most MAX_PENDING_HEADS. While any is newer than the held head, the view trusts only the devices and
+   * key holders every such one lists too. Cleared by the next complete refresh a majority of the listed
+   * relays answered; one issued in the future or past its `exp` is ignored.
+   */
+  pendingHeads?: string[];
+  /**
    * Obsolete (pre-release review S3: demotion isn't revocation). Ignored when read,
    * never written.
    */
@@ -588,21 +595,54 @@ export interface StoredIdentityChain {
 
 /** Upper bound on versions kept per identity; the oldest non-tips go first. */
 export const MAX_CHAIN_VERSIONS = 1024;
+/**
+ * Upper bound on pending heads kept per identity (#35). Only the ones that narrow are kept (see
+ * notePending), at most one per device or key holder left out, so this is a safety bound, not a working cap.
+ */
+export const MAX_PENDING_HEADS = 64;
+
+/** A pending head counts only while issued (not in the future) and not past its `exp` (#35). */
+function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
+  const now = opts.now ?? nowSec();
+  return d.iat <= now + (opts.skewSec ?? DEFAULT_SKEW_SEC) && now < d.exp;
+}
+
+/** The stored pending heads still usable at `now` (cheap: decoded, not verified), for keying a cached view. */
+export function usablePendingHeads(s: StoredIdentityChain, opts: TimeOptions = {}): string[] {
+  return (s.pendingHeads ?? []).filter((j) => {
+    try {
+      return pendingUsable(peekIdentityDoc(j), opts);
+    } catch {
+      return true; // malformed: kept, so fromStored fails on it as on any corrupt stored version
+    }
+  });
+}
 
 export class IdentityChain {
   private readonly versions = new Map<string, VerifiedIdentityDoc>();
   private gap = false;
   /** Revocation denylist carried across jumps (R1). */
   private denied = new Set<string>();
+  /** Verified newer versions that don't connect yet (#35, see notePending). */
+  private pending: VerifiedIdentityDoc[] = [];
 
   constructor(readonly iss: string) {}
 
-  /** Rebuilds from storage, re-verifying every link. */
-  static fromStored(s: StoredIdentityChain): IdentityChain {
+  /**
+   * Rebuilds from storage, re-verifying every link. `opts` (default: the wall clock) only decides which
+   * pending heads are still usable (#35).
+   */
+  static fromStored(s: StoredIdentityChain, opts: TimeOptions = {}): IdentityChain {
     const c = new IdentityChain(s.iss);
     const docs = s.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
     c.gap = s.historyGap ?? false;
     c.denied = new Set(s.denied ?? []);
+    for (const j of s.pendingHeads ?? []) {
+      const p = verifyIdentityDocSignature(j);
+      // iss is H(ik), checked with the signature: the same iss is the same ik.
+      if (p.iss !== s.iss) fail("issuer-mismatch", "stored pending head of another identity");
+      if (pendingUsable(p, opts)) c.pending.push(p);
+    }
     // Roots (versions whose parents aren't stored, after a gap jump or pruning) are trusted as stored.
     for (const d of docs) {
       if (d.iss !== s.iss) fail("issuer-mismatch", "stored version of another identity");
@@ -624,7 +664,76 @@ export class IdentityChain {
       versions: [...this.versions.values()].map((d) => d.jws),
       ...(this.gap ? { historyGap: true } : {}),
       ...(this.denied.size > 0 ? { denied: [...this.denied] } : {}),
+      // Each dropped once the held head reaches its ver.
+      ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
     };
+  }
+
+  /**
+   * Records `docs`, signature-verified versions of this identity newer than the held head that don't connect
+   * to the held history yet (an incomplete refresh, #35), beside those already pending. While any is newer
+   * than the held head, the view trusts only the devices and key holders every such one lists too (each tip
+   * above the head, so a fork branch's revocation counts as well), so versions committed on the way there
+   * can't trust a device or key one of them already removed.
+   *  - Narrowing only, and never the permanent denylist: a device one of them leaves out may be one a merge
+   *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
+   *    rules once connected.
+   *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
+   *    refresh a majority of the held view's relays answered (clearPending), and one issued in the future or past
+   *    its `exp` is ignored. So a version only the identity key could sign but no relay serves any more can't
+   *    narrow the view for good. A client never applies them to its own identity (re-review N1).
+   *  - Only the ones that narrow are kept, and none that narrows is evicted (re-review N3/R3): walking the
+   *    candidates highest `ver` first, one is kept if it leaves out a device or key holder that no kept,
+   *    higher-`ver` one lasting at least as long (`exp`) already leaves out (the highest is always kept).
+   *    Any other is redundant for good: what it leaves out stays left out by a higher-`ver` one that is
+   *    dropped no sooner, by the head reaching it or by expiry (re-review E1). So however many
+   *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
+   *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
+   */
+  notePending(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
+    if (this.versions.size === 0) return false;
+    const headVer = this.tips()[0].ver;
+    const before = this.pendingCap().map((d) => d.hash);
+    const byHash = new Map(this.pendingCap().map((d) => [d.hash, d]));
+    for (const d of docs) {
+      if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+      if (d.ver > headVer && pendingUsable(d, opts)) byHash.set(d.hash, d);
+    }
+    // Everything any held version or candidate lists: what a candidate "leaves out" is measured against it.
+    // (Anything outside it is left out by the highest candidate too, which is always kept.)
+    const universe = new Set<string>();
+    for (const d of [...this.versions.values(), ...byHash.values()]) {
+      for (const x of d.devices) universe.add(`d:${x}`);
+      for (const x of d.keyholders) universe.add(`k:${x}`);
+    }
+    // What each kept head leaves out, with the latest `exp` among the kept heads leaving it out: a higher
+    // head covers a candidate only while it lasts at least as long (expiry isn't ver-ordered; re-review E1).
+    const covered = new Map<string, number>();
+    const kept: VerifiedIdentityDoc[] = [];
+    for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
+      const lists = new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
+      const leaves = [...universe].filter((x) => !lists.has(x));
+      if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp)) continue;
+      kept.push(d);
+      for (const x of leaves) covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
+    }
+    this.pending = kept.slice(0, MAX_PENDING_HEADS);
+    const after = this.pending.map((d) => d.hash);
+    return after.length !== before.length || after.some((h) => !before.includes(h));
+  }
+
+  /** Drops every pending head (a complete refresh, #35). Returns whether there was one. */
+  clearPending(): boolean {
+    const had = this.pendingCap().length > 0;
+    this.pending = [];
+    return had;
+  }
+
+  /** The pending heads still newer than the held head (#35). */
+  private pendingCap(): VerifiedIdentityDoc[] {
+    if (this.pending.length === 0 || this.versions.size === 0) return [];
+    const headVer = this.tips()[0].ver;
+    return this.pending.filter((d) => d.ver > headVer);
   }
 
   get size(): number {
@@ -801,9 +910,11 @@ export class IdentityChain {
     const tips = this.tips();
     if (tips.length === 0) fail("identity-unknown", `no identity document for ${this.iss}`);
     const head = tips[0];
-    const devices = head.devices.filter((d) => tips.every((t) => t.devices.includes(d)) && !this.denied.has(d));
+    // #35: a newer verified version not connected yet narrows the allowlist and the key holders.
+    const cap = this.pendingCap();
+    const devices = head.devices.filter((d) => tips.every((t) => t.devices.includes(d)) && !this.denied.has(d) && cap.every((p) => p.devices.includes(d)));
     // S3: key holders are the head's (intersected across a fork), limited to the denied-filtered allowlist.
-    const keyholders = head.keyholders.filter((d) => tips.every((t) => t.keyholders.includes(d)) && devices.includes(d));
+    const keyholders = head.keyholders.filter((d) => tips.every((t) => t.keyholders.includes(d)) && devices.includes(d) && cap.every((p) => p.keyholders.includes(d)));
     const relays = [...new Set(tips.flatMap((t) => t.relays))];
     return {
       iss: this.iss,

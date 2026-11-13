@@ -509,15 +509,21 @@ export class App {
   // -------------------------------------------------------------------------
   // Identity documents (§2.5, §5.6)
 
+  /**
+   * Our own identity's view. Pending heads (core #35) never narrow it: they are for trusting others'
+   * devices, and a version only the identity key signed must not stop this device from editing or
+   * rotating the identity (#65 review M1).
+   */
   ownView(): Promise<IdentityView> {
-    return getIdentityView(this.store, this.userId).then((v) => {
+    return getIdentityView(this.store, this.userId, { ignorePending: true }).then((v) => {
       if (!v) throw new CliError("no_identity", "this device holds no identity document for its user");
       return v;
     });
   }
 
+  /** The stored view of `userId`; our own identity's never narrowed by pending heads (#65 re-review N1, see ownView). */
   async view(userId: string): Promise<IdentityView | undefined> {
-    return getIdentityView(this.store, userId);
+    return getIdentityView(this.store, userId, userId === this.keys?.userId ? { ignorePending: true } : {});
   }
 
   /**
@@ -627,6 +633,7 @@ export class App {
   /** Signer resolution for core verifiers, finding unknown identities on the relays (once per process). */
   signerCtx(hint: readonly string[] = []): SignerContext {
     return storeSignerContext(this.store, {
+      own: this.keys?.userId,
       resolveIdentity: (u) => this.discover(u, hint),
     });
   }
@@ -804,7 +811,7 @@ export class App {
     const stored = await this.store.getIdentity(this.userId);
     // Only devices a merge dropped come back: never one revoked along the head's ancestry, nor one
     // core denies after a history jump.
-    const plan = stored && merges.length > 0 ? planReadd(IdentityChain.fromStored(stored), preTips, unionDevices, view.devices, head.hash, stored.denied ?? []) : { readd: [], skipped: [] };
+    const plan = stored && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored, pendingHeads: [] }), preTips, unionDevices, view.devices, head.hash, stored.denied ?? []) : { readd: [], skipped: [] };
     for (const d of plan.skipped) this.warn(`device ${d} was dropped by the merge of your identity document's branches; link it again (this device's copy of the history can't prove it wasn't revoked)`);
     const readd = plan.readd;
     const devices = [...view.devices, ...readd].slice(0, MAX_DEVICES);
