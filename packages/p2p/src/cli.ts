@@ -79,6 +79,8 @@ export interface ProgramDeps {
   noInput?: boolean;
   /** The person token was valid (main() checks it once and removes it from the environment: projects.ts). */
   front?: boolean;
+  /** A person token was passed that isn't this home's (person.key was replaced since): every command refuses it (main()). */
+  personTokenStale?: boolean;
   /** The person's "yes" on their controlling terminal (tty-confirm.ts; tests stand in). */
   confirmTty?: projects.ConfirmTty;
 }
@@ -171,6 +173,12 @@ export function buildProgram(deps: ProgramDeps): Command {
       const app = makeApp(deps.env, io, opts.readOnly ? { readOnly: true } : undefined);
       let stop = () => {};
       try {
+        if (deps.personTokenStale) {
+          throw new CliError(
+            "person_token_stale",
+            `P2P_PERSON_TOKEN isn't this device's person token: ${projects.personTokenFile(app.home)} is replaced when an identity is created or restored here. Nothing was done: read that file again and run the command again. A front end does this itself (in Claude Code, reloading the Peer2Peer plugin also does it)`,
+          );
+        }
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a
         // read-only command, which must leave the home exactly as it found it).
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
@@ -2125,9 +2133,13 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
   {
     // A copy without it (an embedder's object is left as it was); the process's own environment loses it too.
     const env = { ...deps.env };
+    const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
     const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
-    deps = { ...deps, front, env };
+    // A token that isn't this home's is refused outright, never quietly taken as "not the person": the
+    // person.key it was read from was replaced when an identity was created or restored here
+    // (projects.ts renewPersonToken), and the front end that passed it reads the file again.
+    deps = { ...deps, front, env, ...(given && !front ? { personTokenStale: true } : {}) };
   }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
   const end = argvIn.indexOf("--");
