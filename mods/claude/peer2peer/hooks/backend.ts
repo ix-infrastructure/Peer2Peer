@@ -52,7 +52,18 @@ export interface Exec {
    * and so does `signal` aborting, where the Exec can take one.
    */
   spawn(argv: readonly string[], init?: { signal?: AbortSignal }): AsyncGenerator<Chunk, unknown>
+  /**
+   * Reads the person token again (`<P2P_HOME>/cli/person.key`) after the CLI refused the one this
+   * Exec passes (`person_token_stale`: the CLI replaces it when an identity is created or restored).
+   * True when a different token is in use from now on.
+   */
+  refreshPersonToken?(): Promise<boolean>
 }
+
+/** The CLI refused the person token it was given before doing anything (packages/p2p/src/cli.ts). */
+const STALE_TOKEN = 'person_token_stale'
+/** What the person does when the token still can't be read again. */
+export const STALE_TOKEN_HINT = "Peer2Peer couldn't read the new person token: check that the person.key file named above exists and is readable by you, then run the command again (or reload the Peer2Peer plugin, or restart Claude Code)"
 
 export type Outcome<T> =
   | { ok: true; value: T; stderr: string }
@@ -79,17 +90,27 @@ export class P2P {
     // `--json` goes before any `--`, so it is always read as the flag.
     const dash = args.indexOf('--')
     const argv = dash < 0 ? [...args, '--json'] : [...args.slice(0, dash), '--json', ...args.slice(dash)]
+    const once = () => this.exec.run([...this.bin, ...argv], { timeoutMs: init.timeoutMs ?? TIMEOUT_MS, ...(init.stdin !== undefined ? { stdin: init.stdin } : {}) })
     let ran: RunResult
+    let parsed: Record<string, unknown> | null
     try {
-      ran = await this.exec.run([...this.bin, ...argv], { timeoutMs: init.timeoutMs ?? TIMEOUT_MS, ...(init.stdin !== undefined ? { stdin: init.stdin } : {}) })
+      ran = await once()
+      parsed = parseJson<Record<string, unknown>>(ran.stdout)
+      // The token went stale (an identity was created or restored since it was read): the CLI did
+      // nothing, so the command runs once more with the token read again.
+      if (ran.exitCode !== 0 && parsed?.error === STALE_TOKEN && (await this.exec.refreshPersonToken?.().catch(() => false))) {
+        ran = await once()
+        parsed = parseJson<Record<string, unknown>>(ran.stdout)
+      }
     } catch (e) {
       return { ok: false, error: 'cli_missing', reason: `could not run ${this.bin.join(' ')}: ${inert(String((e as Error)?.message ?? e))}`, stderr: '' }
     }
-    const parsed = parseJson<Record<string, unknown>>(ran.stdout)
     if (ran.exitCode === 0 && parsed !== null) return { ok: true, value: parsed as T, stderr: ran.stderr }
     const error = typeof parsed?.error === 'string' ? parsed.error : ran.exitCode === 0 ? 'unreadable' : 'failed'
     const last = ran.stderr.trim().split('\n').pop() ?? ''
-    const reason = typeof parsed?.reason === 'string' ? parsed.reason : last || `p2p ${args[0] ?? ''} exited ${ran.exitCode}`
+    const said = typeof parsed?.reason === 'string' ? parsed.reason : last || `p2p ${args[0] ?? ''} exited ${ran.exitCode}`
+    // Still refused after reading the token again (or it couldn't be read): how the person gets out of it.
+    const reason = error === STALE_TOKEN ? `${said}. ${STALE_TOKEN_HINT}` : said
 
     return { ok: false, error, reason: inert(reason), stderr: ran.stderr, ...(parsed ? { value: parsed } : {}) }
   }

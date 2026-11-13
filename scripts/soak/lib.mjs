@@ -389,7 +389,12 @@ export class Device {
       mkdirSync(join(this.home, "cli"), { recursive: true, mode: 0o700 });
       writeFileSync(join(this.home, "cli", "person.key"), this._token, { mode: 0o600 });
     }
-    return this._token;
+    // Read again on every use: the CLI replaces person.key when an identity is created or restored here.
+    try {
+      return readFileSync(join(this.home, "cli", "person.key"), "utf8").trim();
+    } catch {
+      return this._token;
+    }
   }
 
   env(extra = {}) {

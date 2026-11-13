@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { personTokenFor, startRelay, type TestRelay } from "./harness.js";
+import { currentPersonToken, personTokenFor, startRelay, type TestRelay } from "./harness.js";
 
 const run = promisify(execFile);
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -60,8 +60,9 @@ describe("the bundled CLI", () => {
     copyFileSync(BUNDLE, join(bin, "p2p.mjs"));
     writeFileSync(join(bin, "defaults.json"), JSON.stringify({ defaultRelays: [R] }));
     // The person token (projects.ts): this bundle runs in a child process, whose ancestry may hold an agent.
-    const tokens = new Map<string, string>();
-    const tokenOf = (home: string) => tokens.get(home) ?? (tokens.set(home, personTokenFor(home)), tokens.get(home)!);
+    // Read again on every run: the CLI replaces person.key when an identity is created here.
+    const seeded = new Set<string>();
+    const tokenOf = (home: string) => (seeded.has(home) || (seeded.add(home), personTokenFor(home)), currentPersonToken(home));
     const env = (home: string) => ({
       PATH: process.env.PATH ?? "",
       P2P_HOME: home,

@@ -47,6 +47,17 @@ export function nodeExec(env: Record<string, string>): Exec {
         })
         child.stdin.end(init?.stdin ?? '')
       }),
+    // As the mod does (register.tsx execOf): the CLI refused the token (person_token_stale), so
+    // person.key is read again, with the mod's own script. Only where a token is passed at all.
+    refreshPersonToken: async () => {
+      const home = childEnv.P2P_HOME
+      if (!childEnv.P2P_PERSON_TOKEN || !home) return false
+      const t = modPersonToken(home)
+      if (!/^[A-Za-z0-9_-]{43}$/.test(t) || t === childEnv.P2P_PERSON_TOKEN) return false
+      childEnv.P2P_PERSON_TOKEN = t
+
+      return true
+    },
     spawn: argv =>
       (async function* (): AsyncGenerator<Chunk, unknown> {
         const child = spawn(argv[0] as string, argv.slice(1), { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] })

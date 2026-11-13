@@ -2,6 +2,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { childEnv } from "../knobs.js";
 import { personTokenOf } from "../server.js";
+import { nodeExec } from "../p2p.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -230,6 +231,22 @@ describe("PR #30 third review: quoting, a bridge that can't be told, the token's
     expect(t).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(personTokenOf(home)).toBe(t);
     expect(statSync(join(home, "cli", "person.key")).mode & 0o777).toBe(0o600);
+  });
+
+  it("#70: the token is read again for every run, so the bridge keeps working once the CLI replaces person.key", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p2p-tok-"));
+    homes.push(home);
+    const before = personTokenOf(home);
+    // What the CLI does when an identity is created or restored here (packages/p2p projects.ts renewPersonToken).
+    writeFileSync(join(home, "cli", "person.key"), "N".repeat(43), { mode: 0o600 });
+    expect(personTokenOf(home)).toBe("N".repeat(43));
+    expect(personTokenOf(home)).not.toBe(before);
+    // The server's exec works its environment out per run (server.ts: nodeExec(() => childEnv(env, front()))).
+    let n = 0;
+    const exec = nodeExec(() => ({ ...process.env, P2P_TEST_RUN: String(++n) }));
+    const argv = [process.execPath, "-e", "process.stdout.write(process.env.P2P_TEST_RUN)"];
+    expect((await exec.run(argv)).stdout).toBe("1");
+    expect((await exec.run(argv)).stdout).toBe("2");
   });
 });
 
