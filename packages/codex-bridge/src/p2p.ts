@@ -28,11 +28,12 @@ export type Outcome<T> = { ok: true; value: T } | { ok: false; error: string; re
 const TIMEOUT_MS = 30_000;
 
 /** Exec over node's child_process with the given environment. */
-export function nodeExec(env: NodeJS.ProcessEnv = process.env): Exec {
+export function nodeExec(env: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv) = process.env): Exec {
   return {
     run: (argv, init) =>
       new Promise<RunResult>((resolve, reject) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        // A function: worked out again for every run (the server's reads the person token each time).
+        const child = spawn(argv[0] as string, argv.slice(1), { env: typeof env === "function" ? env() : env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         let stdout = "";
         let stderr = "";
         const timer = setTimeout(() => child.kill("SIGKILL"), init?.timeoutMs ?? TIMEOUT_MS);

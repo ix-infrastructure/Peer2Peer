@@ -116,6 +116,7 @@ import { deliverCircle, memberCaps, ownerPublish, signOwnJoin } from "./circle-o
 import { accept, dropHeld, getHeld, hold, mintInvite, withHeldId } from "./social.js";
 import { exportAll, exportCircle, mergeRemovals, sendSync } from "./sync.js";
 import { linkJoin } from "./identity.js";
+import { renewPersonToken } from "./projects.js";
 import { makeEvent, receiving, type EventFrom, type NewEvent } from "./inbound.js";
 
 // ---------------------------------------------------------------------------
@@ -747,6 +748,8 @@ async function begin(app: App, opts: RotateOptions): Promise<RotationState> {
   const napp = await appAt(app, home);
   const self: SelfDoc = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
+  // The new identity's home gets its own person token (projects.ts renewPersonToken); front ends read it again.
+  renewPersonToken(home);
   await napp.state.put("self", self);
   await napp.load(true);
   await addIdentityVersion(napp.store, doc);

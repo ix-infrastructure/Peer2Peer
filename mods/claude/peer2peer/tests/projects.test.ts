@@ -252,6 +252,30 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     for (const env of w.spawnEnvs) expect((env as Record<string, string> | undefined)?.P2P_PERSON_TOKEN).toBeUndefined()
   })
 
+  test('a token the CLI refuses as stale (#70: person.key replaced once the identity exists) is read again, and the command runs once more', async ($, on) => {
+    const A = 'A'.repeat(43)
+    const B = 'B'.repeat(43)
+    const options: { personToken?: string; isTokenChecked: boolean } = { personToken: A, isTokenChecked: true }
+    const w = world(on, options)
+    await start($, w)
+    // The first run's typed join carries the token the mod made; the CLI then replaces person.key.
+    await slash($, 'peers', `join ${CODE}`)
+    expect(ran(w, 'join').at(-1)?.env?.P2P_PERSON_TOKEN).toBe(A)
+    options.personToken = B
+    await slash($, 'peers', 'project share c_team')
+    expect(ran(w, 'project', 'share').map(r => r.env?.P2P_PERSON_TOKEN)).toEqual([A, B])
+    // From then on the new one, with no refusal first.
+    await slash($, 'peers', 'project share c_team')
+    expect(ran(w, 'project', 'share').map(r => r.env?.P2P_PERSON_TOKEN)).toEqual([A, B, B])
+    // No token to read (none could be made): the refusal stands, run once only, and no token is passed after.
+    options.personToken = ''
+    const refused = await slash($, 'peers', 'project share c_team')
+    expect(ran(w, 'project', 'share').length).toBe(4)
+    expect(refused.text).toContain("isn't this device's person token")
+    await slash($, 'peers', 'project share c_team')
+    expect(ran(w, 'project', 'share').at(-1)?.env?.P2P_PERSON_TOKEN).toBeUndefined()
+  })
+
   test('the held Join reads the person token itself, so it works in a session that has none yet (after /clear or a resume)', async ($, on) => {
     // No token when the session started and when /peers join ran (as in a fresh Sess after /clear).
     const options: { personToken?: string } = {}

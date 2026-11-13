@@ -550,6 +550,15 @@ const execOf = (S: Sess, $: EngineInterface): Exec => ({
   // The long-lived watch never gets the person token: it needs none, and a process's environment can
   // be read by others running as this user (/proc/<pid>/environ on Linux).
   spawn: argv => $.process.spawn({ argv, cwd: $.plugin.root, env: withoutToken(p2pEnv(S, $)) }),
+  // The CLI refused the cached token (person_token_stale): person.key was replaced when an identity was
+  // created or restored on this home (a typed /peers join on a fresh install, a rotation). Read it again.
+  refreshPersonToken: async () => {
+    const was = S.personToken
+    S.personToken = undefined
+    await readPersonToken(S, $)
+
+    return S.personToken !== undefined && S.personToken !== was
+  },
 })
 
 const client = async (S: Sess, $: EngineInterface) => new P2P(execOf(S, $), await binOf(S, $))
@@ -812,7 +821,7 @@ const saveDirs = (S: Sess, $: EngineInterface, current: Run) => {
   if (S.engineSession) bg($.store.set(`${DIRS_PREFIX}${S.engineSession}`, { dirs: [...current.projectDirs], over: current.isDirsOver, why: [...current.dirsOverWhy], ...(current.isEnvUntrusted ? { untrusted: true } : {}), at: Date.now() }))
 }
 
-/** The person token in the CLI's own folder, made here if there is none yet (a fresh install), once. */
+/** The person token in the CLI's own folder, made here if there is none yet (a fresh install), once; read again when the CLI refuses it (execOf refreshPersonToken). */
 const readPersonToken = async (S: Sess, $: EngineInterface) => {
   if (S.personToken) return
   const home = (await $.env.get('P2P_HOME')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.p2p`

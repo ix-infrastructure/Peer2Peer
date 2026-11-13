@@ -23,7 +23,7 @@
 
 import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
@@ -1127,6 +1127,37 @@ export function personToken(home: string): string {
     if (again) return again;
     throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
   }
+}
+
+/**
+ * Replaces the person token with a fresh one. Called whenever an identity is first created or
+ * restored on a home (init, link join, backup restore; setup and join create through init): a
+ * person.key that was already there may have been put there by anything that could write the
+ * folder before the identity existed, so it must not keep standing in for the person afterwards.
+ * The command that creates the identity checked its token when it started, so a front end's first
+ * run still works; the front ends read person.key again when the CLI refuses their old token
+ * (`person_token_stale`). Written whole: a new 0600 file made exclusively beside it, then renamed
+ * over it (a planted symlink is replaced, never followed).
+ */
+export function renewPersonToken(home: string): string {
+  const f = personTokenFile(home);
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  const t = randomBytes(32).toString("base64url");
+  const tmp = `${f}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, t, { mode: 0o600, flag: "wx" });
+    try {
+      renameSync(tmp, f);
+    } catch {
+      // Something that isn't a file is in the way (a directory): it goes, then the new token.
+      rmSync(f, { recursive: true, force: true });
+      renameSync(tmp, f);
+    }
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw new CliError("conflict", `couldn't replace the person token in ${f} (${(e as NodeJS.ErrnoException).code ?? "error"}): remove it, and the next command makes a new one`);
+  }
+  return t;
 }
 
 /** Whether `home` holds an identity (its keys document; state.ts keeps it at <home>/cli/keys.json). */
