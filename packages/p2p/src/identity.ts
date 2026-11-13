@@ -60,6 +60,7 @@ import {
 import { capPeek, certDid, defaultLabel, defaultName, joinCapOf, newKeysDoc, type App } from "./app.js";
 import { defaultRelays, normalizeRelays } from "./config.js";
 import { CliError } from "./errors.js";
+import { isOwnRelay, isPrivateRelayHost, PRIVATE_RESOLVE_MARK, privateGuardLookup, privateRelayMessage } from "./shortcode.js";
 import { fetchTips, linkGet, linkPut, openLinkConnection, relayCode, sleep } from "./relay-client.js";
 import type { SelfDoc } from "./state.js";
 import { exportAll, sendSync, verifiedIssuedCap } from "./sync.js";
@@ -80,12 +81,28 @@ export interface InitResult {
   failed: { relay: string; code: string }[];
 }
 
+/** The `p2p` command as the person types it here (Windows PowerShell blocks npm's p2p.ps1 shim; p2p.cmd works everywhere on Windows). */
+export function p2pCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "p2p.cmd" : "p2p";
+}
+
+/**
+ * Why a new identity can't be made here (no relay anywhere), naming the three ways in. There is
+ * no default relay, by design (bring your own relay).
+ */
+export function noRelaysReason(home: string, platform: NodeJS.Platform = process.platform): string {
+  const p = p2pCommand(platform);
+  return (
+    `no relays configured. Already use Peer2Peer on another device? Run \`p2p link start\` there, then \`${p} link join <code>\` here (one identity, not a second one). ` +
+    `Have an invite? \`${p} join <invite link or code>\`. ` +
+    `Starting a new identity? Pass --relay wss://… (1–5, your group's relay), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${home}/config.json`
+  );
+}
+
 export async function init(app: App, opts: { name?: string; relays?: string[] }): Promise<InitResult> {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
   const relays = opts.relays && opts.relays.length > 0 ? normalizeRelays(opts.relays) : defaultRelays(app.env, app.file);
-  if (relays.length === 0) {
-    throw new CliError("no_relays", `no relays configured: pass --relay wss://… (1–5), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${app.home}/config.json`);
-  }
+  if (relays.length === 0) throw new CliError("no_relays", noRelaysReason(app.home));
   const name = opts.name ?? defaultName();
   if (!isValidName(name)) throw new CliError("usage", "--name must match [a-z0-9._-]{1,32}");
   const ik = generateIdentityKey();
@@ -127,17 +144,34 @@ export interface SetupResult {
   backup?: { file?: string; phrase?: string };
   /** Ix, optional and recommended (ix-local.ts setupIx): found, enabled, recommended (with the command for the person to run), and what to do when it isn't on. Never installed for them. */
   ix?: SetupIx;
+  /** This device is the only key holder and the backup phrase was never shown or saved (`p2p backup show`). */
+  backupNeeded?: true;
 }
 
 export const BACKUP_FILE_NAME = "backup-phrase.txt";
 
-export async function setup(app: App, opts: { name?: string; relays?: string[]; backup?: "file" | "print" | "none"; backupFile?: string; ix?: boolean }): Promise<SetupResult> {
+export type BackupMode = "file" | "print" | "none";
+
+export async function setup(
+  app: App,
+  opts: {
+    name?: string;
+    relays?: string[];
+    backup?: BackupMode;
+    backupFile?: string;
+    ix?: boolean;
+    /** Asked only once an identity was created here (never before its key exists), when `backup` isn't given. */
+    chooseBackup?: (created: InitResult) => Promise<BackupMode>;
+  },
+): Promise<SetupResult> {
   let created = false;
   let pub: { published: string[]; failed: { relay: string; code: string }[] } | undefined;
+  let backupMode = opts.backup;
   if (!(await app.load(false))) {
     const r = await init(app, { name: opts.name, relays: opts.relays });
     created = true;
     pub = { published: r.published, failed: r.failed };
+    if (backupMode === undefined && opts.chooseBackup) backupMode = await opts.chooseBackup(r);
   }
   const v = await app.ownView();
   const out: SetupResult = {
@@ -155,7 +189,7 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     // Never fails a setup: Ix is optional.
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText((e as Error).message, 200)}` };
   }
-  if (opts.backup === "file") {
+  if (backupMode === "file") {
     const path = opts.backupFile ?? join(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
@@ -167,9 +201,11 @@ export async function setup(app: App, opts: { name?: string; relays?: string[]; 
     }
     await chmod(path, 0o600);
     out.backup = { file: path };
-  } else if (opts.backup === "print") {
+  } else if (backupMode === "print") {
     out.backup = { phrase: (await backupShow(app)).phrase };
   }
+  // This device is the only key holder and its phrase was never shown: losing it loses the identity.
+  if (!out.backup && app.isKeyholder && v.head.keyholders.length < 2 && !app.self?.backupShown) out.backupNeeded = true;
   return out;
 }
 
@@ -492,13 +528,26 @@ export async function linkStart(app: App, opts: { keyholder?: boolean; relay?: s
   };
 }
 
+/** The identity a link code would make this device part of, shown before anything is kept (LinkJoin.wait). */
+export interface LinkIdentity {
+  userId: string;
+  address: string;
+  fingerprint: string;
+  /** This device would get the identity key. */
+  keyholder: boolean;
+}
+
 export interface LinkJoin {
   compareCode: string;
   did: string;
-  wait(): Promise<{ userId: string; address: string; did: string; keyholder: boolean }>;
+  /**
+   * Waits for the other device, then, with `confirm`, shows which identity this device would
+   * become and keeps nothing unless it says yes (a code from someone else makes this device theirs).
+   */
+  wait(confirm?: (who: LinkIdentity) => Promise<boolean>): Promise<{ userId: string; address: string; did: string; keyholder: boolean }>;
 }
 
-export async function linkJoin(app: App, code: string, opts: { label?: string; maxWaitMs?: number } = {}): Promise<LinkJoin> {
+export async function linkJoin(app: App, code: string, opts: { label?: string; maxWaitMs?: number; allowPrivateRelay?: boolean } = {}): Promise<LinkJoin> {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
   let parsed: { secret: Uint8Array; relay: string };
   try {
@@ -507,12 +556,35 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
     throw new CliError("usage", "that is not a link code (p2p-link:…@relay)");
   }
   const { secret, relay } = parsed;
+  // A link code someone else gave connects to its relay before anyone confirms anything: the same
+  // private-address rule as an invite code's relay, unless it is one of the person's own relays
+  // (P2P_DEFAULT_RELAYS or config.json: no identity here yet) or they opted in.
+  const allowPrivate = opts.allowPrivateRelay || app.env.P2P_ALLOW_PRIVATE_RELAY === "1";
+  let own: string[] = [];
+  try {
+    own = defaultRelays(app.env, app.file);
+  } catch {
+    // a broken config: no own relays
+  }
+  const guard = !allowPrivate && !isOwnRelay(relay, own);
+  if (guard && isPrivateRelayHost(new URL(relay).hostname)) {
+    throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname));
+  }
   const device = generateDeviceKeysV3("p2p:pending");
   const x = generateDeviceKeysV3("p2p:pending");
   const label = (opts.label ?? defaultLabel()).slice(0, 64);
   const req = createLinkRequest(secret, device, x.agreementPublicKey, label);
   const lid = linkId(secret);
-  const conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress);
+  let conn: Awaited<ReturnType<typeof openLinkConnection>>;
+  try {
+    conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress, guard ? { lookup: privateGuardLookup() } : {});
+  } catch (e) {
+    if ((e as Error).message?.includes(PRIVATE_RESOLVE_MARK)) {
+      const at = /\(([^()]+)\)\s*$/.exec((e as Error).message)?.[1];
+      throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname, at ? { detail: `it resolves to ${at}` } : {}));
+    }
+    throw e;
+  }
   try {
     await linkPut(conn, lid, "req", JSON.stringify(req));
   } catch (e) {
@@ -522,7 +594,7 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
   return {
     compareCode: linkCompareCode(secret, device.did),
     did: device.did,
-    wait: async () => {
+    wait: async (confirm) => {
       const deadline = Date.now() + Math.min(LINK_TTL_SEC * 1000, opts.maxWaitMs ?? Infinity);
       let frame: string | undefined;
       try {
@@ -541,6 +613,17 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
       }
       const opened = openLinkResponse(secret, device, x.agreementSecretKey, JSON.parse(frame) as Parameters<typeof openLinkResponse>[3]);
       const userId = opened.doc.iss;
+      // Nothing is kept before the person says this is their identity: a code from someone else
+      // would make this device theirs.
+      if (confirm) {
+        const who: LinkIdentity = { userId, address: displayAddress(userId, opened.doc.name), fingerprint: displayFingerprint(userId), keyholder: !!opened.ik };
+        if (!(await confirm(who))) {
+          throw new CliError(
+            "link_declined",
+            `not linked: nothing was kept on this device. The other device's identity (${who.address}) now lists a device that will never be used: if it is yours after all, remove it there with \`p2p devices revoke ${device.did}\``,
+          );
+        }
+      }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self: SelfDoc = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
       await app.state.put("keys", keys);

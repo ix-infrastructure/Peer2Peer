@@ -20,8 +20,9 @@
 #      to exactly P2P_VERSION, and checks the result with `p2p --version`.
 #      npm checks each package against the registry's integrity hash; nothing
 #      is downloaded any other way, and no package install scripts run.
-#   4. In a terminal, hands over to `p2p setup`, which asks its own questions.
-#      Piped (`curl ... | sh`), it reads the answers from /dev/tty when there is
+#   4. In a terminal, hands over to `p2p setup`, which asks its own questions
+#      (first: link this device to an identity you already have, join with an
+#      invite, or start a new identity). Piped (`curl ... | sh`), it reads the answers from /dev/tty when there is
 #      one; with no terminal at all it skips setup and says to run `p2p setup`.
 #   It doesn't install Ix or anything else.
 #
@@ -141,10 +142,14 @@ check_prefix() {
   done
 }
 
+# What `p2p setup` does for someone who already has an identity: links this device to it.
+LINK_HINT="Already use Peer2Peer on another device? Choose to link this device in setup (and run \`p2p link start\` on that device): one identity on all your devices, not a second one."
+
 # Runs `p2p setup` when there is a terminal to ask questions on.
 hand_over() {
   if [ "$NO_SETUP" = 1 ]; then
-    say "Next: run \`p2p setup\` to create your identity."
+    say "Next: run \`p2p setup\` to link this device to your identity, join with an invite, or create a new identity."
+    say "$LINK_HINT"
     return 0
   fi
   if [ -n "${P2P_DETECT_TTY+set}" ]; then tty=$P2P_DETECT_TTY
@@ -156,15 +161,18 @@ hand_over() {
     stdin)
       say ""
       say "Now setting up your identity (p2p setup):"
+      say "$LINK_HINT"
       if ! run "$P2P_BIN" setup; then warn "p2p setup didn't finish; run \`p2p setup\` to try again."; fi ;;
     dev)
       # Piped into sh: stdin is the script, so the answers come from the terminal.
       say ""
       say "Now setting up your identity (p2p setup, reading answers from /dev/tty):"
+      say "$LINK_HINT"
       say "+ $P2P_BIN setup </dev/tty"
       if [ "$DRY_RUN" = 0 ] && ! "$P2P_BIN" setup </dev/tty; then warn "p2p setup didn't finish; run \`p2p setup\` to try again."; fi ;;
     *)
-      say "No terminal to ask questions on, so setup was skipped. Next: run \`p2p setup\` to create your identity." ;;
+      say "No terminal to ask questions on, so setup was skipped. Next: run \`p2p setup\` to link this device to your identity, join with an invite, or create a new identity."
+      say "$LINK_HINT" ;;
   esac
 }
 

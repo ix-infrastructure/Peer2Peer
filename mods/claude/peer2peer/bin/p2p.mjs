@@ -20390,6 +20390,8 @@ __export(identity_exports, {
   linkJoin: () => linkJoin,
   linkStart: () => linkStart,
   lostKeyholderWarning: () => lostKeyholderWarning,
+  noRelaysReason: () => noRelaysReason,
+  p2pCommand: () => p2pCommand,
   profileSet: () => profileSet,
   profileShow: () => profileShow,
   proofAdd: () => proofAdd,
@@ -20405,12 +20407,17 @@ __export(identity_exports, {
 import { chmod, readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join18 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
+function p2pCommand(platform = process.platform) {
+  return platform === "win32" ? "p2p.cmd" : "p2p";
+}
+function noRelaysReason(home, platform = process.platform) {
+  const p = p2pCommand(platform);
+  return `no relays configured. Already use Peer2Peer on another device? Run \`p2p link start\` there, then \`${p} link join <code>\` here (one identity, not a second one). Have an invite? \`${p} join <invite link or code>\`. Starting a new identity? Pass --relay wss://… (1–5, your group's relay), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${home}/config.json`;
+}
 async function init(app, opts) {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
   const relays = opts.relays && opts.relays.length > 0 ? normalizeRelays(opts.relays) : defaultRelays(app.env, app.file);
-  if (relays.length === 0) {
-    throw new CliError("no_relays", `no relays configured: pass --relay wss://… (1–5), or set P2P_DEFAULT_RELAYS, or "defaultRelays" in ${app.home}/config.json`);
-  }
+  if (relays.length === 0) throw new CliError("no_relays", noRelaysReason(app.home));
   const name2 = opts.name ?? defaultName();
   if (!isValidName(name2)) throw new CliError("usage", "--name must match [a-z0-9._-]{1,32}");
   const ik = generateIdentityKey();
@@ -20435,10 +20442,12 @@ async function init(app, opts) {
 async function setup(app, opts) {
   let created = false;
   let pub;
+  let backupMode = opts.backup;
   if (!await app.load(false)) {
     const r = await init(app, { name: opts.name, relays: opts.relays });
     created = true;
     pub = { published: r.published, failed: r.failed };
+    if (backupMode === void 0 && opts.chooseBackup) backupMode = await opts.chooseBackup(r);
   }
   const v = await app.ownView();
   const out = {
@@ -20455,7 +20464,7 @@ async function setup(app, opts) {
   } catch (e) {
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
   }
-  if (opts.backup === "file") {
+  if (backupMode === "file") {
     const path2 = opts.backupFile ?? join18(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
@@ -20467,9 +20476,10 @@ async function setup(app, opts) {
     }
     await chmod(path2, 384);
     out.backup = { file: path2 };
-  } else if (opts.backup === "print") {
+  } else if (backupMode === "print") {
     out.backup = { phrase: (await backupShow(app)).phrase };
   }
+  if (!out.backup && app.isKeyholder && v.head.keyholders.length < 2 && !app.self?.backupShown) out.backupNeeded = true;
   return out;
 }
 async function relaysList(app) {
@@ -20710,12 +20720,31 @@ async function linkJoin(app, code2, opts = {}) {
     throw new CliError("usage", "that is not a link code (p2p-link:…@relay)");
   }
   const { secret, relay } = parsed;
+  const allowPrivate = opts.allowPrivateRelay || app.env.P2P_ALLOW_PRIVATE_RELAY === "1";
+  let own = [];
+  try {
+    own = defaultRelays(app.env, app.file);
+  } catch {
+  }
+  const guard2 = !allowPrivate && !isOwnRelay(relay, own);
+  if (guard2 && isPrivateRelayHost(new URL(relay).hostname)) {
+    throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname));
+  }
   const device = generateDeviceKeysV3("p2p:pending");
   const x = generateDeviceKeysV3("p2p:pending");
   const label = (opts.label ?? defaultLabel()).slice(0, 64);
   const req = createLinkRequest(secret, device, x.agreementPublicKey, label);
   const lid = linkId(secret);
-  const conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress);
+  let conn;
+  try {
+    conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress, guard2 ? { lookup: privateGuardLookup() } : {});
+  } catch (e) {
+    if (e.message?.includes(PRIVATE_RESOLVE_MARK)) {
+      const at = /\(([^()]+)\)\s*$/.exec(e.message)?.[1];
+      throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname, at ? { detail: `it resolves to ${at}` } : {}));
+    }
+    throw e;
+  }
   try {
     await linkPut(conn, lid, "req", JSON.stringify(req));
   } catch (e) {
@@ -20725,7 +20754,7 @@ async function linkJoin(app, code2, opts = {}) {
   return {
     compareCode: linkCompareCode(secret, device.did),
     did: device.did,
-    wait: async () => {
+    wait: async (confirm) => {
       const deadline = Date.now() + Math.min(LINK_TTL_SEC * 1e3, opts.maxWaitMs ?? Infinity);
       let frame;
       try {
@@ -20744,6 +20773,15 @@ async function linkJoin(app, code2, opts = {}) {
       }
       const opened = openLinkResponse(secret, device, x.agreementSecretKey, JSON.parse(frame));
       const userId = opened.doc.iss;
+      if (confirm) {
+        const who2 = { userId, address: displayAddress(userId, opened.doc.name), fingerprint: displayFingerprint(userId), keyholder: !!opened.ik };
+        if (!await confirm(who2)) {
+          throw new CliError(
+            "link_declined",
+            `not linked: nothing was kept on this device. The other device's identity (${who2.address}) now lists a device that will never be used: if it is yours after all, remove it there with \`p2p devices revoke ${device.did}\``
+          );
+        }
+      }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
       await app.state.put("keys", keys);
@@ -21019,6 +21057,7 @@ var init_identity2 = __esm({
     init_app();
     init_config();
     init_errors2();
+    init_shortcode();
     init_relay_client();
     init_sync();
     init_inbound();
@@ -24937,6 +24976,7 @@ __export(projects_exports, {
   graphTargetLine: () => graphTargetLine,
   graphTargetOf: () => graphTargetOf,
   hasDotDot: () => hasDotDot,
+  identityHere: () => identityHere,
   isAgentProcess: () => isAgentProcess,
   isLoopbackEndpoint: () => isLoopbackEndpoint,
   listProjects: () => listProjects,
@@ -25661,6 +25701,9 @@ function personToken(home) {
     throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
   }
 }
+function identityHere(home) {
+  return existsSync3(join20(home, "cli", "keys.json"));
+}
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
   if (!given || typeof home !== "string" || home === "") return false;
@@ -25680,8 +25723,9 @@ function takePersonToken(env, home) {
   delete process.env.P2P_PERSON_TOKEN;
   return ok;
 }
-async function assertPersonForWidening(app, what, confirm, why = "changes who reaches you") {
-  if (app.front === true) return;
+async function assertPersonForWidening(app, what, confirm, why = "changes who reaches you", opts = {}) {
+  const tokenCounts = !opts.noTokenBeforeIdentity || typeof app.home === "string" && identityHere(app.home);
+  if (app.front === true && tokenCounts) return;
   if (agentContext(app.env)) {
     throw new CliError(
       "refused",
@@ -36973,6 +37017,7 @@ function registerExtensionCommands(program2, reg, deps) {
 // packages/p2p/src/cli.ts
 init_extensions();
 init_codes();
+init_shortcode();
 init_identity2();
 init_inbound();
 init_rotation();
@@ -40265,7 +40310,7 @@ function buildProgram(deps) {
     try {
       if (typeof app.home === "string" && !opts.readOnly) await recoverInterruptedFollow(app.home).catch(() => false);
       const widening = wideningOf(cmd);
-      if (widening) await assertPersonForWidening(app, widening, confirmTty);
+      if (widening) await assertPersonForWidening(app, widening, confirmTty, void 0, { noTokenBeforeIdentity: widening === "link join" });
       if (opts.requireIdentity !== false) await app.load(true);
       if (app.keys && !opts.readOnly && typeof app.home === "string") personToken(app.home);
       if (app.keys) receiving(app);
@@ -40363,6 +40408,101 @@ function buildProgram(deps) {
   const friendChoices = async (app) => (await ops.friends(app)).friends.map((f) => ({ value: f.userId, label: f.address, detail: f.canMessage ? "connected" : "waiting for their cap" }));
   const circleChoices = async (app, which) => (await ops.listCircles(app)).filter(which).map((c) => ({ value: c.cid, label: c.name, detail: `${plural(c.members, "member")} · ${c.policy} · ${c.role}${c.isDefault ? " · default" : ""}` }));
   const heldChoices = async (app) => (await ops.listHeld(app)).map((h) => ({ value: h.id, label: `${h.address}: ${h.summary}`, detail: h.type }));
+  const joinLines = (r) => {
+    const lines = [`You and ${r.friend.address} are friends${r.delivered && r.delivered.relays.length === 0 ? " (they'll know once the accept is delivered: run this again later)" : ""}.`];
+    for (const c of r.circles) {
+      if (c.status === "joined" || c.status === "already") lines.push(`${c.status === "joined" ? "Joined" : "Already in"} "${c.name}"${c.default ? "; it is your default circle (new sessions start in it; running ones stay as they are)" : ""}.`);
+      else if (c.status === "pending") lines.push(`${r.friend.address} adds you to "${c.name}" when their client next runs; your next p2p command finishes the join.`);
+      else if (c.status === "held") lines.push(`Not joined "${c.name}" from this code (${c.reason}): if its invite comes, \`p2p held\` lists it for you to approve on its own.`);
+      else lines.push(`"${c.name}" couldn't be confirmed with a second member (§3.3): \`p2p held approve ${c.held}\` to join anyway.`);
+    }
+    return lines;
+  };
+  const askLetter = async (q, letters) => {
+    for (let i = 0; i < 3; i++) {
+      const a = (await io2.prompt(q)).trim().toLowerCase();
+      if (letters.includes(a)) return a;
+      io2.err(`Type ${letters.slice(0, -1).join(", ")} or ${letters[letters.length - 1]}.`);
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup` again)");
+  };
+  const askNonEmpty = async (q, what) => {
+    for (let i = 0; i < 3; i++) {
+      const a = (await io2.prompt(q)).trim();
+      if (a !== "") return a;
+      io2.err(`Type ${what}, or press Ctrl-C to stop.`);
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup` again)");
+  };
+  const askJoinPath = async (p2p) => {
+    io2.out(
+      [
+        "How are you joining Peer2Peer?",
+        "  [l] I already use Peer2Peer on another device: link this device to it",
+        "  [i] I have an invite link or code from someone",
+        "  [n] Start a new identity (my first device)",
+        `(Already have an identity? Choose l: a new one here would be a second, separate identity. ${p2p} link join and ${p2p} join do the same later.)`
+      ].join("\n")
+    );
+    const a = await askLetter("Choose l, i or n: ", ["l", "i", "n"]);
+    return a === "l" ? "link" : a === "i" ? "invite" : "new";
+  };
+  const askRelay = async () => {
+    io2.out("\nPeer2Peer has no default relay: each group runs its own. Ask whoever runs yours for its address (wss://…).");
+    for (let i = 0; i < 3; i++) {
+      let a = (await io2.prompt("Relay URL (wss://…): ")).trim();
+      if (a !== "" && !/^[a-z][a-z0-9+.-]*:\/\//i.test(a)) a = `wss://${a}`;
+      if (!/^wss:\/\//i.test(a)) {
+        io2.err(a === "" ? "Type the relay's address (wss://…)." : "A relay URL starts with wss:// (ws://, http:// and https:// aren't relay URLs).");
+        continue;
+      }
+      try {
+        return normalizeRelays([a])[0];
+      } catch (e) {
+        io2.err(e instanceof CliError ? String(e.message) : `${a} is not a relay URL`);
+      }
+    }
+    throw new CliError("cancelled", "cancelled: nothing was done (run `p2p setup --relay wss://…` again)");
+  };
+  const isLinkCode = (s2) => /^p2p-link:/i.test(s2.trim());
+  const looksLikeInvite = (s2) => {
+    try {
+      parseShortCode(s2, { allowPrivate: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const confirmLinkIdentity = (p2p) => (who2) => confirmTty(
+    `This device would become ${who2.address} (fingerprint ${who2.fingerprint})${who2.keyholder ? ", a key holder" : ""}. Is this your identity? It must match \`${p2p} whoami\` on your other device: a link code from anyone else makes this device theirs.`
+  );
+  const setupByLink = async (app, p2p, o) => {
+    await assertPersonForWidening(app, "link join", confirmTty, void 0, { noTokenBeforeIdentity: true });
+    io2.out(
+      [
+        "",
+        "Link this device to the identity you already have:",
+        "  1. On your other device run:  p2p link start",
+        "     (Windows PowerShell: p2p.cmd link start; in Claude Code: /peers link start)",
+        "  2. It shows a one-time link code (p2p-link:…). Type it here.",
+        "Only type a code shown on YOUR OWN other device. A code from anyone else makes this device theirs.",
+        ...o.ignored.length > 0 ? [`(${o.ignored.join(", ")} ${o.ignored.length === 1 ? "is" : "are"} ignored when linking: this device takes your identity's name, relays and backup.)`] : []
+      ].join("\n")
+    );
+    const code2 = await askNonEmpty("Link code: ", "the link code");
+    if (!isLinkCode(code2) && looksLikeInvite(code2)) {
+      io2.err("That is an invite from someone, not a link code from your own device: joining with it as an invite instead (you'll see who it's from first).");
+      return { invite: code2 };
+    }
+    const j = await ops.linkJoin(app, code2, { ...o.allowPrivateRelay ? { allowPrivateRelay: true } : {} });
+    io2.out(`Compare code: ${j.compareCode}
+Check the other device shows the same code, and confirm there. Waiting…`);
+    const r = await j.wait(confirmLinkIdentity(p2p));
+    return {
+      json: { linked: r },
+      human: [`This device is now ${r.address} (${r.did})${r.keyholder ? ", a key holder" : ""}.`, "", `Check it: ${p2p} whoami    Invite someone: ${p2p} invite <their name>`].join("\n")
+    };
+  };
   program2.command("init").description("Create your identity key and first device, and publish your identity document").option("--name <name>", "Your display name ([a-z0-9._-], not unique)").option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS or config.json", collect).option("-y, --yes", "Don't prompt about the backup (scripts); still prints a warning").option("--json", "JSON output").action(
     run(
       async (app, o) => {
@@ -40402,18 +40542,79 @@ ${backup2}
       { requireIdentity: false }
     )
   );
-  program2.command("setup").description("Get started: create your identity with sensible defaults (safe to run again)").option("--name <name>", "Your display name (default: your OS user name)").option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS, config.json, or the relays shipped with the CLI", collect).option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)").option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)").option("--no-backup", "Don't save or print the backup phrase now").option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension").option("--json", "JSON output").action(
+  program2.command("setup").description("Get started: link this device to your identity, join with an invite, or create a new identity (safe to run again)").option("--name <name>", "Your display name (default: your OS user name)").option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS, config.json, or the relays shipped with the CLI", collect).option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)").option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)").option("--no-backup", "Don't save or print the backup phrase now").option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension").option("--allow-private-relay", "Linking or joining: accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
     run(
       async (app, o) => {
         let mode = o.backupFile !== void 0 ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : void 0;
         const existed = await app.load(false);
-        if (mode === void 0 && !existed && !o.json && io2.prompt) {
-          io2.out("Your identity key will live only on this device. A 24-word backup phrase restores it if the device is lost.\n  [f] save it to a file only you can read (0600), on this device: copy it off later\n  [p] print it now, for a password manager or paper (best)\n  [s] skip for now (p2p backup show later)");
+        const p2p = p2pCommand();
+        const askBackup = async () => {
+          io2.out(`
+Your identity key lives only on this device. A 24-word backup phrase restores it if the device is lost.
+  [f] save it to a file only you can read (0600), on this device: copy it off later
+  [p] print it now, for a password manager or paper (best)
+  [s] skip for now (${p2p} backup show later)`);
           const a = (await io2.prompt("Choose f, p or s: ")).trim().toLowerCase();
-          mode = a === "p" ? "print" : a === "s" ? "none" : "file";
+          return a === "p" ? "print" : a === "s" ? "none" : "file";
+        };
+        const asking = !existed && !o.json && Boolean(io2.prompt) && !ciEnv(app.env) && personHere(app);
+        let how = asking ? await askJoinPath(p2p) : "new";
+        let inviteCode2;
+        if (how === "link") {
+          const ignored = [
+            ...o.name !== void 0 ? ["--name"] : [],
+            ...o.relay && o.relay.length > 0 ? ["--relay"] : [],
+            ...o.backupFile !== void 0 ? ["--backup-file"] : [],
+            ...o.printBackup ? ["--print-backup"] : []
+          ];
+          const l = await setupByLink(app, p2p, { allowPrivateRelay: o.allowPrivateRelay, ignored });
+          if (!("invite" in l)) return l;
+          how = "invite";
+          inviteCode2 = l.invite;
         }
-        const r = await ops.setup(app, { name: o.name, relays: o.relay, backup: mode, ...typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {}, ...o.ix ? { ix: true } : {} });
-        const lines = [r.created ? `Created ${r.address}` : `Already set up: ${r.address}`, `  relays  ${r.relays.join(", ")}`];
+        let createdHere = false;
+        if (how === "invite") {
+          await assertPersonForWidening(app, "join", confirmTty, void 0, { noTokenBeforeIdentity: true });
+          if (inviteCode2 === void 0) io2.out("\nPaste the invite link (https://…/p2p/invite#…) or the code you were sent. It carries the relays your inviter uses.");
+          const code2 = inviteCode2 ?? await askNonEmpty("Invite link or code: ", "an invite link or code");
+          if (isLinkCode(code2)) {
+            throw new CliError(
+              "usage",
+              `that is a device link code, not an invite: nothing was done. Link codes come only from your own other device, and one from anyone else makes this device theirs. If it is from your own device, run \`${p2p} setup\` again and choose l`
+            );
+          }
+          const j = await ops.joinCode(app, code2, {
+            name: o.name,
+            ...o.allowPrivateRelay ? { allowPrivateRelay: true } : {},
+            confirm: (q) => confirmPrompt(q, false, ["Join", "Cancel"]),
+            create: async (a, x) => {
+              const c = await ops.init(a, x);
+              receiving(a);
+              createdHere = true;
+              io2.out(`Created ${c.address}`);
+              io2.err(`Only this device holds your identity key: save a backup with \`${p2p} backup show\` (setup asks next).`);
+              return { userId: c.userId, address: c.address, relays: c.relays };
+            }
+          });
+          io2.out(joinLines(j).join("\n"));
+          if (createdHere && mode === void 0) mode = await askBackup();
+        }
+        let relays2 = o.relay;
+        if (how === "new" && asking && !(relays2 && relays2.length > 0) && defaultRelays(app.env, app.file).length === 0) relays2 = [await askRelay()];
+        const chooseBackup = how === "new" && mode === void 0 && !o.json && io2.prompt ? async (c) => {
+          createdHere = true;
+          io2.out(`Created ${c.address}`);
+          return askBackup();
+        } : void 0;
+        const r = await ops.setup(app, {
+          name: o.name,
+          relays: relays2,
+          backup: mode,
+          ...typeof o.backupFile === "string" ? { backupFile: o.backupFile } : {},
+          ...o.ix ? { ix: true } : {},
+          ...chooseBackup ? { chooseBackup } : {}
+        });
+        const lines = [...createdHere ? [`Your identity: ${r.address}`] : [r.created ? `Created ${r.address}` : `Already set up: ${r.address}`], `  relays  ${r.relays.join(", ")}`];
         if (r.backup?.file) {
           lines.push(`  backup  saved to ${r.backup.file}`);
           io2.err(
@@ -40425,7 +40626,7 @@ Write these 24 words down and keep them offline. Anyone with them is you:
 
 ${r.backup.phrase}
 `);
-        if (r.created && !r.backup) io2.err("warning: no backup yet: if you lose this device, the identity is gone. Run `p2p backup show`.");
+        if (r.backupNeeded) io2.err(`warning: no backup yet: this device is the only one holding your identity key, so if you lose it, the identity is gone. Run \`${p2p} backup show\`.`);
         const offerIx = r.ix !== void 0 && !r.ix.found && r.ix.recommended && !o.json && Boolean(io2.prompt || io2.select) && !ciEnv(app.env) && personHere(app);
         if (r.ix?.enabledNow) lines.push("  ix      Ix found: the Ix extension is on (`p2p extensions disable ix` turns it off). Ix calls stay on this machine (graph: local only)");
         else if (r.ix?.enabled) lines.push("  ix      the Ix extension is on (graph: local only)");
@@ -40617,14 +40818,29 @@ A device "${req.label}" answered. Its compare code: ${req.compareCode}`);
       return { json: { ...r, compareCode: shown }, human: `Linked ${r.did}${r.label ? ` (${r.label})` : ""}${r.keyholder ? " as a key holder" : ""}; your document is now version ${r.ver}.` };
     }, { noDeadline: true })
   );
-  link.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--json", "JSON output").action(
+  link.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--expect-fingerprint <fingerprint>", "Proceed only if the identity is this one (for scripts; `p2p whoami` on the other device shows it); otherwise you confirm it on your terminal").option("--allow-private-relay", "Accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
     run(
       async (app, code2, o) => {
-        const j = o.rotated ? await ops.relinkRotated(app, code2, { label: o.label }) : await ops.linkJoin(app, code2, { label: o.label });
+        if (o.rotated) {
+          const j2 = await ops.relinkRotated(app, code2, { label: o.label });
+          if (o.json) io2.err(JSON.stringify({ compareCode: j2.compareCode, did: j2.did }));
+          else io2.out(`Compare code: ${j2.compareCode}
+Check the other device shows the same code, and confirm there. Waiting…`);
+          const r2 = await j2.wait();
+          return { json: r2, human: `This device is now ${r2.address} (${r2.did})${r2.keyholder ? ", a key holder" : ""}.` };
+        }
+        const j = await ops.linkJoin(app, code2, { label: o.label, ...o.allowPrivateRelay ? { allowPrivateRelay: true } : {} });
         if (o.json) io2.err(JSON.stringify({ compareCode: j.compareCode, did: j.did }));
         else io2.out(`Compare code: ${j.compareCode}
 Check the other device shows the same code, and confirm there. Waiting…`);
-        const r = await j.wait();
+        const expect = o.expectFingerprint?.trim().toLowerCase();
+        const r = await j.wait(
+          expect !== void 0 ? async (who2) => {
+            const ok = who2.fingerprint.toLowerCase() === expect;
+            if (deps.io.prompt) io2.err(`This device would become ${who2.address} (fingerprint ${who2.fingerprint})${who2.keyholder ? ", a key holder" : ""}: ${ok ? "it matches" : "it does NOT match"} --expect-fingerprint.`);
+            return ok;
+          } : confirmLinkIdentity(p2pCommand())
+        );
         return { json: r, human: `This device is now ${r.address} (${r.did})${r.keyholder ? ", a key holder" : ""}.` };
       },
       // Linking waits up to 10 minutes for the other device, by design.
@@ -40773,14 +40989,7 @@ To join: p2p join --confirmed ${ops.shownCode(code2)}` };
             return { userId: c.userId, address: c.address, relays: c.relays };
           }
         });
-        const lines = [`You and ${r.friend.address} are friends${r.delivered && r.delivered.relays.length === 0 ? " (they'll know once the accept is delivered: run this again later)" : ""}.`];
-        for (const c of r.circles) {
-          if (c.status === "joined" || c.status === "already") lines.push(`${c.status === "joined" ? "Joined" : "Already in"} "${c.name}"${c.default ? "; it is your default circle (new sessions start in it; running ones stay as they are)" : ""}.`);
-          else if (c.status === "pending") lines.push(`${r.friend.address} adds you to "${c.name}" when their client next runs; your next p2p command finishes the join.`);
-          else if (c.status === "held") lines.push(`Not joined "${c.name}" from this code (${c.reason}): if its invite comes, \`p2p held\` lists it for you to approve on its own.`);
-          else lines.push(`"${c.name}" couldn't be confirmed with a second member (§3.3): \`p2p held approve ${c.held}\` to join anyway.`);
-        }
-        return { json: r, human: lines.join("\n") };
+        return { json: r, human: joinLines(r).join("\n") };
       },
       { requireIdentity: false, waitDefault: 15 }
     )

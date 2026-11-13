@@ -15,7 +15,7 @@ export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3   # 1–5, comma separated
 **Ann:**
 
 ```sh
-p2p setup                     # makes your key (name: your OS user); offers to save the backup phrase
+p2p setup                     # asks how you're joining (link a device you already use, an invite, or new); new: your relay, your key, the backup phrase
 p2p invite ben                # prints a one-time code: relay.example.org/K7QM-3XPD-9TWA-HF2N-6RJC
 ```
 
