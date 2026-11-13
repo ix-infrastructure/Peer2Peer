@@ -32440,7 +32440,7 @@ function configConflict(text2) {
     const j = i >= 0 ? text2.indexOf(END, i) : -1;
     return i >= 0 && j >= 0 ? text2.slice(0, i) + text2.slice(j + END.length) : text2;
   })();
-  const lines = outside.split("\n").map((l) => {
+  const lines = outside.split(/\r\n|[\n\r\u2028\u2029]/).map((l) => {
     const hash = l.indexOf("#");
     return (hash >= 0 ? l.slice(0, hash) : l).trim();
   });

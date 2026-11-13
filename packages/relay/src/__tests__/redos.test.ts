@@ -48,6 +48,14 @@ describe("parseAllowFile", () => {
       expect([...parseAllowFile(s).allow, ...parseAllowFile(s).deny.map((x) => `!${x}`)].sort()).toEqual([...old].sort());
     }
   });
+  it("a comment ends at any line ending: CR-only, U+2028/2029 and CRLF files keep the lines after it", () => {
+    const a = `p2p:${"a".repeat(26)}`;
+    const b = `p2p:${"b".repeat(26)}`;
+    const m = `p2p:${"m".repeat(26)}`;
+    for (const eol of ["\r", "\u2028", "\u2029", "\r\n", "\n"]) {
+      expect(parseAllowFile([a, "# banned", `!${m}`, `${b} # friend`].join(eol))).toEqual({ allow: [a, b], deny: [m] });
+    }
+  });
   it("is linear on a line of many # (alert 15)", () => {
     expect(growth(parseAllowFile, (n) => "#".repeat(n))).toBeLessThan(LIMIT);
   });

@@ -93,5 +93,9 @@ describe("linear on adversarial input", () => {
     expect(growth(configConflict, (n) => "#".repeat(n))).toBeLessThan(LIMIT);
     expect(replaceBlock("a\n\n\n", "<b>", "<e>", "x")).toBe("a\n\nx\n");
     expect(configConflict("[mcp_servers.peer2peer] # trailing comment")).toMatch(/already defines/);
+    // A comment ends at any line ending: what follows it on the next line is still read.
+    for (const eol of ["\r", "\u2028", "\u2029", "\r\n"]) {
+      expect(configConflict(`# note${eol}[mcp_servers.peer2peer]${eol}command = "x"`)).toMatch(/already defines/);
+    }
   });
 });

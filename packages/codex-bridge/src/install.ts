@@ -170,7 +170,8 @@ export function configConflict(text: string): string | null {
     const j = i >= 0 ? text.indexOf(END, i) : -1;
     return i >= 0 && j >= 0 ? text.slice(0, i) + text.slice(j + END.length) : text;
   })();
-  const lines = outside.split("\n").map((l) => {
+  // Every line ending (CRLF, CR, LF, U+2028, U+2029) ends a line, so a comment never swallows the lines after it.
+  const lines = outside.split(/\r\n|[\n\r\u2028\u2029]/).map((l) => {
     const hash = l.indexOf("#");
     return (hash >= 0 ? l.slice(0, hash) : l).trim();
   });
