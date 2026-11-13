@@ -1,5 +1,6 @@
 // Copyright 2026 Ix Infrastructure Inc.
 import { readFileSync } from "node:fs";
+import { guard } from "../hook.js";
 import { describe, expect, it } from "vitest";
 import {
   cleanSummary,
@@ -13,6 +14,10 @@ import {
   mergeMode,
   modeFromTranscript,
   mutatingP2PVerb,
+  indirectP2PRun,
+  nestedTooDeep,
+  TOO_COMPLEX,
+  WORK_BUDGET,
   parseAddress,
   parseAutoDeliver,
   peerActivity,
@@ -257,5 +262,113 @@ describe("what Codex tells us", () => {
     expect(editedFiles("apply_patch", { input: patch }).sort()).toEqual(["/abs/repo/src/b.ts", "src/a.ts"]);
     expect(editedFiles("Write", { file_path: "src/c.ts" })).toEqual(["src/c.ts"]);
     expect(editedFiles("Bash", { command: "ls" })).toEqual([]);
+  });
+});
+
+describe("issue #69: env -S, GNU parallel, aliases and functions (parity with the mod)", () => {
+  it("unwraps env -S in each spelling; a send inside it is never read as naming --from-session", () => {
+    for (const [cmd, verb] of [
+      ["env -S 'p2p invite'", "invite"],
+      ["env -S'p2p invite'", "invite"],
+      ["env -vS 'p2p held approve h1'", "held approve"],
+      ["env -u HOME --split-string='p2p join x'", "join"],
+      ["env -C /tmp p2p invite", "invite"],
+      ["env p2p invite -S 'echo'", "invite"],
+    ] as const) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb]);
+  });
+
+  it("refuses parallel, an alias or a function on a command that names p2p (vectors shared with the mod)", () => {
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/indirect-run.vectors.ts", import.meta.url), "utf8");
+    const vectors = JSON.parse(file.slice(file.indexOf("= [") + 2)) as { cmd: string; reason: string | null }[];
+    expect(vectors.length).toBeGreaterThan(25);
+    for (const v of vectors) {
+      expect([v.cmd, indirectP2PRun(v.cmd)]).toEqual([v.cmd, v.reason]);
+      // Wired into the PreToolUse guard: refused. (Whole-line answers, refused or not, are guard-parity.vectors.ts.)
+      if (v.reason) expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, true]);
+    }
+  });
+
+  it("refuses whole command lines as the mod does (vectors shared with the mod)", () => {
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/guard-parity.vectors.ts", import.meta.url), "utf8");
+    const vectors = JSON.parse(file.slice(file.indexOf("= [") + 2)) as { cmd: string; refused: boolean }[];
+    expect(vectors.length).toBeGreaterThan(200);
+    for (const v of vectors) expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, v.refused]);
+  });
+
+  it("refuses nesting past the limit that still names p2p", () => {
+    for (const cmd of [
+      'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"p2p invite\\\\\\"\\"\'"',
+      "eval eval eval eval eval eval p2p invite",
+      "eval \"eval 'eval \\\"eval p2p invite\\\"'\"",
+    ]) expect([cmd, guard("Bash", { command: cmd }, [], "s1") !== null]).toEqual([cmd, true]);
+    expect(nestedTooDeep('bash -c "p2p ls"')).toBe(false);
+  });
+
+  it("shares the guard block with the mod byte for byte", () => {
+    const block = (file: string) => {
+      const t = readFileSync(new URL(file, import.meta.url), "utf8");
+      const a = t.indexOf("// ---- Shared with the Codex bridge");
+      return t.slice(a, t.indexOf("// ---- End of the shared block.", a));
+    };
+    const mine = block("../lib.ts");
+    expect(mine.length).toBeGreaterThan(1000);
+    expect(block("../../../../mods/claude/peer2peer/hooks/lib.ts")).toBe(mine);
+  });
+
+  it("keeps runner padding (eval, trap, su, watch, ssh, …) linear: one pass per level, and a budget that refuses past it", () => {
+    const time = (f: () => unknown) => {
+      const t = Date.now();
+      f();
+      return Date.now() - t;
+    };
+    for (const word of ["eval", "trap", "su", "watch", "ssh", "complete", "e''val", "bash -c", "env -S", `bash -c '"$@"' x eval`]) {
+      const pad = (n: number) => (word + " ").repeat(Math.floor(n / (word.length + 1))) + "p2p invite";
+      const half = time(() => guard("Bash", { command: pad(8 * 1024) }, [], "s1"));
+      const full = time(() => guard("Bash", { command: pad(16 * 1024) }, [], "s1"));
+      expect([word, full < 1000, full <= 4 * half + 50]).toEqual([word, true, true]);
+      expect([word, guard("Bash", { command: pad(16 * 1024) }, [], "s1") !== null]).toEqual([word, true]);
+      // The review's case: 160 runner words before a send took seconds (each runner word read the rest again).
+      const short = "echo " + Array(160).fill(word).join(" ") + "; p2p send --to bob hi";
+      expect([word, time(() => mutatingP2PVerb(short)) < 1000, mutatingP2PVerb(short)]).toEqual([word, true, "send (no --from-session)"]);
+    }
+    // Past the work budget, a command that names p2p is refused unread (the guard says it can't be checked).
+    expect(mutatingP2PVerb("eval p2p ls", [], 0, false, undefined, { left: 5 })).toBe(TOO_COMPLEX);
+    expect(mutatingP2PVerb("eval ls", [], 0, false, undefined, { left: 5 })).toBeNull();
+    expect(mutatingP2PVerb("eval mycli ls", ["mycli"], 0, false, undefined, { left: 5 })).toBe(TOO_COMPLEX);
+    const huge = "eval " + "x ".repeat(WORK_BUDGET) + "p2p ls";
+    expect(guard("Bash", { command: huge }, [], "s1")).toContain("too complex to check");
+  });
+
+  it("stays linear on adversarial 16 KiB inputs", () => {
+    const n = 16 * 1024;
+    for (const cmd of [
+      "p2p " + "(".repeat(n),
+      "p2p " + "( ".repeat(n / 2),
+      "p2p " + "f" + " ".repeat(n) + "(",
+      "p2p " + "(".repeat(n / 4) + " ".repeat(n / 2) + ")",
+      "p2p " + '"p2p '.repeat(n / 5),
+      "p2p bash -c '" + 'bash -c "p2p '.repeat(n / 13),
+      "p2p " + "a=1 ".repeat(n / 4),
+      "p2p " + "$( p2p ".repeat(n / 7),
+      "p2p " + " ( ) ".repeat(n / 5),
+      "p2p " + "x(   ".repeat(n / 5),
+      "p2p " + "( )  \n\n".repeat(n / 7),
+      "p2p " + "() # () () ()\n".repeat(n / 14),
+      'eval "' + "p2p x ".repeat(n / 6) + '"',
+      "env" + " -u".repeat(n / 3) + " p2p",
+      "p2p; " + "if ".repeat(n / 3),
+      "p2p; " + "xargs ".repeat(n / 6),
+      "cat " + "<<'a' ".repeat(n / 6) + "\np2p",
+      "cat <<'EOF'\n" + "p2p x\n".repeat(n / 6) + "EOF",
+      "echo " + "`p2p `".repeat(n / 6),
+      "p2p `" + "\\`".repeat(n / 2),
+      "p2p; " + "sudo -u ".repeat(n / 8) + "x",
+      "p2p; " + "flock ".repeat(n / 6) + "/l",
+    ]) {
+      const t = Date.now();
+      indirectP2PRun(cmd);
+      guard("Bash", { command: cmd }, [], "s1");
+      expect([cmd.slice(0, 20), Date.now() - t < 1000]).toEqual([cmd.slice(0, 20), true]);
+    }
   });
 });

@@ -74,6 +74,7 @@ import {
   isMutating,
   isPeer2PeerHelp,
   mutatingP2PVerb,
+  TOO_COMPLEX,
   p2pHomeAccess,
   uncheckableShell,
   nodeRuntime,
@@ -2968,6 +2969,7 @@ const guardTool = async (S: Sess | null, $: EngineInterface, e: { tool: unknown;
     if (opaque) return { deny: `Peer2Peer: this command can't be checked (${opaque}); run it directly, or ask your user to run it in their own terminal.` }
     // Without session state, the `p2p` this session would run is P2P_BIN or `p2p` (mutatingP2PVerb knows `p2p` and the bundled CLI by name).
     const verb = mutatingP2PVerb(command, [...(S?.resolvedBin ?? []), (await $.env.get('P2P_BIN')) ?? ''].filter(Boolean))
+    if (verb === TOO_COMPLEX) return { deny: `Peer2Peer: this command can't be checked (${TOO_COMPLEX}); run it directly, or ask your user to run it in their own terminal.` }
     if (verb === 'extensions enable') {
       return { deny: 'Peer2Peer: `p2p extensions enable` makes p2p run an extension\'s code with your user\'s identity and keys, so only they decide it, in their own terminal. Tell them what you suggest instead.' }
     }

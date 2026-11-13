@@ -591,13 +591,380 @@ function cliBinJs(word: string): boolean {
 }
 
 /**
+ * `env`'s split string (`-S <cmd …>`, `-S<cmd …>`, `-vS <cmd …>`, `--split-string[=]<cmd …>`) among its
+ * options and assignments, from `from` (the word after `env`) up to its command: the command line it
+ * holds and the index of the first word after it, or null. The mod's `envSplitString`; both are pinned
+ * to the same vectors. Linear.
+ */
+export function envSplitString(words: readonly string[], from: number): { line: string; next: number } | null {
+  for (let j = from; j < words.length; j++) {
+    const w = words[j] ?? "";
+    if (w === "--split-string") return words[j + 1] === undefined ? null : { line: words[j + 1] ?? "", next: j + 2 };
+    if (w.startsWith("--split-string=")) return { line: w.slice("--split-string=".length), next: j + 1 };
+    if (w === "--unset" || w === "--chdir") {
+      j++;
+      continue;
+    }
+    // NAME=VALUE before the command; anything else that isn't an option is the command (or `--` ends the options).
+    if (!w.startsWith("-") || w === "-") {
+      if (w.indexOf("=") > 0) continue;
+      return null;
+    }
+    // `--` ends env's options, but a `-S` read past it fails closed (`env -- -S '…'` is still read as a split string).
+    if (w === "--") continue;
+    if (w.startsWith("--")) continue;
+    // Short options, bundled: -S takes the rest of the word or the next one; -u and -C take a value.
+    for (let k = 1; k < w.length; k++) {
+      const o = w[k];
+      if (o === "S") {
+        if (k + 1 < w.length) return { line: w.slice(k + 1), next: j + 1 };
+        return words[j + 1] === undefined ? null : { line: words[j + 1] ?? "", next: j + 2 };
+      }
+      if (o === "u" || o === "C") {
+        if (k + 1 === w.length) j++;
+        break;
+      }
+    }
+  }
+  return null;
+}
+
+// ---- Shared with the Codex bridge, byte for byte (the mod's hooks/lib.ts and the bridge's src/lib.ts): see indirectP2PRun.
+/** Runners that build a command's argv from their own arguments (`parallel p2p ::: invite`): the guards never see it. */
+const ARG_RUNNERS = new Set(['parallel', 'sem', 'parset', 'rush', 'xjobs'])
+/** `xargs` under its names: it runs its arguments with words read from stdin. */
+const XARGS = new Set(['xargs', 'gxargs'])
+/** Words before a simple command's command word: keywords, and builtins and wrappers that run the next word. */
+const LEAD_WORDS = new Set(['{', '!', 'if', 'then', 'do', 'else', 'elif', 'while', 'until', 'time', 'exec', 'command', 'builtin', 'eval', 'sudo', 'doas', 'env', 'nice', 'nohup', 'timeout', 'stdbuf', 'xargs', 'gxargs', 'busybox', 'coproc', 'setsid', 'flock', 'chrt', 'taskset', 'ionice', 'caffeinate', 'unshare', 'watch'])
+/** Those wrappers' options that take the next word as their value (`sudo -u x`, `timeout -s KILL`, `ionice -c 2`). */
+const VALUE_OPTIONS = new Set(['-u', '-g', '-p', '-s', '-k', '-n', '-C', '-c', '-w', '-E', '--user', '--group', '--signal', '--kill-after', '--chdir', '--interval'])
+/** Commands whose arguments are text: a quoted argument isn't read again as a script (a substitution in it still is). */
+const TEXT_ARGS = new Set(['echo', 'printf', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'git', 'gh', 'cat', 'head', 'tail', 'wc', 'diff', 'jq', 'tee', 'less', 'more'])
+/** Shells xargs may run with words from stdin as their script (`… | xargs -I{} sh -c '{}'`). */
+const XARGS_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'eval'])
+/** Assignments that define a function or an alias by name (zsh's `functions`/`aliases`/`galiases`, bash's BASH_ALIASES). */
+const NAME_STORES = ['functions[', 'aliases[', 'galiases[', 'saliases[', 'dis_functions[', 'dis_aliases[', 'BASH_ALIASES[', 'BASH_ALIASES=', 'BASH_ALIASES+=', 'BASH_CMDS[', 'BASH_CMDS=', 'BASH_CMDS+=']
+/** How deep quoted scripts are read again; past it, a word that still names p2p is refused. */
+const MAX_NESTING = 4
+const NESTED = 'a command nested too deeply to check, that names p2p'
+
+/** The CLI named as a word (the guards' isCli, without configured names): `p2p`, `p2p.mjs`, `@peer2peer/cli`, `$P2P_BIN`. */
+function cliWord(word: string): boolean {
+  const base = (word.split(/[\\/]/).pop() ?? word).toLowerCase()
+
+  return base === 'p2p' || base === 'p2p.exe' || base === 'p2p.cmd' || base === 'p2p.mjs' || base === 'p2p.cjs' || base === 'p2p.js' || word.startsWith('@peer2peer/cli') || word === '$P2P_BIN' || word === '${P2P_BIN}'
+}
+
+/** Whether a text names p2p at all (a substring: errs towards yes). */
+function mentionsP2P(text: string): boolean {
+  const lower = text.toLowerCase()
+
+  return lower.includes('p2p') || lower.includes('@peer2peer')
+}
+
+/** The text with every quoted span (and each escaped character) blanked, positions kept. One pass. */
+function unquoted(text: string): string {
+  const out = text.split('')
+  let q = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (q === "'") {
+      if (c === "'") q = ''
+      else out[i] = ' '
+      continue
+    }
+    if (q === '"' || q === '$') {
+      if (c === '\\') {
+        out[i] = ' '
+        if (i + 1 < text.length) out[++i] = ' '
+      } else if (c === (q === '$' ? "'" : '"')) q = ''
+      else out[i] = ' '
+      continue
+    }
+    if (c === '\\') {
+      out[i] = ' '
+      if (i + 1 < text.length) out[++i] = ' '
+    } else if (c === '$' && text[i + 1] === "'") {
+      q = '$'
+      i++
+    } else if (c === "'" || c === '"') q = c
+  }
+
+  return out.join('')
+}
+
+/** The backtick substitutions in a text, unquoted or inside double quotes (where they run; never inside single quotes). One pass. */
+function backticks(text: string): string[] {
+  const out: string[] = []
+  let q = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (q === "'") {
+      if (c === "'") q = ''
+      continue
+    }
+    if (c === '\\') {
+      i++
+      continue
+    }
+    if (q === '$') {
+      if (c === "'") q = ''
+      continue
+    }
+    if (c === '`') {
+      let j = i + 1
+      while (j < text.length && text[j] !== '`') j += text[j] === '\\' ? 2 : 1
+      out.push(text.slice(i + 1, Math.min(j, text.length)))
+      i = j
+      continue
+    }
+    if (q === '"') {
+      if (c === '"') q = ''
+      continue
+    }
+    if (c === '$' && text[i + 1] === "'") {
+      q = '$'
+      i++
+    } else if (c === "'" || c === '"') q = c
+  }
+
+  return out
+}
+
+/**
+ * The text with the bodies of quoted heredocs fed to a text command blanked (`cat > f <<'EOF'`: data,
+ * nothing in it runs), positions kept. Any other heredoc is left as written. `unq` is unquoted(text).
+ * One pass: each line is read once, and each line's command word once.
+ */
+function blankHeredocs(text: string, unq: string): string {
+  const out = text.split('')
+  let lineStart = 0
+  let lineWord = ''
+  let wordFor = -1
+  let pos = 0
+  let i = 0
+  for (;;) {
+    const at = unq.indexOf('<<', i)
+    if (at < 0) break
+    while (pos < at) {
+      if (text[pos] === '\n') lineStart = pos + 1
+      pos++
+    }
+    if (unq[at + 2] === '<') {
+      i = at + 3
+      continue
+    }
+    let j = at + 2
+    const dash = text[j] === '-'
+    if (dash) j++
+    while (text[j] === ' ' || text[j] === '\t') j++
+    const q = text[j] === "'" || text[j] === '"' ? text[j] : ''
+    if (q) j++
+    const from = j
+    while (j < text.length && /[\w-]/.test(text[j] as string)) j++
+    const delim = text.slice(from, j)
+    if (q && text[j] === q) j++
+    i = Math.max(j, at + 2)
+    if (!q || delim === '') continue
+    if (wordFor !== lineStart) {
+      let s = lineStart
+      while (text[s] === ' ' || text[s] === '\t') s++
+      let e = s
+      while (e < text.length && !' \t\n;&|<>'.includes(text[e] as string)) e++
+      lineWord = (text.slice(s, e).split(/[\\/]/).pop() ?? '').toLowerCase()
+      wordFor = lineStart
+    }
+    const nl = text.indexOf('\n', j)
+    if (nl < 0) break
+    let k = nl + 1
+    while (k <= text.length) {
+      let e = text.indexOf('\n', k)
+      if (e < 0) e = text.length
+      let s = k
+      if (dash) while (text[s] === '\t') s++
+      if (text.slice(s, e) === delim) break
+      if (TEXT_ARGS.has(lineWord)) for (let x = k; x < e; x++) out[x] = ' '
+      k = e + 1
+    }
+    i = Math.max(i, k)
+    pos = Math.max(pos, Math.min(k, text.length))
+    lineStart = Math.min(k, text.length)
+  }
+
+  return out.join('')
+}
+
+/**
+ * A shell function defined in the text (quoted spans already blanked): `name()` or `name ( )` followed by
+ * a body, whatever it is (bash's `{ …; }` or `( … )`, zsh's simple command, after blanks, comments and
+ * newlines), or zsh's anonymous `() { … }` at a command's start. `$()`, `=()` (an empty array), `<()`
+ * and extglob's `@()` aren't. One pass: the text after each `()` is skipped once.
+ */
+function definesFunction(text: string): boolean {
+  const blank = (c: string | undefined) => c === ' ' || c === '\t'
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '(') continue
+    let j = i + 1
+    while (blank(text[j])) j++
+    if (text[j] !== ')') continue
+    let k = j + 1
+    for (;;) {
+      while (blank(text[k])) k++
+      if (text[k] === '#') while (k < text.length && text[k] !== '\n') k++
+      if (text[k] === '\n' || text[k] === '\r') k++
+      else break
+    }
+    const next = text[k]
+    let m = i - 1
+    while (m >= 0 && blank(text[m])) m--
+    const before = text[m]
+    if (before === undefined || ';&|(){}\n\r'.includes(before)) {
+      if (next === '{') return true
+    } else if (!'$=<>`@!?*+'.includes(before) && next !== undefined && !';|&)'.includes(next)) return true
+    i = Math.max(i, k - 1)
+  }
+
+  return false
+}
+
+/**
+ * Why a command line that names p2p can't be read by its words, or null (the mod and the Codex bridge
+ * share this function, and the same vectors pin both). Not emulated, refused:
+ * - GNU `parallel` and runners like it, or `xargs`, in a simple command that names p2p or expands
+ *   anything (before the CLI's name, unless the command is a text command like `grep`): they build the
+ *   CLI's argv from their own arguments (`parallel p2p ::: invite`). As the command word, also when they
+ *   read their arguments from stdin or a file on a line that names p2p (`echo 'p2p invite' | parallel`),
+ *   or xargs runs a shell (`… | xargs -I{} sh -c '{}'`);
+ * - an alias defined in a simple command that names p2p or expands anything, `hash -p`, an assignment to
+ *   zsh's `functions[…]`/`aliases[…]` or bash's BASH_ALIASES, or any shell function: each gives the CLI
+ *   another name (`alias q='p2p send --to'`, `f(){ p2p "$@"; }`, `() { p2p "$@"; }`);
+ * - a command word built at run time (`$p`, `$(…)`, backticks; `$P2P_BIN` is the CLI), `eval` of text built at
+ *   run time that names p2p, or a script sourced from a process substitution or a path that names p2p.
+ * A quoted word that may be a script of its own (`bash -c '…'`, `eval "…"`, `trap '…'`, `ssh host '…'`) and
+ * a backtick substitution are read again when they name p2p, up to MAX_NESTING levels (past that,
+ * refused); text after the CLI's name or a text command's (`echo`, `git commit -m`) isn't, except a
+ * substitution. The body of a quoted heredoc fed to a text command is data. One pass per level, no
+ * backtracking: linear. The caller checks that the command names p2p.
+ */
+export function indirectP2PRun(command: string, depth = 0): string | null {
+  const unq = unquoted(command)
+  const data = command.includes('<<') ? blankHeredocs(command, unq) : command
+  if (definesFunction(data === command ? unq : unquoted(data))) return 'a shell function defined on a command that names p2p'
+  for (const inner of backticks(data)) {
+    if (!mentionsP2P(inner)) continue
+    if (depth + 1 >= MAX_NESTING) return NESTED
+    const found = indirectP2PRun(inner, depth + 1)
+    if (found) return found
+  }
+  const starts = new Set<number>()
+  const words = shellTokens(data, false, undefined, starts)
+  // Per simple command (one pass): whether a word in it names p2p, expands something, how many words it
+  // has, whether it gives arguments inline (`:::`) or from a file (`::::`, `-a`), and whether it names a shell.
+  const named: boolean[] = []
+  const expands: boolean[] = []
+  const count: number[] = []
+  const inline: boolean[] = []
+  const files: boolean[] = []
+  const shells: boolean[] = []
+  for (let i = 0, s = -1; i < words.length; i++) {
+    if (starts.has(i) || s < 0) s++
+    const w = words[i] ?? ''
+    if (mentionsP2P(w)) named[s] = true
+    if (w.includes('$') || w.includes('`')) expands[s] = true
+    if (w === ':::') inline[s] = true
+    if (w === '::::' || w === '-a' || w === '--arg-file' || w.startsWith('--arg-file=')) files[s] = true
+    if (XARGS_SHELLS.has((w.split(/[\\/]/).pop() ?? w).toLowerCase())) shells[s] = true
+    count[s] = (count[s] ?? 0) + 1
+  }
+  let seg = -1
+  let lead = true
+  let cliSeen = false
+  let text = false
+  let value = false
+  let lockFile = false
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? ''
+    if (starts.has(i) || seg < 0) {
+      seg++
+      lead = true
+      cliSeen = false
+      text = false
+      value = false
+      lockFile = false
+    }
+    const base = (w.split(/[\\/]/).pop() ?? w).toLowerCase()
+    const dot = base.indexOf('.')
+    const name = dot > 0 ? base.slice(0, dot) : base
+    const marked = named[seg] === true || expands[seg] === true
+    const runner = ARG_RUNNERS.has(name) || XARGS.has(name)
+    if (lead && value && !runner) {
+      // A wrapper's option value (`sudo -u x`, `timeout -s KILL`): the command word is still to come. A
+      // runner's name is never taken for one (`sudo -k parallel …`).
+      value = false
+    } else if (lead) {
+      value = false
+      if (NAME_STORES.some(p => w.startsWith(p))) return 'a shell alias or function defined on a command that names p2p'
+      if (w.startsWith('PROMPT_COMMAND=') && mentionsP2P(w)) return 'a shell hook (PROMPT_COMMAND) that names p2p'
+      if (base === 'function') return 'a shell function defined on a command that names p2p'
+      if (base === 'alias' && marked) return 'a shell alias defined on a command that names p2p'
+      if (base === 'hash' && marked) return 'a hashed command name on a command that names p2p'
+      if (ARG_RUNNERS.has(name) && (marked || (name !== 'sem' && (!inline[seg] || files[seg])))) return 'GNU parallel (or a runner like it) on a command that names p2p'
+      if (XARGS.has(name) && (marked || shells[seg])) return 'xargs on a command that names p2p'
+      // eval of text built at run time that names p2p (`eval "$(printf 'f\050…')"`), or a script sourced from a
+      // process substitution or a path that names p2p (`source <(echo 'f(){ p2p …; }')`).
+      if (base === 'eval' && named[seg] && expands[seg]) return 'eval of text built at run time, on a command that names p2p'
+      if ((base === 'source' || base === '.') && (named[seg] || count[seg] === 1)) return 'a sourced script on a command that names p2p'
+      if ((w.startsWith('$') || w.startsWith('`')) && w !== '$P2P_BIN' && w !== '${P2P_BIN}') return 'a command word built at run time on a command that names p2p'
+      if (base === 'flock') lockFile = true
+      // NAME=value, a keyword or wrapper, a wrapper's option (and its value) or count, or flock's lock file:
+      // the command word is still to come.
+      if (VALUE_OPTIONS.has(w)) value = true
+      else if (lockFile && base !== 'flock' && !w.startsWith('-') && !runner) lockFile = false
+      else if (!(w.indexOf('=') > 0 || LEAD_WORDS.has(base) || w.startsWith('-') || (w !== '' && [...w].every(ch => ch >= '0' && ch <= '9')))) {
+        lead = false
+        text = TEXT_ARGS.has(base)
+      }
+    } else if (!text && !cliSeen && marked && runner) {
+      // Behind a wrapper the guard doesn't know (`setsid parallel p2p ::: invite`).
+      return ARG_RUNNERS.has(name) ? 'GNU parallel (or a runner like it) on a command that names p2p' : 'xargs on a command that names p2p'
+    }
+    if (cliWord(w)) cliSeen = true
+    const subst = w.includes('$(') || w.includes('`')
+    if ((w.includes(' ') || w.includes('\t') || w.includes('\n')) && ((!cliSeen && !text) || subst) && mentionsP2P(w)) {
+      if (depth + 1 >= MAX_NESTING) return NESTED
+      const found = indirectP2PRun(w, depth + 1)
+      if (found) return found
+    }
+  }
+
+  return null
+}
+// ---- End of the shared block.
+
+/**
  * The mutating `p2p` verb a shell command runs, or null (the mod's
  * `mutatingP2PVerb`, for Codex's PreToolUse hook). Defence in depth only:
  * parsed conservatively, it may refuse a harmless command, never the reverse
  * on purpose, but a determined command can spell things another way.
  */
-export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0): string | null {
-  if (depth > 3) return null;
+/** Builtins and commands that run a string argument later or elsewhere: `trap`, `su -c`, `complete -C`, `ssh host`, `watch`. */
+const STRING_RUNNERS = new Set(["trap", "su", "complete", "ssh", "watch"]);
+/** What mutatingP2PVerb reads, in characters over all its passes, before it refuses a command that names p2p unread (64 passes over the longest command checked). */
+export const WORK_BUDGET = 64 * 16 * 1024;
+/** mutatingP2PVerb's answer when a command that names p2p is past WORK_BUDGET: refused as one it can't check. */
+export const TOO_COMPLEX = "a command too complex to check that names p2p";
+
+export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, unread = false, deep?: { hit: boolean }, work: { left: number } = { left: WORK_BUDGET }): string | null {
+  // Past the nesting limit nothing more is read: nestedTooDeep refuses it when it still names p2p.
+  if (depth > 3) {
+    if (deep && mentionsP2P(command)) deep.hit = true;
+    return null;
+  }
+  // Every pass spends the text it reads from one budget: past it, a command that names p2p is refused unread.
+  // The configured binary counts as naming p2p here too.
+  const names = (t: string) => mentionsP2P(t) || binNames.some((b) => b !== "" && t.includes(b));
+  work.left -= command.length + 1;
+  if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, "");
@@ -615,21 +982,50 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       binNames.includes(w)
     );
   };
+  // A shell's `-c` script and its positional arguments, read over the whole command (the split below doesn't
+  // know quotes, so a `;` inside the script would cut it): the first one, once per level.
+  const all = shellTokens(command);
+  const sh = all.findIndex((w) => /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test((w.split(/[\\/]/).pop() ?? "").toLowerCase()));
+  const shFlag = sh < 0 ? -1 : all.findIndex((w, j) => j > sh && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
+  if (shFlag > 0 && all[shFlag + 1] !== undefined) {
+    const script = shFlag + 2 < all.length ? `${all[shFlag + 1]}; ${all.slice(shFlag + 2).join(" ")}` : (all[shFlag + 1] ?? "");
+    const found = mutatingP2PVerb(script, binNames, depth + 1, false, deep, work);
+    if (found) return found;
+    if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
+  }
   for (const segment of segments) {
     const raws: string[] = [];
     const words = shellTokens(segment, false, undefined, undefined, raws);
+    // At most one command line read again per simple command (its words after the runner were read in that
+    // pass), and a shell's `-c` looked for once: so each level reads its text once, never once per runner word.
+    let noFlag = false;
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
-      if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
+      let inner: string | undefined;
+      let innerUnread = false;
+      if (!noFlag && /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
-        const inner = flag > 0 ? words[flag + 1] : undefined;
-        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1) : null;
-        if (found) return found;
+        if (flag < 0) noFlag = true;
+        // The script and then its positional arguments, which it can run (`bash -c '"$@"' x eval 'p2p invite'`): one nested line.
+        else if (words[flag + 1] !== undefined) inner = flag + 2 < words.length ? `${words[flag + 1]}; ${words.slice(flag + 2).join(" ")}` : words[flag + 1];
+      } else if (base === "eval" || STRING_RUNNERS.has(base)) {
+        // `eval …`, and a string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`,
+        // `su -c '…'`, `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the mod does).
+        inner = words.slice(i + 1).join(" ");
+      } else if (base === "env") {
+        // `env -S "<cmd …>"` (split-string): the string is a command line of its own. Its words come from a
+        // string read again, with no source to check, so a send there is never read as naming --from-session.
+        const split = envSplitString(words, i + 1);
+        if (split) {
+          inner = [split.line, ...words.slice(split.next)].join(" ");
+          innerUnread = true;
+        }
       }
-      if (base === "eval") {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1);
-        if (found) return found;
-      }
+      if (inner === undefined) continue;
+      const found = mutatingP2PVerb(inner, binNames, depth + 1, innerUnread, deep, work);
+      if (found) return found;
+      if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
+      break;
     }
     const at = words.findIndex(isCli);
     if (at < 0) continue;
@@ -643,9 +1039,35 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (const w of after) if (MUTATING_ONE.has(w)) return w;
     // `send` with no --from-session is the person's terminal path: it sends from the `tui` session and
     // shares that session with the recipient, a roster change only the person makes.
-    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1))) return "send (no --from-session)";
+    if (plain[0] === "send" && (unread || !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1)))) return "send (no --from-session)";
   }
   return null;
+}
+
+/**
+ * How many times a text holds something every nested command line needs (a shell's name: `sh` is in
+ * bash, zsh, dash, ksh, fish and pwsh; `cmd`, `eval`, `script`, `env -S`, a string runner), up to `cap`.
+ * Over-counting only costs a pass. Quotes and backslashes are dropped first; then one indexOf pass per word.
+ */
+function nestingWords(raw: string, cap: number): number {
+  // Quotes and backslashes out first (one pass), so `e''val`, `e"v"al` and `ev\al` count as eval.
+  let text = "";
+  for (const ch of raw) if (ch !== "'" && ch !== '"' && ch !== '\\') text += ch;
+  let n = 0;
+  for (const word of ["sh", "cmd", "eval", "script", "trap", "su", "complete", "watch", "env"]) {
+    for (let at = text.indexOf(word); at >= 0 && n < cap; at = text.indexOf(word, at + word.length)) n++;
+    if (n >= cap) break;
+  }
+  return n;
+}
+
+/** Whether mutatingP2PVerb stops at its nesting limit (shells and eval inside each other) on a command that still names p2p there. */
+export function nestedTooDeep(command: string): boolean {
+  // Four levels need four words that open one: without them, the second pass is skipped.
+  if (nestingWords(command.toLowerCase(), 4) < 4) return false;
+  const deep = { hit: false };
+  mutatingP2PVerb(command, [], 0, false, deep);
+  return deep.hit;
 }
 
 /**
@@ -1689,7 +2111,7 @@ export const MAX_GUARDED_COMMAND = 16 * 1024;
 
 /** Whether a command line names the p2p CLI (as a word, a path ending in it, the bundle or its variables). */
 export function namesP2PCli(command: string): boolean {
-  return /(?:^|[\s;&|(/="'`])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
+  return /(?:^|[\s;&|(/="'`{])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`}])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
 }
 
 /**
@@ -1705,6 +2127,11 @@ export function boundaryRefusal(command: string, ownSid: string | undefined): st
   const hidden = hidesCommand(command);
   if (hidden === "interpreter") return "interpreter code that runs p2p can't be checked";
   if (hidden === "pty") return "p2p under a pseudo-terminal can't be checked";
+  // GNU parallel and its kin, xargs, an alias or function defined on the line, or a command word built at
+  // run time (issue #69, as the mod reads them): not emulated.
+  const indirect = indirectP2PRun(command);
+  if (indirect) return `${indirect} can't be checked`;
+  if (nestedTooDeep(command)) return `${NESTED} can't be checked`;
   const words = shellTokens(command);
   for (let i = 0; i < words.length; i++) {
     const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");

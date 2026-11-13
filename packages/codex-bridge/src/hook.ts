@@ -20,7 +20,7 @@
 import { lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { CodexMode } from "./lib.js";
-import { boundaryRefusal, editedFiles, MAX_COMMAND_PATHS, mutatingP2PVerb, namesP2PCli, resolveLike, shellPaths, touchesSecrets } from "./lib.js";
+import { boundaryRefusal, editedFiles, MAX_COMMAND_PATHS, mutatingP2PVerb, namesP2PCli, resolveLike, shellPaths, TOO_COMPLEX, touchesSecrets } from "./lib.js";
 import { ancestors, ask, findEntry, readEntries } from "./ipc.js";
 
 const SHELL_TOOLS = /^(bash|shell|local_shell|exec_command|unified_exec|container\.exec|powershell|write_stdin)$/i;
@@ -40,6 +40,7 @@ export function guard(toolName: string, input: unknown, binNames: readonly strin
   if (!SHELL_TOOLS.test(toolName)) return null;
   const command = commandOf(input);
   const verb = mutatingP2PVerb(command, binNames);
+  if (verb === TOO_COMPLEX) return `Refused by Peer2Peer: ${TOO_COMPLEX} can't be checked.`;
   if (verb) {
     return `Refused by Peer2Peer: \`p2p ${verb}\` changes who reaches your user (or touches their keys or held messages). Only your user runs it, in their own terminal. Tell them what you'd suggest instead.`;
   }

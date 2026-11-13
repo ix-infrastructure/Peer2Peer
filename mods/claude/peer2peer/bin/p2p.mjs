@@ -28185,32 +28185,413 @@ function cliBinJs(word) {
   const w = word.replace(/\\/g, "/").toLowerCase();
   return w.endsWith("/p2p/dist/bin.js") || w.endsWith("@peer2peer/cli/dist/bin.js");
 }
-function mutatingP2PVerb(command, binNames = [], depth = 0) {
-  if (depth > 3)
+function envSplitString(words, from) {
+  for (let j = from; j < words.length; j++) {
+    const w = words[j] ?? "";
+    if (w === "--split-string")
+      return words[j + 1] === void 0 ? null : { line: words[j + 1] ?? "", next: j + 2 };
+    if (w.startsWith("--split-string="))
+      return { line: w.slice("--split-string=".length), next: j + 1 };
+    if (w === "--unset" || w === "--chdir") {
+      j++;
+      continue;
+    }
+    if (!w.startsWith("-") || w === "-") {
+      if (w.indexOf("=") > 0)
+        continue;
+      return null;
+    }
+    if (w === "--")
+      continue;
+    if (w.startsWith("--"))
+      continue;
+    for (let k = 1; k < w.length; k++) {
+      const o = w[k];
+      if (o === "S") {
+        if (k + 1 < w.length)
+          return { line: w.slice(k + 1), next: j + 1 };
+        return words[j + 1] === void 0 ? null : { line: words[j + 1] ?? "", next: j + 2 };
+      }
+      if (o === "u" || o === "C") {
+        if (k + 1 === w.length)
+          j++;
+        break;
+      }
+    }
+  }
+  return null;
+}
+var ARG_RUNNERS = /* @__PURE__ */ new Set(["parallel", "sem", "parset", "rush", "xjobs"]);
+var XARGS = /* @__PURE__ */ new Set(["xargs", "gxargs"]);
+var LEAD_WORDS = /* @__PURE__ */ new Set(["{", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "exec", "command", "builtin", "eval", "sudo", "doas", "env", "nice", "nohup", "timeout", "stdbuf", "xargs", "gxargs", "busybox", "coproc", "setsid", "flock", "chrt", "taskset", "ionice", "caffeinate", "unshare", "watch"]);
+var VALUE_OPTIONS = /* @__PURE__ */ new Set(["-u", "-g", "-p", "-s", "-k", "-n", "-C", "-c", "-w", "-E", "--user", "--group", "--signal", "--kill-after", "--chdir", "--interval"]);
+var TEXT_ARGS = /* @__PURE__ */ new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "git", "gh", "cat", "head", "tail", "wc", "diff", "jq", "tee", "less", "more"]);
+var XARGS_SHELLS = /* @__PURE__ */ new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "eval"]);
+var NAME_STORES = ["functions[", "aliases[", "galiases[", "saliases[", "dis_functions[", "dis_aliases[", "BASH_ALIASES[", "BASH_ALIASES=", "BASH_ALIASES+=", "BASH_CMDS[", "BASH_CMDS=", "BASH_CMDS+="];
+var MAX_NESTING = 4;
+var NESTED = "a command nested too deeply to check, that names p2p";
+function cliWord(word) {
+  const base = (word.split(/[\\/]/).pop() ?? word).toLowerCase();
+  return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || base === "p2p.mjs" || base === "p2p.cjs" || base === "p2p.js" || word.startsWith("@peer2peer/cli") || word === "$P2P_BIN" || word === "${P2P_BIN}";
+}
+function mentionsP2P(text2) {
+  const lower = text2.toLowerCase();
+  return lower.includes("p2p") || lower.includes("@peer2peer");
+}
+function unquoted(text2) {
+  const out = text2.split("");
+  let q = "";
+  for (let i = 0; i < text2.length; i++) {
+    const c = text2[i];
+    if (q === "'") {
+      if (c === "'")
+        q = "";
+      else
+        out[i] = " ";
+      continue;
+    }
+    if (q === '"' || q === "$") {
+      if (c === "\\") {
+        out[i] = " ";
+        if (i + 1 < text2.length)
+          out[++i] = " ";
+      } else if (c === (q === "$" ? "'" : '"'))
+        q = "";
+      else
+        out[i] = " ";
+      continue;
+    }
+    if (c === "\\") {
+      out[i] = " ";
+      if (i + 1 < text2.length)
+        out[++i] = " ";
+    } else if (c === "$" && text2[i + 1] === "'") {
+      q = "$";
+      i++;
+    } else if (c === "'" || c === '"')
+      q = c;
+  }
+  return out.join("");
+}
+function backticks(text2) {
+  const out = [];
+  let q = "";
+  for (let i = 0; i < text2.length; i++) {
+    const c = text2[i];
+    if (q === "'") {
+      if (c === "'")
+        q = "";
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (q === "$") {
+      if (c === "'")
+        q = "";
+      continue;
+    }
+    if (c === "`") {
+      let j = i + 1;
+      while (j < text2.length && text2[j] !== "`")
+        j += text2[j] === "\\" ? 2 : 1;
+      out.push(text2.slice(i + 1, Math.min(j, text2.length)));
+      i = j;
+      continue;
+    }
+    if (q === '"') {
+      if (c === '"')
+        q = "";
+      continue;
+    }
+    if (c === "$" && text2[i + 1] === "'") {
+      q = "$";
+      i++;
+    } else if (c === "'" || c === '"')
+      q = c;
+  }
+  return out;
+}
+function blankHeredocs(text2, unq) {
+  const out = text2.split("");
+  let lineStart = 0;
+  let lineWord = "";
+  let wordFor = -1;
+  let pos = 0;
+  let i = 0;
+  for (; ; ) {
+    const at = unq.indexOf("<<", i);
+    if (at < 0)
+      break;
+    while (pos < at) {
+      if (text2[pos] === "\n")
+        lineStart = pos + 1;
+      pos++;
+    }
+    if (unq[at + 2] === "<") {
+      i = at + 3;
+      continue;
+    }
+    let j = at + 2;
+    const dash = text2[j] === "-";
+    if (dash)
+      j++;
+    while (text2[j] === " " || text2[j] === "	")
+      j++;
+    const q = text2[j] === "'" || text2[j] === '"' ? text2[j] : "";
+    if (q)
+      j++;
+    const from = j;
+    while (j < text2.length && /[\w-]/.test(text2[j]))
+      j++;
+    const delim = text2.slice(from, j);
+    if (q && text2[j] === q)
+      j++;
+    i = Math.max(j, at + 2);
+    if (!q || delim === "")
+      continue;
+    if (wordFor !== lineStart) {
+      let s2 = lineStart;
+      while (text2[s2] === " " || text2[s2] === "	")
+        s2++;
+      let e = s2;
+      while (e < text2.length && !" 	\n;&|<>".includes(text2[e]))
+        e++;
+      lineWord = (text2.slice(s2, e).split(/[\\/]/).pop() ?? "").toLowerCase();
+      wordFor = lineStart;
+    }
+    const nl = text2.indexOf("\n", j);
+    if (nl < 0)
+      break;
+    let k = nl + 1;
+    while (k <= text2.length) {
+      let e = text2.indexOf("\n", k);
+      if (e < 0)
+        e = text2.length;
+      let s2 = k;
+      if (dash)
+        while (text2[s2] === "	")
+          s2++;
+      if (text2.slice(s2, e) === delim)
+        break;
+      if (TEXT_ARGS.has(lineWord))
+        for (let x = k; x < e; x++)
+          out[x] = " ";
+      k = e + 1;
+    }
+    i = Math.max(i, k);
+    pos = Math.max(pos, Math.min(k, text2.length));
+    lineStart = Math.min(k, text2.length);
+  }
+  return out.join("");
+}
+function definesFunction(text2) {
+  const blank = (c) => c === " " || c === "	";
+  for (let i = 0; i < text2.length; i++) {
+    if (text2[i] !== "(")
+      continue;
+    let j = i + 1;
+    while (blank(text2[j]))
+      j++;
+    if (text2[j] !== ")")
+      continue;
+    let k = j + 1;
+    for (; ; ) {
+      while (blank(text2[k]))
+        k++;
+      if (text2[k] === "#")
+        while (k < text2.length && text2[k] !== "\n")
+          k++;
+      if (text2[k] === "\n" || text2[k] === "\r")
+        k++;
+      else
+        break;
+    }
+    const next = text2[k];
+    let m = i - 1;
+    while (m >= 0 && blank(text2[m]))
+      m--;
+    const before = text2[m];
+    if (before === void 0 || ";&|(){}\n\r".includes(before)) {
+      if (next === "{")
+        return true;
+    } else if (!"$=<>`@!?*+".includes(before) && next !== void 0 && !";|&)".includes(next))
+      return true;
+    i = Math.max(i, k - 1);
+  }
+  return false;
+}
+function indirectP2PRun(command, depth = 0) {
+  const unq = unquoted(command);
+  const data = command.includes("<<") ? blankHeredocs(command, unq) : command;
+  if (definesFunction(data === command ? unq : unquoted(data)))
+    return "a shell function defined on a command that names p2p";
+  for (const inner of backticks(data)) {
+    if (!mentionsP2P(inner))
+      continue;
+    if (depth + 1 >= MAX_NESTING)
+      return NESTED;
+    const found = indirectP2PRun(inner, depth + 1);
+    if (found)
+      return found;
+  }
+  const starts = /* @__PURE__ */ new Set();
+  const words = shellTokens(data, false, void 0, starts);
+  const named = [];
+  const expands = [];
+  const count2 = [];
+  const inline = [];
+  const files = [];
+  const shells = [];
+  for (let i = 0, s2 = -1; i < words.length; i++) {
+    if (starts.has(i) || s2 < 0)
+      s2++;
+    const w = words[i] ?? "";
+    if (mentionsP2P(w))
+      named[s2] = true;
+    if (w.includes("$") || w.includes("`"))
+      expands[s2] = true;
+    if (w === ":::")
+      inline[s2] = true;
+    if (w === "::::" || w === "-a" || w === "--arg-file" || w.startsWith("--arg-file="))
+      files[s2] = true;
+    if (XARGS_SHELLS.has((w.split(/[\\/]/).pop() ?? w).toLowerCase()))
+      shells[s2] = true;
+    count2[s2] = (count2[s2] ?? 0) + 1;
+  }
+  let seg = -1;
+  let lead = true;
+  let cliSeen = false;
+  let text2 = false;
+  let value = false;
+  let lockFile = false;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? "";
+    if (starts.has(i) || seg < 0) {
+      seg++;
+      lead = true;
+      cliSeen = false;
+      text2 = false;
+      value = false;
+      lockFile = false;
+    }
+    const base = (w.split(/[\\/]/).pop() ?? w).toLowerCase();
+    const dot = base.indexOf(".");
+    const name2 = dot > 0 ? base.slice(0, dot) : base;
+    const marked = named[seg] === true || expands[seg] === true;
+    const runner = ARG_RUNNERS.has(name2) || XARGS.has(name2);
+    if (lead && value && !runner) {
+      value = false;
+    } else if (lead) {
+      value = false;
+      if (NAME_STORES.some((p) => w.startsWith(p)))
+        return "a shell alias or function defined on a command that names p2p";
+      if (w.startsWith("PROMPT_COMMAND=") && mentionsP2P(w))
+        return "a shell hook (PROMPT_COMMAND) that names p2p";
+      if (base === "function")
+        return "a shell function defined on a command that names p2p";
+      if (base === "alias" && marked)
+        return "a shell alias defined on a command that names p2p";
+      if (base === "hash" && marked)
+        return "a hashed command name on a command that names p2p";
+      if (ARG_RUNNERS.has(name2) && (marked || name2 !== "sem" && (!inline[seg] || files[seg])))
+        return "GNU parallel (or a runner like it) on a command that names p2p";
+      if (XARGS.has(name2) && (marked || shells[seg]))
+        return "xargs on a command that names p2p";
+      if (base === "eval" && named[seg] && expands[seg])
+        return "eval of text built at run time, on a command that names p2p";
+      if ((base === "source" || base === ".") && (named[seg] || count2[seg] === 1))
+        return "a sourced script on a command that names p2p";
+      if ((w.startsWith("$") || w.startsWith("`")) && w !== "$P2P_BIN" && w !== "${P2P_BIN}")
+        return "a command word built at run time on a command that names p2p";
+      if (base === "flock")
+        lockFile = true;
+      if (VALUE_OPTIONS.has(w))
+        value = true;
+      else if (lockFile && base !== "flock" && !w.startsWith("-") && !runner)
+        lockFile = false;
+      else if (!(w.indexOf("=") > 0 || LEAD_WORDS.has(base) || w.startsWith("-") || w !== "" && [...w].every((ch) => ch >= "0" && ch <= "9"))) {
+        lead = false;
+        text2 = TEXT_ARGS.has(base);
+      }
+    } else if (!text2 && !cliSeen && marked && runner) {
+      return ARG_RUNNERS.has(name2) ? "GNU parallel (or a runner like it) on a command that names p2p" : "xargs on a command that names p2p";
+    }
+    if (cliWord(w))
+      cliSeen = true;
+    const subst = w.includes("$(") || w.includes("`");
+    if ((w.includes(" ") || w.includes("	") || w.includes("\n")) && (!cliSeen && !text2 || subst) && mentionsP2P(w)) {
+      if (depth + 1 >= MAX_NESTING)
+        return NESTED;
+      const found = indirectP2PRun(w, depth + 1);
+      if (found)
+        return found;
+    }
+  }
+  return null;
+}
+var STRING_RUNNERS = /* @__PURE__ */ new Set(["trap", "su", "complete", "ssh", "watch"]);
+var WORK_BUDGET = 64 * 16 * 1024;
+var TOO_COMPLEX = "a command too complex to check that names p2p";
+function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep, work = { left: WORK_BUDGET }) {
+  if (depth > 3) {
+    if (deep && mentionsP2P(command))
+      deep.hit = true;
     return null;
+  }
+  const names = (t2) => mentionsP2P(t2) || binNames.some((b) => b !== "" && t2.includes(b));
+  work.left -= command.length + 1;
+  if (work.left < 0)
+    return depth === 0 && names(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
     const base = w.split(/[\\/]/).pop() ?? w;
     return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || cliBinJs(w) || binNames.includes(w);
   };
+  const all = shellTokens(command);
+  const sh = all.findIndex((w) => /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test((w.split(/[\\/]/).pop() ?? "").toLowerCase()));
+  const shFlag = sh < 0 ? -1 : all.findIndex((w, j) => j > sh && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
+  if (shFlag > 0 && all[shFlag + 1] !== void 0) {
+    const script = shFlag + 2 < all.length ? `${all[shFlag + 1]}; ${all.slice(shFlag + 2).join(" ")}` : all[shFlag + 1] ?? "";
+    const found = mutatingP2PVerb(script, binNames, depth + 1, false, deep, work);
+    if (found)
+      return found;
+    if (work.left < 0)
+      return depth === 0 && names(command) ? TOO_COMPLEX : null;
+  }
   for (const segment of segments) {
     const raws = [];
     const words = shellTokens(segment, false, void 0, void 0, raws);
+    let noFlag = false;
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
-      if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
+      let inner;
+      let innerUnread = false;
+      if (!noFlag && /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
-        const inner = flag > 0 ? words[flag + 1] : void 0;
-        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1) : null;
-        if (found)
-          return found;
+        if (flag < 0)
+          noFlag = true;
+        else if (words[flag + 1] !== void 0)
+          inner = flag + 2 < words.length ? `${words[flag + 1]}; ${words.slice(flag + 2).join(" ")}` : words[flag + 1];
+      } else if (base === "eval" || STRING_RUNNERS.has(base)) {
+        inner = words.slice(i + 1).join(" ");
+      } else if (base === "env") {
+        const split2 = envSplitString(words, i + 1);
+        if (split2) {
+          inner = [split2.line, ...words.slice(split2.next)].join(" ");
+          innerUnread = true;
+        }
       }
-      if (base === "eval") {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1);
-        if (found)
-          return found;
-      }
+      if (inner === void 0)
+        continue;
+      const found = mutatingP2PVerb(inner, binNames, depth + 1, innerUnread, deep, work);
+      if (found)
+        return found;
+      if (work.left < 0)
+        return depth === 0 && names(command) ? TOO_COMPLEX : null;
+      break;
     }
     const at = words.findIndex(isCli);
     if (at < 0)
@@ -28227,10 +28608,31 @@ function mutatingP2PVerb(command, binNames = [], depth = 0) {
     for (const w of after2)
       if (MUTATING_ONE.has(w))
         return w;
-    if (plain[0] === "send" && !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1)))
+    if (plain[0] === "send" && (unread || !sendNamesFromSession(words.slice(at + 1), raws.slice(at + 1))))
       return "send (no --from-session)";
   }
   return null;
+}
+function nestingWords(raw, cap2) {
+  let text2 = "";
+  for (const ch of raw)
+    if (ch !== "'" && ch !== '"' && ch !== "\\")
+      text2 += ch;
+  let n = 0;
+  for (const word of ["sh", "cmd", "eval", "script", "trap", "su", "complete", "watch", "env"]) {
+    for (let at = text2.indexOf(word); at >= 0 && n < cap2; at = text2.indexOf(word, at + word.length))
+      n++;
+    if (n >= cap2)
+      break;
+  }
+  return n;
+}
+function nestedTooDeep(command) {
+  if (nestingWords(command.toLowerCase(), 4) < 4)
+    return false;
+  const deep = { hit: false };
+  mutatingP2PVerb(command, [], 0, false, deep);
+  return deep.hit;
 }
 function touchesSecrets(command) {
   const text2 = command.replace(/\\\\/g, "/").toLowerCase();
@@ -29148,7 +29550,7 @@ function hidesCommand(command) {
 }
 var MAX_GUARDED_COMMAND = 16 * 1024;
 function namesP2PCli(command) {
-  return /(?:^|[\s;&|(/="'`])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
+  return /(?:^|[\s;&|(/="'`{])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`}])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
 }
 function boundaryRefusal(command, ownSid) {
   if (/project["'\s,\]]+share/.test(command) && /p2p|peer2peer/i.test(command))
@@ -29162,6 +29564,11 @@ function boundaryRefusal(command, ownSid) {
     return "interpreter code that runs p2p can't be checked";
   if (hidden === "pty")
     return "p2p under a pseudo-terminal can't be checked";
+  const indirect = indirectP2PRun(command);
+  if (indirect)
+    return `${indirect} can't be checked`;
+  if (nestedTooDeep(command))
+    return `${NESTED} can't be checked`;
   const words = shellTokens(command);
   for (let i = 0; i < words.length; i++) {
     const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");
@@ -32538,6 +32945,8 @@ function guard(toolName, input, binNames = [], ownSid) {
     return null;
   const command = commandOf(input);
   const verb = mutatingP2PVerb(command, binNames);
+  if (verb === TOO_COMPLEX)
+    return `Refused by Peer2Peer: ${TOO_COMPLEX} can't be checked.`;
   if (verb) {
     return `Refused by Peer2Peer: \`p2p ${verb}\` changes who reaches your user (or touches their keys or held messages). Only your user runs it, in their own terminal. Tell them what you'd suggest instead.`;
   }
