@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 2bdfcb6fffde7d80
+// @peer2peer/core 0.1.1 d05dc6e365ac8f7a
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6968,8 +6968,9 @@ var init_identitydoc = __esm({
        *    narrow the view for good. A client never applies them to its own identity (re-review N1).
        *  - Only the ones that narrow are kept, and none that narrows is evicted (re-review N3/R3): walking the
        *    candidates highest `ver` first, one is kept if it leaves out a device or key holder that no kept,
-       *    higher-`ver` one already leaves out (the highest is always kept). Any other is redundant for good:
-       *    what it leaves out stays left out by a higher-`ver` one, which is dropped no sooner. So however many
+       *    higher-`ver` one lasting at least as long (`exp`) already leaves out (the highest is always kept).
+       *    Any other is redundant for good: what it leaves out stays left out by a higher-`ver` one that is
+       *    dropped no sooner, by the head reaching it or by expiry (re-review E1). So however many
        *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
        *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
        */
@@ -6992,16 +6993,16 @@ var init_identitydoc = __esm({
           for (const x of d.keyholders)
             universe.add(`k:${x}`);
         }
-        const covered = /* @__PURE__ */ new Set();
+        const covered = /* @__PURE__ */ new Map();
         const kept = [];
         for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
           const lists = /* @__PURE__ */ new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
           const leaves = [...universe].filter((x) => !lists.has(x));
-          if (kept.length > 0 && leaves.every((x) => covered.has(x)))
+          if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp))
             continue;
           kept.push(d);
           for (const x of leaves)
-            covered.add(x);
+            covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
         }
         this.pending = kept.slice(0, MAX_PENDING_HEADS);
         const after2 = this.pending.map((d) => d.hash);

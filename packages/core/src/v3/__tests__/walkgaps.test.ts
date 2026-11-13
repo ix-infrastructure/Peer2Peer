@@ -573,4 +573,26 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
       expect(c.view().keyholders).toEqual([u.dev.did]);
     }
   });
+
+  it("re-review E1: a higher head that expires sooner doesn't stand in for a lower one that lasts longer", () => {
+    // Held v1..v3 (the laptop trusted). L: a disconnected fork tip (ver 5) dropping the laptop, issued 100 s
+    // ago. H: a higher version (ver 9) also leaving it out, but issued 29 days ago, so it expires in a day.
+    // Both are kept; once H expires, L still keeps the laptop out.
+    const DAY = 86400;
+    const u = makeUser("alice");
+    const laptop = u.addDevice({ keyholder: true });
+    u.publish({ iat: NOW - 40 * DAY });
+    const v3 = u.publish({ iat: NOW - 39 * DAY });
+    const only = [u.dev.did];
+    const L = doc(u, { ver: 5, prev: b64uEncode(randomBytes(32)), devices: only, keyholders: only, iat: NOW - 100 });
+    const H = doc(u, { ver: 9, prev: b64uEncode(randomBytes(32)), devices: only, keyholders: only, iat: NOW - 29 * DAY });
+    expect(H.exp).toBeLessThan(L.exp);
+    const c = IdentityChain.fromStored({ iss: u.userId, versions: [u.docs[0].jws, u.docs[1].jws, v3.jws] }, { now: NOW });
+    expect(c.view().devices).toContain(laptop.did);
+    expect(c.notePending([L, H], { now: NOW })).toBe(true);
+    expect(c.toStored().pendingHeads).toEqual([H.jws, L.jws]);
+    const later = NOW + 2 * DAY; // H past its exp, L not
+    expect(later).toBeGreaterThanOrEqual(H.exp);
+    expect(IdentityChain.fromStored(c.toStored(), { now: later }).view().devices).toEqual(only);
+  });
 });
