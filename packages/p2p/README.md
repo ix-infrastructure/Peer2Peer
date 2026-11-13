@@ -15,7 +15,7 @@ export P2P_DEFAULT_RELAYS=wss://relay.example.org/v3   # 1–5, comma separated
 **Ann:**
 
 ```sh
-p2p setup                     # makes your key (name: your OS user); offers to save the backup phrase
+p2p setup                     # asks how you're joining (link a device you already use, an invite, or new); new: your relay, your key, the backup phrase
 p2p invite ben                # prints a one-time code: relay.example.org/K7QM-3XPD-9TWA-HF2N-6RJC
 ```
 
@@ -53,7 +53,7 @@ Every command takes `--json`. With it, a command prints exactly one JSON object 
 
 **On a terminal** (stdin and stdout both a TTY, no `--json`, `--yes`, `--no-input` or `CI`, and not inside an agent's tool call), a command missing an argument it could take from a list asks for it with a picker: arrow keys or j/k move, space selects, enter confirms, typing filters, Esc or Ctrl-C cancels (exit 1, nothing done). `invite` with no `--circle` picks the circles and the expiry; `join` asks Join/Cancel; `circle default|invite|leave|members`, `held approve|decline`, `remove`, `unfriend`, `block`, `unblock`, `invites revoke`, `send` (recipient, then text) and `trust add|remove` pick what's missing (`trust add` still takes the fingerprint typed). Output on a terminal is laid out (tables, colour for state, relative times; `NO_COLOR`, `FORCE_COLOR` and `TERM=dumb` are respected), and `p2p` alone shows a home screen. Piped or redirected, every command prints and exits exactly as before. `--no-input` (anywhere on the line) turns off pickers and questions on a terminal too.
 
-On a terminal, `p2p` alone and `p2p relays` connect to your own relays (bounded) to show their health; piped, they don't. `send` without `--from-session` sends from the `tui` session, shares that session with the recipient when it isn't yet ("shared session tui with <name>", so the message can land there and replies reach `p2p tui`; undone if the send fails; never with `--from-session` or off a terminal, and an agent's `p2p send` without `--from-session` is refused by the guards; a send from `p2p tui` does the same), and says so ("sent from session tui; replies show in `p2p tui`"). `trust add` lists names (or petnames) only: you type the fingerprint as the person gave it to you. A signal (SIGINT, SIGTERM, SIGHUP) during a picker restores the terminal, then ends the process as the signal would.
+On a terminal, `p2p` alone and `p2p relays` connect to your own relays (bounded) to show their health; piped, they don't. `send` without `--from-session` sends from the `tui` session, shares that session with the recipient when it isn't yet ("shared session tui with <name>", so the message can land there and replies reach `p2p tui`; undone if the send fails before anything went out and the roster is still the one the share wrote; never with `--from-session` or off a terminal, and an agent's `p2p send` without `--from-session` is refused by the guards; a send from `p2p tui` does the same), and says so ("sent from session tui; replies show in `p2p tui`"). `trust add` lists names (or petnames) only: you type the fingerprint as the person gave it to you. A signal (SIGINT, SIGTERM, SIGHUP) during a picker restores the terminal, then ends the process as the signal would.
 
 **Agents:** the pickers stay off inside Claude Code's and Codex's tool calls (`CLAUDECODE`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`). That check knows only those two: any other agent or automation that runs `p2p` in a terminal should pass `--no-input` or set `CI=1`.
 

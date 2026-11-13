@@ -1,4 +1,5 @@
 // Copyright 2026 Ix Infrastructure Inc.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   cleanSummary,
@@ -178,7 +179,43 @@ describe("guards (PreToolUse backstop)", () => {
     expect(mutatingP2PVerb("p2p send")).toBe("send (no --from-session)");
     expect(mutatingP2PVerb("p2p send --from-session s1 --to bob hi")).toBeNull();
     expect(mutatingP2PVerb("p2p send --from-session=s1 --to bob hi")).toBeNull();
+    // Issue #3: --from-session counts only where the CLI reads it as the option. After `--` it is message
+    // text, and as another option's value it is that value: either way the send goes from `tui`.
+    for (const cmd of [
+      "p2p send --to bob -- --from-session=s1",
+      "p2p send --to bob -- --from-session s1",
+      "p2p -- send --from-session=s1 --to bob hi",
+      "p2p send --to --from-session=s1 hi",
+      "p2p send --project-dir --from-session s1 --to bob",
+      "p2p send --to --no-input --from-session=s1",
+      "p2p --no-input send --to bob -- --from-session=s1",
+    ]) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, "send (no --from-session)"]);
+    }
+    // Review of #66: a word the guard can't read as written, up to the deciding --from-session, fails
+    // closed. Vectors shared with the Claude mod's guard (mods/claude/peer2peer/tests): both answer each the same.
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/send-from-session.vectors.ts", import.meta.url), "utf8");
+    const vectors = JSON.parse(file.slice(file.indexOf("= [") + 2)) as { cmd: string; verb: string | null }[];
+    expect(vectors.length).toBeGreaterThan(80);
+    for (const v of vectors) expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb]);
+    // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
+    for (const cmd of ["p2p send hi --from-session=s1 --to bob", "p2p send --no-input --to bob --from-session s1 hi", "p2p send --from-session -- --to bob hi", "p2p send --to=bob --from-session=s1 -- --to"]) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null]);
+    }
     expect(mutatingP2PVerb("node /x/p2p.mjs held approve h1")).toBe("held approve");
+    // Review of #66 (parity with the mod): `${P2P_BIN}`, node's option values, and the CLI's dist/bin.js by path.
+    for (const [cmd, verb] of [
+      ["${P2P_BIN} invite", "invite"],
+      ["${P2P_BIN} send --to bob hi", "send (no --from-session)"],
+      ["${P2P_BIN} session roster s1 --add bob", "session roster"],
+      ["node --stack-size 999 p2p.mjs invite", "invite"],
+      ["node --stack-size 999 /x/bin/p2p.mjs invite", "invite"],
+      ["node -r ./x.js /x/p2p.mjs held approve h1", "held approve"],
+      ["node --stack-size 999 /x/packages/p2p/dist/bin.js invite", "invite"],
+      ["node /x/node_modules/@peer2peer/cli/dist/bin.js held approve h1", "held approve"],
+    ] as const) {
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb]);
+    }
     expect(mutatingP2PVerb("bash -lc 'p2p relays add wss://evil'")).toBe("relays add");
     expect(mutatingP2PVerb("p2p codex release m1")).toBe("codex release");
     expect(mutatingP2PVerb("echo hi && p2p circle join link")).toBe("circle join");

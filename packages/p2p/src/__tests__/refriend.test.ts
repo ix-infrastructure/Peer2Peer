@@ -136,4 +136,41 @@ describe("re-friending after an unfriend", () => {
     expect(await friendIds(q)).not.toContain(ids.op);
     expect(await friendIds(p)).not.toContain(ids.oq);
   }, 30_000);
+
+  it("issue #3: an unfriend that arrives after the re-friend leaves the new friendship's caps alone", async () => {
+    const [p, q] = await pair("lp", "lq");
+    await befriend(p, q);
+    await q.ok(["unfriend", ids.lp]);
+    await befriend(p, q);
+    const canMessage = async (u: User, other: string) => ((await u.ok(["friends"])).friends as { userId: string; canMessage: boolean }[]).find((f) => f.userId === other)?.canMessage;
+    expect(await canMessage(p, ids.lq)).toBe(true);
+    const issuedTo = async (u: User, other: string) => {
+      const a = await u.app();
+      await a.load();
+      return (await a.store.listCapsIssued()).filter((c) => c.sub === other).length;
+    };
+    const issued = await issuedTo(p, ids.lq);
+    expect(issued).toBeGreaterThan(0);
+    // A late copy of the old unfriend (another device's, one a relay held back): it ends the old
+    // friendship only, which is over already.
+    const a = await q.app();
+    await a.load();
+    const old = (await a.store.listUnfriends()).find((u) => u.iss === ids.lq && u.peer === ids.lp);
+    try {
+      await a.deliver(ids.lp, "contact", { own: ids.lq, sid: "~contact" }, { text: old!.jws });
+    } finally {
+      await a.close();
+    }
+    await p.ok(["friends"]);
+    expect(await friendIds(p)).toContain(ids.lq);
+    // Without the fix, p dropped the caps q gave it and revoked the ones it gave q.
+    expect(await canMessage(p, ids.lq)).toBe(true);
+    expect(await issuedTo(p, ids.lq)).toBe(issued);
+    await q.ok(["session", "roster", "s-q", "--add", ids.lp]);
+    await q.ok(["status", "--session", "s-q", "--state", "idle", "--label", "q"]);
+    await p.ok(["session", "roster", "s-p", "--add", ids.lq]);
+    await p.ok(["ls"]);
+    const sent = await p.ok(["send", "--from-session", "s-p", "--to", `${ids.lq}/s-q`, "--stdin"], { stdin: "still friends" });
+    expect(sent).toMatchObject({ delivered: true });
+  }, 60_000);
 });

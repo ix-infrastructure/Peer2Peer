@@ -29,6 +29,7 @@ import {
   slash,
   start,
   typed,
+  words,
   world,
 } from './world'
 import type { World } from './world'
@@ -1297,6 +1298,27 @@ describe('peer2peer: lifecycle', () => {
     expect(sidOf(w)).not.toBe(first)
     await settle(w, () => ran(w, 'status').some(r => flag(r.argv, 'session') === sidOf(w)))
     expect(ran(w, 'status').some(r => flag(r.argv, 'session') === sidOf(w))).toBe(true)
+  })
+
+  test('issue #3: the final idle goes out after a busy status still on its way, so an ended session never stays busy', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    let release = () => {}
+    const gate = new Promise<void>(r => { release = r })
+    // Runs are recorded when they finish: the order a peer gets them in (it keeps the one sealed last).
+    w.onRun = async argv => {
+      if (words(argv)[0] === 'status' && flag(argv, 'state') === 'busy') await gate
+    }
+    const before = ran(w, 'status').length
+    await $.turn.start({ text: 'work', turnId: 'turn-1' } as never)
+    await settle(w, () => false)
+    const ending = $.session.end({ reason: 'prompt_input_exit', sessionId: w.sessionId } as never)
+    await settle(w, () => false)
+    // The busy status hasn't finished: the final idle waits for it.
+    expect(ran(w, 'status').length).toBe(before)
+    release()
+    await ending
+    expect(ran(w, 'status').slice(before).map(r => flag(r.argv, 'state'))).toEqual(['busy', 'idle'])
   })
 
   test('L3: no watcher survives the session\'s end or a /clear', async ($, on) => {

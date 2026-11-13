@@ -85,12 +85,14 @@ describe("p2p setup: the Ix offer", () => {
 
   it("explains Ix and asks, default No: Enter declines, is remembered, and isn't asked again", async () => {
     const u = user("ixno");
-    const r = await runAt(u.env, ["setup", "--name", "ixno", "--no-backup"], [""]);
+    // A new identity: first how they're joining ([n] new), then Ix.
+    const r = await runAt(u.env, ["setup", "--name", "ixno", "--no-backup"], ["n", ""]);
     expect(r.code, r.err).toBe(0);
-    expect(r.asked).toHaveLength(1);
-    expect(r.asked[0]).toMatch(/Install Ix\? \[y\/N\] $/);
-    expect(r.asked[0]).toContain("optional, recommended");
-    expect(r.asked[0]).toContain("never installs it for you");
+    expect(r.asked).toHaveLength(2);
+    expect(r.asked[0]).toBe("Choose l, i or n: ");
+    expect(r.asked[1]).toMatch(/Install Ix\? \[y\/N\] $/);
+    expect(r.asked[1]).toContain("optional, recommended");
+    expect(r.asked[1]).toContain("never installs it for you");
     expect(r.out).toContain("You won't be asked again");
     expect(config(u).ixDeclined).toBe(true);
     expect(config(u).extensions).toBeUndefined();
@@ -106,9 +108,9 @@ describe("p2p setup: the Ix offer", () => {
 
   it("a yes prints the command for the person to run; nothing is installed or enabled", async () => {
     const u = user("ixyes");
-    const r = await runAt(u.env, ["setup", "--name", "ixyes", "--no-backup"], ["y"]);
+    const r = await runAt(u.env, ["setup", "--name", "ixyes", "--no-backup"], ["n", "y"]);
     expect(r.code, r.err).toBe(0);
-    expect(r.asked).toHaveLength(1);
+    expect(r.asked).toHaveLength(2);
     expect(r.out).toContain("Peer2Peer doesn't run installers");
     for (const c of ixInstallCommands()) expect(r.out).toContain(c);
     expect(r.out).toContain("p2p setup --ix");

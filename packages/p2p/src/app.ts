@@ -1053,6 +1053,40 @@ export class App {
     } = {},
   ): Promise<Delivery> {
     const pool = this.pool ?? (await this.connect());
+    const { targets, outgoing, errors, sealed } = await this.sealCopies(to, kind, session, plaintext, opts);
+    const sentVia = new Set<string>();
+    const results = await Promise.all(outgoing.map(({ d, env }) => pool.sendEnvelope(env, to, d, kind, targets)));
+    const unsent: NonNullable<Delivery["unsent"]> = [];
+    for (const [i, res] of results.entries()) {
+      for (const r of res.sent) sentVia.add(r);
+      for (const e of res.errors) errors.push({ did: outgoing[i].d, relay: e.relay, code: e.code, ...(e.written ? { written: true } : {}) });
+      if (res.sent.length === 0) unsent.push({ did: outgoing[i].d, env: outgoing[i].env, targets, codes: res.errors.map((e) => e.code) });
+    }
+    return { userId: to, devices: sealed, relays: [...sentVia], ...(errors.length > 0 ? { errors } : {}), ...(unsent.length > 0 ? { unsent } : {}) };
+  }
+
+  /**
+   * Seals `plaintext` for `to` exactly as deliver does (the same devices, a fresh seq each, the same
+   * relays and caps) and sends nothing: copies for the outbox to send later (outbox.ts).
+   */
+  async seal(
+    to: string,
+    kind: EnvelopeKindV3,
+    session: { own: string; sid: string },
+    plaintext: object,
+    opts: { onlyDevices?: readonly string[]; beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void> } = {},
+  ): Promise<{ did: string; env: string; targets: { relay: string; cap?: string }[] }[]> {
+    const { targets, outgoing } = await this.sealCopies(to, kind, session, plaintext, opts);
+    return outgoing.map(({ d, env }) => ({ did: d, env, targets }));
+  }
+
+  private async sealCopies(
+    to: string,
+    kind: EnvelopeKindV3,
+    session: { own: string; sid: string },
+    plaintext: object,
+    opts: { refresh?: boolean; extraCaps?: readonly string[]; hint?: readonly string[]; onlyDevices?: readonly string[]; beforeSend?: (copies: { did: string; seq: number }[]) => Promise<void> },
+  ): Promise<{ targets: { relay: string; cap?: string }[]; outgoing: { d: string; env: string }[]; errors: NonNullable<Delivery["errors"]>; sealed: number }> {
     const view = to === this.userId ? await this.ownView() : await this.viewFor(to, { refresh: opts.refresh, hint: opts.hint });
     if (!view) throw new CliError("unknown_user", `no identity document for ${to}: can't find their devices or relays`);
     // This device only when named in onlyDevices (a message to another session of ours here, or a
@@ -1061,8 +1095,7 @@ export class App {
     const relays = orderRelays(view.head.relays, view.relays).slice(0, 3);
     const caps = await this.capsFor(to, kind, opts.extraCaps);
     const resolveCert = storeCertResolver(this.store);
-    const sentVia = new Set<string>();
-    const errors: { did: string; relay: string; code: string; written?: boolean }[] = [];
+    const errors: NonNullable<Delivery["errors"]> = [];
     // Certificates first (each verified, as before), then one seq block for every copy, then the
     // copies go out together: one round trip for all of the recipient's devices, not one each.
     const ready: { d: string; kpk: Uint8Array }[] = [];
@@ -1101,15 +1134,7 @@ export class App {
       if (targets.length === 0) errors.push({ did: d, relay: "", code: "no-cap" });
       else outgoing.push({ d, env });
     }
-    const sealed = ready.length;
-    const results = await Promise.all(outgoing.map(({ d, env }) => pool.sendEnvelope(env, to, d, kind, targets)));
-    const unsent: NonNullable<Delivery["unsent"]> = [];
-    for (const [i, res] of results.entries()) {
-      for (const r of res.sent) sentVia.add(r);
-      for (const e of res.errors) errors.push({ did: outgoing[i].d, relay: e.relay, code: e.code, ...(e.written ? { written: true } : {}) });
-      if (res.sent.length === 0) unsent.push({ did: outgoing[i].d, env: outgoing[i].env, targets, codes: res.errors.map((e) => e.code) });
-    }
-    return { userId: to, devices: sealed, relays: [...sentVia], ...(errors.length > 0 ? { errors } : {}), ...(unsent.length > 0 ? { unsent } : {}) };
+    return { targets, outgoing, errors, sealed: ready.length };
   }
 
   /** Delivers to our other devices, when there are any (sync, §4.3). */

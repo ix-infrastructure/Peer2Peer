@@ -454,6 +454,13 @@ export class Bridge {
     this.stop.abort();
     for (const t of this.timers) t.cancel();
     this.queueTimer?.cancel();
+    // After any status still on its way (issue #3): peers keep the one sealed last, so a `busy` that
+    // went out after this idle left the ended session busy until it aged out. Bounded.
+    if (this.announcing) {
+      const settled = new AbortController();
+      await Promise.race([this.announcing.catch(() => undefined), this.clock.sleep(FINAL_STATUS_TIMEOUT_MS, settled.signal)]);
+      settled.abort();
+    }
     if (this.isOnline) {
       await this.deps.p2p.status({ session: this.sid, state: "idle", label: this.label, ...this.where() }, FINAL_STATUS_TIMEOUT_MS).catch(() => undefined);
     }

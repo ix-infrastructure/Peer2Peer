@@ -24,7 +24,8 @@
 #      npm checks each package against the registry's integrity hash; nothing
 #      is downloaded any other way, and no package install scripts run.
 #   4. In an interactive console, hands over to `p2p setup`, which asks its own
-#      questions. Without one it skips setup and says to run `p2p.cmd setup`.
+#      questions (first: link this device to an identity you already have, join
+#      with an invite, or start a new identity). Without one it skips setup and says to run `p2p.cmd setup`.
 #   It doesn't install Ix or anything else.
 #
 # Every command is printed (as "+ ...") before it runs. The CLI is run as
@@ -209,10 +210,12 @@ if ($true) {
         Write-Warning "$prefix isn't on your PATH: add it (Settings > System > About > Advanced system settings > Environment Variables), or open a new PowerShell window."
     }
     # In Windows PowerShell, `p2p` finds npm's p2p.ps1 shim, which the default execution policy blocks.
-    $next = 'Next: run `p2p.cmd setup` to create your identity (in PowerShell, p2p.cmd works whatever the execution policy; in cmd or a new terminal, `p2p setup`).'
+    $next = 'Next: run `p2p.cmd setup` to link this device to your identity, join with an invite, or create a new identity (in PowerShell, p2p.cmd works whatever the execution policy; in cmd or a new terminal, `p2p setup`).'
+    $linkHint = 'Already use Peer2Peer on another device? Choose to link this device in setup (and run `p2p link start` on that device): one identity on all your devices, not a second one.'
 
     if ($NoSetup) {
         Write-Say $next
+        Write-Say $linkHint
     } else {
         $tty = Get-Detected 'P2P_DETECT_TTY' {
             $nonInteractive = [Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }
@@ -221,6 +224,7 @@ if ($true) {
         if ($tty -eq 'yes') {
             Write-Say ''
             Write-Say 'Now setting up your identity (p2p setup):'
+            Write-Say $linkHint
             Write-Say ('+ ' + (Format-Command $nodeExe @($binJs, 'setup')))
             if (-not $DryRun) {
                 # Not piped anywhere, so setup keeps the console for its questions.
@@ -229,6 +233,7 @@ if ($true) {
             }
         } else {
             Write-Say "No console to ask questions on, so setup was skipped. $next"
+            Write-Say $linkHint
         }
     }
     if ($DryRun) { Write-Say 'Dry run done: nothing was installed.' }
