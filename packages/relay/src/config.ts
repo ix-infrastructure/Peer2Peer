@@ -403,7 +403,10 @@ const CIRCLE_ID_RE = /^c_[a-z2-7]{26}$/;
 export function parseAllowFile(text: string): { allow: string[]; deny: string[] } {
   const ids = text
     .split("\n")
-    .map((l) => l.replace(/#.*$/, "").trim())
+    .map((l) => {
+      const hash = l.indexOf("#");
+      return (hash >= 0 ? l.slice(0, hash) : l).trim();
+    })
     .filter((l) => l !== "")
     .flatMap((l) => l.split(ALLOW_SPLIT));
   return { allow: ids.filter((x) => !x.startsWith("!")), deny: ids.filter((x) => x.startsWith("!")).map((x) => x.slice(1)) };

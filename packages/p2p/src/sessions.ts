@@ -923,8 +923,14 @@ export interface SendResult {
 /** `user`, `user [ref]`, `user/ref` or `user/sid`. */
 export function parseTarget(to: string): { user: string; pick?: string } {
   const s = to.trim();
-  const br = /^(.*?)\s*\[([0-9a-f]{6})\]$/.exec(s);
-  if (br) return { user: br[1].trim(), pick: br[2] };
+  // `user [ref]`, scanned from the end (a backtracking regex here was quadratic on long whitespace runs).
+  const n = s.length;
+  if (n >= 8 && s[n - 1] === "]" && s[n - 8] === "[") {
+    const ref = s.slice(n - 7, n - 1);
+    const user = s.slice(0, n - 8).trimEnd();
+    // As /^(.*?)\s*\[([0-9a-f]{6})\]$/ did: `.` never spans a line break.
+    if (/^[0-9a-f]{6}$/.test(ref) && !/[\n\r\u2028\u2029]/.test(user)) return { user: user.trim(), pick: ref };
+  }
   // userIds, addresses and petnames never contain "/", so the last one separates a session.
   const i = s.lastIndexOf("/");
   if (i > 0 && i < s.length - 1) return { user: s.slice(0, i), pick: s.slice(i + 1) };

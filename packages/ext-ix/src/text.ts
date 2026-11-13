@@ -160,6 +160,13 @@ function rootList(root?: Roots): string[] {
   return (typeof root === "string" ? [root] : [...(root ?? [])]).filter((r) => r.length > 1);
 }
 
+/** `s` without any of `chars` at its end: one backward pass (no backtracking regex). */
+export function trimEnd(s: string, chars: string): string {
+  let j = s.length;
+  while (j > 0 && chars.includes(s.charAt(j - 1))) j--;
+  return s.slice(0, j);
+}
+
 /**
  * Sending: free text with this machine's identifying details replaced, so a
  * note, a risk summary or a symbol name doesn't leak them:
@@ -175,7 +182,7 @@ export function scrubPaths(text: string, opts: { root?: Roots; home?: string; ho
   const roots = [...repoRoots, ...(opts.home && opts.home.length > 1 ? [opts.home] : [])].sort((a, b) => b.length - a.length);
   for (const r of roots) {
     const repl = repoRoots.includes(r) ? "." : "~";
-    out = out.split(r.replace(/[\\/]+$/, "")).join(repl);
+    out = out.split(trimEnd(r, "\\/")).join(repl);
   }
   out = out
     .replace(/\\\\[^\\\s]+\\[^\\\s]+/g, "…")

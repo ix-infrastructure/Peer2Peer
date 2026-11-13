@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 d05dc6e365ac8f7a
+// @peer2peer/core 0.1.1 d1be8ce9c0616e8a
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -4073,8 +4073,31 @@ function isPathLike(run) {
     return false;
   return run.split("/").some((s2) => /^[a-z]{3,}$/.test(s2) || /\.[A-Za-z0-9]{1,8}$/.test(s2));
 }
+function redactUserinfo(text2) {
+  let out = "";
+  let done = 0;
+  let k = text2.indexOf("://");
+  while (k >= 0) {
+    let s2 = k;
+    while (s2 > done && SCHEME_CHAR.test(text2.charAt(s2 - 1)))
+      s2--;
+    while (s2 < k && !SCHEME_START.test(text2.charAt(s2)))
+      s2++;
+    let e = k + 3;
+    while (e < text2.length && !USERINFO_END.test(text2.charAt(e)))
+      e++;
+    if (s2 < k && e > k + 3 && text2.charAt(e) === "@") {
+      out += `${text2.slice(done, k + 3)}[redacted]@`;
+      done = e + 1;
+      k = text2.indexOf("://", done);
+    } else {
+      k = text2.indexOf("://", k + 1);
+    }
+  }
+  return out + text2.slice(done);
+}
 function redactSecrets(text2) {
-  let out = text2.replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, "$1[redacted]@");
+  let out = redactUserinfo(text2);
   out = out.replace(BEARER, (m) => `${m.slice(0, 6)} [redacted]`);
   out = out.replace(KEYWORD_SECRET, (_m, key, sep4, value) => {
     const q = value[0] === '"' || value[0] === "'" ? value[0] : "";
@@ -4089,7 +4112,7 @@ function redactSecrets(text2) {
     return /[0-9]/.test(m) && /[A-Za-z]/.test(m) ? "[redacted]" : m;
   });
 }
-var PATH_LEAD, PATH_START, PATH_RE, SLASH_COMMAND, SECRET_PATTERNS, KEYWORD_SECRET, BEARER, HEX_RUN, LONG_RUN, UUID, isGitSha;
+var PATH_LEAD, PATH_START, PATH_RE, SLASH_COMMAND, SECRET_PATTERNS, KEYWORD_SECRET, BEARER, HEX_RUN, LONG_RUN, UUID, isGitSha, SCHEME_CHAR, SCHEME_START, USERINFO_END;
 var init_redact = __esm({
   "packages/core/dist/v3/redact.js"() {
     "use strict";
@@ -4117,6 +4140,9 @@ var init_redact = __esm({
     LONG_RUN = /[A-Za-z0-9+/_=.-]{32,}/g;
     UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
     isGitSha = (m) => /^[0-9a-fA-F]+$/.test(m) && (m.length === 40 || m.length === 64);
+    SCHEME_CHAR = /[A-Za-z0-9+.-]/;
+    SCHEME_START = /[A-Za-z]/;
+    USERINFO_END = /[\s/@]/;
   }
 });
 
@@ -14594,8 +14620,12 @@ async function rosterCircleOf(app, own, sid) {
 }
 function parseTarget(to) {
   const s2 = to.trim();
-  const br = /^(.*?)\s*\[([0-9a-f]{6})\]$/.exec(s2);
-  if (br) return { user: br[1].trim(), pick: br[2] };
+  const n = s2.length;
+  if (n >= 8 && s2[n - 1] === "]" && s2[n - 8] === "[") {
+    const ref = s2.slice(n - 7, n - 1);
+    const user = s2.slice(0, n - 8).trimEnd();
+    if (/^[0-9a-f]{6}$/.test(ref) && !/[\n\r\u2028\u2029]/.test(user)) return { user: user.trim(), pick: ref };
+  }
   const i = s2.lastIndexOf("/");
   if (i > 0 && i < s2.length - 1) return { user: s2.slice(0, i), pick: s2.slice(i + 1) };
   return { user: s2 };
@@ -27374,6 +27404,26 @@ var FP = "[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}";
 var USER_ID_RE = /^p2p:[a-z2-7]{20,}$/;
 var REF_RE = /^[0-9a-f]{6}$/;
 var LABEL_MAX = 40;
+function trimChars(s2, chars, start = false) {
+  let i = 0;
+  let j = s2.length;
+  if (start)
+    while (i < j && chars.includes(s2.charAt(i)))
+      i++;
+  while (j > i && chars.includes(s2.charAt(j - 1)))
+    j--;
+  return s2.slice(i, j);
+}
+function splitRef(s2) {
+  const n = s2.length;
+  if (n < 8 || s2.charAt(n - 1) !== "]" || s2.charAt(n - 8) !== "[")
+    return null;
+  const ref = s2.slice(n - 7, n - 1);
+  if (!REF_RE.test(ref))
+    return null;
+  const head = s2.slice(0, n - 8).trimEnd();
+  return /[\n\r\u2028\u2029]/.test(head) ? null : [head, ref];
+}
 var UNSAFE = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
 function inert(text2) {
   return String(text2).replace(/[\s\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").replace(/[<>]/g, "").trim();
@@ -27383,11 +27433,12 @@ function inertMax(text2, max) {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 function sanitizeLabel(raw) {
-  const label = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, LABEL_MAX);
+  const dashed = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  const label = trimChars(dashed, "-", true).slice(0, LABEL_MAX);
   return label === "" ? "session" : label;
 }
 function addressLabel(label) {
-  return inert(label).replace(/[\s[\]/"&:]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "session";
+  return trimChars(inert(label).replace(/[\s[\]/"&:]+/g, "-"), "-", true).slice(0, 64) || "session";
 }
 function cleanBody(text2) {
   return String(text2).replace(/\r\n?|[\u2028\u2029\u0085]/g, "\n").replace(UNSAFE, (m) => m === "\n" || m === "	" ? m : "");
@@ -27407,9 +27458,9 @@ ${body}
 }
 function parseAddress(to) {
   const s2 = to.trim();
-  const ref = /^(.*?)\s*\[([0-9a-f]{6})\]$/.exec(s2);
-  const head = (ref ? ref[1] : s2)?.trim() ?? "";
-  const pick = ref?.[2];
+  const ref = splitRef(s2);
+  const head = (ref ? ref[0] : s2).trim();
+  const pick = ref?.[1];
   if (USER_ID_RE.test(head))
     return { user: head, ...pick ? { ref: pick } : {} };
   const body = head.startsWith(P2P_PREFIX) ? head.slice(P2P_PREFIX.length) : head;
@@ -27542,7 +27593,7 @@ var MAX_SHARED_FILES = 25;
 var MAX_FILE_CHARS = 200;
 var isWindowsPath = (p) => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
 function pathBasename(path2) {
-  const trimmed = path2.replace(/[\\/]+$/, "");
+  const trimmed = trimChars(path2, "\\/");
   return trimmed.split(/[\\/]/).pop() || void 0;
 }
 function isShareablePath(rel) {
@@ -27577,7 +27628,8 @@ function stripPaths(line) {
   return line.replace(/(^|[\s("'`])(?:~?\/|[A-Za-z]:[\\/]|\\\\)[^\s)"'`,;]*/g, "$1").replace(/\s+/g, " ").replace(/\s+([.,;:])/g, "$1").trim();
 }
 function cleanSummary(text2) {
-  const line = String(text2).replace(/\s+/g, " ").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+  const folded = String(text2).replace(/\s+/g, " ").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "").trim();
+  const line = trimChars(folded, "\"'`", true).trim();
   if (line === "" || /^(none|n\/a|unknown)\.?$/i.test(line))
     return void 0;
   const scrubbed = stripPaths(line);
@@ -27823,7 +27875,7 @@ function turnContextOf(line) {
 }
 function isInside(path2, root, caseless = process.platform === "darwin" || process.platform === "win32") {
   const norm = (s2) => {
-    const t2 = s2.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+    const t2 = trimChars(s2.replace(/\\/g, "/"), "/") || "/";
     return caseless ? t2.toLowerCase() : t2;
   };
   const p = norm(path2);
@@ -32318,7 +32370,7 @@ function replaceBlock(text2, begin2, end, block2) {
   const i = text2.indexOf(begin2);
   const j = i >= 0 ? text2.indexOf(end, i) : -1;
   if (i >= 0 && j >= 0) {
-    const before = text2.slice(0, i).replace(/\n*$/, "");
+    const before = trimChars(text2.slice(0, i), "\n");
     const after2 = text2.slice(j + end.length).replace(/^\n*/, "");
     const parts = [before, block2, after2].filter((p) => p !== null && p !== "");
     return parts.length > 0 ? `${parts.join("\n\n")}
@@ -32326,7 +32378,7 @@ function replaceBlock(text2, begin2, end, block2) {
   }
   if (block2 === null)
     return text2;
-  const base = text2.replace(/\n*$/, "");
+  const base = trimChars(text2, "\n");
   return base ? `${base}
 
 ${block2}
@@ -32339,7 +32391,10 @@ function configConflict(text2) {
     const j = i >= 0 ? text2.indexOf(END, i) : -1;
     return i >= 0 && j >= 0 ? text2.slice(0, i) + text2.slice(j + END.length) : text2;
   })();
-  const lines = outside.split("\n").map((l) => l.replace(/#.*$/, "").trim());
+  const lines = outside.split("\n").map((l) => {
+    const hash = l.indexOf("#");
+    return (hash >= 0 ? l.slice(0, hash) : l).trim();
+  });
   if (lines.some((l) => /^\[\s*mcp_servers\s*\.\s*["']?peer2peer["']?\s*[\].]/.test(l)))
     return "config.toml already defines [mcp_servers.peer2peer] outside the managed block: remove it, then run again";
   if (lines.some((l) => /^mcp_servers\s*\.\s*["']?peer2peer["']?\s*[.=]/.test(l)))
