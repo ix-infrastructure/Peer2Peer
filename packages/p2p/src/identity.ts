@@ -60,6 +60,7 @@ import {
 import { capPeek, certDid, defaultLabel, defaultName, joinCapOf, newKeysDoc, type App } from "./app.js";
 import { defaultRelays, normalizeRelays } from "./config.js";
 import { CliError } from "./errors.js";
+import { isOwnRelay, isPrivateRelayHost, PRIVATE_RESOLVE_MARK, privateGuardLookup, privateRelayMessage } from "./shortcode.js";
 import { fetchTips, linkGet, linkPut, openLinkConnection, relayCode, sleep } from "./relay-client.js";
 import type { SelfDoc } from "./state.js";
 import { exportAll, sendSync, verifiedIssuedCap } from "./sync.js";
@@ -143,6 +144,8 @@ export interface SetupResult {
   backup?: { file?: string; phrase?: string };
   /** Ix, optional and recommended (ix-local.ts setupIx): found, enabled, recommended (with the command for the person to run), and what to do when it isn't on. Never installed for them. */
   ix?: SetupIx;
+  /** This device is the only key holder and the backup phrase was never shown or saved (`p2p backup show`). */
+  backupNeeded?: true;
 }
 
 export const BACKUP_FILE_NAME = "backup-phrase.txt";
@@ -201,6 +204,8 @@ export async function setup(
   } else if (backupMode === "print") {
     out.backup = { phrase: (await backupShow(app)).phrase };
   }
+  // This device is the only key holder and its phrase was never shown: losing it loses the identity.
+  if (!out.backup && app.isKeyholder && v.head.keyholders.length < 2 && !app.self?.backupShown) out.backupNeeded = true;
   return out;
 }
 
@@ -523,13 +528,26 @@ export async function linkStart(app: App, opts: { keyholder?: boolean; relay?: s
   };
 }
 
+/** The identity a link code would make this device part of, shown before anything is kept (LinkJoin.wait). */
+export interface LinkIdentity {
+  userId: string;
+  address: string;
+  fingerprint: string;
+  /** This device would get the identity key. */
+  keyholder: boolean;
+}
+
 export interface LinkJoin {
   compareCode: string;
   did: string;
-  wait(): Promise<{ userId: string; address: string; did: string; keyholder: boolean }>;
+  /**
+   * Waits for the other device, then, with `confirm`, shows which identity this device would
+   * become and keeps nothing unless it says yes (a code from someone else makes this device theirs).
+   */
+  wait(confirm?: (who: LinkIdentity) => Promise<boolean>): Promise<{ userId: string; address: string; did: string; keyholder: boolean }>;
 }
 
-export async function linkJoin(app: App, code: string, opts: { label?: string; maxWaitMs?: number } = {}): Promise<LinkJoin> {
+export async function linkJoin(app: App, code: string, opts: { label?: string; maxWaitMs?: number; allowPrivateRelay?: boolean } = {}): Promise<LinkJoin> {
   if (await app.load(false)) throw new CliError("already_initialized", `${app.home} already holds an identity (${app.userId})`);
   let parsed: { secret: Uint8Array; relay: string };
   try {
@@ -538,12 +556,35 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
     throw new CliError("usage", "that is not a link code (p2p-link:…@relay)");
   }
   const { secret, relay } = parsed;
+  // A link code someone else gave connects to its relay before anyone confirms anything: the same
+  // private-address rule as an invite code's relay, unless it is one of the person's own relays
+  // (P2P_DEFAULT_RELAYS or config.json: no identity here yet) or they opted in.
+  const allowPrivate = opts.allowPrivateRelay || app.env.P2P_ALLOW_PRIVATE_RELAY === "1";
+  let own: string[] = [];
+  try {
+    own = defaultRelays(app.env, app.file);
+  } catch {
+    // a broken config: no own relays
+  }
+  const guard = !allowPrivate && !isOwnRelay(relay, own);
+  if (guard && isPrivateRelayHost(new URL(relay).hostname)) {
+    throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname));
+  }
   const device = generateDeviceKeysV3("p2p:pending");
   const x = generateDeviceKeysV3("p2p:pending");
   const label = (opts.label ?? defaultLabel()).slice(0, 64);
   const req = createLinkRequest(secret, device, x.agreementPublicKey, label);
   const lid = linkId(secret);
-  const conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress);
+  let conn: Awaited<ReturnType<typeof openLinkConnection>>;
+  try {
+    conn = await openLinkConnection(relay, app.transport, app.tun.connectTimeoutMs, app.progress, guard ? { lookup: privateGuardLookup() } : {});
+  } catch (e) {
+    if ((e as Error).message?.includes(PRIVATE_RESOLVE_MARK)) {
+      const at = /\(([^()]+)\)\s*$/.exec((e as Error).message)?.[1];
+      throw new CliError("private_relay", privateRelayMessage("link code's relay", new URL(relay).hostname, at ? { detail: `it resolves to ${at}` } : {}));
+    }
+    throw e;
+  }
   try {
     await linkPut(conn, lid, "req", JSON.stringify(req));
   } catch (e) {
@@ -553,7 +594,7 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
   return {
     compareCode: linkCompareCode(secret, device.did),
     did: device.did,
-    wait: async () => {
+    wait: async (confirm) => {
       const deadline = Date.now() + Math.min(LINK_TTL_SEC * 1000, opts.maxWaitMs ?? Infinity);
       let frame: string | undefined;
       try {
@@ -572,6 +613,17 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
       }
       const opened = openLinkResponse(secret, device, x.agreementSecretKey, JSON.parse(frame) as Parameters<typeof openLinkResponse>[3]);
       const userId = opened.doc.iss;
+      // Nothing is kept before the person says this is their identity: a code from someone else
+      // would make this device theirs.
+      if (confirm) {
+        const who: LinkIdentity = { userId, address: displayAddress(userId, opened.doc.name), fingerprint: displayFingerprint(userId), keyholder: !!opened.ik };
+        if (!(await confirm(who))) {
+          throw new CliError(
+            "link_declined",
+            `not linked: nothing was kept on this device. The other device's identity (${who.address}) now lists a device that will never be used: if it is yours after all, remove it there with \`p2p devices revoke ${device.did}\``,
+          );
+        }
+      }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self: SelfDoc = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
       await app.state.put("keys", keys);

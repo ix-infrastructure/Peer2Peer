@@ -1129,6 +1129,11 @@ export function personToken(home: string): string {
   }
 }
 
+/** Whether `home` holds an identity (its keys document; state.ts keeps it at <home>/cli/keys.json). */
+export function identityHere(home: string): boolean {
+  return existsSync(join(home, "cli", "keys.json"));
+}
+
 /** Whether P2P_PERSON_TOKEN is this home's person token (read only: a missing file is no match). */
 export function personTokenOk(env: Record<string, string | undefined> | undefined, home: string | undefined): boolean {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -1165,8 +1170,21 @@ export type ConfirmTty = (question: string) => Promise<boolean>;
  * flag: a process detached from every terminal can't give it). Reads are never asked, except for
  * the person's own messages (history.ts), which pass their own `why`.
  */
-export async function assertPersonForWidening(app: Pick<App, "env"> & { front?: boolean }, what: string, confirm: ConfirmTty, why = "changes who reaches you"): Promise<void> {
-  if (app.front === true) return;
+export async function assertPersonForWidening(
+  app: Pick<App, "env"> & { front?: boolean; home?: string },
+  what: string,
+  confirm: ConfirmTty,
+  why = "changes who reaches you",
+  opts: { noTokenBeforeIdentity?: boolean } = {},
+): Promise<void> {
+  // `noTokenBeforeIdentity`: what makes this device someone's (a link code makes it the code's
+  // identity; setup links or joins). On a home with no identity yet the person token doesn't stand
+  // in for the person there: no front end runs these (link and setup are refused in the Claude mod
+  // and the Codex bridge), and a person.key on a fresh home may have been put there by anything that
+  // can write the folder. (`join` and `accept` keep it: the mod's typed /peers join on a fresh
+  // install is the documented first run.)
+  const tokenCounts = !opts.noTokenBeforeIdentity || (typeof app.home === "string" && identityHere(app.home));
+  if (app.front === true && tokenCounts) return;
   if (agentContext(app.env)) {
     throw new CliError(
       "refused",
