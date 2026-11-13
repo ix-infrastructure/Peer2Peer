@@ -674,8 +674,10 @@ async function begin(app: App, opts: RotateOptions): Promise<RotationState> {
     await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
   } else {
     await app.connectAndDrain();
-    // Build on the relays' head: a stale view could miss a competing rotation or a new device.
-    await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true });
+    // Build on the relays' head: a stale view could miss a competing rotation or a new device. #67: a listed
+    // relay serving versions that don't connect (a thief's, signed with the old identity key) is left out
+    // when the others confirm the head (App.ownStrictFallback): rotation is the remedy for exactly that.
+    await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true, setAside: { unconnected: true } });
   }
   const view = await app.ownView();
   const foreign = await foreignRotations(app);
@@ -1106,7 +1108,8 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
   const ik = app.requireKeyholder("Publishing your old identity's final version");
   const contesting = st.contest || (await foreignRotations(app)).length > 0;
   await app.connect({ allowNone: true });
-  await app.refreshIdentity(app.userId, app.relays, contesting ? { force: true, quiet: true } : { force: true, strict: true });
+  // #67: as in begin, a relay serving versions that don't connect is left out when the others confirm the head.
+  await app.refreshIdentity(app.userId, app.relays, contesting ? { force: true, quiet: true } : { force: true, strict: true, setAside: { unconnected: true } });
   const chain = await ownChain(app);
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();

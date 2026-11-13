@@ -32,6 +32,7 @@ import {
   mergePrevTip,
   scheduledWriter,
   refreshIdentity as coreRefreshIdentity,
+  unconnectedRelaysOf,
   type IdentityFetcher,
   IdentityChain,
   identityKeyFromSeed,
@@ -52,6 +53,7 @@ import {
   type EnvelopeKindV3,
   type IdentityKey,
   type IdentityView,
+  type RefreshedView,
   type RotationStatement,
   type SignerContext,
   type StoredCapV3,
@@ -96,6 +98,16 @@ const ADMIT_KEEP_MS = 8 * 86_400_000;
 /** One `circle-put` frame: at most this many versions and about this many bytes (relay frames are 96 KiB). */
 const CIRCLE_PUSH_MAX_VERSIONS = 64;
 const CIRCLE_PUSH_MAX_BYTES = 80 * 1024;
+/**
+ * #67: relays a strict refresh of our own identity may leave out when it can't confirm the head over all of
+ * them (App.ownStrictFallback): the ones an edit removes, and (rotation) the ones that sent versions it
+ * couldn't connect.
+ */
+export interface SetAside {
+  relays?: readonly string[];
+  unconnected?: boolean;
+}
+
 export interface Io {
   /** Human output (stdout). */
   out(s: string): void;
@@ -549,8 +561,15 @@ export class App {
    * gap filling, automatic jumps only over unanchored history). This is the
    * only way an identity enters the store: bundled documents never do.
    * Failures leave the held view (or none) and are reported as a warning.
+   *
+   * `setAside` (#67, strict refreshes of our own identity only): relays to leave out when the refresh over
+   * all of them can't confirm the head. See ownStrictFallback.
    */
-  async refreshIdentity(userId: string, relays: readonly string[], opts: { force?: boolean; quiet?: boolean; strict?: boolean } = {}): Promise<IdentityView | undefined> {
+  async refreshIdentity(
+    userId: string,
+    relays: readonly string[],
+    opts: { force?: boolean; quiet?: boolean; strict?: boolean; setAside?: SetAside } = {},
+  ): Promise<IdentityView | undefined> {
     const fetched = (await this.state.get("fetched"))?.[userId];
     const fresh = fetched !== undefined && Date.now() - fetched < this.tun.docRefreshSec * 1000;
     if (fresh && !opts.force && !opts.strict) return this.view(userId);
@@ -560,30 +579,101 @@ export class App {
       if (opts.strict) throw new CliError("refresh_failed", `no relays to refresh ${userId} from`);
       return held;
     }
+    const refreshFrom = (rs: readonly string[]) => step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => coreRefreshIdentity(this.store, userId, this.fetcher(), { relays: rs }));
+    let v: RefreshedView;
     try {
-      const v = await step(this.progress, `refreshing ${userId}'s identity document from ${list.join(", ")}`, () => coreRefreshIdentity(this.store, userId, this.fetcher(), { relays: list }));
-      if (v.incomplete) {
-        if (opts.strict) throw new CliError("refresh_failed", "refreshing the identity document was cut short; try again");
+      v = await refreshFrom(list);
+    } catch (e) {
+      if (!(e instanceof P2PError)) throw e;
+      // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
+      if (opts.strict) {
+        const unconnected = unconnectedRelaysOf(e);
+        const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, opts.setAside, refreshFrom) : undefined;
+        if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, userId)}`);
+        v = own;
+      } else {
+        if (e.reason === "chain-broken" && held && !opts.quiet) {
+          this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
+        }
+        return held;
+      }
+    }
+    if (v.incomplete) {
+      if (!opts.strict) {
         // Cut short by core's work bound: the head may be stale. Not refreshed; don't act on it as fresh.
         if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
         return held;
       }
-      // Recorded moments ago by another p2p process of this home (a watch and a command refresh
-      // the same people in a burst): no write. Only ever leaves the time a little older, so the
-      // next refresh comes no later.
-      const now = Date.now();
-      const last = (await this.state.get("fetched"))?.[userId];
-      if (last === undefined || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: undefined }));
-      return v;
-    } catch (e) {
-      if (!(e instanceof P2PError)) throw e;
-      // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
-      if (opts.strict) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head`);
-      if (e.reason === "chain-broken" && held && !opts.quiet) {
-        this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
-      }
-      return held;
+      const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], opts.setAside, refreshFrom);
+      if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], userId)}`);
+      v = own;
     }
+    // Recorded moments ago by another p2p process of this home (a watch and a command refresh
+    // the same people in a burst): no write. Only ever leaves the time a little older, so the
+    // next refresh comes no later.
+    const now = Date.now();
+    const last = (await this.state.get("fetched"))?.[userId];
+    if (last === undefined || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: undefined }));
+    return v;
+  }
+
+  /** For a strict refresh of our own identity that failed: which relays sent versions that don't connect, and what to do. */
+  private unconnectedHint(unconnected: readonly string[], userId: string): string {
+    if (userId !== this.keys?.userId || unconnected.length === 0) return "";
+    const one = unconnected.length === 1;
+    return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+  }
+
+  /**
+   * #67: a strict refresh of our OWN identity couldn't confirm the head over every listed relay. Before an
+   * identity edit that removes relays (`setAside.relays`: the ones it removes), or a rotation step
+   * (`setAside.unconnected`: the relays that sent versions the refresh couldn't connect), it is retried over
+   * the other listed relays, and the caller goes ahead only if that refresh is complete.
+   *
+   * Why this is safe:
+   *  - The strict refresh is there so we don't fork our own chain by building on a stale head (review H2):
+   *    a newer version another of our key holders published went to every relay the document lists. The
+   *    relays kept must still give a complete refresh, so a newer version any of them serves is still found,
+   *    connected and built on (or, far behind, the refresh is incomplete and the edit refused: trying again
+   *    goes on where the walk stopped). Leaving a relay out is what the strict refresh already allows when
+   *    that relay doesn't answer.
+   *  - Which relays are left out is the user's choice (the ones the edit removes) or each relay's own
+   *    evidence (it sent identity-key-signed versions that don't connect): one relay can't get another left
+   *    out. Any other edit still refuses while such a relay is listed, and names it (fork and compromise
+   *    detection stay: the user is told someone else may hold the key).
+   *  - What is published is still head.ver + 1 on the head the kept relays confirmed: a relay left out can't
+   *    make it lower, or make it fork from anything but what those relays serve.
+   *  - Nothing is left out when no relay would be left; the kept relays' refresh must reach one of them.
+   * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
+   */
+  private async ownStrictFallback(
+    userId: string,
+    list: readonly string[],
+    unconnected: readonly string[],
+    setAside: SetAside | undefined,
+    refreshFrom: (rs: readonly string[]) => Promise<RefreshedView>,
+  ): Promise<RefreshedView | undefined> {
+    if (!setAside || userId !== this.keys?.userId) return undefined;
+    const aside = new Set([...(setAside.relays ?? []), ...(setAside.unconnected ? unconnected : [])].filter((r) => list.includes(r)));
+    const rest = list.filter((r) => !aside.has(r));
+    if (aside.size === 0 || rest.length === 0) return undefined;
+    let v: RefreshedView;
+    try {
+      v = await refreshFrom(rest);
+    } catch (e) {
+      if (e instanceof P2PError) return undefined;
+      throw e;
+    }
+    if (v.incomplete) return undefined;
+    // §2.5 compromise detection: say so, whatever the user goes on to do.
+    const forged = unconnected.filter((r) => aside.has(r));
+    if (forged.length > 0) {
+      const one = forged.length === 1;
+      this.warn(
+        `${forged.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to the history your other relays confirm (left out of this check). If no device of yours published them, someone else holds your identity key: rotate your identity (\`p2p identity rotate\`)`,
+      );
+    }
+    return v;
   }
 
   /** Relays a (bundled, unverified) identity document lists: only a hint for where to refresh from. */
@@ -761,12 +851,17 @@ export class App {
       restoring?: boolean;
       /** §2.8 step 6: the old identity's final version: no devices, no key holders, carrying the statement (P3). */
       rotation?: RotationStatement;
+      /** #67: relays this edit removes (see ownStrictFallback). */
+      removing?: readonly string[];
     } = {},
   ): Promise<{ doc: string; ver: number; ok: string[]; failed: { relay: string; code: string }[]; merged: number }> {
     const ik = this.requireKeyholder("Publishing the identity document");
     // §2.5: build on the newest head the relays hold, or not at all (review H2: a stale key holder
     // republishing blind could fork the identity).
-    await this.refreshIdentity(this.userId, this.relays, { force: true, strict: true });
+    // #67: an edit that removes relays, or the rotation's final version, may leave out a listed relay
+    // serving versions that don't connect (a thief's, signed with the identity key): see ownStrictFallback.
+    const setAside: SetAside | undefined = opts.rotation ? { unconnected: true } : opts.removing?.length ? { relays: opts.removing } : undefined;
+    await this.refreshIdentity(this.userId, this.relays, { force: true, strict: true, ...(setAside ? { setAside } : {}) });
     let view = await this.ownView();
     // What the tips list before any merge: a merge keeps only the intersection (§2.5), so devices
     // only one branch listed are re-added below unless they were revoked (review N-H1).

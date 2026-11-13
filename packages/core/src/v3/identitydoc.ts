@@ -587,6 +587,14 @@ export interface StoredIdentityChain {
    */
   pendingHeads?: string[];
   /**
+   * Where an incomplete refresh's chain walk stopped (#67), at most MAX_WALK_ANCHORS: signature-verified
+   * versions of this identity whose ancestors the walk hadn't reached yet. The next refresh starts its walk
+   * from them instead of from the tips, so a client further behind than one refresh can walk still catches
+   * up. Only where to ask next: never part of the view, never a pending head, and each is re-verified and
+   * chain-checked like any fetched version before it is placed.
+   */
+  walkAnchors?: string[];
+  /**
    * Obsolete (pre-release review S3: demotion isn't revocation). Ignored when read,
    * never written.
    */
@@ -600,6 +608,8 @@ export const MAX_CHAIN_VERSIONS = 1024;
  * notePending), at most one per device or key holder left out, so this is a safety bound, not a working cap.
  */
 export const MAX_PENDING_HEADS = 64;
+/** Upper bound on walk anchors kept per identity (#67); the lowest `ver`s are kept, the closest to the held head. */
+export const MAX_WALK_ANCHORS = 16;
 
 /** A pending head counts only while issued (not in the future) and not past its `exp` (#35). */
 function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
@@ -625,6 +635,8 @@ export class IdentityChain {
   private denied = new Set<string>();
   /** Verified newer versions that don't connect yet (#35, see notePending). */
   private pending: VerifiedIdentityDoc[] = [];
+  /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
+  private anchors: VerifiedIdentityDoc[] = [];
 
   constructor(readonly iss: string) {}
 
@@ -642,6 +654,11 @@ export class IdentityChain {
       // iss is H(ik), checked with the signature: the same iss is the same ik.
       if (p.iss !== s.iss) fail("issuer-mismatch", "stored pending head of another identity");
       if (pendingUsable(p, opts)) c.pending.push(p);
+    }
+    for (const j of s.walkAnchors ?? []) {
+      const a = verifyIdentityDocSignature(j);
+      if (a.iss !== s.iss) fail("issuer-mismatch", "stored walk anchor of another identity");
+      c.anchors.push(a);
     }
     // Roots (versions whose parents aren't stored, after a gap jump or pruning) are trusted as stored.
     for (const d of docs) {
@@ -666,7 +683,32 @@ export class IdentityChain {
       ...(this.denied.size > 0 ? { denied: [...this.denied] } : {}),
       // Each dropped once the held head reaches its ver.
       ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
+      ...(this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}),
     };
+  }
+
+  /** The walk anchors still useful (#67): those not held yet. */
+  walkAnchors(): VerifiedIdentityDoc[] {
+    if (this.anchors.length === 0 || this.versions.size === 0) return [];
+    return this.anchors.filter((d) => !this.versions.has(d.hash));
+  }
+
+  /**
+   * Replaces the walk anchors (#67) with `docs`, signature-verified versions of this identity an incomplete
+   * refresh's walk reached but couldn't connect yet, keeping the MAX_WALK_ANCHORS lowest `ver`s (the ones the
+   * walk needs next). They only say where the next walk starts; they never enter the view. Returns whether
+   * anything changed.
+   */
+  setWalkAnchors(docs: readonly VerifiedIdentityDoc[]): boolean {
+    const before = this.walkAnchors().map((d) => d.hash);
+    const byHash = new Map<string, VerifiedIdentityDoc>();
+    for (const d of docs) {
+      if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+      byHash.set(d.hash, d);
+    }
+    this.anchors = [...byHash.values()].sort((a, b) => a.ver - b.ver || asciiCompare(a.hash, b.hash)).slice(0, MAX_WALK_ANCHORS);
+    const after = this.walkAnchors().map((d) => d.hash);
+    return after.length !== before.length || after.some((h, i) => h !== before[i]);
   }
 
   /**

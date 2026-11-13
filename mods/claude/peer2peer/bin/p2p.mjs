@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 d05dc6e365ac8f7a
+// @peer2peer/core 0.1.1 d3917991737b380e
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6875,7 +6875,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6901,6 +6901,7 @@ var init_identitydoc = __esm({
     MERGE_TAKEOVER_SEC = 24 * HOUR;
     MAX_CHAIN_VERSIONS = 1024;
     MAX_PENDING_HEADS = 64;
+    MAX_WALK_ANCHORS = 16;
     IdentityChain = class _IdentityChain {
       iss;
       versions = /* @__PURE__ */ new Map();
@@ -6909,6 +6910,8 @@ var init_identitydoc = __esm({
       denied = /* @__PURE__ */ new Set();
       /** Verified newer versions that don't connect yet (#35, see notePending). */
       pending = [];
+      /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
+      anchors = [];
       constructor(iss) {
         this.iss = iss;
       }
@@ -6927,6 +6930,12 @@ var init_identitydoc = __esm({
             fail("issuer-mismatch", "stored pending head of another identity");
           if (pendingUsable(p, opts))
             c.pending.push(p);
+        }
+        for (const j of s2.walkAnchors ?? []) {
+          const a = verifyIdentityDocSignature(j);
+          if (a.iss !== s2.iss)
+            fail("issuer-mismatch", "stored walk anchor of another identity");
+          c.anchors.push(a);
         }
         for (const d of docs) {
           if (d.iss !== s2.iss)
@@ -6950,8 +6959,33 @@ var init_identitydoc = __esm({
           ...this.gap ? { historyGap: true } : {},
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
           // Each dropped once the held head reaches its ver.
-          ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}
+          ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {},
+          ...this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}
         };
+      }
+      /** The walk anchors still useful (#67): those not held yet. */
+      walkAnchors() {
+        if (this.anchors.length === 0 || this.versions.size === 0)
+          return [];
+        return this.anchors.filter((d) => !this.versions.has(d.hash));
+      }
+      /**
+       * Replaces the walk anchors (#67) with `docs`, signature-verified versions of this identity an incomplete
+       * refresh's walk reached but couldn't connect yet, keeping the MAX_WALK_ANCHORS lowest `ver`s (the ones the
+       * walk needs next). They only say where the next walk starts; they never enter the view. Returns whether
+       * anything changed.
+       */
+      setWalkAnchors(docs) {
+        const before = this.walkAnchors().map((d) => d.hash);
+        const byHash = /* @__PURE__ */ new Map();
+        for (const d of docs) {
+          if (d.iss !== this.iss)
+            fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+          byHash.set(d.hash, d);
+        }
+        this.anchors = [...byHash.values()].sort((a, b) => a.ver - b.ver || asciiCompare(a.hash, b.hash)).slice(0, MAX_WALK_ANCHORS);
+        const after2 = this.walkAnchors().map((d) => d.hash);
+        return after2.length !== before.length || after2.some((h, i) => h !== before[i]);
       }
       /**
        * Records `docs`, signature-verified versions of this identity newer than the held head that don't connect
@@ -10248,6 +10282,10 @@ async function jumpIdentity(store2, jws, opts = {}) {
     return { next: chain.toStored(), result: doc };
   });
 }
+function unconnectedRelaysOf(e) {
+  const r = e?.unconnectedRelays;
+  return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+}
 function forRelay(result, relay) {
   if (result === void 0)
     return [];
@@ -10307,16 +10345,20 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   if (relays.length === 0)
     fail("identity-unknown", `no relays to refresh ${userId} from`);
   const seen = /* @__PURE__ */ new Set();
-  const admit = (list, keep, quota, walk = false, shareMs = Infinity) => {
+  const sentBy = /* @__PURE__ */ new Map();
+  let wanted = /* @__PURE__ */ new Set();
+  const admit = (list, keep, quota, walk = false, shareMs = Infinity, relay) => {
     const t0 = performance.now();
     if (walk && list.length > keep)
       return { docs: [], cut: false, used: 0, ms: 0, unchecked: [] };
+    const sent = relay === void 0 ? void 0 : sentBy.get(relay) ?? sentBy.set(relay, /* @__PURE__ */ new Set()).get(relay);
     const sorted = list.filter((j) => typeof j === "string").slice(0, MAX_EXAMINED_PER_RELAY * 4).map((j) => {
       try {
         const p = decodeJws(j).payload;
         if (p.iss !== userId || before && p.ik !== before.ik)
           return void 0;
         const h = jwsHash(j);
+        sent?.add(h);
         if (seen.has(h) || walk && chain.has(h))
           return void 0;
         if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId)
@@ -10330,13 +10372,32 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const out = [];
     let used = 0;
     let cut = false;
-    for (const { j } of claimed) {
+    const checked = /* @__PURE__ */ new Set();
+    for (const { j, h } of claimed) {
       if (out.length >= keep)
         break;
       if (used >= quota || !walk && overDocs() || used > 0 && performance.now() - t0 > shareMs) {
         cut = true;
+        if (walk && wanted.has(h)) {
+          used++;
+          examined++;
+          checked.add(h);
+          try {
+            const d = verifyIdentityDocSignature(j);
+            if (d.iss === userId && (!before || d.ik === before.ik) && !seen.has(d.hash)) {
+              seen.add(d.hash);
+              out.push(d);
+            }
+          } catch (e) {
+            if (!(e instanceof P2PError))
+              throw e;
+          }
+        }
+        if (walk && wanted.size > 0)
+          continue;
         break;
       }
+      checked.add(h);
       used++;
       examined++;
       try {
@@ -10350,7 +10411,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
           throw e;
       }
     }
-    const unchecked = walk ? sorted.slice(used).map((x) => x.h) : [];
+    const unchecked = walk ? sorted.filter((x) => !checked.has(x.h)).map((x) => x.h) : [];
     return { docs: out, cut, used, ms: performance.now() - t0, unchecked };
   };
   const accepted = [];
@@ -10382,8 +10443,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const spent = (r) => walkTimeLeft.get(r) <= 0 || walkLeft.get(r) <= 0;
   const walkUnchecked = /* @__PURE__ */ new Set();
   const walkSupplied = /* @__PURE__ */ new Set();
+  let lastAsked = 0;
   const fetchEach = async (f, keep, walk = false) => {
     const asked = walk ? relays.filter((r) => !spent(r)) : relays;
+    if (walk)
+      lastAsked = asked.length;
     if (walk && asked.length === 0)
       return [];
     const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
@@ -10400,7 +10464,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const share = checkMs / 2 / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r) : quota;
-      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r) : share);
+      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r) : share, r);
       if (walk) {
         walkLeft.set(r, q - a.used);
         walkTimeLeft.set(r, walkTimeLeft.get(r) - a.ms);
@@ -10420,47 +10484,75 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);
   if (tips.length === 0 && !exhausted && !docsCapped)
     fail("identity-unknown", `no listed relay returned a valid identity document for ${userId}`);
+  const anchors = chainOf ? chain.walkAnchors() : [];
+  for (const a of anchors)
+    seen.add(a.hash);
   begin2();
-  place(tips);
+  place([...tips, ...anchors]);
   end();
+  const dead = /* @__PURE__ */ new Set();
+  const frontier = () => {
+    const held2 = new Set(gaps.map((g) => g.d.hash));
+    return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
+  };
   let requests = 0;
   let stalled = false;
-  const lowestGap = () => gaps.reduce((a, b) => b.d.ver < a.d.ver ? b : a);
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const need = lowestGap().need;
-    const page = await fetchEach((r) => chainOf(userId, [r], need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
-    if (page.length === 0) {
-      stalled = true;
+    const open3 = frontier();
+    const next = open3.find((g) => !dead.has(g.need));
+    if (!next) {
+      stalled = open3.length > 0;
       break;
+    }
+    wanted = new Set(open3.map((g) => g.need));
+    const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
+    if (page.length === 0) {
+      if (lastAsked === 0) {
+        stalled = true;
+        break;
+      }
+      dead.add(next.need);
+      continue;
     }
     begin2();
     place(page);
     end();
   }
   let probeUnanswered = false;
-  if (chainOf && stalled && gaps.length > 0) {
-    const need = lowestGap().need;
-    const probed = relays.filter(spent);
-    const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], need, CHAIN_WALK_PAGE), timeoutMs) })));
-    for (const { r, res } of answers) {
-      if (res === void 0 && walkSupplied.has(r))
-        probeUnanswered = true;
-      for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked)
-        walkUnchecked.add(h);
+  const probed = relays.filter(spent);
+  if (chainOf && stalled && gaps.length > 0 && probed.length > 0) {
+    wanted = /* @__PURE__ */ new Set();
+    for (const g of frontier().slice(0, WALK_PROBE_GAPS)) {
+      const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
+      for (const { r, res } of answers) {
+        if (res === void 0 && walkSupplied.has(r))
+          probeUnanswered = true;
+        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked)
+          walkUnchecked.add(h);
+      }
     }
   }
   const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
+  const unconnectedRelays = () => {
+    const left = new Set(gaps.map((g) => g.d.hash));
+    return relays.filter((r) => [...sentBy.get(r) ?? []].some((h) => left.has(h)));
+  };
+  const broken = (msg) => {
+    const e = new P2PError("chain-broken", msg);
+    Object.assign(e, { unconnectedRelays: unconnectedRelays() });
+    throw e;
+  };
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
   const incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
-      fail("chain-broken", `could not fit ${userId}'s newest version (ver ${newest.ver})`);
+      broken(`could not fit ${userId}'s newest version (ver ${newest.ver})`);
     if (anchoredBefore) {
-      fail("chain-broken", `${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
+      broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
     jumpTo = newest.jws;
   }
@@ -10468,7 +10560,17 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false;
-  const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && !pendingChange(chain);
+  const tipHashes = new Set(tips.map((d) => d.hash));
+  const gapHashes = new Set(gaps.map((g) => g.d.hash));
+  const wasAnchor = new Set(anchors.map((d) => d.hash));
+  const keptAnchors = incomplete && chainOf ? gaps.filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && (!dead.has(g.need) || walkUnchecked.has(g.need))).map((g) => g.d) : [];
+  const anchorChange = (c) => c.setWalkAnchors(keptAnchors);
+  const stateChange = (c) => {
+    const a = pendingChange(c);
+    const b = anchorChange(c);
+    return a || b;
+  };
+  const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && !stateChange(chain);
   const jumped = unchanged ? false : await store2.updateIdentity(userId, (cur) => {
     const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur, { now, skewSec: opts.skewSec }) : new IdentityChain(userId);
     const anchoredAtCommit = c.size > 0 && c.anchored;
@@ -10485,7 +10587,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
       didJump = true;
     }
-    const narrowed = c.size > 0 && pendingChange(c);
+    const narrowed = c.size > 0 && stateChange(c);
     if (accepted.length === 0 && !didJump && !narrowed && cur)
       return { result: false };
     return { next: c.toStored(), result: didJump };
@@ -10494,12 +10596,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   if (!view)
     return fail("identity-unknown", `no usable identity document for ${userId}`);
   if (!incomplete && newest !== void 0 && view.head.ver < newest.ver) {
-    fail("chain-broken", `${userId}'s newest version (ver ${newest.ver}) doesn't connect to the stored history${jumpTo !== void 0 && !jumped ? " (anchored meanwhile)" : ""}`);
+    broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the stored history${jumpTo !== void 0 && !jumped ? " (anchored meanwhile)" : ""}`);
   }
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
   if (incomplete)
-    return { ...view, incomplete: true, answeredRelays: answered };
+    return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays() };
   await store2.deleteProvisional(userId);
   if (majority)
     await store2.markRefreshed(userId, now);
@@ -10948,7 +11050,7 @@ async function outgoingCircleBundle(store2, cid, opts = {}) {
     return void 0;
   return buildCircleBundle(loaded.chain, loaded.book, opts);
 }
-var CHAIN_WALK_PAGE, CHAIN_WALK_MAX_REQUESTS, MAX_TIPS_PER_RELAY, MAX_EXAMINED_PER_RELAY, MAX_REFRESH_DOCS, REFRESH_BUDGET_MS, WALK_ALLOWANCE_PER_RELAY, RELAY_FETCH_TIMEOUT_MS, reverified, REVERIFY_MAX_AGE_SEC, VIEW_CACHE_MAX, viewCache;
+var CHAIN_WALK_PAGE, CHAIN_WALK_MAX_REQUESTS, MAX_TIPS_PER_RELAY, MAX_EXAMINED_PER_RELAY, MAX_REFRESH_DOCS, REFRESH_BUDGET_MS, WALK_ALLOWANCE_PER_RELAY, RELAY_FETCH_TIMEOUT_MS, WALK_PROBE_GAPS, reverified, REVERIFY_MAX_AGE_SEC, VIEW_CACHE_MAX, viewCache;
 var init_state = __esm({
   "packages/core/dist/v3/state.js"() {
     "use strict";
@@ -10968,6 +11070,7 @@ var init_state = __esm({
     REFRESH_BUDGET_MS = 2e3;
     WALK_ALLOWANCE_PER_RELAY = 256;
     RELAY_FETCH_TIMEOUT_MS = 5e3;
+    WALK_PROBE_GAPS = 4;
     reverified = /* @__PURE__ */ new WeakMap();
     REVERIFY_MAX_AGE_SEC = 10 * 60;
     VIEW_CACHE_MAX = 4096;
@@ -20610,12 +20713,16 @@ async function setup(app, opts) {
 async function relaysList(app) {
   return { relays: [...(await app.ownView()).head.relays] };
 }
-async function changeRelays(app, f) {
+async function changeRelays(app, f, removing = []) {
   app.requireKeyholder("Changing your relays");
   await app.connectAndDrain();
-  const pub = await app.publishNext((p) => {
-    p.relays = f(p.relays);
-  });
+  const pub = await app.publishNext(
+    (p) => {
+      p.relays = f(p.relays);
+    },
+    // #67: removing a relay must work even while it serves versions that don't connect (App.ownStrictFallback).
+    { removing }
+  );
   const re = await reissueForRelays(app);
   return { relays: [...(await app.ownView()).head.relays], ver: pub.ver, published: pub.ok, failed: pub.failed, ...re };
 }
@@ -20670,7 +20777,7 @@ async function relaysRemove(app, url) {
   if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
   if (cur.length === 1) throw new CliError("usage", "that is your only relay: add another first");
   const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.includes(r));
-  const out = await changeRelays(app, (list) => list.filter((x) => x !== r));
+  const out = await changeRelays(app, (list) => list.filter((x) => x !== r), [r]);
   let revokedAtRemoved = 0;
   const pool = app.pool ?? await app.connect({ allowNone: true });
   for (const c of old) {
@@ -21552,7 +21659,7 @@ async function begin(app, opts) {
     await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
   } else {
     await app.connectAndDrain();
-    await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true });
+    await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true, setAside: { unconnected: true } });
   }
   const view = await app.ownView();
   const foreign = await foreignRotations(app);
@@ -21900,7 +22007,7 @@ async function publishFinal(app, st) {
   const ik = app.requireKeyholder("Publishing your old identity's final version");
   const contesting = st.contest || (await foreignRotations(app)).length > 0;
   await app.connect({ allowNone: true });
-  await app.refreshIdentity(app.userId, app.relays, contesting ? { force: true, quiet: true } : { force: true, strict: true });
+  await app.refreshIdentity(app.userId, app.relays, contesting ? { force: true, quiet: true } : { force: true, strict: true, setAside: { unconnected: true } });
   const chain = await ownChain(app);
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
@@ -26860,6 +26967,9 @@ var init_app = __esm({
        * gap filling, automatic jumps only over unanchored history). This is the
        * only way an identity enters the store: bundled documents never do.
        * Failures leave the held view (or none) and are reported as a warning.
+       *
+       * `setAside` (#67, strict refreshes of our own identity only): relays to leave out when the refresh over
+       * all of them can't confirm the head. See ownStrictFallback.
        */
       async refreshIdentity(userId, relays, opts = {}) {
         const fetched = (await this.state.get("fetched"))?.[userId];
@@ -26871,25 +26981,87 @@ var init_app = __esm({
           if (opts.strict) throw new CliError("refresh_failed", `no relays to refresh ${userId} from`);
           return held2;
         }
+        const refreshFrom = (rs) => step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => refreshIdentity(this.store, userId, this.fetcher(), { relays: rs }));
+        let v;
         try {
-          const v = await step(this.progress, `refreshing ${userId}'s identity document from ${list.join(", ")}`, () => refreshIdentity(this.store, userId, this.fetcher(), { relays: list }));
-          if (v.incomplete) {
-            if (opts.strict) throw new CliError("refresh_failed", "refreshing the identity document was cut short; try again");
+          v = await refreshFrom(list);
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+          if (opts.strict) {
+            const unconnected = unconnectedRelaysOf(e);
+            const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, opts.setAside, refreshFrom) : void 0;
+            if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, userId)}`);
+            v = own;
+          } else {
+            if (e.reason === "chain-broken" && held2 && !opts.quiet) {
+              this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
+            }
+            return held2;
+          }
+        }
+        if (v.incomplete) {
+          if (!opts.strict) {
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const now = Date.now();
-          const last = (await this.state.get("fetched"))?.[userId];
-          if (last === void 0 || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: void 0 }));
-          return v;
-        } catch (e) {
-          if (!(e instanceof P2PError)) throw e;
-          if (opts.strict) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head`);
-          if (e.reason === "chain-broken" && held2 && !opts.quiet) {
-            this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
-          }
-          return held2;
+          const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], opts.setAside, refreshFrom);
+          if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], userId)}`);
+          v = own;
         }
+        const now = Date.now();
+        const last = (await this.state.get("fetched"))?.[userId];
+        if (last === void 0 || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: void 0 }));
+        return v;
+      }
+      /** For a strict refresh of our own identity that failed: which relays sent versions that don't connect, and what to do. */
+      unconnectedHint(unconnected, userId) {
+        if (userId !== this.keys?.userId || unconnected.length === 0) return "";
+        const one = unconnected.length === 1;
+        return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+      }
+      /**
+       * #67: a strict refresh of our OWN identity couldn't confirm the head over every listed relay. Before an
+       * identity edit that removes relays (`setAside.relays`: the ones it removes), or a rotation step
+       * (`setAside.unconnected`: the relays that sent versions the refresh couldn't connect), it is retried over
+       * the other listed relays, and the caller goes ahead only if that refresh is complete.
+       *
+       * Why this is safe:
+       *  - The strict refresh is there so we don't fork our own chain by building on a stale head (review H2):
+       *    a newer version another of our key holders published went to every relay the document lists. The
+       *    relays kept must still give a complete refresh, so a newer version any of them serves is still found,
+       *    connected and built on (or, far behind, the refresh is incomplete and the edit refused: trying again
+       *    goes on where the walk stopped). Leaving a relay out is what the strict refresh already allows when
+       *    that relay doesn't answer.
+       *  - Which relays are left out is the user's choice (the ones the edit removes) or each relay's own
+       *    evidence (it sent identity-key-signed versions that don't connect): one relay can't get another left
+       *    out. Any other edit still refuses while such a relay is listed, and names it (fork and compromise
+       *    detection stay: the user is told someone else may hold the key).
+       *  - What is published is still head.ver + 1 on the head the kept relays confirmed: a relay left out can't
+       *    make it lower, or make it fork from anything but what those relays serve.
+       *  - Nothing is left out when no relay would be left; the kept relays' refresh must reach one of them.
+       * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
+       */
+      async ownStrictFallback(userId, list, unconnected, setAside2, refreshFrom) {
+        if (!setAside2 || userId !== this.keys?.userId) return void 0;
+        const aside = new Set([...setAside2.relays ?? [], ...setAside2.unconnected ? unconnected : []].filter((r) => list.includes(r)));
+        const rest = list.filter((r) => !aside.has(r));
+        if (aside.size === 0 || rest.length === 0) return void 0;
+        let v;
+        try {
+          v = await refreshFrom(rest);
+        } catch (e) {
+          if (e instanceof P2PError) return void 0;
+          throw e;
+        }
+        if (v.incomplete) return void 0;
+        const forged = unconnected.filter((r) => aside.has(r));
+        if (forged.length > 0) {
+          const one = forged.length === 1;
+          this.warn(
+            `${forged.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to the history your other relays confirm (left out of this check). If no device of yours published them, someone else holds your identity key: rotate your identity (\`p2p identity rotate\`)`
+          );
+        }
+        return v;
       }
       /** Relays a (bundled, unverified) identity document lists: only a hint for where to refresh from. */
       static relaysOf(docJws) {
@@ -27038,7 +27210,8 @@ var init_app = __esm({
        */
       async publishNext(change2, opts = {}) {
         const ik = this.requireKeyholder("Publishing the identity document");
-        await this.refreshIdentity(this.userId, this.relays, { force: true, strict: true });
+        const setAside2 = opts.rotation ? { unconnected: true } : opts.removing?.length ? { relays: opts.removing } : void 0;
+        await this.refreshIdentity(this.userId, this.relays, { force: true, strict: true, ...setAside2 ? { setAside: setAside2 } : {} });
         let view = await this.ownView();
         const unionDevices = [...new Set(view.tips.flatMap((t2) => t2.devices))];
         const preTips = view.tips.map((t2) => t2.hash);

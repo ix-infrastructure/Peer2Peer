@@ -112,6 +112,8 @@ export const REFRESH_BUDGET_MS = 2000;
 export const WALK_ALLOWANCE_PER_RELAY = 256;
 /** Default per-relay fetch timeout; a relay that doesn't answer in time is skipped (S1). */
 export const RELAY_FETCH_TIMEOUT_MS = 5000;
+/** Gaps a stalled walk probes the spent relays for, hash-only, lowest first (#67). */
+export const WALK_PROBE_GAPS = 4;
 
 /** refreshIdentity's result: the view, and whether the work bound cut the refresh short. */
 export type RefreshedView = IdentityView & {
@@ -119,7 +121,19 @@ export type RefreshedView = IdentityView & {
   incomplete?: boolean;
   /** The listed relays that answered the tips request (pre-release review). */
   answeredRelays: string[];
+  /**
+   * #67, on an incomplete result: the relays that sent a signature-valid version of this identity the refresh
+   * left unconnected to the held history. The same list rides on a `chain-broken` failure (`unconnectedRelays`
+   * on the thrown error). Evidence only about what each relay itself sent: one relay can't put another here.
+   */
+  unconnectedRelays?: string[];
 };
+
+/** The relays a failed refresh names as having sent versions it couldn't connect (#67); empty when none or not such a failure. */
+export function unconnectedRelaysOf(e: unknown): string[] {
+  const r = (e as { unconnectedRelays?: unknown } | null)?.unconnectedRelays;
+  return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
+}
 
 function forRelay(result: FetchResult | undefined, relay: string): readonly string[] {
   if (result === undefined) return [];
@@ -169,6 +183,23 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    hash-only probe of a relay whose share was spent, or a spent relay that
  *    gave the walk documents and didn't answer the probe); a junk relay cut
  *    short on every page never makes a genuine gap "incomplete" (#35).
+ *    Accepted residual (#65 review, recorded in #67): a hostile relay can
+ *    replay genuine documents it got elsewhere, spend its share, then stay
+ *    silent on the probe, and so keep a GENUINE gap (one no relay can fill)
+ *    "incomplete" rather than chain-broken. Liveness only: only connected
+ *    versions are committed and an incomplete refresh never counts for
+ *    approval; a junk relay that never gave a valid document can't do it.
+ *  - #67, a client far behind: where an incomplete refresh's walk stopped is
+ *    kept as walk anchors (verified versions not yet connected, at most 16,
+ *    never part of the view), and the next refresh walks on from there, so
+ *    each refresh makes progress whatever the distance. The walk asks only
+ *    for frontier gaps (whose missing version the walk doesn't already
+ *    hold); one the relays asked have nothing for is dead for this
+ *    refresh, and the next gap is tried. An entry hashing to a version a gap
+ *    misses is checked even past its relay's share (junk can't hash to one;
+ *    once per version per refresh). The result names the relays that sent a
+ *    version left unconnected (`unconnectedRelays`, also on a `chain-broken`
+ *    error: unconnectedRelaysOf), each only for what it sent itself.
  *  - An incomplete refresh records the verified tips above the stored head as
  *    pending heads (#35): while any is above the head, the view trusts only
  *    the devices and key holders every one lists, so a committed intermediate
@@ -266,6 +297,13 @@ export async function refreshIdentity(
 
   const seen = new Set<string>();
   /**
+   * #67: the hashes of the documents each relay sent that name this identity (cheap filter passed), so a
+   * version left unconnected at the end can be traced to the relays that sent it, and only to them.
+   */
+  const sentBy = new Map<string, Set<string>>();
+  /** #67 (walk): the versions the current frontier gaps miss; an entry hashing to one is checked even past its relay's share. */
+  let wanted = new Set<string>();
+  /**
    * Cheap admission of one relay's answer: the entries claiming the highest
    * `ver` are signature-checked first (at most MAX_EXAMINED_PER_RELAY), and
    * the first `keep` valid ones (iss == H(ik) == userId, the held ik) are kept.
@@ -276,11 +314,13 @@ export async function refreshIdentity(
     quota: number,
     walk = false,
     shareMs = Infinity,
+    relay?: string,
   ): { docs: VerifiedIdentityDoc[]; cut: boolean; used: number; ms: number; unchecked: string[] } => {
     const t0 = performance.now();
     // An answer to a chain request longer than the request asks for (an honest relay never sends one):
     // dropped before any decoding (#65 review L2).
     if (walk && list.length > keep) return { docs: [], cut: false, used: 0, ms: 0, unchecked: [] };
+    const sent = relay === undefined ? undefined : (sentBy.get(relay) ?? sentBy.set(relay, new Set()).get(relay)!);
     // Cheap filters first (pre-release review T2): after the JSON decode, and before
     // any curve work, the payload must name this userId and (when a chain is
     // held) its ik. Foreign-key junk costs a decode and uses no quota.
@@ -291,9 +331,10 @@ export async function refreshIdentity(
         try {
           const p = decodeJws(j).payload;
           if (p.iss !== userId || (before && p.ik !== before.ik)) return undefined;
+          const h = jwsHash(j);
+          sent?.add(h);
           // Already checked in this refresh (another relay had it, or an earlier walk page), or already in
           // the held chain: no second check.
-          const h = jwsHash(j);
           if (seen.has(h) || (walk && chain.has(h))) return undefined;
           // Hash first: iss must be the fingerprint of the ik it names, before any curve work.
           if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId) return undefined;
@@ -310,7 +351,8 @@ export async function refreshIdentity(
     const out: VerifiedIdentityDoc[] = [];
     let used = 0;
     let cut = false;
-    for (const { j } of claimed) {
+    const checked = new Set<string>();
+    for (const { j, h } of claimed) {
       if (out.length >= keep) break; // the top `keep` valid ones: complete for this relay
       // Each relay gets its own share of the document cap (T1), so hostile relays can't starve an honest one;
       // the walk has its own document allowance instead. Checking time is each relay's own share too, in the
@@ -318,8 +360,27 @@ export async function refreshIdentity(
       // junk would starve the honest relay checked last). At least one check per relay, however slow.
       if (used >= quota || (!walk && overDocs()) || (used > 0 && performance.now() - t0 > shareMs)) {
         cut = true;
+        // #67: in the walk, an entry that hashes to the very version a gap misses is still checked, past the
+        // share: junk can't hash to one, and each is checked once per refresh (`seen`), so this adds at most
+        // one check per missing version. Junk sorted ahead of it (claiming older vers) can't keep it unchecked.
+        if (walk && wanted.has(h)) {
+          used++;
+          examined++;
+          checked.add(h);
+          try {
+            const d = verifyIdentityDocSignature(j);
+            if (d.iss === userId && (!before || d.ik === before.ik) && !seen.has(d.hash)) {
+              seen.add(d.hash);
+              out.push(d);
+            }
+          } catch (e) {
+            if (!(e instanceof P2PError)) throw e;
+          }
+        }
+        if (walk && wanted.size > 0) continue;
         break;
       }
+      checked.add(h);
       used++;
       examined++;
       try {
@@ -334,7 +395,7 @@ export async function refreshIdentity(
     // #35: in the walk, the hashes this answer held but never had checked (cut short, or past a cap): the
     // evidence that more time would fill a gap left at the end. (Only answers of at most `keep` entries
     // get this far in the walk.)
-    const unchecked = walk ? sorted.slice(used).map((x) => x.h) : [];
+    const unchecked = walk ? sorted.filter((x) => !checked.has(x.h)).map((x) => x.h) : [];
     return { docs: out, cut, used, ms: performance.now() - t0, unchecked };
   };
   const accepted: string[] = [];
@@ -373,10 +434,13 @@ export async function refreshIdentity(
   const walkUnchecked = new Set<string>();
   /** Relays that gave the walk at least one valid document (a junk relay never does; #65 review L3). */
   const walkSupplied = new Set<string>();
+  /** Relays the last walk page asked (#67: none means every relay's walk share is spent). */
+  let lastAsked = 0;
   const fetchEach = async (f: (relay: string) => Promise<FetchResult>, keep: number, walk = false): Promise<VerifiedIdentityDoc[]> => {
     // The walk asks only relays with walk time and allowance left: a relay whose share is spent (it had
     // its check) is asked no more, so the time bound holds page by page.
     const asked = walk ? relays.filter((r) => !spent(r)) : relays;
+    if (walk) lastAsked = asked.length;
     if (walk && asked.length === 0) return [];
     const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) for (const { r, res } of answers) if (res !== undefined) answeredRelays.add(r);
@@ -391,7 +455,7 @@ export async function refreshIdentity(
     const share = checkMs / 2 / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r)! : quota;
-      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r)! : share);
+      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r)! : share, r);
       if (walk) {
         walkLeft.set(r, q - a.used);
         walkTimeLeft.set(r, walkTimeLeft.get(r)! - a.ms);
@@ -414,39 +478,66 @@ export async function refreshIdentity(
 
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);
   if (tips.length === 0 && !exhausted && !docsCapped) fail("identity-unknown", `no listed relay returned a valid identity document for ${userId}`);
+  // #67: where the last incomplete refresh's walk stopped. Placed with the tips (each fully verified and
+  // chain-checked by `place`, like any fetched version), so the walk goes on from there instead of from the
+  // tips again, and a client further behind than one refresh's walk still catches up, refresh by refresh.
+  const anchors = chainOf ? chain.walkAnchors() : [];
+  for (const a of anchors) seen.add(a.hash);
   begin();
-  place(tips);
+  place([...tips, ...anchors]);
   end();
-  // Walk back from the LOWEST gap with the chain request (§5.6), per relay,
-  // on the walk's own allowance (pre-release review): filling the lowest gap first
-  // connects the most versions, and a hostile majority's tips can't use it up.
+  // Walk back with the chain request (§5.6), per relay, on the walk's own allowance (pre-release review),
+  // from the LOWEST gap first: filling it connects the most versions, and a hostile majority's tips can't use
+  // the allowance up. Only frontier gaps are asked for (#67): the version they miss isn't one the walk already
+  // holds as a gap (or one the chain rules rejected). A gap no relay asked has anything new for is dead for
+  // this refresh, and the walk tries the next one (#67: stalling on the lowest gap no longer abandons another
+  // branch's). (A gap below the oldest held version is still walked: the walk can reach a genesis and anchor
+  // the history from there, as a restore during a fork does.)
+  const dead = new Set<string>();
+  const frontier = () => {
+    const held = new Set(gaps.map((g) => g.d.hash));
+    return gaps.filter((g) => !held.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
+  };
   let requests = 0;
   let stalled = false;
-  const lowestGap = () => gaps.reduce((a, b) => (b.d.ver < a.d.ver ? b : a));
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const need = lowestGap().need;
-    const page = await fetchEach((r) => chainOf(userId, [r], need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
-    if (page.length === 0) {
-      stalled = true;
+    const open = frontier();
+    const next = open.find((g) => !dead.has(g.need));
+    if (!next) {
+      stalled = open.length > 0;
       break;
+    }
+    wanted = new Set(open.map((g) => g.need));
+    const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
+    if (page.length === 0) {
+      // Every relay's walk share spent: stop here (the probe below). Otherwise the relays asked had nothing
+      // new for this gap: try the next one.
+      if (lastAsked === 0) {
+        stalled = true;
+        break;
+      }
+      dead.add(next.need);
+      continue;
     }
     begin();
     place(page);
     end();
   }
-  // The relays asked for the lowest gap had nothing new to check. Those with their walk share spent weren't
-  // asked: probe them once for it, hashes only (no signature check, so the time bound holds), so an honest
-  // relay that ran out of time still counts as holding the missing version, and a junk relay doesn't.
+  // The relays asked had nothing new to check. Those with their walk share spent weren't asked: probe them
+  // once for each gap left (the lowest few), hashes only (no signature check, so the time bound holds), so an
+  // honest relay that ran out of time still counts as holding a missing version, and a junk relay doesn't.
   // A spent relay that gave the walk valid documents and doesn't answer the probe can't be ruled out, so
   // the gap counts as cut short (#65 review L3); a junk relay never gave any, so its silence counts for nothing.
   let probeUnanswered = false;
-  if (chainOf && stalled && gaps.length > 0) {
-    const need = lowestGap().need;
-    const probed = relays.filter(spent);
-    const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], need, CHAIN_WALK_PAGE), timeoutMs) })));
-    for (const { r, res } of answers) {
-      if (res === undefined && walkSupplied.has(r)) probeUnanswered = true;
-      for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked) walkUnchecked.add(h);
+  const probed = relays.filter(spent);
+  if (chainOf && stalled && gaps.length > 0 && probed.length > 0) {
+    wanted = new Set();
+    for (const g of frontier().slice(0, WALK_PROBE_GAPS)) {
+      const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
+      for (const { r, res } of answers) {
+        if (res === undefined && walkSupplied.has(r)) probeUnanswered = true;
+        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked) walkUnchecked.add(h);
+      }
     }
   }
   // A walk cut short with a gap left isn't a gap the relays can't fill: incomplete (what was placed is
@@ -455,6 +546,20 @@ export async function refreshIdentity(
   // a relay merely cut short (junk) or a genuine gap (pruned history) doesn't make it so.
   const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
   if (gaps.length > 0 && walkCut) docsCapped = true;
+  /**
+   * #67: the relays that sent a version left unconnected (still a gap). Each is named only for what it sent
+   * itself. The owner's client uses this to set such a relay aside when it can't confirm its own head (a
+   * listed relay serving versions only the identity key could sign, which don't connect to its history).
+   */
+  const unconnectedRelays = () => {
+    const left = new Set(gaps.map((g) => g.d.hash));
+    return relays.filter((r) => [...(sentBy.get(r) ?? [])].some((h) => left.has(h)));
+  };
+  const broken = (msg: string): never => {
+    const e = new P2PError("chain-broken", msg);
+    Object.assign(e, { unconnectedRelays: unconnectedRelays() });
+    throw e;
+  };
 
   // The newest version the relays returned that the chain rules didn't reject.
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
@@ -462,9 +567,9 @@ export async function refreshIdentity(
   let jumpTo: string | undefined;
   const incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
-    if (!gaps.some((g) => g.d.hash === newest!.hash)) fail("chain-broken", `could not fit ${userId}'s newest version (ver ${newest!.ver})`);
+    if (!gaps.some((g) => g.d.hash === newest!.hash)) broken(`could not fit ${userId}'s newest version (ver ${newest!.ver})`);
     if (anchoredBefore) {
-      fail("chain-broken", `${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
+      broken(`${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
     jumpTo = newest!.jws;
   }
@@ -482,9 +587,29 @@ export async function refreshIdentity(
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
+  // #67: on an incomplete refresh, where the walk stopped, for the next one: the frontier gaps left (where
+  // each walked stretch stops), plus the earlier anchors still unplaced (the tops of the stretches walked
+  // before, needed again on the way back up), the tips aside (they are fetched again anyway). Not a gap the
+  // relays asked had nothing for, unless a relay was found holding its missing version unchecked. The lowest
+  // MAX_WALK_ANCHORS are kept. Cleared by a complete refresh.
+  const tipHashes = new Set(tips.map((d) => d.hash));
+  const gapHashes = new Set(gaps.map((g) => g.d.hash));
+  const wasAnchor = new Set(anchors.map((d) => d.hash));
+  const keptAnchors =
+    incomplete && chainOf
+      ? gaps
+          .filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && (!dead.has(g.need) || walkUnchecked.has(g.need)))
+          .map((g) => g.d)
+      : [];
+  const anchorChange = (c: IdentityChain) => c.setWalkAnchors(keptAnchors);
+  const stateChange = (c: IdentityChain) => {
+    const a = pendingChange(c);
+    const b = anchorChange(c);
+    return a || b;
+  };
   // Commit once, re-applied onto whatever is stored by now. Nothing new and no jump (the usual
   // refresh): nothing to write, and no need to queue for the store's lock to find that out.
-  const unchanged = accepted.length === 0 && jumpTo === undefined && chain.size > 0 && !pendingChange(chain);
+  const unchanged = accepted.length === 0 && jumpTo === undefined && chain.size > 0 && !stateChange(chain);
   const jumped = unchanged ? false : await store.updateIdentity(userId, (cur) => {
     const c = cur && cur.versions.length > 0 ? IdentityChain.fromStored(cur, { now, skewSec: opts.skewSec }) : new IdentityChain(userId);
     // S4: whether the stored history is anchored is re-checked here, before our versions are added.
@@ -501,7 +626,7 @@ export async function refreshIdentity(
       c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
       didJump = true;
     }
-    const narrowed = c.size > 0 && pendingChange(c);
+    const narrowed = c.size > 0 && stateChange(c);
     // Nothing new: the stored chain stays as it is, with no write (every write is an fsync under
     // the store's cross-process lock, which every p2p process of the home queues for).
     if (accepted.length === 0 && !didJump && !narrowed && cur) return { result: false };
@@ -513,11 +638,11 @@ export async function refreshIdentity(
   // have anchored the history meanwhile (S4), so versions placed on the
   // in-memory copy might not fit what is stored now.
   if (!incomplete && newest !== undefined && view.head.ver < newest.ver) {
-    fail("chain-broken", `${userId}'s newest version (ver ${newest.ver}) doesn't connect to the stored history${jumpTo !== undefined && !jumped ? " (anchored meanwhile)" : ""}`);
+    broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the stored history${jumpTo !== undefined && !jumped ? " (anchored meanwhile)" : ""}`);
   }
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
-  if (incomplete) return { ...view, incomplete: true, answeredRelays: answered };
+  if (incomplete) return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays() };
   await store.deleteProvisional(userId);
   // Freshness needs a majority of the listed relays (pre-release review): with an
   // honest relay unreachable, a stale answer from a minority isn't "fresh". Counted over the

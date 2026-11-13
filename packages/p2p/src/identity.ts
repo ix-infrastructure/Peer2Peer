@@ -229,12 +229,16 @@ export interface RelaysChange {
   revokedAtRemoved?: number;
 }
 
-async function changeRelays(app: App, f: (cur: string[]) => string[]): Promise<RelaysChange> {
+async function changeRelays(app: App, f: (cur: string[]) => string[], removing: readonly string[] = []): Promise<RelaysChange> {
   app.requireKeyholder("Changing your relays");
   await app.connectAndDrain();
-  const pub = await app.publishNext((p) => {
-    p.relays = f(p.relays);
-  });
+  const pub = await app.publishNext(
+    (p) => {
+      p.relays = f(p.relays);
+    },
+    // #67: removing a relay must work even while it serves versions that don't connect (App.ownStrictFallback).
+    { removing },
+  );
   const re = await reissueForRelays(app);
   return { relays: [...(await app.ownView()).head.relays], ver: pub.ver, published: pub.ok, failed: pub.failed, ...re };
 }
@@ -302,7 +306,7 @@ export async function relaysRemove(app: App, url: string): Promise<RelaysChange>
   if (cur.length === 1) throw new CliError("usage", "that is your only relay: add another first");
   // Caps naming the dropped relay, captured before the re-issue adds new ones.
   const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.includes(r));
-  const out = await changeRelays(app, (list) => list.filter((x) => x !== r));
+  const out = await changeRelays(app, (list) => list.filter((x) => x !== r), [r]);
   // review L2: revoke them at the dropped relay only (our devices are still in its allowlist). Other
   // relays keep honouring them, so friends who haven't picked up the new caps stay covered.
   // Best effort: the relay may be down.
