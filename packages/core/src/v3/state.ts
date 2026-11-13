@@ -36,7 +36,7 @@ import {
 } from "./circles.js";
 import { unfriendApplies, verifyFriendshipV3, verifyInviteV3, type VerifiedFriendshipV3, type VerifiedInviteV3 } from "./friends.js";
 import { verifyDeviceCertV3 } from "./device.js";
-import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, peekIdentityDoc, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
+import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, MAX_WALK_ANCHORS, peekIdentityDoc, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
 import type { CertResolverV3, IdentityResolver, SignerContext } from "./signers.js";
 import type { StoredCapV3, StoredCircleV3, TrustStoreV3 } from "./store.js";
 
@@ -112,7 +112,7 @@ export const REFRESH_BUDGET_MS = 2000;
 export const WALK_ALLOWANCE_PER_RELAY = 256;
 /** Default per-relay fetch timeout; a relay that doesn't answer in time is skipped (S1). */
 export const RELAY_FETCH_TIMEOUT_MS = 5000;
-/** Gaps a stalled walk probes the spent relays for, hash-only, lowest first (#67). */
+/** The walk's final probe covers at most twice this many unsettled gaps, hash-only, in turns by sending relay (#67). */
 export const WALK_PROBE_GAPS = 4;
 
 /** refreshIdentity's result: the view, and whether the work bound cut the refresh short. */
@@ -195,11 +195,12 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    the held chain and is committed. Running out of chain work, or a walk cut
  *    short with a gap left, commits what was placed and returns
  *    `incomplete: true`: a later refresh goes on from there. Cut short means
- *    the request cap, or a gap whose missing version a relay held but wasn't
- *    checked in time (in an answer cut short by its share, or found by a
- *    hash-only probe of a relay whose share was spent, or a spent relay that
- *    gave the walk documents and didn't answer the probe); a junk relay cut
- *    short on every page never makes a genuine gap "incomplete" (#35).
+ *    the request cap, or a gap that isn't settled: settled means every relay
+ *    was asked for its missing version (relays not asked during the walk are
+ *    probed, hash-only, at most 8 gaps in turns by sending relay) and none
+ *    sent it; a silent relay counts as not holding it unless it gave the walk
+ *    documents (#67 re-review G2). A junk relay cut short on every page never
+ *    makes a genuine gap "incomplete" (#35).
  *    Accepted residual (#65 review, recorded in #67): a hostile relay can
  *    replay genuine documents it got elsewhere, spend its share, then stay
  *    silent on the probe, and so keep a GENUINE gap (one no relay can fill)
@@ -463,6 +464,9 @@ export async function refreshIdentity(
   /** #67: for each missing version the walk asked for (a page or the probe), the relays that answered that request. */
   const askedFor = new Map<string, Set<string>>();
   const noteAsked = (need: string, r: string) => (askedFor.get(need) ?? askedFor.set(need, new Set()).get(need)!).add(r);
+  /** #67 review G2: for each missing version, the relays asked for it at all (answering or not). */
+  const attemptedFor = new Map<string, Set<string>>();
+  const noteAttempted = (need: string, r: string) => (attemptedFor.get(need) ?? attemptedFor.set(need, new Set()).get(need)!).add(r);
   const fetchEach = async (f: (relay: string) => Promise<FetchResult>, keep: number, walk = false, need?: string): Promise<VerifiedIdentityDoc[]> => {
     // The walk asks only relays with walk time and allowance left: a relay whose share is spent (it had
     // its check) is asked no more, so the time bound holds page by page.
@@ -471,7 +475,12 @@ export async function refreshIdentity(
     if (walk && asked.length === 0) return [];
     const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) for (const { r, res } of answers) if (res !== undefined) answeredRelays.add(r);
-    if (need !== undefined) for (const { r, res } of answers) if (res !== undefined) noteAsked(need, r);
+    if (need !== undefined) {
+      for (const { r, res } of answers) {
+        noteAttempted(need, r);
+        if (res !== undefined) noteAsked(need, r);
+      }
+    }
     // T1: the remaining tips-phase allowance is split evenly between the relays.
     const quota = Math.floor((maxDocs - examined) / relays.length);
     if (!walk && quota <= 0) {
@@ -510,7 +519,11 @@ export async function refreshIdentity(
   // chain-checked by `place`, like any fetched version), so the walk goes on from there instead of from the
   // tips again, and a client further behind than one refresh's walk still catches up, refresh by refresh.
   const anchors = chainOf ? chain.walkAnchors() : [];
-  for (const a of anchors) seen.add(a.hash);
+  for (const a of anchors) {
+    seen.add(a.hash);
+    // Who sent it, in an earlier refresh (#67 re-review G2): its walk turns stay with those relays.
+    for (const r of chain.walkAnchorRelays(a.hash)) if (relays.includes(r)) (sentBy.get(r) ?? sentBy.set(r, new Set()).get(r)!).add(a.hash);
+  }
   begin();
   place([...tips, ...anchors]);
   end();
@@ -548,23 +561,16 @@ export async function refreshIdentity(
     return undefined;
   };
   let requests = 0;
-  let stalled = false;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     const open = frontier();
     const next = pick(open);
-    if (!next) {
-      stalled = open.length > 0;
-      break;
-    }
+    if (!next) break;
     wanted = new Set(open.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
       // Every relay's walk share spent: stop here (the probe below). Otherwise the relays asked had nothing
       // new for this gap: try the next one.
-      if (lastAsked === 0) {
-        stalled = true;
-        break;
-      }
+      if (lastAsked === 0) break;
       dead.add(next.need);
       continue;
     }
@@ -572,35 +578,48 @@ export async function refreshIdentity(
     place(page);
     end();
   }
-  // The relays asked had nothing new to check. Those with their walk share spent weren't asked: probe them
-  // once for each gap left (the lowest few open ones, and the lowest few dead ones), hashes only (no signature check, so the time bound holds), so an
-  // honest relay that ran out of time still counts as holding a missing version, and a junk relay doesn't.
-  // A spent relay that gave the walk valid documents and doesn't answer the probe can't be ruled out, so
-  // the gap counts as cut short (#65 review L3); a junk relay never gave any, so its silence counts for nothing.
-  // When the request cap ends the walk, the spent relays are probed too, for the lowest dead gaps (#67 review
-  // F1): a dead gap counts as one no relay holds only once every relay answered for it, the relays whose share
-  // ran out (often the very relay that sent it) included.
+  // A gap left at the end is SETTLED (#67 review G2) when no relay sent its missing version (checked or not)
+  // and every relay was asked for it; a relay that didn't answer counts as not holding it (otherwise one could
+  // force "incomplete" by staying silent), except one that gave the walk valid documents (#65 review L3). Any
+  // frontier gap not settled makes the walk "cut short": incomplete, so what was placed is committed and the
+  // next refresh goes on (never chain-broken, which would throw before the commit). A junk relay can't keep a
+  // genuine gap (pruned history) unsettled: its junk never hashes to the missing version.
+  //
+  // So the relays not yet asked for a frontier gap (those whose walk share ran out, typically) are probed for
+  // it, hashes only (no signature check, so the time bound holds): at most 2 * WALK_PROBE_GAPS gaps, taken in
+  // turns by the relay that sent them (#67 review G2: one relay's many gaps can't take every probe).
+  const sentByAnyRelay = (h: string) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
+  const settled = (need: string) => !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
   let probeUnanswered = false;
-  const probed = relays.filter(spent);
-  const capped = requests >= CHAIN_WALK_MAX_REQUESTS;
-  if (chainOf && (stalled || capped) && gaps.length > 0 && probed.length > 0) {
+  if (chainOf && !exhausted && gaps.length > 0) {
     wanted = new Set();
-    const open = frontier();
-    const toProbe = [...open.filter((g) => !dead.has(g.need)).slice(0, WALK_PROBE_GAPS), ...open.filter((g) => dead.has(g.need)).slice(0, WALK_PROBE_GAPS)];
+    const unsettled = frontier().filter((g) => !settled(g.need));
+    const toProbe: typeof unsettled = [];
+    const owners = relays.length + 1;
+    for (let round = 0; toProbe.length < 2 * WALK_PROBE_GAPS && round < unsettled.length; round++) {
+      let added = false;
+      for (let o = 0; o < owners && toProbe.length < 2 * WALK_PROBE_GAPS; o++) {
+        const g = unsettled.find((x) => !toProbe.includes(x) && (o < relays.length ? sentBy.get(relays[o])?.has(x.d.hash) : !sentByAny(x.d.hash)));
+        if (g) {
+          toProbe.push(g);
+          added = true;
+        }
+      }
+      if (!added) break;
+    }
     for (const g of toProbe) {
-      const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
+      const ask = relays.filter((r) => !attemptedFor.get(g.need)?.has(r));
+      const answers = await Promise.all(ask.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
       for (const { r, res } of answers) {
+        noteAttempted(g.need, r);
         if (res !== undefined) noteAsked(g.need, r);
         if (res === undefined && walkSupplied.has(r)) probeUnanswered = true;
-        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked) walkUnchecked.add(h);
+        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0, r).unchecked) walkUnchecked.add(h);
       }
     }
   }
-  // A walk cut short with a gap left isn't a gap the relays can't fill: incomplete (what was placed is
-  // committed, and the next refresh goes on from there), never chain-broken or a jump over it. Cut short
-  // means the request cap, or a gap whose missing version a relay held but wasn't checked in time (#35):
-  // a relay merely cut short (junk) or a genuine gap (pruned history) doesn't make it so.
-  const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
+  // (Without a chain fetcher there is no walk: a gap left is a real one, as before.)
+  const walkCut = chainOf !== undefined && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || frontier().some((g) => !settled(g.need)));
   if (gaps.length > 0 && walkCut) docsCapped = true;
   /**
    * #67: the relays that sent a version left on a DEAD gap: its missing version was asked of every relay
@@ -612,7 +631,7 @@ export async function refreshIdentity(
    */
   const unconnectedRelays = () =>
     relays.filter((r) =>
-      gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAny(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))),
+      gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAnyRelay(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))),
     );
   /**
    * #67 review F1: every verified version above the held head left unconnected, with the relays that sent it
@@ -657,19 +676,29 @@ export async function refreshIdentity(
   const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
   // #67: on an incomplete refresh, where the walk stopped, for the next one: the frontier gaps left (where
   // each walked stretch stops), plus the earlier anchors still unplaced (the tops of the stretches walked
-  // before, needed again on the way back up), the tips aside (they are fetched again anyway). Not a gap the
-  // relays asked had nothing for, unless a relay was found holding its missing version unchecked. The lowest
-  // MAX_WALK_ANCHORS are kept. Cleared by a complete refresh.
+  // before, needed again on the way back up), the tips aside (they are fetched again anyway). Not a settled
+  // gap (no relay holds its missing version). At most MAX_WALK_ANCHORS, taken in turns by the relay that sent
+  // them, lowest first (#67 re-review G2: one relay's many gaps can't push out another's). Cleared by a
+  // complete refresh.
   const tipHashes = new Set(tips.map((d) => d.hash));
   const gapHashes = new Set(gaps.map((g) => g.d.hash));
   const wasAnchor = new Set(anchors.map((d) => d.hash));
-  const keptAnchors =
+  const anchorCands =
     incomplete && chainOf
-      ? gaps
-          .filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && (!dead.has(g.need) || walkUnchecked.has(g.need)))
-          .map((g) => g.d)
+      ? gaps.filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && !settled(g.need)).sort((a, b) => a.d.ver - b.d.ver)
       : [];
-  const anchorChange = (c: IdentityChain) => c.setWalkAnchors(keptAnchors);
+  const keptAnchors: VerifiedIdentityDoc[] = [];
+  for (let progress = true; progress && keptAnchors.length < MAX_WALK_ANCHORS; ) {
+    progress = false;
+    for (let o = 0; o <= relays.length && keptAnchors.length < MAX_WALK_ANCHORS; o++) {
+      const g = anchorCands.find((x) => !keptAnchors.includes(x.d) && (o < relays.length ? sentBy.get(relays[o])?.has(x.d.hash) : !sentByAny(x.d.hash)));
+      if (g) {
+        keptAnchors.push(g.d);
+        progress = true;
+      }
+    }
+  }
+  const anchorChange = (c: IdentityChain) => c.setWalkAnchors(keptAnchors, (h) => relays.filter((r) => sentBy.get(r)?.has(h)));
   const stateChange = (c: IdentityChain) => {
     const a = pendingChange(c);
     const b = anchorChange(c);

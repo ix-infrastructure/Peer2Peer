@@ -209,7 +209,7 @@ describe("#67: a version a gap misses is checked even past the relay's share", (
 });
 
 describe("#67: a refresh names the relays that sent versions it couldn't connect", () => {
-  it("a forged chain signed with the identity key: only the relay that sent it is named (incomplete and chain-broken)", async () => {
+  it("a forged chain signed with the identity key: only the relay that sent it is named, once its gap is known dead", async () => {
     const u = makeUser("alice");
     u.relays = RELAYS.slice(0, 3);
     history(u, 4);
@@ -223,10 +223,22 @@ describe("#67: a refresh names the relays that sent versions it couldn't connect
       tips: async (_u, rs) => (rs[0] === RELAYS[0] ? [u.doc.jws] : rs[0] === RELAYS[1] ? [top.jws] : junk.slice(0, 8)),
       chain: async (uid, rs, to, n) => (rs[0] === RELAYS[0] ? walkFrom(u.docs)(uid, rs, to, n) : rs[0] === RELAYS[1] ? (serveChain ? walkFrom(forged)(uid, rs, to, n) : []) : junk),
     });
-    // Serving the forged chain: incomplete (it holds what it serves), R1 named.
+    // Serving a forged chain longer than its walk allowance: incomplete (it holds what it serves), and nobody is
+    // named yet (its bottom wasn't reached, so no gap is known dead: #67 review F1); the forged versions are
+    // listed as sent by R1 alone.
     const v = await refreshIdentity(await storeWith(u.docs), u.userId, fetcher(true), { now: NOW, relays: u.relays });
     expect(v.incomplete).toBe(true);
-    expect(v.unconnectedRelays).toEqual([RELAYS[1]]);
+    expect(v.unconnectedRelays).toEqual([]);
+    expect((v.unconnectedVersions ?? []).every((x) => x.relays.length === 1 && x.relays[0] === RELAYS[1])).toBe(true);
+    // Refresh after refresh, the walk goes on down the forged chain (anchors) until its bottom, which no relay
+    // holds: then R1 is named.
+    const store = await storeWith(u.docs);
+    let named: string[] = [];
+    for (let i = 0; i < 6 && named.length === 0; i++) {
+      const w = await refreshIdentity(store, u.userId, fetcher(true), { now: NOW, relays: u.relays }).catch((x: Error) => x);
+      named = w instanceof Error ? unconnectedRelaysOf(w) : (w.unconnectedRelays ?? []);
+    }
+    expect(named).toEqual([RELAYS[1]]);
     // Serving only the forged tip: chain-broken, R1 named on the error.
     const e = await refreshIdentity(await storeWith(u.docs), u.userId, fetcher(false), { now: NOW, relays: u.relays }).catch((x: unknown) => x);
     expect(e).toBeInstanceOf(Error);
@@ -305,4 +317,51 @@ describe("#67 review F1: a relay serving forgeries can't get an honest relay nam
     expect(named).toEqual([]);
     expect(versions).toContainEqual({ ver: 10, relays: [A] });
   });
+});
+
+describe("#67 re-review G1/G2: honest relays far ahead or lagging are never named; a forger can't stop progress", () => {
+  const [A, B, H] = ["wss://a.example/v3", "wss://b.example/v3", "wss://h.example/v3"];
+
+  it("G1: A far ahead (its share spent), B lagging: nobody is named, so the owner's fallback has nothing to set aside", async () => {
+    for (const checkMs of [undefined, 1]) {
+      const u = makeUser("alice");
+      for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 5000 + i, certs: false });
+      const held = [...u.docs];
+      for (let i = 0; i < 600; i++) u.publish({ iat: NOW - 4000 + i, certs: false });
+      const f: IdentityFetcher = {
+        tips: async (_u, rs) => (rs[0] === A ? [u.doc.jws] : [held[held.length - 1].jws]),
+        chain: async (uid, rs, to, n) => (rs[0] === A ? walkFrom(u.docs)(uid, rs, to, n) : walkFrom(held)(uid, rs, to, n)),
+      };
+      const store = await storeWith(held);
+      const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [A, B], checkMs });
+      expect(v.incomplete).toBe(true);
+      expect(v.unconnectedRelays).toEqual([]);
+      // A's newest version is listed as sent by A: a fallback over B alone would be refused for it.
+      expect(v.unconnectedVersions).toContainEqual({ ver: 605, relays: [A] });
+    }
+  }, 120_000);
+
+  it("G2: one forging relay beside one honest relay, 300 behind: refresh after refresh makes progress until complete", async () => {
+    const u = makeUser("alice");
+    for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 5000 + i, certs: false });
+    const held = [...u.docs];
+    for (let i = 0; i < 300; i++) u.publish({ iat: NOW - 4000 + i, certs: false });
+    const forge = () =>
+      createIdentityDoc(u.ik, { ver: 6, prev: b64uEncode(randomBytes(32)), name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 50 });
+    const f: IdentityFetcher = {
+      tips: async (_u, rs) => (rs[0] === A ? [u.doc.jws] : Array.from({ length: 8 }, forge)),
+      chain: async (uid, rs, to, n) => (rs[0] === A ? walkFrom(u.docs)(uid, rs, to, n) : Array.from({ length: 64 }, forge)),
+    };
+    const store = await storeWith(held);
+    let last = 0;
+    for (let i = 0; i < 30; i++) {
+      const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [A, H] });
+      expect(v.head.ver).toBeGreaterThanOrEqual(last);
+      expect(v.unconnectedRelays ?? []).not.toContain(A);
+      last = v.head.ver;
+      if (v.head.hash === u.doc.hash) break;
+    }
+    expect(last).toBe(u.doc.ver);
+    void B;
+  }, 120_000);
 });

@@ -595,6 +595,12 @@ export interface StoredIdentityChain {
    */
   walkAnchors?: string[];
   /**
+   * The relays that sent each walk anchor (#67 re-review G2), by the anchor's jwsHash: local only, so the next
+   * refresh's walk takes its turns by relay with the anchors too (one relay's anchors can't take another's
+   * turns). Never trusted for anything else.
+   */
+  walkAnchorRelays?: Record<string, string[]>;
+  /**
    * Obsolete (pre-release review S3: demotion isn't revocation). Ignored when read,
    * never written.
    */
@@ -637,6 +643,8 @@ export class IdentityChain {
   private pending: VerifiedIdentityDoc[] = [];
   /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
   private anchors: VerifiedIdentityDoc[] = [];
+  /** Which relays sent each anchor (#67 re-review G2). */
+  private anchorFrom = new Map<string, string[]>();
 
   constructor(readonly iss: string) {}
 
@@ -659,6 +667,8 @@ export class IdentityChain {
       const a = verifyIdentityDocSignature(j);
       if (a.iss !== s.iss) fail("issuer-mismatch", "stored walk anchor of another identity");
       c.anchors.push(a);
+      const from = s.walkAnchorRelays?.[a.hash];
+      if (Array.isArray(from)) c.anchorFrom.set(a.hash, from.filter((r): r is string => typeof r === "string").slice(0, 16));
     }
     // Roots (versions whose parents aren't stored, after a gap jump or pruning) are trusted as stored.
     for (const d of docs) {
@@ -684,7 +694,15 @@ export class IdentityChain {
       // Each dropped once the held head reaches its ver.
       ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
       ...(this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}),
+      ...(this.walkAnchors().some((d) => this.anchorFrom.has(d.hash))
+        ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)!]])) }
+        : {}),
     };
+  }
+
+  /** The relays that sent a walk anchor (#67 re-review G2); empty when unknown. */
+  walkAnchorRelays(hash: string): string[] {
+    return [...(this.anchorFrom.get(hash) ?? [])];
   }
 
   /** The walk anchors still useful (#67): those not held yet. */
@@ -699,15 +717,16 @@ export class IdentityChain {
    * walk needs next). They only say where the next walk starts; they never enter the view. Returns whether
    * anything changed.
    */
-  setWalkAnchors(docs: readonly VerifiedIdentityDoc[]): boolean {
-    const before = this.walkAnchors().map((d) => d.hash);
+  setWalkAnchors(docs: readonly VerifiedIdentityDoc[], from: (hash: string) => readonly string[] = () => []): boolean {
+    const before = this.walkAnchors().map((d) => `${d.hash}:${(this.anchorFrom.get(d.hash) ?? []).join(",")}`);
     const byHash = new Map<string, VerifiedIdentityDoc>();
     for (const d of docs) {
       if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
       byHash.set(d.hash, d);
     }
     this.anchors = [...byHash.values()].sort((a, b) => a.ver - b.ver || asciiCompare(a.hash, b.hash)).slice(0, MAX_WALK_ANCHORS);
-    const after = this.walkAnchors().map((d) => d.hash);
+    this.anchorFrom = new Map(this.anchors.map((d) => [d.hash, [...from(d.hash)]] as [string, string[]]).filter(([, r]) => r.length > 0));
+    const after = this.walkAnchors().map((d) => `${d.hash}:${(this.anchorFrom.get(d.hash) ?? []).join(",")}`);
     return after.length !== before.length || after.some((h, i) => h !== before[i]);
   }
 

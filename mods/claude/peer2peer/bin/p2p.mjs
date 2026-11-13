@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 3d21f7a941e2d618
+// @peer2peer/core 0.1.1 25652609810bc78a
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6912,6 +6912,8 @@ var init_identitydoc = __esm({
       pending = [];
       /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
       anchors = [];
+      /** Which relays sent each anchor (#67 re-review G2). */
+      anchorFrom = /* @__PURE__ */ new Map();
       constructor(iss) {
         this.iss = iss;
       }
@@ -6936,6 +6938,9 @@ var init_identitydoc = __esm({
           if (a.iss !== s2.iss)
             fail("issuer-mismatch", "stored walk anchor of another identity");
           c.anchors.push(a);
+          const from = s2.walkAnchorRelays?.[a.hash];
+          if (Array.isArray(from))
+            c.anchorFrom.set(a.hash, from.filter((r) => typeof r === "string").slice(0, 16));
         }
         for (const d of docs) {
           if (d.iss !== s2.iss)
@@ -6960,8 +6965,13 @@ var init_identitydoc = __esm({
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
           // Each dropped once the held head reaches its ver.
           ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {},
-          ...this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}
+          ...this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {},
+          ...this.walkAnchors().some((d) => this.anchorFrom.has(d.hash)) ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)]])) } : {}
         };
+      }
+      /** The relays that sent a walk anchor (#67 re-review G2); empty when unknown. */
+      walkAnchorRelays(hash) {
+        return [...this.anchorFrom.get(hash) ?? []];
       }
       /** The walk anchors still useful (#67): those not held yet. */
       walkAnchors() {
@@ -6975,8 +6985,8 @@ var init_identitydoc = __esm({
        * walk needs next). They only say where the next walk starts; they never enter the view. Returns whether
        * anything changed.
        */
-      setWalkAnchors(docs) {
-        const before = this.walkAnchors().map((d) => d.hash);
+      setWalkAnchors(docs, from = () => []) {
+        const before = this.walkAnchors().map((d) => `${d.hash}:${(this.anchorFrom.get(d.hash) ?? []).join(",")}`);
         const byHash = /* @__PURE__ */ new Map();
         for (const d of docs) {
           if (d.iss !== this.iss)
@@ -6984,7 +6994,8 @@ var init_identitydoc = __esm({
           byHash.set(d.hash, d);
         }
         this.anchors = [...byHash.values()].sort((a, b) => a.ver - b.ver || asciiCompare(a.hash, b.hash)).slice(0, MAX_WALK_ANCHORS);
-        const after2 = this.walkAnchors().map((d) => d.hash);
+        this.anchorFrom = new Map(this.anchors.map((d) => [d.hash, [...from(d.hash)]]).filter(([, r]) => r.length > 0));
+        const after2 = this.walkAnchors().map((d) => `${d.hash}:${(this.anchorFrom.get(d.hash) ?? []).join(",")}`);
         return after2.length !== before.length || after2.some((h, i) => h !== before[i]);
       }
       /**
@@ -10450,6 +10461,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   let lastAsked = 0;
   const askedFor = /* @__PURE__ */ new Map();
   const noteAsked = (need, r) => (askedFor.get(need) ?? askedFor.set(need, /* @__PURE__ */ new Set()).get(need)).add(r);
+  const attemptedFor = /* @__PURE__ */ new Map();
+  const noteAttempted = (need, r) => (attemptedFor.get(need) ?? attemptedFor.set(need, /* @__PURE__ */ new Set()).get(need)).add(r);
   const fetchEach = async (f, keep, walk = false, need) => {
     const asked = walk ? relays.filter((r) => !spent(r)) : relays;
     if (walk)
@@ -10463,9 +10476,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
           answeredRelays.add(r);
     }
     if (need !== void 0) {
-      for (const { r, res } of answers)
+      for (const { r, res } of answers) {
+        noteAttempted(need, r);
         if (res !== void 0)
           noteAsked(need, r);
+      }
     }
     const quota = Math.floor((maxDocs - examined) / relays.length);
     if (!walk && quota <= 0) {
@@ -10496,8 +10511,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   if (tips.length === 0 && !exhausted && !docsCapped)
     fail("identity-unknown", `no listed relay returned a valid identity document for ${userId}`);
   const anchors = chainOf ? chain.walkAnchors() : [];
-  for (const a of anchors)
+  for (const a of anchors) {
     seen.add(a.hash);
+    for (const r of chain.walkAnchorRelays(a.hash))
+      if (relays.includes(r))
+        (sentBy.get(r) ?? sentBy.set(r, /* @__PURE__ */ new Set()).get(r)).add(a.hash);
+  }
   begin2();
   place([...tips, ...anchors]);
   end();
@@ -10522,21 +10541,16 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     return void 0;
   };
   let requests = 0;
-  let stalled = false;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     const open3 = frontier();
     const next = pick(open3);
-    if (!next) {
-      stalled = open3.length > 0;
+    if (!next)
       break;
-    }
     wanted = new Set(open3.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
-      if (lastAsked === 0) {
-        stalled = true;
+      if (lastAsked === 0)
         break;
-      }
       dead.add(next.need);
       continue;
     }
@@ -10544,29 +10558,44 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     place(page);
     end();
   }
+  const sentByAnyRelay = (h) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
+  const settled = (need) => !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
   let probeUnanswered = false;
-  const probed = relays.filter(spent);
-  const capped = requests >= CHAIN_WALK_MAX_REQUESTS;
-  if (chainOf && (stalled || capped) && gaps.length > 0 && probed.length > 0) {
+  if (chainOf && !exhausted && gaps.length > 0) {
     wanted = /* @__PURE__ */ new Set();
-    const open3 = frontier();
-    const toProbe = [...open3.filter((g) => !dead.has(g.need)).slice(0, WALK_PROBE_GAPS), ...open3.filter((g) => dead.has(g.need)).slice(0, WALK_PROBE_GAPS)];
+    const unsettled = frontier().filter((g) => !settled(g.need));
+    const toProbe = [];
+    const owners = relays.length + 1;
+    for (let round = 0; toProbe.length < 2 * WALK_PROBE_GAPS && round < unsettled.length; round++) {
+      let added = false;
+      for (let o = 0; o < owners && toProbe.length < 2 * WALK_PROBE_GAPS; o++) {
+        const g = unsettled.find((x) => !toProbe.includes(x) && (o < relays.length ? sentBy.get(relays[o])?.has(x.d.hash) : !sentByAny(x.d.hash)));
+        if (g) {
+          toProbe.push(g);
+          added = true;
+        }
+      }
+      if (!added)
+        break;
+    }
     for (const g of toProbe) {
-      const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
+      const ask2 = relays.filter((r) => !attemptedFor.get(g.need)?.has(r));
+      const answers = await Promise.all(ask2.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
       for (const { r, res } of answers) {
+        noteAttempted(g.need, r);
         if (res !== void 0)
           noteAsked(g.need, r);
         if (res === void 0 && walkSupplied.has(r))
           probeUnanswered = true;
-        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked)
+        for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0, r).unchecked)
           walkUnchecked.add(h);
       }
     }
   }
-  const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
+  const walkCut = chainOf !== void 0 && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || frontier().some((g) => !settled(g.need)));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
-  const unconnectedRelays = () => relays.filter((r) => gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAny(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))));
+  const unconnectedRelays = () => relays.filter((r) => gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAnyRelay(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))));
   const unconnectedVersions = () => {
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
@@ -10595,8 +10624,19 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const tipHashes = new Set(tips.map((d) => d.hash));
   const gapHashes = new Set(gaps.map((g) => g.d.hash));
   const wasAnchor = new Set(anchors.map((d) => d.hash));
-  const keptAnchors = incomplete && chainOf ? gaps.filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && (!dead.has(g.need) || walkUnchecked.has(g.need))).map((g) => g.d) : [];
-  const anchorChange = (c) => c.setWalkAnchors(keptAnchors);
+  const anchorCands = incomplete && chainOf ? gaps.filter((g) => !tipHashes.has(g.d.hash) && (!gapHashes.has(g.need) || wasAnchor.has(g.d.hash)) && !settled(g.need)).sort((a, b) => a.d.ver - b.d.ver) : [];
+  const keptAnchors = [];
+  for (let progress = true; progress && keptAnchors.length < MAX_WALK_ANCHORS; ) {
+    progress = false;
+    for (let o = 0; o <= relays.length && keptAnchors.length < MAX_WALK_ANCHORS; o++) {
+      const g = anchorCands.find((x) => !keptAnchors.includes(x.d) && (o < relays.length ? sentBy.get(relays[o])?.has(x.d.hash) : !sentByAny(x.d.hash)));
+      if (g) {
+        keptAnchors.push(g.d);
+        progress = true;
+      }
+    }
+  }
+  const anchorChange = (c) => c.setWalkAnchors(keptAnchors, (h) => relays.filter((r) => sentBy.get(r)?.has(h)));
   const stateChange = (c) => {
     const a = pendingChange(c);
     const b = anchorChange(c);
