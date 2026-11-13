@@ -5,7 +5,7 @@
 // widen sharing, so the CLI wants the person token; the mod makes it itself (PERSON_TOKEN_SCRIPT,
 // the code its readPersonToken runs) before any typed command. Without it they are refused.
 
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { modPersonToken, startRelay, user, type User } from './harness'
@@ -46,11 +46,18 @@ describe('first run through the mod: join and accept on a fresh install', () => 
     expect(refused.ok ? 'ok' : refused.error).toBe('refused')
     // What the mod does before any typed /peers command: make the token (exclusively), then pass it.
     const ben = user('ben', relay.port, {}, { home: bare.home })
-    expect(modPersonToken(bare.home)).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const first = modPersonToken(bare.home)
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/)
     const preview = await ben.p2p.joinPreview(code)
     expect(preview.ok).toBe(true)
     const joined = await ben.p2p.join(code)
     expect(joined.ok ? 'joined' : `${joined.error}: ${joined.reason}`).toBe('joined')
+    // #70: the join made the identity, so the CLI replaced person.key; the token the mod made before
+    // no longer counts. The mod's next widening command is refused as stale, reads the file again and
+    // runs once more.
+    expect(readFileSync(join(bare.home, 'cli', 'person.key'), 'utf8')).not.toBe(first)
+    const next = await ben.p2p.call<{ code?: string }>(['invite', '--no-circle'])
+    expect(next.ok ? 'invited' : `${next.error}: ${next.reason}`).toBe('invited')
 
     // Accept, on another fresh home: a long link.
     const link = await ann.p2p.call<{ link: string }>(['invite', '--link'])

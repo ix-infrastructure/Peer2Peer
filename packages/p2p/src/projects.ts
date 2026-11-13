@@ -23,7 +23,7 @@
 
 import { agentAncestor, isAgentProcess } from "./ancestry.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
@@ -1129,9 +1129,64 @@ export function personToken(home: string): string {
   }
 }
 
-/** Whether `home` holds an identity (its keys document; state.ts keeps it at <home>/cli/keys.json). */
+/**
+ * Replaces the person token with a fresh one. Called whenever an identity is first created or
+ * restored on a home (init, link join, backup restore; setup and join create through init): a
+ * person.key that was already there may have been put there by anything that could write the
+ * folder before the identity existed, so it must not keep standing in for the person afterwards.
+ * The command that creates the identity checked its token when it started, so a front end's first
+ * run still works; the front ends read person.key again when the CLI refuses their old token
+ * (`person_token_stale`). Written whole: a new 0600 file made exclusively beside it, then renamed
+ * over it (a planted symlink is replaced, never followed).
+ */
+export function renewPersonToken(home: string): string {
+  const f = personTokenFile(home);
+  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
+  const t = randomBytes(32).toString("base64url");
+  const tmp = `${f}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, t, { mode: 0o600, flag: "wx" });
+    let cleared = false;
+    for (let tries = 0; ; tries++) {
+      try {
+        renameSync(tmp, f);
+        break;
+      } catch (e) {
+        // Something that isn't a file is in the way (a directory): it goes, then the new token.
+        if (!cleared && isDirectory(f)) {
+          rmSync(f, { recursive: true, force: true });
+          cleared = true;
+          continue;
+        }
+        // Windows: a virus scanner or indexer briefly holding the old file. Retried for about a second.
+        if (process.platform === "win32" && RENAME_BUSY.has((e as NodeJS.ErrnoException).code ?? "") && tries < 20) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          continue;
+        }
+        throw e;
+      }
+    }
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw new CliError("conflict", `couldn't replace the person token in ${f} (${(e as NodeJS.ErrnoException).code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
+  }
+  return t;
+}
+
+const RENAME_BUSY = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+function isDirectory(p: string): boolean {
+  try {
+    return lstatSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `home` holds an identity: its keys and self documents (state.ts keeps them at <home>/cli/keys.json and self.json). */
 export function identityHere(home: string): boolean {
-  return existsSync(join(home, "cli", "keys.json"));
+  // Both documents, as App.load requires: keys alone are an identity whose creation didn't finish.
+  return existsSync(join(home, "cli", "keys.json")) && existsSync(join(home, "cli", "self.json"));
 }
 
 /** Whether P2P_PERSON_TOKEN is this home's person token (read only: a missing file is no match). */

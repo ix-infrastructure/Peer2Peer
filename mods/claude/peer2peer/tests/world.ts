@@ -133,6 +133,8 @@ export const CODE = 'relay.example/K7QM-3XPD-9TWA-HF2N'
 export type WorldOptions = {
   /** The person token the mod's token script prints (none: an empty answer). */
   personToken?: string
+  /** The CLI refuses a P2P_PERSON_TOKEN other than `personToken` (person_token_stale), as after person.key was replaced. */
+  isTokenChecked?: boolean
   /** What `$.store` holds at the start (other sessions' board entries). */
   store?: Record<string, unknown>
   /** `p2p profile show <name>` answers, by name. */
@@ -341,6 +343,9 @@ export function world(on: On, options: WorldOptions = {}): World {
     if (bin === 'p2p' && e.argv[1] === '--help') return ok(options.isPathPeer2Peer === false ? 'usage: p2p <torrent>  (some other p2p tool)\n' : 'Usage: p2p [options] [command]\n\nPeer2Peer: an account-free network for AI agent sessions\n')
     if (bin === 'p2p' && e.argv[1] === '--version') return ok(`${options.pathVersion ?? '0.0.9'}\n`)
     if (options.isMissing) throw new Error('spawn p2p ENOENT')
+    // packages/p2p/src/cli.ts: a token that isn't the home's is refused before anything runs.
+    const given = e.init?.env?.P2P_PERSON_TOKEN
+    if (options.isTokenChecked && given && given !== (options.personToken ?? '')) return ok(json({ error: 'person_token_stale', reason: "P2P_PERSON_TOKEN isn't this device's person token" }), 1)
     const cmd = words(e.argv).join(' ')
     // `p2p join --preview` answers on its own key ('join-preview'), so a test can set the join's answer apart.
     if (cmd === 'join' && e.argv.includes('--preview')) {
