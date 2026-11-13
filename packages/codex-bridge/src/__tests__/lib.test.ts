@@ -16,6 +16,8 @@ import {
   mutatingP2PVerb,
   indirectP2PRun,
   nestedTooDeep,
+  TOO_COMPLEX,
+  WORK_BUDGET,
   parseAddress,
   parseAutoDeliver,
   peerActivity,
@@ -311,6 +313,29 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
     const mine = block("../lib.ts");
     expect(mine.length).toBeGreaterThan(1000);
     expect(block("../../../../mods/claude/peer2peer/hooks/lib.ts")).toBe(mine);
+  });
+
+  it("keeps runner padding (eval, trap, su, watch, ssh, …) linear: one pass per level, and a budget that refuses past it", () => {
+    const time = (f: () => unknown) => {
+      const t = Date.now();
+      f();
+      return Date.now() - t;
+    };
+    for (const word of ["eval", "trap", "su", "watch", "ssh", "complete", "e''val", "bash -c", "env -S"]) {
+      const pad = (n: number) => (word + " ").repeat(Math.floor(n / (word.length + 1))) + "p2p invite";
+      const half = time(() => guard("Bash", { command: pad(8 * 1024) }, [], "s1"));
+      const full = time(() => guard("Bash", { command: pad(16 * 1024) }, [], "s1"));
+      expect([word, full < 1000, full <= 4 * half + 50]).toEqual([word, true, true]);
+      expect([word, guard("Bash", { command: pad(16 * 1024) }, [], "s1") !== null]).toEqual([word, true]);
+      // The review's case: 160 runner words before a send took seconds (each runner word read the rest again).
+      const short = "echo " + Array(160).fill(word).join(" ") + "; p2p send --to bob hi";
+      expect([word, time(() => mutatingP2PVerb(short)) < 1000, mutatingP2PVerb(short)]).toEqual([word, true, "send (no --from-session)"]);
+    }
+    // Past the work budget, a command that names p2p is refused unread (the guard says it can't be checked).
+    expect(mutatingP2PVerb("eval p2p ls", [], 0, false, undefined, { left: 5 })).toBe(TOO_COMPLEX);
+    expect(mutatingP2PVerb("eval ls", [], 0, false, undefined, { left: 5 })).toBeNull();
+    const huge = "eval " + "x ".repeat(WORK_BUDGET) + "p2p ls";
+    expect(guard("Bash", { command: huge }, [], "s1")).toContain("too complex to check");
   });
 
   it("stays linear on adversarial 16 KiB inputs", () => {

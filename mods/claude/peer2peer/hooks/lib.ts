@@ -1849,7 +1849,8 @@ export function envSplitString(words: readonly string[], from: number): { line: 
 
       return null
     }
-    if (w === '--') return null
+    // `--` ends env's options, but a `-S` read past it fails closed (`env -- -S '…'` is still read as a split string).
+    if (w === '--') continue
     if (w.startsWith('--')) continue
     // Short options, bundled: -S takes the rest of the word or the next one; -u and -C take a value.
     for (let k = 1; k < w.length; k++) {
@@ -2464,13 +2465,23 @@ function cliBinJs(word: string): boolean {
 /** Builtins and commands that run a string argument later or elsewhere: `trap`, `su -c`, `complete -C`, `ssh host`, `watch`. */
 const STRING_RUNNERS = new Set(['trap', 'su', 'complete', 'ssh', 'watch'])
 
-export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, deep?: { hit: boolean }): string | null {
+/** What mutatingP2PVerb reads, in characters over all its passes, before it refuses a command that names p2p unread (64 passes over the longest command checked). */
+export const WORK_BUDGET = 64 * MAX_CHECKED_COMMAND
+/** mutatingP2PVerb's answer when a command that names p2p is past WORK_BUDGET: refused as one it can't check. */
+export const TOO_COMPLEX = 'a command too complex to check that names p2p'
+
+export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, deep?: { hit: boolean }, work: { left: number } = { left: WORK_BUDGET }): string | null {
   // Past the nesting limit nothing more is read: nestedTooDeep refuses it when it still names p2p.
   if (depth > 4) {
     if (deep && mentionsP2P(command)) deep.hit = true
 
     return null
   }
+  // Every pass spends the text it reads from one budget: past it, a command that names p2p is refused unread.
+  work.left -= command.length + 1
+  if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null
+  const over = () => work.left < 0
+  const tooComplex = () => (depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null)
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, '')
     const base = w.split(/[\\/]/).pop() ?? w
@@ -2493,13 +2504,15 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     if (SHELLS.test(base)) {
       const flag = words.findIndex((w, j) => j > 0 && /^(-[a-z]*c|-command|\/c|-encodedcommand)$/i.test(w))
       const inner = flag > 0 ? words[flag + 1] : undefined
-      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep) : null
+      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep, work) : null
       if (found) return found
+      if (over()) return tooComplex()
       continue
     }
     if (base === 'eval') {
-      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep)
+      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work)
       if (found) return found
+      if (over()) return tooComplex()
       continue
     }
     // `script` runs a command under a pseudo-terminal: `script -c "<cmd>" [file]` (util-linux) or
@@ -2511,15 +2524,17 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
         while (j < words.length && (words[j] ?? '').startsWith('-')) j += /^-[tT]$/.test(words[j] ?? '') ? 2 : 1
         return words.slice(j + 1).join(' ')
       })()
-      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep) : null
+      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep, work) : null
       if (found) return found
+      if (over()) return tooComplex()
       continue
     }
     // A string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`, `su -c '…'`,
     // `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the Codex bridge does).
     if (STRING_RUNNERS.has(base)) {
-      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep)
+      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work)
       if (found) return found
+      if (over()) return tooComplex()
     }
     // The CLI as the command word, or anywhere after it unless the command is a text command (`echo`,
     // `grep`): behind a wrapper this guard doesn't know (`setsid p2p …`, `watch -n1 p2p …`,
@@ -2530,8 +2545,9 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       for (let j = 1; j < words.length; j++) {
         if (!SHELLS.test((words[j] ?? '').split(/[\\/]/).pop()?.toLowerCase() ?? '')) continue
         const flag = words.findIndex((w, k) => k > j && /^(-[a-z]*c|-command|\/c|-encodedcommand)$/i.test(w))
-        const found = flag > 0 && words[flag + 1] ? mutatingP2PVerb(words[flag + 1] ?? '', binNames, depth + 1, deep) : null
+        const found = flag > 0 && words[flag + 1] ? mutatingP2PVerb(words[flag + 1] ?? '', binNames, depth + 1, deep, work) : null
         if (found) return found
+        if (over()) return tooComplex()
         break
       }
     }
@@ -2561,9 +2577,12 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
 /**
  * How many times a text holds something every nested command line needs (a shell's name: `sh` is in
  * bash, zsh, dash, ksh, fish and pwsh; `cmd`, `eval`, `script`, `env -S`, a string runner), up to `cap`.
- * Over-counting only costs a pass. One indexOf pass per word.
+ * Over-counting only costs a pass. Quotes and backslashes are dropped first; then one indexOf pass per word.
  */
-function nestingWords(text: string, cap: number): number {
+function nestingWords(raw: string, cap: number): number {
+  // Quotes and backslashes out first (one pass), so `e''val`, `e"v"al` and `ev\al` count as eval.
+  let text = ''
+  for (const ch of raw) if (ch !== "'" && ch !== '"' && ch !== '\\') text += ch
   let n = 0
   for (const word of ['sh', 'cmd', 'eval', 'script', 'trap', 'su', 'complete', 'watch', 'env']) {
     for (let at = text.indexOf(word); at >= 0 && n < cap; at = text.indexOf(word, at + word.length)) n++

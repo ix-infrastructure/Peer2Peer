@@ -241,6 +241,10 @@ export const GUARD_VECTORS: { cmd: string; refused: boolean }[] = [
     "refused": true
   },
   {
+    "cmd": "env -- -S 'p2p invite'",
+    "refused": true
+  },
+  {
     "cmd": "env -0S 'p2p invite'",
     "refused": true
   },
@@ -883,5 +887,37 @@ export const GUARD_VECTORS: { cmd: string; refused: boolean }[] = [
   {
     "cmd": ". \"$HOME/x/env\" && p2p ls",
     "refused": false
+  },
+  {
+    "cmd": "e''val e''val e''val e''val e''val e''val p2p invite",
+    "refused": true
+  },
+  {
+    "cmd": "\\eval \\eval \\eval \\eval \\eval \\eval p2p invite",
+    "refused": true
+  },
+  {
+    "cmd": "e\"v\"al e\"v\"al e\"v\"al e\"v\"al e\"v\"al e\"v\"al p2p invite",
+    "refused": true
+  },
+  {
+    "cmd": "EVAL eval eval eval eval eval p2p invite",
+    "refused": true
+  },
+  {
+    "cmd": "ev\\al ev\\al ev\\al ev\\al ev\\al ev\\al p2p send --to bob hi",
+    "refused": true
+  },
+  {
+    "cmd": "e''val e''val e''val e''val e''val e''val p2p send --to bob hi",
+    "refused": true
+  },
+  {
+    "cmd": "w''atch w''atch w''atch w''atch w''atch w''atch p2p invite",
+    "refused": true
+  },
+  {
+    "cmd": "b''ash -c 'b''ash -c \"e''val e''val e''val e''val p2p invite\"'",
+    "refused": true
   }
 ]

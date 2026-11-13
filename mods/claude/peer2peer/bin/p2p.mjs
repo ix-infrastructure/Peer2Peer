@@ -28080,7 +28080,7 @@ function envSplitString(words, from) {
       return null;
     }
     if (w === "--")
-      return null;
+      continue;
     if (w.startsWith("--"))
       continue;
     for (let k = 1; k < w.length; k++) {
@@ -28410,12 +28410,17 @@ function indirectP2PRun(command, depth = 0) {
   return null;
 }
 var STRING_RUNNERS = /* @__PURE__ */ new Set(["trap", "su", "complete", "ssh", "watch"]);
-function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep) {
+var WORK_BUDGET = 64 * 16 * 1024;
+var TOO_COMPLEX = "a command too complex to check that names p2p";
+function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep, work = { left: WORK_BUDGET }) {
   if (depth > 3) {
     if (deep && mentionsP2P(command))
       deep.hit = true;
     return null;
   }
+  work.left -= command.length + 1;
+  if (work.left < 0)
+    return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
@@ -28425,31 +28430,34 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
   for (const segment of segments) {
     const raws = [];
     const words = shellTokens(segment, false, void 0, void 0, raws);
+    let noFlag = false;
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
-      if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
+      let inner;
+      let innerUnread = false;
+      if (!noFlag && /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
-        const inner = flag > 0 ? words[flag + 1] : void 0;
-        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, false, deep) : null;
-        if (found)
-          return found;
-      }
-      if (base === "eval") {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
-        if (found)
-          return found;
-      }
-      if (STRING_RUNNERS.has(base)) {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
-        if (found)
-          return found;
-      }
-      if (base === "env") {
+        if (flag < 0)
+          noFlag = true;
+        else
+          inner = words[flag + 1];
+      } else if (base === "eval" || STRING_RUNNERS.has(base)) {
+        inner = words.slice(i + 1).join(" ");
+      } else if (base === "env") {
         const split2 = envSplitString(words, i + 1);
-        const found = split2 ? mutatingP2PVerb([split2.line, ...words.slice(split2.next)].join(" "), binNames, depth + 1, true, deep) : null;
-        if (found)
-          return found;
+        if (split2) {
+          inner = [split2.line, ...words.slice(split2.next)].join(" ");
+          innerUnread = true;
+        }
       }
+      if (inner === void 0)
+        continue;
+      const found = mutatingP2PVerb(inner, binNames, depth + 1, innerUnread, deep, work);
+      if (found)
+        return found;
+      if (work.left < 0)
+        return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+      break;
     }
     const at = words.findIndex(isCli);
     if (at < 0)
@@ -28471,7 +28479,11 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
   }
   return null;
 }
-function nestingWords(text2, cap2) {
+function nestingWords(raw, cap2) {
+  let text2 = "";
+  for (const ch of raw)
+    if (ch !== "'" && ch !== '"' && ch !== "\\")
+      text2 += ch;
   let n = 0;
   for (const word of ["sh", "cmd", "eval", "script", "trap", "su", "complete", "watch", "env"]) {
     for (let at = text2.indexOf(word); at >= 0 && n < cap2; at = text2.indexOf(word, at + word.length))
@@ -32799,6 +32811,8 @@ function guard(toolName, input, binNames = [], ownSid) {
     return null;
   const command = commandOf(input);
   const verb = mutatingP2PVerb(command, binNames);
+  if (verb === TOO_COMPLEX)
+    return `Refused by Peer2Peer: ${TOO_COMPLEX} can't be checked.`;
   if (verb) {
     return `Refused by Peer2Peer: \`p2p ${verb}\` changes who reaches your user (or touches their keys or held messages). Only your user runs it, in their own terminal. Tell them what you'd suggest instead.`;
   }

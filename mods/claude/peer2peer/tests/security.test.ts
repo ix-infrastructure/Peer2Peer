@@ -27,6 +27,8 @@ import {
   indirectP2PRun,
   mutatingP2PVerb,
   nestedTooDeep,
+  TOO_COMPLEX,
+  WORK_BUDGET,
   touchesBackupFile,
   touchesP2PSettings,
   p2pHomeAccess,
@@ -811,6 +813,28 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
       expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
     }
     expect(nestedTooDeep('bash -c "p2p ls"')).toBe(false)
+  })
+
+  test('runner padding (eval, trap, su, watch, ssh, …) stays linear: one pass per level, and a budget that refuses past it', () => {
+    const time = (f: () => unknown) => {
+      const t = Date.now()
+      f()
+
+      return Date.now() - t
+    }
+    for (const word of ['eval', 'trap', 'su', 'watch', 'ssh', 'complete', "e''val", 'bash -c', 'env -S']) {
+      const pad = (n: number) => (word + ' ').repeat(Math.floor(n / (word.length + 1))) + 'p2p invite'
+      const half = time(() => uncheckableShell(pad(8 * 1024)) ?? mutatingP2PVerb(pad(8 * 1024)))
+      const full = time(() => uncheckableShell(pad(16 * 1024)) ?? mutatingP2PVerb(pad(16 * 1024)))
+      expect([word, full < 1000, full <= 4 * half + 50]).toEqual([word, true, true])
+      expect([word, (uncheckableShell(pad(16 * 1024)) ?? mutatingP2PVerb(pad(16 * 1024))) !== null]).toEqual([word, true])
+      const short = 'echo ' + Array(160).fill(word).join(' ') + '; p2p send --to bob hi'
+      expect([word, time(() => mutatingP2PVerb(short)) < 1000, mutatingP2PVerb(short)]).toEqual([word, true, 'send (no --from-session)'])
+    }
+    // Past the work budget, a command that names p2p is refused unread; one that doesn't is left alone.
+    expect(mutatingP2PVerb('eval p2p ls', [], 0, undefined, { left: 5 })).toBe(TOO_COMPLEX)
+    expect(mutatingP2PVerb('eval ls', [], 0, undefined, { left: 5 })).toBeNull()
+    expect(WORK_BUDGET).toBeGreaterThan(16 * 1024 * 8)
   })
 
   test('linear: adversarial 16 KiB inputs are read quickly', () => {

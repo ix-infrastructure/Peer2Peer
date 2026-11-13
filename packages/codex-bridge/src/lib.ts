@@ -610,7 +610,8 @@ export function envSplitString(words: readonly string[], from: number): { line: 
       if (w.indexOf("=") > 0) continue;
       return null;
     }
-    if (w === "--") return null;
+    // `--` ends env's options, but a `-S` read past it fails closed (`env -- -S '…'` is still read as a split string).
+    if (w === "--") continue;
     if (w.startsWith("--")) continue;
     // Short options, bundled: -S takes the rest of the word or the next one; -u and -C take a value.
     for (let k = 1; k < w.length; k++) {
@@ -948,13 +949,20 @@ export function indirectP2PRun(command: string, depth = 0): string | null {
  */
 /** Builtins and commands that run a string argument later or elsewhere: `trap`, `su -c`, `complete -C`, `ssh host`, `watch`. */
 const STRING_RUNNERS = new Set(["trap", "su", "complete", "ssh", "watch"]);
+/** What mutatingP2PVerb reads, in characters over all its passes, before it refuses a command that names p2p unread (64 passes over the longest command checked). */
+export const WORK_BUDGET = 64 * 16 * 1024;
+/** mutatingP2PVerb's answer when a command that names p2p is past WORK_BUDGET: refused as one it can't check. */
+export const TOO_COMPLEX = "a command too complex to check that names p2p";
 
-export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, unread = false, deep?: { hit: boolean }): string | null {
+export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, unread = false, deep?: { hit: boolean }, work: { left: number } = { left: WORK_BUDGET }): string | null {
   // Past the nesting limit nothing more is read: nestedTooDeep refuses it when it still names p2p.
   if (depth > 3) {
     if (deep && mentionsP2P(command)) deep.hit = true;
     return null;
   }
+  // Every pass spends the text it reads from one budget: past it, a command that names p2p is refused unread.
+  work.left -= command.length + 1;
+  if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, "");
@@ -975,31 +983,35 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
   for (const segment of segments) {
     const raws: string[] = [];
     const words = shellTokens(segment, false, undefined, undefined, raws);
+    // At most one command line read again per simple command (its words after the runner were read in that
+    // pass), and a shell's `-c` looked for once: so each level reads its text once, never once per runner word.
+    let noFlag = false;
     for (let i = 0; i < words.length; i++) {
       const base = (words[i] ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
-      if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
+      let inner: string | undefined;
+      let innerUnread = false;
+      if (!noFlag && /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
-        const inner = flag > 0 ? words[flag + 1] : undefined;
-        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, false, deep) : null;
-        if (found) return found;
-      }
-      if (base === "eval") {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
-        if (found) return found;
-      }
-      // A string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`, `su -c '…'`,
-      // `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the mod does).
-      if (STRING_RUNNERS.has(base)) {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
-        if (found) return found;
-      }
-      // `env -S "<cmd …>"` (split-string): the string is a command line of its own. Its words come from a
-      // string read again, with no source to check, so a send there is never read as naming --from-session.
-      if (base === "env") {
+        if (flag < 0) noFlag = true;
+        else inner = words[flag + 1];
+      } else if (base === "eval" || STRING_RUNNERS.has(base)) {
+        // `eval …`, and a string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`,
+        // `su -c '…'`, `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the mod does).
+        inner = words.slice(i + 1).join(" ");
+      } else if (base === "env") {
+        // `env -S "<cmd …>"` (split-string): the string is a command line of its own. Its words come from a
+        // string read again, with no source to check, so a send there is never read as naming --from-session.
         const split = envSplitString(words, i + 1);
-        const found = split ? mutatingP2PVerb([split.line, ...words.slice(split.next)].join(" "), binNames, depth + 1, true, deep) : null;
-        if (found) return found;
+        if (split) {
+          inner = [split.line, ...words.slice(split.next)].join(" ");
+          innerUnread = true;
+        }
       }
+      if (inner === undefined) continue;
+      const found = mutatingP2PVerb(inner, binNames, depth + 1, innerUnread, deep, work);
+      if (found) return found;
+      if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+      break;
     }
     const at = words.findIndex(isCli);
     if (at < 0) continue;
@@ -1021,9 +1033,12 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
 /**
  * How many times a text holds something every nested command line needs (a shell's name: `sh` is in
  * bash, zsh, dash, ksh, fish and pwsh; `cmd`, `eval`, `script`, `env -S`, a string runner), up to `cap`.
- * Over-counting only costs a pass. One indexOf pass per word.
+ * Over-counting only costs a pass. Quotes and backslashes are dropped first; then one indexOf pass per word.
  */
-function nestingWords(text: string, cap: number): number {
+function nestingWords(raw: string, cap: number): number {
+  // Quotes and backslashes out first (one pass), so `e''val`, `e"v"al` and `ev\al` count as eval.
+  let text = "";
+  for (const ch of raw) if (ch !== "'" && ch !== '"' && ch !== '\\') text += ch;
   let n = 0;
   for (const word of ["sh", "cmd", "eval", "script", "trap", "su", "complete", "watch", "env"]) {
     for (let at = text.indexOf(word); at >= 0 && n < cap; at = text.indexOf(word, at + word.length)) n++;
