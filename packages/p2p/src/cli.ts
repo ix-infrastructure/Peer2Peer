@@ -835,7 +835,16 @@ export function buildProgram(deps: ProgramDeps): Command {
           // Which identity this device becomes is the person's to confirm (a code from someone else
           // makes it theirs): on their own terminal, or the fingerprint a script expects.
           const expect = o.expectFingerprint?.trim().toLowerCase();
-          const r = await j.wait(expect !== undefined ? async (who) => who.fingerprint.toLowerCase() === expect : confirmLinkIdentity(identity.p2pCommand()));
+          const r = await j.wait(
+            expect !== undefined
+              ? async (who) => {
+                  const ok = who.fingerprint.toLowerCase() === expect;
+                  // At a terminal, the identity is still said (on stderr; nothing is asked: scripts stay non-interactive).
+                  if (deps.io.prompt) io.err(`This device would become ${who.address} (fingerprint ${who.fingerprint})${who.keyholder ? ", a key holder" : ""}: ${ok ? "it matches" : "it does NOT match"} --expect-fingerprint.`);
+                  return ok;
+                }
+              : confirmLinkIdentity(identity.p2pCommand()),
+          );
           return { json: r, human: `This device is now ${r.address} (${r.did})${r.keyholder ? ", a key holder" : ""}.` };
         },
         // Linking waits up to 10 minutes for the other device, by design.

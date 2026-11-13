@@ -322,9 +322,12 @@ describe("p2p setup: how are you joining?", () => {
 
     const two = await linkFrom(RL[0]);
     const g = fresh();
-    const wrong = await runAt(g.env, ["link", "join", two.start.code, "--expect-fingerprint", "aaaa-bbbb-cccc-dddd", "--json"], null, { confirmTty: async () => true });
+    // At a terminal (a prompt is there), the identity is still said, on stderr; nothing is asked.
+    const wrong = await runAt(g.env, ["link", "join", two.start.code, "--expect-fingerprint", "aaaa-bbbb-cccc-dddd", "--json"], [], { confirmTty: async () => true });
     await two.done;
     expect(wrong.code).toBe(1);
+    expect(wrong.asked).toEqual([]);
+    expect(wrong.err).toContain(`This device would become ${two.me.address} (fingerprint ${two.me.fingerprint}): it does NOT match --expect-fingerprint.`);
     expect(wrong.out).toContain("link_declined");
     expect(await hasIdentity(g.home)).toBe(false);
 
@@ -333,6 +336,8 @@ describe("p2p setup: how are you joining?", () => {
     const right = await runAt(h.env, ["link", "join", three.start.code, "--expect-fingerprint", three.me.fingerprint, "--json"], null, { confirmTty: async (q) => q.startsWith("p2p link join ") });
     await three.done;
     expect(right.code, right.err).toBe(0);
+    // A script (no terminal): nothing extra is said.
+    expect(right.err).not.toContain("This device would become");
     expect(await hasIdentity(h.home)).toBe(true);
   });
 
