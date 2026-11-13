@@ -28157,7 +28157,19 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
   }
   return null;
 }
+function nestingWords(text2, cap2) {
+  let n = 0;
+  for (const word of ["sh", "cmd", "eval", "script", "trap", "su", "complete", "watch", "env"]) {
+    for (let at = text2.indexOf(word); at >= 0 && n < cap2; at = text2.indexOf(word, at + word.length))
+      n++;
+    if (n >= cap2)
+      break;
+  }
+  return n;
+}
 function nestedTooDeep(command) {
+  if (nestingWords(command.toLowerCase(), 4) < 4)
+    return false;
   const deep = { hit: false };
   mutatingP2PVerb(command, [], 0, false, deep);
   return deep.hit;

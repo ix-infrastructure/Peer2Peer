@@ -2535,8 +2535,25 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
   return null
 }
 
+/**
+ * How many times a text holds something every nested command line needs (a shell's name: `sh` is in
+ * bash, zsh, dash, ksh, fish and pwsh; `cmd`, `eval`, `script`, `env -S`, a string runner), up to `cap`.
+ * Over-counting only costs a pass. One indexOf pass per word.
+ */
+function nestingWords(text: string, cap: number): number {
+  let n = 0
+  for (const word of ['sh', 'cmd', 'eval', 'script', 'trap', 'su', 'complete', 'watch', 'env']) {
+    for (let at = text.indexOf(word); at >= 0 && n < cap; at = text.indexOf(word, at + word.length)) n++
+    if (n >= cap) break
+  }
+
+  return n
+}
+
 /** Whether mutatingP2PVerb stops at its nesting limit (shells, eval, script inside each other) on a command that still names p2p there. */
 export function nestedTooDeep(command: string): boolean {
+  // Five levels need five words that open one: without them, the second pass is skipped.
+  if (nestingWords(command.toLowerCase(), 5) < 5) return false
   const deep = { hit: false }
   mutatingP2PVerb(command, [], 0, deep)
 
