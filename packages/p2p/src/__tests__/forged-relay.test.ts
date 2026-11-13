@@ -9,7 +9,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { b64uDecode, createIdentityDoc, generateDeviceKeysV3, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { b64uDecode, b64uEncode, createIdentityDoc, generateDeviceKeysV3, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { randomBytes } from "node:crypto";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R1 = "wss://relay-honest.test/v3";
@@ -164,5 +165,68 @@ describe("#67: a listed relay serving a forged chain signed with the identity ke
     expect(final[0].rotation).toBeDefined();
     expect(final[0].ver).toBeGreaterThan(before.ver);
     expect(final[0].ver).toBeLessThan(5000);
+  }, 180_000);
+});
+
+describe("#67 review F1: a lagging relay can't 'confirm' a stale head while a forger is listed", () => {
+  it("rotation never builds on the lagging relay's stale head (no fork): it builds on the newest version, or refuses", async () => {
+    // This device's store lags (it holds the head before 5 versions another device of ours published). R1 holds
+    // the newest; R3 lags (serves only the stale history); R2 (an identity-key holder) answers with fresh
+    // forged versions just above the stale head, whose parents nobody holds.
+    const R3 = "wss://relay-lagging.test/v3";
+    const r3 = await startRelay(R3);
+    try {
+      const u = new User("eve", { [R1]: `ws://127.0.0.1:${r1.port}/v3`, [R2]: `ws://127.0.0.1:${r2.port}/v3`, [R3]: `ws://127.0.0.1:${r3.port}/v3` });
+      const userId = (await u.ok(["init", "--name", "eve", "--relay", R1, "--yes"])).userId as string;
+      await u.ok(["relays", "add", R2]);
+      await u.ok(["relays", "add", R3]);
+      const stale = await heldHead(u);
+      let app = await u.app();
+      await app.load();
+      const staleVersions = [...(await app.store.getIdentity(userId))!.versions];
+      await app.close();
+      for (let i = 0; i < 5; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+      const newest = await heldHead(u);
+      app = await u.app();
+      await app.load();
+      await app.store.updateIdentity(userId, (cur) => ({ next: { ...cur!, versions: staleVersions }, result: undefined }));
+      await app.close();
+      expect((await heldHead(u)).hash).toBe(stale.hash);
+
+      const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+      const forge = () => createIdentityDoc(ik, { ver: stale.ver + 1, prev: b64uEncode(randomBytes(32)), name: "eve", relays: [R1, R2, R3], devices: [keysOf(u).did], keyholders: [keysOf(u).did], by: keysOf(u).did, iat: nowSec() - 5 });
+      const byHash = new Map(staleVersions.map((j) => [jwsHash(j), j]));
+      const real = globalThis.fetch;
+      const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+      const id = `/v3/identity/${encodeURIComponent(userId)}/`;
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+        if (url.pathname.startsWith(id) && url.port === String(r2.port)) {
+          return url.pathname.endsWith("/tips") ? json({ tips: Array.from({ length: 8 }, forge) }) : json({ docs: Array.from({ length: 64 }, forge) });
+        }
+        if (url.pathname.startsWith(id) && url.port === String(r3.port)) {
+          if (url.pathname.endsWith("/tips")) return json({ tips: [stale.jws] });
+          const docs: string[] = [];
+          for (let j = byHash.get(url.searchParams.get("to") ?? ""); j && docs.length < 64; j = byHash.get(String(peekIdentityDoc(j).prev))) docs.push(j);
+          return json({ docs });
+        }
+        return real(input, init);
+      });
+      const r = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+      vi.restoreAllMocks();
+      const tips = ((await (await fetch(`http://127.0.0.1:${r1.port}/v3/identity/${encodeURIComponent(userId)}/tips`)).json()) as { tips: string[] }).tips.map((t) => peekIdentityDoc(t));
+      // Never a fork of the owner's chain on R1, and nothing published on the stale head.
+      expect(tips).toHaveLength(1);
+      if (r.code === 0) {
+        expect(tips[0].rotation).toBeDefined();
+        expect(tips[0].ver).toBe(newest.ver + 1);
+        expect(tips[0].prev).toBe(newest.hash);
+      } else {
+        expect(tips[0].hash).toBe(newest.hash);
+        expect(r.json.error).toBe("refresh_failed");
+      }
+    } finally {
+      await r3.close();
+    }
   }, 180_000);
 });

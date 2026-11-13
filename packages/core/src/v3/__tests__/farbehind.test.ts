@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import { createIdentityDoc, IdentityChain, MAX_WALK_ANCHORS, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
-import { addIdentityVersion, getIdentityView, refreshIdentity, unconnectedRelaysOf, type IdentityFetcher } from "../state.js";
+import { addIdentityVersion, getIdentityView, refreshIdentity, unconnectedRelaysOf, unconnectedVersionsOf, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { b64uEncode } from "../../encoding.js";
 import { randomBytes } from "../../crypto.js";
@@ -250,5 +250,59 @@ describe("#67: a refresh names the relays that sent versions it couldn't connect
     };
     const e = await refreshIdentity(await storeWith(u.docs), u.userId, fetcher, { now: NOW, relays: u.relays }).catch((x: unknown) => x);
     expect(unconnectedRelaysOf(e)).toEqual([RELAYS[1]]);
+  });
+});
+
+describe("#67 review F1: a relay serving forgeries can't get an honest relay named, or use up the walk", () => {
+  // The review's proof of concept. This device holds v1..v5; another of the owner's devices published v6..v10.
+  // Honest A holds v10, honest-but-lagging B holds v5, and H (an identity-key holder) answers with fresh forged
+  // ver-6 versions whose parents nobody holds: 8 tips, and 64 to every chain request.
+  const [A, B, H] = ["wss://a.example/v3", "wss://b.example/v3", "wss://h.example/v3"];
+  function setup() {
+    const u = makeUser("alice");
+    for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 900 + i });
+    const held = [...u.docs];
+    for (let i = 0; i < 5; i++) u.publish({ iat: NOW - 500 + i });
+    const forge = () =>
+      createIdentityDoc(u.ik, { ver: 6, prev: b64uEncode(randomBytes(32)), name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 50 });
+    const f: IdentityFetcher = {
+      tips: async (_u, rs) => (rs[0] === A ? [u.doc.jws] : rs[0] === B ? [held[held.length - 1].jws] : Array.from({ length: 8 }, forge)),
+      chain: async (uid, rs, to, n) => (rs[0] === A ? walkFrom(u.docs)(uid, rs, to, n) : rs[0] === B ? walkFrom(held)(uid, rs, to, n) : Array.from({ length: 64 }, forge)),
+    };
+    return { u, held, f };
+  }
+
+  it("A's genuine gap is still asked for (turns), the head reaches v10, and only H can be named", async () => {
+    const { u, held, f } = setup();
+    for (const checkMs of [2000, 50]) {
+      const store = await storeWith(held);
+      const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [A, B, H], checkMs }).catch((e: Error) => e);
+      if (v instanceof Error) {
+        expect(unconnectedRelaysOf(v)).not.toContain(A);
+        expect(unconnectedRelaysOf(v)).not.toContain(B);
+      } else {
+        expect(v.head.hash).toBe(u.doc.hash);
+        expect(v.unconnectedRelays ?? []).not.toContain(A);
+        expect(v.unconnectedRelays ?? []).not.toContain(B);
+      }
+      expect((await getIdentityView(store, u.userId, { now: NOW, ignorePending: true }))!.head.hash).toBe(u.doc.hash);
+    }
+  });
+
+  it("an honest relay whose genuine gap the walk didn't reach is never named, and its version is reported with its sender", async () => {
+    // Without H, but the walk can't reach A's gap at all (the request cap is spent elsewhere: here, no chain
+    // request is answered for it in time). A's v10 is listed as unconnected, sent by A; A isn't named.
+    const { u, held } = setup();
+    const hang = () => new Promise<string[]>(() => {});
+    const f: IdentityFetcher = {
+      tips: async (_u, rs) => (rs[0] === A ? [u.doc.jws] : [held[held.length - 1].jws]),
+      chain: async (uid, rs, to, n) => (rs[0] === A ? hang() : walkFrom(held)(uid, rs, to, n)),
+    };
+    const store = await storeWith(held);
+    const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [A, B], fetchTimeoutMs: 50 }).catch((e: Error) => e);
+    const named = v instanceof Error ? unconnectedRelaysOf(v) : (v.unconnectedRelays ?? []);
+    const versions = v instanceof Error ? unconnectedVersionsOf(v) : (v.unconnectedVersions ?? []);
+    expect(named).toEqual([]);
+    expect(versions).toContainEqual({ ver: 10, relays: [A] });
   });
 });

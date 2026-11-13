@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 d3917991737b380e
+// @peer2peer/core 0.1.1 3d21f7a941e2d618
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -10282,6 +10282,10 @@ async function jumpIdentity(store2, jws, opts = {}) {
     return { next: chain.toStored(), result: doc };
   });
 }
+function unconnectedVersionsOf(e) {
+  const v = e?.unconnectedVersions;
+  return Array.isArray(v) ? v : [];
+}
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
@@ -10444,7 +10448,9 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const walkUnchecked = /* @__PURE__ */ new Set();
   const walkSupplied = /* @__PURE__ */ new Set();
   let lastAsked = 0;
-  const fetchEach = async (f, keep, walk = false) => {
+  const askedFor = /* @__PURE__ */ new Map();
+  const noteAsked = (need, r) => (askedFor.get(need) ?? askedFor.set(need, /* @__PURE__ */ new Set()).get(need)).add(r);
+  const fetchEach = async (f, keep, walk = false, need) => {
     const asked = walk ? relays.filter((r) => !spent(r)) : relays;
     if (walk)
       lastAsked = asked.length;
@@ -10455,6 +10461,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       for (const { r, res } of answers)
         if (res !== void 0)
           answeredRelays.add(r);
+    }
+    if (need !== void 0) {
+      for (const { r, res } of answers)
+        if (res !== void 0)
+          noteAsked(need, r);
     }
     const quota = Math.floor((maxDocs - examined) / relays.length);
     if (!walk && quota <= 0) {
@@ -10495,17 +10506,32 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const held2 = new Set(gaps.map((g) => g.d.hash));
     return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
   };
+  const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
+  let turn = 0;
+  const pick = (open3) => {
+    const live = open3.filter((g) => !dead.has(g.need));
+    const owners = relays.length + 1;
+    for (let i = 0; i < owners; i++) {
+      const o = (turn + i) % owners;
+      const mine = live.find((g) => o < relays.length ? sentBy.get(relays[o])?.has(g.d.hash) : !sentByAny(g.d.hash));
+      if (mine) {
+        turn = (o + 1) % owners;
+        return mine;
+      }
+    }
+    return void 0;
+  };
   let requests = 0;
   let stalled = false;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     const open3 = frontier();
-    const next = open3.find((g) => !dead.has(g.need));
+    const next = pick(open3);
     if (!next) {
       stalled = open3.length > 0;
       break;
     }
     wanted = new Set(open3.map((g) => g.need));
-    const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
+    const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
       if (lastAsked === 0) {
         stalled = true;
@@ -10520,11 +10546,16 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   let probeUnanswered = false;
   const probed = relays.filter(spent);
-  if (chainOf && stalled && gaps.length > 0 && probed.length > 0) {
+  const capped = requests >= CHAIN_WALK_MAX_REQUESTS;
+  if (chainOf && (stalled || capped) && gaps.length > 0 && probed.length > 0) {
     wanted = /* @__PURE__ */ new Set();
-    for (const g of frontier().slice(0, WALK_PROBE_GAPS)) {
+    const open3 = frontier();
+    const toProbe = [...open3.filter((g) => !dead.has(g.need)).slice(0, WALK_PROBE_GAPS), ...open3.filter((g) => dead.has(g.need)).slice(0, WALK_PROBE_GAPS)];
+    for (const g of toProbe) {
       const answers = await Promise.all(probed.map(async (r) => ({ r, res: await withTimeout(chainOf(userId, [r], g.need, CHAIN_WALK_PAGE), timeoutMs) })));
       for (const { r, res } of answers) {
+        if (res !== void 0)
+          noteAsked(g.need, r);
         if (res === void 0 && walkSupplied.has(r))
           probeUnanswered = true;
         for (const h of admit(forRelay(res, r), CHAIN_WALK_PAGE, 0, true, 0).unchecked)
@@ -10535,13 +10566,14 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const walkCut = requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || gaps.some((g) => walkUnchecked.has(g.need));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
-  const unconnectedRelays = () => {
-    const left = new Set(gaps.map((g) => g.d.hash));
-    return relays.filter((r) => [...sentBy.get(r) ?? []].some((h) => left.has(h)));
+  const unconnectedRelays = () => relays.filter((r) => gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAny(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))));
+  const unconnectedVersions = () => {
+    const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
+    return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
   const broken = (msg) => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays() });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() });
     throw e;
   };
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
@@ -10601,7 +10633,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
   if (incomplete)
-    return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays() };
+    return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() };
   await store2.deleteProvisional(userId);
   if (majority)
     await store2.markRefreshed(userId, now);
@@ -26989,8 +27021,9 @@ var init_app = __esm({
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
             const unconnected = unconnectedRelaysOf(e);
-            const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, opts.setAside, refreshFrom) : void 0;
-            if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, userId)}`);
+            const versions = unconnectedVersionsOf(e);
+            const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
+            if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
             v = own;
           } else {
             if (e.reason === "chain-broken" && held2 && !opts.quiet) {
@@ -27004,8 +27037,8 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], opts.setAside, refreshFrom);
-          if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], userId)}`);
+          const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+          if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
           v = own;
         }
         const now = Date.now();
@@ -27013,11 +27046,20 @@ var init_app = __esm({
         if (last === void 0 || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: void 0 }));
         return v;
       }
-      /** For a strict refresh of our own identity that failed: which relays sent versions that don't connect, and what to do. */
-      unconnectedHint(unconnected, userId) {
-        if (userId !== this.keys?.userId || unconnected.length === 0) return "";
-        const one = unconnected.length === 1;
-        return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+      /**
+       * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
+       * core named (#67 review F1): each sent a version whose missing parent every relay was asked for and none had,
+       * so nothing a device of ours published would be there. Otherwise only which relays sent the newer versions.
+       */
+      unconnectedHint(unconnected, versions, userId) {
+        if (userId !== this.keys?.userId) return "";
+        if (unconnected.length > 0) {
+          const one = unconnected.length === 1;
+          return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+        }
+        const from = [...new Set(versions.flatMap((x) => x.relays))];
+        if (from.length === 0) return "";
+        return `. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
       }
       /**
        * #67: a strict refresh of our OWN identity couldn't confirm the head over every listed relay. Before an
@@ -27039,9 +27081,15 @@ var init_app = __esm({
        *  - What is published is still head.ver + 1 on the head the kept relays confirmed: a relay left out can't
        *    make it lower, or make it fork from anything but what those relays serve.
        *  - Nothing is left out when no relay would be left; the kept relays' refresh must reach one of them.
+       *  - #67 review F1: core names a relay only for versions on a dead gap (asked of every relay, held by
+       *    none), never one whose genuine gap the walk merely didn't reach. And the confirmed head must not be
+       *    below any version the full refresh left unconnected, unless every relay that sent that version is set
+       *    aside: a lagging kept relay can't "confirm" a stale head while another relay serves a newer version.
+       *    (Pending heads stored by earlier refreshes can't be traced to a relay; a relay still serving a newer
+       *    version shows it in this refresh.)
        * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
        */
-      async ownStrictFallback(userId, list, unconnected, setAside2, refreshFrom) {
+      async ownStrictFallback(userId, list, unconnected, versions, setAside2, refreshFrom) {
         if (!setAside2 || userId !== this.keys?.userId) return void 0;
         const aside = new Set([...setAside2.relays ?? [], ...setAside2.unconnected ? unconnected : []].filter((r) => list.includes(r)));
         const rest = list.filter((r) => !aside.has(r));
@@ -27054,6 +27102,7 @@ var init_app = __esm({
           throw e;
         }
         if (v.incomplete) return void 0;
+        if (versions.some((x) => x.ver > v.head.ver && (x.relays.length === 0 || x.relays.some((r) => !aside.has(r))))) return void 0;
         const forged = unconnected.filter((r) => aside.has(r));
         if (forged.length > 0) {
           const one = forged.length === 1;

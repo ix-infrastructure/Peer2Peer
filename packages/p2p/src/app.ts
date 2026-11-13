@@ -33,6 +33,8 @@ import {
   scheduledWriter,
   refreshIdentity as coreRefreshIdentity,
   unconnectedRelaysOf,
+  unconnectedVersionsOf,
+  type UnconnectedVersion,
   type IdentityFetcher,
   IdentityChain,
   identityKeyFromSeed,
@@ -588,8 +590,9 @@ export class App {
       // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
       if (opts.strict) {
         const unconnected = unconnectedRelaysOf(e);
-        const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, opts.setAside, refreshFrom) : undefined;
-        if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, userId)}`);
+        const versions = unconnectedVersionsOf(e);
+        const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
+        if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
         v = own;
       } else {
         if (e.reason === "chain-broken" && held && !opts.quiet) {
@@ -604,8 +607,8 @@ export class App {
         if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
         return held;
       }
-      const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], opts.setAside, refreshFrom);
-      if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], userId)}`);
+      const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+      if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
       v = own;
     }
     // Recorded moments ago by another p2p process of this home (a watch and a command refresh
@@ -617,11 +620,20 @@ export class App {
     return v;
   }
 
-  /** For a strict refresh of our own identity that failed: which relays sent versions that don't connect, and what to do. */
-  private unconnectedHint(unconnected: readonly string[], userId: string): string {
-    if (userId !== this.keys?.userId || unconnected.length === 0) return "";
-    const one = unconnected.length === 1;
-    return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+  /**
+   * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
+   * core named (#67 review F1): each sent a version whose missing parent every relay was asked for and none had,
+   * so nothing a device of ours published would be there. Otherwise only which relays sent the newer versions.
+   */
+  private unconnectedHint(unconnected: readonly string[], versions: readonly UnconnectedVersion[], userId: string): string {
+    if (userId !== this.keys?.userId) return "";
+    if (unconnected.length > 0) {
+      const one = unconnected.length === 1;
+      return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+    }
+    const from = [...new Set(versions.flatMap((x) => x.relays))];
+    if (from.length === 0) return "";
+    return `. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
   }
 
   /**
@@ -644,12 +656,19 @@ export class App {
    *  - What is published is still head.ver + 1 on the head the kept relays confirmed: a relay left out can't
    *    make it lower, or make it fork from anything but what those relays serve.
    *  - Nothing is left out when no relay would be left; the kept relays' refresh must reach one of them.
+   *  - #67 review F1: core names a relay only for versions on a dead gap (asked of every relay, held by
+   *    none), never one whose genuine gap the walk merely didn't reach. And the confirmed head must not be
+   *    below any version the full refresh left unconnected, unless every relay that sent that version is set
+   *    aside: a lagging kept relay can't "confirm" a stale head while another relay serves a newer version.
+   *    (Pending heads stored by earlier refreshes can't be traced to a relay; a relay still serving a newer
+   *    version shows it in this refresh.)
    * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
    */
   private async ownStrictFallback(
     userId: string,
     list: readonly string[],
     unconnected: readonly string[],
+    versions: readonly UnconnectedVersion[],
     setAside: SetAside | undefined,
     refreshFrom: (rs: readonly string[]) => Promise<RefreshedView>,
   ): Promise<RefreshedView | undefined> {
@@ -665,7 +684,8 @@ export class App {
       throw e;
     }
     if (v.incomplete) return undefined;
-    // §2.5 compromise detection: say so, whatever the user goes on to do.
+    if (versions.some((x) => x.ver > v.head.ver && (x.relays.length === 0 || x.relays.some((r) => !aside.has(r))))) return undefined;
+    // §2.5 compromise detection: say so, whatever the user goes on to do (only for relays core named, F1).
     const forged = unconnected.filter((r) => aside.has(r));
     if (forged.length > 0) {
       const one = forged.length === 1;
