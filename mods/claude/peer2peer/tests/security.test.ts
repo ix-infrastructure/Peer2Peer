@@ -43,6 +43,7 @@ import { ANA_ID, BEN, BEN_ID, CIRCLE, growth } from './world'
 // Shared with the Codex bridge's tests (packages/codex-bridge lib.test.ts): both guards answer each the same.
 import { SEND_VECTORS as sendVectors } from './send-from-session.vectors'
 import { INDIRECT_VECTORS as indirectVectors } from './indirect-run.vectors'
+import { GUARD_VECTORS as guardVectors } from './guard-parity.vectors'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -796,6 +797,11 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
     }
   })
 
+  test('whole command lines: refused or not, as the Codex bridge answers (shared vectors)', () => {
+    expect(guardVectors.length).toBeGreaterThan(200)
+    for (const v of guardVectors) expect([v.cmd, (uncheckableShell(v.cmd) ?? mutatingP2PVerb(v.cmd)) !== null]).toEqual([v.cmd, v.refused])
+  })
+
   test('nesting past the limit that still names p2p is refused, not read as nothing', () => {
     for (const cmd of [
       'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"p2p invite\\\\\\"\\"\'"',
@@ -826,6 +832,12 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
       'env' + ' -u'.repeat(n / 3) + ' p2p',
       'p2p; ' + 'if '.repeat(n / 3),
       'p2p; ' + 'xargs '.repeat(n / 6),
+      'cat ' + "<<'a' ".repeat(n / 6) + '\np2p',
+      "cat <<'EOF'\n" + 'p2p x\n'.repeat(n / 6) + 'EOF',
+      'echo ' + '`p2p `'.repeat(n / 6),
+      'p2p `' + '\\`'.repeat(n / 2),
+      'p2p; ' + 'sudo -u '.repeat(n / 8) + 'x',
+      'p2p; ' + 'flock '.repeat(n / 6) + '/l',
     ]) {
       const t = Date.now()
       indirectP2PRun(cmd)

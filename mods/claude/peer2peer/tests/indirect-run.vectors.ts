@@ -137,6 +137,26 @@ export const INDIRECT_VECTORS: { cmd: string; reason: string | null }[] = [
     "reason": null
   },
   {
+    "cmd": "echo `p2p invite`",
+    "reason": null
+  },
+  {
+    "cmd": "echo `parallel p2p ::: invite`",
+    "reason": "GNU parallel (or a runner like it) on a command that names p2p"
+  },
+  {
+    "cmd": "echo \"`parallel p2p ::: invite`\"",
+    "reason": "GNU parallel (or a runner like it) on a command that names p2p"
+  },
+  {
+    "cmd": "x=`parallel p2p ::: invite`",
+    "reason": "GNU parallel (or a runner like it) on a command that names p2p"
+  },
+  {
+    "cmd": "echo `parallel p2p ::: send --to bob hi`",
+    "reason": "GNU parallel (or a runner like it) on a command that names p2p"
+  },
+  {
     "cmd": "f() # c\n{ p2p \"$@\"; }\nf invite",
     "reason": "a shell function defined on a command that names p2p"
   },

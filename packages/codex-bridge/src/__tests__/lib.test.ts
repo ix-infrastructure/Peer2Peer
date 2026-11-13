@@ -281,10 +281,16 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
     expect(vectors.length).toBeGreaterThan(25);
     for (const v of vectors) {
       expect([v.cmd, indirectP2PRun(v.cmd)]).toEqual([v.cmd, v.reason]);
-      // Wired into the PreToolUse guard: refused (this session's own id, so only the new check can refuse a send).
+      // Wired into the PreToolUse guard: refused. (Whole-line answers, refused or not, are guard-parity.vectors.ts.)
       if (v.reason) expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, true]);
-      else expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1")]).toEqual([v.cmd, null]);
     }
+  });
+
+  it("refuses whole command lines as the mod does (vectors shared with the mod)", () => {
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/guard-parity.vectors.ts", import.meta.url), "utf8");
+    const vectors = JSON.parse(file.slice(file.indexOf("= [") + 2)) as { cmd: string; refused: boolean }[];
+    expect(vectors.length).toBeGreaterThan(200);
+    for (const v of vectors) expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, v.refused]);
   });
 
   it("refuses nesting past the limit that still names p2p", () => {
@@ -326,6 +332,12 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
       "env" + " -u".repeat(n / 3) + " p2p",
       "p2p; " + "if ".repeat(n / 3),
       "p2p; " + "xargs ".repeat(n / 6),
+      "cat " + "<<'a' ".repeat(n / 6) + "\np2p",
+      "cat <<'EOF'\n" + "p2p x\n".repeat(n / 6) + "EOF",
+      "echo " + "`p2p `".repeat(n / 6),
+      "p2p `" + "\\`".repeat(n / 2),
+      "p2p; " + "sudo -u ".repeat(n / 8) + "x",
+      "p2p; " + "flock ".repeat(n / 6) + "/l",
     ]) {
       const t = Date.now();
       indirectP2PRun(cmd);

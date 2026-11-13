@@ -27786,8 +27786,11 @@ function envSplitString(words, from) {
   return null;
 }
 var ARG_RUNNERS = /* @__PURE__ */ new Set(["parallel", "sem", "parset", "rush", "xjobs"]);
-var LEAD_WORDS = /* @__PURE__ */ new Set(["{", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "exec", "command", "builtin", "eval", "sudo", "doas", "env", "nice", "nohup", "timeout", "stdbuf", "xargs"]);
-var TEXT_ARGS = /* @__PURE__ */ new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "git", "cat", "head", "tail", "wc", "diff", "jq", "tee", "less", "more"]);
+var XARGS = /* @__PURE__ */ new Set(["xargs", "gxargs"]);
+var LEAD_WORDS = /* @__PURE__ */ new Set(["{", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "exec", "command", "builtin", "eval", "sudo", "doas", "env", "nice", "nohup", "timeout", "stdbuf", "xargs", "gxargs", "busybox", "coproc", "setsid", "flock", "chrt", "taskset", "ionice", "caffeinate", "unshare", "watch"]);
+var VALUE_OPTIONS = /* @__PURE__ */ new Set(["-u", "-g", "-p", "-s", "-k", "-n", "-C", "-c", "-w", "-E", "--user", "--group", "--signal", "--kill-after", "--chdir", "--interval"]);
+var TEXT_ARGS = /* @__PURE__ */ new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "git", "gh", "cat", "head", "tail", "wc", "diff", "jq", "tee", "less", "more"]);
+var XARGS_SHELLS = /* @__PURE__ */ new Set(["sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "eval"]);
 var NAME_STORES = ["functions[", "aliases[", "galiases[", "saliases[", "dis_functions[", "dis_aliases[", "BASH_ALIASES[", "BASH_ALIASES=", "BASH_ALIASES+=", "BASH_CMDS[", "BASH_CMDS=", "BASH_CMDS+="];
 var MAX_NESTING = 4;
 var NESTED = "a command nested too deeply to check, that names p2p";
@@ -27834,6 +27837,119 @@ function unquoted(text2) {
   }
   return out.join("");
 }
+function backticks(text2) {
+  const out = [];
+  let q = "";
+  for (let i = 0; i < text2.length; i++) {
+    const c = text2[i];
+    if (q === "'") {
+      if (c === "'")
+        q = "";
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (q === "$") {
+      if (c === "'")
+        q = "";
+      continue;
+    }
+    if (c === "`") {
+      let j = i + 1;
+      while (j < text2.length && text2[j] !== "`")
+        j += text2[j] === "\\" ? 2 : 1;
+      out.push(text2.slice(i + 1, Math.min(j, text2.length)));
+      i = j;
+      continue;
+    }
+    if (q === '"') {
+      if (c === '"')
+        q = "";
+      continue;
+    }
+    if (c === "$" && text2[i + 1] === "'") {
+      q = "$";
+      i++;
+    } else if (c === "'" || c === '"')
+      q = c;
+  }
+  return out;
+}
+function blankHeredocs(text2, unq) {
+  const out = text2.split("");
+  let lineStart = 0;
+  let lineWord = "";
+  let wordFor = -1;
+  let pos = 0;
+  let i = 0;
+  for (; ; ) {
+    const at = unq.indexOf("<<", i);
+    if (at < 0)
+      break;
+    while (pos < at) {
+      if (text2[pos] === "\n")
+        lineStart = pos + 1;
+      pos++;
+    }
+    if (unq[at + 2] === "<") {
+      i = at + 3;
+      continue;
+    }
+    let j = at + 2;
+    const dash = text2[j] === "-";
+    if (dash)
+      j++;
+    while (text2[j] === " " || text2[j] === "	")
+      j++;
+    const q = text2[j] === "'" || text2[j] === '"' ? text2[j] : "";
+    if (q)
+      j++;
+    const from = j;
+    while (j < text2.length && /[\w-]/.test(text2[j]))
+      j++;
+    const delim = text2.slice(from, j);
+    if (q && text2[j] === q)
+      j++;
+    i = Math.max(j, at + 2);
+    if (!q || delim === "")
+      continue;
+    if (wordFor !== lineStart) {
+      let s2 = lineStart;
+      while (text2[s2] === " " || text2[s2] === "	")
+        s2++;
+      let e = s2;
+      while (e < text2.length && !" 	\n;&|<>".includes(text2[e]))
+        e++;
+      lineWord = (text2.slice(s2, e).split(/[\\/]/).pop() ?? "").toLowerCase();
+      wordFor = lineStart;
+    }
+    const nl = text2.indexOf("\n", j);
+    if (nl < 0)
+      break;
+    let k = nl + 1;
+    while (k <= text2.length) {
+      let e = text2.indexOf("\n", k);
+      if (e < 0)
+        e = text2.length;
+      let s2 = k;
+      if (dash)
+        while (text2[s2] === "	")
+          s2++;
+      if (text2.slice(s2, e) === delim)
+        break;
+      if (TEXT_ARGS.has(lineWord))
+        for (let x = k; x < e; x++)
+          out[x] = " ";
+      k = e + 1;
+    }
+    i = Math.max(i, k);
+    pos = Math.max(pos, Math.min(k, text2.length));
+    lineStart = Math.min(k, text2.length);
+  }
+  return out.join("");
+}
 function definesFunction(text2) {
   const blank = (c) => c === " " || c === "	";
   for (let i = 0; i < text2.length; i++) {
@@ -27871,13 +27987,27 @@ function definesFunction(text2) {
   return false;
 }
 function indirectP2PRun(command, depth = 0) {
-  if (definesFunction(unquoted(command)))
+  const unq = unquoted(command);
+  const data = command.includes("<<") ? blankHeredocs(command, unq) : command;
+  if (definesFunction(data === command ? unq : unquoted(data)))
     return "a shell function defined on a command that names p2p";
+  for (const inner of backticks(data)) {
+    if (!mentionsP2P(inner))
+      continue;
+    if (depth + 1 >= MAX_NESTING)
+      return NESTED;
+    const found = indirectP2PRun(inner, depth + 1);
+    if (found)
+      return found;
+  }
   const starts = /* @__PURE__ */ new Set();
-  const words = shellTokens(command, false, void 0, starts);
+  const words = shellTokens(data, false, void 0, starts);
   const named = [];
   const expands = [];
   const count2 = [];
+  const inline = [];
+  const files = [];
+  const shells = [];
   for (let i = 0, s2 = -1; i < words.length; i++) {
     if (starts.has(i) || s2 < 0)
       s2++;
@@ -27886,12 +28016,20 @@ function indirectP2PRun(command, depth = 0) {
       named[s2] = true;
     if (w.includes("$") || w.includes("`"))
       expands[s2] = true;
+    if (w === ":::")
+      inline[s2] = true;
+    if (w === "::::" || w === "-a" || w === "--arg-file" || w.startsWith("--arg-file="))
+      files[s2] = true;
+    if (XARGS_SHELLS.has((w.split(/[\\/]/).pop() ?? w).toLowerCase()))
+      shells[s2] = true;
     count2[s2] = (count2[s2] ?? 0) + 1;
   }
   let seg = -1;
   let lead = true;
   let cliSeen = false;
   let text2 = false;
+  let value = false;
+  let lockFile = false;
   for (let i = 0; i < words.length; i++) {
     const w = words[i] ?? "";
     if (starts.has(i) || seg < 0) {
@@ -27899,23 +28037,31 @@ function indirectP2PRun(command, depth = 0) {
       lead = true;
       cliSeen = false;
       text2 = false;
+      value = false;
+      lockFile = false;
     }
     const base = (w.split(/[\\/]/).pop() ?? w).toLowerCase();
-    if (lead) {
-      const dot = base.indexOf(".");
-      const name2 = dot > 0 ? base.slice(0, dot) : base;
-      const marked = named[seg] === true || expands[seg] === true;
+    const dot = base.indexOf(".");
+    const name2 = dot > 0 ? base.slice(0, dot) : base;
+    const marked = named[seg] === true || expands[seg] === true;
+    const runner = ARG_RUNNERS.has(name2) || XARGS.has(name2);
+    if (lead && value && !runner) {
+      value = false;
+    } else if (lead) {
+      value = false;
       if (NAME_STORES.some((p) => w.startsWith(p)))
         return "a shell alias or function defined on a command that names p2p";
+      if (w.startsWith("PROMPT_COMMAND=") && mentionsP2P(w))
+        return "a shell hook (PROMPT_COMMAND) that names p2p";
       if (base === "function")
         return "a shell function defined on a command that names p2p";
       if (base === "alias" && marked)
         return "a shell alias defined on a command that names p2p";
       if (base === "hash" && marked)
         return "a hashed command name on a command that names p2p";
-      if (ARG_RUNNERS.has(name2) && marked)
+      if (ARG_RUNNERS.has(name2) && (marked || name2 !== "sem" && (!inline[seg] || files[seg])))
         return "GNU parallel (or a runner like it) on a command that names p2p";
-      if (name2 === "xargs" && marked)
+      if (XARGS.has(name2) && (marked || shells[seg]))
         return "xargs on a command that names p2p";
       if (base === "eval" && named[seg] && expands[seg])
         return "eval of text built at run time, on a command that names p2p";
@@ -27923,10 +28069,18 @@ function indirectP2PRun(command, depth = 0) {
         return "a sourced script on a command that names p2p";
       if ((w.startsWith("$") || w.startsWith("`")) && w !== "$P2P_BIN" && w !== "${P2P_BIN}")
         return "a command word built at run time on a command that names p2p";
-      if (!(w.indexOf("=") > 0 || LEAD_WORDS.has(base) || w.startsWith("-") || w !== "" && [...w].every((ch) => ch >= "0" && ch <= "9"))) {
+      if (base === "flock")
+        lockFile = true;
+      if (VALUE_OPTIONS.has(w))
+        value = true;
+      else if (lockFile && base !== "flock" && !w.startsWith("-") && !runner)
+        lockFile = false;
+      else if (!(w.indexOf("=") > 0 || LEAD_WORDS.has(base) || w.startsWith("-") || w !== "" && [...w].every((ch) => ch >= "0" && ch <= "9"))) {
         lead = false;
         text2 = TEXT_ARGS.has(base);
       }
+    } else if (!text2 && !cliSeen && marked && runner) {
+      return ARG_RUNNERS.has(name2) ? "GNU parallel (or a runner like it) on a command that names p2p" : "xargs on a command that names p2p";
     }
     if (cliWord(w))
       cliSeen = true;
@@ -27941,6 +28095,7 @@ function indirectP2PRun(command, depth = 0) {
   }
   return null;
 }
+var STRING_RUNNERS = /* @__PURE__ */ new Set(["trap", "su", "complete", "ssh", "watch"]);
 function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep) {
   if (depth > 3) {
     if (deep && mentionsP2P(command))
@@ -27966,6 +28121,11 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
           return found;
       }
       if (base === "eval") {
+        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
+        if (found)
+          return found;
+      }
+      if (STRING_RUNNERS.has(base)) {
         const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
         if (found)
           return found;
@@ -28918,7 +29078,7 @@ function hidesCommand(command) {
 }
 var MAX_GUARDED_COMMAND = 16 * 1024;
 function namesP2PCli(command) {
-  return /(?:^|[\s;&|(/="'`])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
+  return /(?:^|[\s;&|(/="'`{])p2p(?:\.m?js|\.cjs|\.exe|\.cmd)?(?=$|[\s;&|)"'`}])|@peer2peer\/cli|\$\{?P2P_(?:BIN|HOME)\b/i.test(command);
 }
 function boundaryRefusal(command, ownSid) {
   if (/project["'\s,\]]+share/.test(command) && /p2p|peer2peer/i.test(command))
