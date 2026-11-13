@@ -176,7 +176,7 @@ export function buildProgram(deps: ProgramDeps): Command {
         if (deps.personTokenStale) {
           throw new CliError(
             "person_token_stale",
-            `P2P_PERSON_TOKEN isn't this device's person token: ${projects.personTokenFile(app.home)} is replaced when an identity is created or restored here. Read it again and rerun the command (nothing was done)`,
+            `P2P_PERSON_TOKEN isn't this device's person token: ${projects.personTokenFile(app.home)} is replaced when an identity is created or restored here. Nothing was done: read that file again and run the command again. A front end does this itself (in Claude Code, reloading the Peer2Peer plugin also does it)`,
           );
         }
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a

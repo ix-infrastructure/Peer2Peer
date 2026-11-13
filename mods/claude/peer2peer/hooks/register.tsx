@@ -552,12 +552,19 @@ const execOf = (S: Sess, $: EngineInterface): Exec => ({
   spawn: argv => $.process.spawn({ argv, cwd: $.plugin.root, env: withoutToken(p2pEnv(S, $)) }),
   // The CLI refused the cached token (person_token_stale): person.key was replaced when an identity was
   // created or restored on this home (a typed /peers join on a fresh install, a rotation). Read it again.
+  // If it can't be read, the old one is kept (never none for the rest of the session): the next command
+  // tries again.
   refreshPersonToken: async () => {
     const was = S.personToken
     S.personToken = undefined
-    await readPersonToken(S, $)
+    await readPersonToken(S, $).catch(() => {})
+    if (S.personToken === undefined) {
+      S.personToken = was
 
-    return S.personToken !== undefined && S.personToken !== was
+      return false
+    }
+
+    return S.personToken !== was
   },
 })
 

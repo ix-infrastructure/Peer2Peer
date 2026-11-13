@@ -7,13 +7,13 @@
 // The test users' homes are seeded with a person.key before any identity exists: exactly the
 // planted key of the issue.
 
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../cli.js";
 import { linkJoin, linkStart } from "../identity.js";
-import { personTokenFile, personTokenOk, renewPersonToken } from "../projects.js";
+import { identityHere, personTokenFile, personTokenOk, renewPersonToken } from "../projects.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-person-token.test/v3";
@@ -163,5 +163,34 @@ describe("the person token is replaced when an identity is created or restored (
     expect(readFileSync(personTokenFile(home), "utf8")).toBe(d);
     // No temporary file is left beside it.
     expect(readdirSync(join(home, "cli"))).toEqual(["person.key"]);
+  });
+
+  it("the token is replaced before any key is written: when it can't be, no identity is made (and keys alone aren't one)", async () => {
+    // A person.key that can't be replaced (as an immutable file on macOS, or one Windows keeps locked): a
+    // directory holding a folder this user can't empty.
+    const u = mk("pt-stuck");
+    rmSync(personTokenFile(u.home));
+    const locked = join(personTokenFile(u.home), "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "x"), "x");
+    chmodSync(locked, 0o500);
+    try {
+      const r = await u.run(["init", "--name", "ptstuck", "--relay", R, "--yes"]);
+      expect(r.code).toBe(1);
+      expect(r.json.error).toBe("conflict");
+      expect(existsSync(join(u.home, "cli", "keys.json"))).toBe(false);
+      expect(identityHere(u.home)).toBe(false);
+      expect(readdirSync(join(u.home, "cli")).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+    // keys.json without self.json (a creation cut short) isn't an identity for the gates either.
+    const h = mkdtempSync(join(tmpdir(), "p2p-pt-keys-"));
+    dirs.push(h);
+    mkdirSync(join(h, "cli"), { recursive: true });
+    writeFileSync(join(h, "cli", "keys.json"), "{}");
+    expect(identityHere(h)).toBe(false);
+    writeFileSync(join(h, "cli", "self.json"), "{}");
+    expect(identityHere(h)).toBe(true);
   });
 });

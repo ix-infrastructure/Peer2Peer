@@ -267,13 +267,21 @@ describe('project boundaries: the shell guard (H4, H5)', () => {
     // From then on the new one, with no refusal first.
     await slash($, 'peers', 'project share c_team')
     expect(ran(w, 'project', 'share').map(r => r.env?.P2P_PERSON_TOKEN)).toEqual([A, B, B])
-    // No token to read (none could be made): the refusal stands, run once only, and no token is passed after.
+    // The new token can't be read (the script prints nothing): the refusal stands, run once only, says
+    // how to get out of it, and the old token is kept rather than none for the rest of the session.
     options.personToken = ''
     const refused = await slash($, 'peers', 'project share c_team')
     expect(ran(w, 'project', 'share').length).toBe(4)
     expect(refused.text).toContain("isn't this device's person token")
+    expect(refused.text).toContain('check that the person.key file named above exists')
+    expect(refused.text).toContain('reload the Peer2Peer plugin')
     await slash($, 'peers', 'project share c_team')
-    expect(ran(w, 'project', 'share').at(-1)?.env?.P2P_PERSON_TOKEN).toBeUndefined()
+    expect(ran(w, 'project', 'share').at(-1)?.env?.P2P_PERSON_TOKEN).toBe(B)
+    // Readable again: the next command reads it and goes through.
+    const C = 'C'.repeat(43)
+    options.personToken = C
+    await slash($, 'peers', 'project share c_team')
+    expect(ran(w, 'project', 'share').slice(-2).map(r => r.env?.P2P_PERSON_TOKEN)).toEqual([B, C])
   })
 
   test('the held Join reads the person token itself, so it works in a session that has none yet (after /clear or a resume)', async ($, on) => {

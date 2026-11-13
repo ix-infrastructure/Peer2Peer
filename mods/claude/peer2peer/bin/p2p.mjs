@@ -20551,8 +20551,8 @@ async function init(app, opts) {
   const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
   const keys = newKeysDoc(ik.userId, device, cert, ik);
   const self = { name: name2, relays, createdAt: Date.now() };
-  await app.state.put("keys", keys);
   renewPersonToken(app.home);
+  await app.state.put("keys", keys);
   await app.state.put("self", self);
   app.setKeys(keys, self);
   await addIdentityVersion(app.store, doc);
@@ -20910,8 +20910,8 @@ async function linkJoin(app, code2, opts = {}) {
       }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
-      await app.state.put("keys", keys);
       renewPersonToken(app.home);
+      await app.state.put("keys", keys);
       await app.state.put("self", self);
       app.setKeys(keys, self);
       await app.refreshIdentity(userId, opened.doc.relays, { force: true });
@@ -20984,8 +20984,8 @@ async function restoreInto(app, phrase, opts) {
   if (found === 0) {
     const name2 = opts.name ?? defaultName();
     const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
-    await app.state.put("keys", keys);
     renewPersonToken(app.home);
+    await app.state.put("keys", keys);
     await app.state.put("self", { ...self, name: name2 });
     app.setKeys(keys, { ...self, name: name2 });
     await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
@@ -21001,8 +21001,8 @@ async function restoreInto(app, phrase, opts) {
   }
   const existing = await app.refreshIdentity(ik.userId, relays, { force: true, strict: true });
   if (!existing) throw new CliError("refresh_failed", "couldn't fit the relays' identity document");
-  await app.state.put("keys", keys);
   renewPersonToken(app.home);
+  await app.state.put("keys", keys);
   await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
   await app.state.put("self", { ...self, name: existing.head.name, relays: existing.head.relays });
   app.setKeys(keys, { ...self, name: existing.head.name, relays: existing.head.relays });
@@ -21623,8 +21623,8 @@ async function begin(app, opts) {
   await rm2(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
-  await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
   renewPersonToken(home);
+  await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
   await napp.state.put("self", self);
   await napp.load(true);
   await addIdentityVersion(napp.store, doc);
@@ -25841,20 +25841,39 @@ function renewPersonToken(home) {
   const tmp = `${f}.${randomBytes14(6).toString("hex")}.tmp`;
   try {
     writeFileSync10(tmp, t2, { mode: 384, flag: "wx" });
-    try {
-      renameSync8(tmp, f);
-    } catch {
-      rmSync4(f, { recursive: true, force: true });
-      renameSync8(tmp, f);
+    let cleared = false;
+    for (let tries = 0; ; tries++) {
+      try {
+        renameSync8(tmp, f);
+        break;
+      } catch (e) {
+        if (!cleared && isDirectory(f)) {
+          rmSync4(f, { recursive: true, force: true });
+          cleared = true;
+          continue;
+        }
+        if (process.platform === "win32" && RENAME_BUSY.has(e.code ?? "") && tries < 20) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          continue;
+        }
+        throw e;
+      }
     }
   } catch (e) {
     rmSync4(tmp, { force: true });
-    throw new CliError("conflict", `couldn't replace the person token in ${f} (${e.code ?? "error"}): remove it, and the next command makes a new one`);
+    throw new CliError("conflict", `couldn't replace the person token in ${f} (${e.code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
   }
   return t2;
 }
+function isDirectory(p) {
+  try {
+    return lstatSync6(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 function identityHere(home) {
-  return existsSync3(join20(home, "cli", "keys.json"));
+  return existsSync3(join20(home, "cli", "keys.json")) && existsSync3(join20(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -26206,7 +26225,7 @@ function graphPinnedEnv(env, target, base = process.env) {
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
 }
-var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
+var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, RENAME_BUSY, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -26246,6 +26265,7 @@ var init_projects = __esm({
       "CODEX_SESSION_ID"
     ];
     TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+    RENAME_BUSY = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
     OVER_TEXT = {
       projects: `it worked in more than ${MAX_SESSION_PROJECTS} projects`,
       folders: "it worked in more folders than Peer2Peer keeps track of for one session",
@@ -40472,7 +40492,7 @@ function buildProgram(deps) {
       if (deps.personTokenStale) {
         throw new CliError(
           "person_token_stale",
-          `P2P_PERSON_TOKEN isn't this device's person token: ${personTokenFile(app.home)} is replaced when an identity is created or restored here. Read it again and rerun the command (nothing was done)`
+          `P2P_PERSON_TOKEN isn't this device's person token: ${personTokenFile(app.home)} is replaced when an identity is created or restored here. Nothing was done: read that file again and run the command again. A front end does this itself (in Claude Code, reloading the Peer2Peer plugin also does it)`
         );
       }
       if (typeof app.home === "string" && !opts.readOnly) await recoverInterruptedFollow(app.home).catch(() => false);

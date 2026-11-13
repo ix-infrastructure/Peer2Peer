@@ -112,9 +112,10 @@ export async function init(app: App, opts: { name?: string; relays?: string[] })
   const doc = createIdentityDoc(ik, { ver: 1, prev: null, name, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
   const keys = newKeysDoc(ik.userId, device, cert, ik);
   const self: SelfDoc = { name, relays, createdAt: Date.now() };
-  await app.state.put("keys", keys);
   // A person.key from before this identity existed no longer counts (projects.ts renewPersonToken).
+  // Replaced before any key is written: if that fails, no identity is made here.
   renewPersonToken(app.home);
+  await app.state.put("keys", keys);
   await app.state.put("self", self);
   app.setKeys(keys, self);
   await addIdentityVersion(app.store, doc);
@@ -629,8 +630,8 @@ export async function linkJoin(app: App, code: string, opts: { label?: string; m
       }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self: SelfDoc = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
-      await app.state.put("keys", keys);
       renewPersonToken(app.home);
+      await app.state.put("keys", keys);
       await app.state.put("self", self);
       app.setKeys(keys, self);
       await app.refreshIdentity(userId, opened.doc.relays, { force: true });
@@ -744,8 +745,8 @@ async function restoreInto(app: App, phrase: string, opts: { relays?: string[]; 
   if (found === 0) {
     const name = opts.name ?? defaultName();
     const doc = createIdentityDoc(ik, { ver: 1, prev: null, name, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
-    await app.state.put("keys", keys);
     renewPersonToken(app.home);
+    await app.state.put("keys", keys);
     await app.state.put("self", { ...self, name });
     app.setKeys(keys, { ...self, name });
     await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
@@ -762,8 +763,8 @@ async function restoreInto(app: App, phrase: string, opts: { relays?: string[]; 
   // Strict: the head must be confirmed on the relays before building on it.
   const existing = await app.refreshIdentity(ik.userId, relays, { force: true, strict: true });
   if (!existing) throw new CliError("refresh_failed", "couldn't fit the relays' identity document");
-  await app.state.put("keys", keys);
   renewPersonToken(app.home);
+  await app.state.put("keys", keys);
   await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
   await app.state.put("self", { ...self, name: existing.head.name, relays: existing.head.relays });
   app.setKeys(keys, { ...self, name: existing.head.name, relays: existing.head.relays });

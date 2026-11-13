@@ -62,6 +62,8 @@ export interface Exec {
 
 /** The CLI refused the person token it was given before doing anything (packages/p2p/src/cli.ts). */
 const STALE_TOKEN = 'person_token_stale'
+/** What the person does when the token still can't be read again. */
+export const STALE_TOKEN_HINT = "Peer2Peer couldn't read the new person token: check that the person.key file named above exists and is readable by you, then run the command again (or reload the Peer2Peer plugin, or restart Claude Code)"
 
 export type Outcome<T> =
   | { ok: true; value: T; stderr: string }
@@ -106,7 +108,9 @@ export class P2P {
     if (ran.exitCode === 0 && parsed !== null) return { ok: true, value: parsed as T, stderr: ran.stderr }
     const error = typeof parsed?.error === 'string' ? parsed.error : ran.exitCode === 0 ? 'unreadable' : 'failed'
     const last = ran.stderr.trim().split('\n').pop() ?? ''
-    const reason = typeof parsed?.reason === 'string' ? parsed.reason : last || `p2p ${args[0] ?? ''} exited ${ran.exitCode}`
+    const said = typeof parsed?.reason === 'string' ? parsed.reason : last || `p2p ${args[0] ?? ''} exited ${ran.exitCode}`
+    // Still refused after reading the token again (or it couldn't be read): how the person gets out of it.
+    const reason = error === STALE_TOKEN ? `${said}. ${STALE_TOKEN_HINT}` : said
 
     return { ok: false, error, reason: inert(reason), stderr: ran.stderr, ...(parsed ? { value: parsed } : {}) }
   }
