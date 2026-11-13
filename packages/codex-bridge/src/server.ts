@@ -183,10 +183,14 @@ export async function runMcpServer(o: McpOptions): Promise<void> {
   // (the session is registered, its sends are its own). The model's shell never has it.
   // Only `p2p` and `p2p watch` get it (`extra`); childEnv never passes one through (CHILD_P2P_DENY), so
   // `codex queue` and anything else this bridge runs can't.
-  const token = personTokenOf(home);
-  const front = token ? { P2P_PERSON_TOKEN: token } : {};
+  // Read for every run, never kept: the CLI replaces person.key when an identity is created or restored on
+  // this home (a join in the person's terminal while this session runs), and refuses the old one.
+  const front = () => {
+    const token = personTokenOf(home);
+    return token ? { P2P_PERSON_TOKEN: token } : {};
+  };
   // Every `p2p` child runs without project-settable node/loader variables (NODE_OPTIONS, DYLD_*, ...).
-  const p2p = new P2P(nodeExec(childEnv(env, front)), bin);
+  const p2p = new P2P(nodeExec(() => childEnv(env, front())), bin);
   let entry: Entry | null = null;
   const bridge: Bridge = new Bridge({
     p2p,

@@ -20611,6 +20611,7 @@ async function init(app, opts) {
   const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
   const keys = newKeysDoc(ik.userId, device, cert, ik);
   const self = { name: name2, relays, createdAt: Date.now() };
+  renewPersonToken(app.home);
   await app.state.put("keys", keys);
   await app.state.put("self", self);
   app.setKeys(keys, self);
@@ -20969,6 +20970,7 @@ async function linkJoin(app, code2, opts = {}) {
       }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
+      renewPersonToken(app.home);
       await app.state.put("keys", keys);
       await app.state.put("self", self);
       app.setKeys(keys, self);
@@ -21042,6 +21044,7 @@ async function restoreInto(app, phrase, opts) {
   if (found === 0) {
     const name2 = opts.name ?? defaultName();
     const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
+    renewPersonToken(app.home);
     await app.state.put("keys", keys);
     await app.state.put("self", { ...self, name: name2 });
     app.setKeys(keys, { ...self, name: name2 });
@@ -21058,6 +21061,7 @@ async function restoreInto(app, phrase, opts) {
   }
   const existing = await app.refreshIdentity(ik.userId, relays, { force: true, strict: true });
   if (!existing) throw new CliError("refresh_failed", "couldn't fit the relays' identity document");
+  renewPersonToken(app.home);
   await app.state.put("keys", keys);
   await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
   await app.state.put("self", { ...self, name: existing.head.name, relays: existing.head.relays });
@@ -21248,6 +21252,7 @@ var init_identity2 = __esm({
     init_inbound();
     init_circle_ops();
     init_ix_local();
+    init_projects();
     BACKUP_FILE_NAME = "backup-phrase.txt";
     MAGIC = [
       ["png", [137, 80, 78, 71]],
@@ -21678,6 +21683,7 @@ async function begin(app, opts) {
   await rm2(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
+  renewPersonToken(home);
   await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
   await napp.state.put("self", self);
   await napp.load(true);
@@ -22754,6 +22760,7 @@ var init_rotation = __esm({
     init_social();
     init_sync();
     init_identity2();
+    init_projects();
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
     rotationDir = (home) => join19(home, "rotation");
@@ -25184,6 +25191,7 @@ __export(projects_exports, {
   projectView: () => projectView,
   projectsDoc: () => projectsDoc,
   pseudoPath: () => pseudoPath,
+  renewPersonToken: () => renewPersonToken,
   scratchRoot: () => scratchRoot,
   sessionBinding: () => sessionBinding,
   sessionCeiling: () => sessionCeiling,
@@ -25200,7 +25208,7 @@ __export(projects_exports, {
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash8, randomBytes as randomBytes14, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync13, readlinkSync as readlinkSync2, realpathSync as realpathSync5, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync13, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
 import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute9, join as join20, resolve as resolve3, sep as sep3 } from "node:path";
 function sessionWorkdir(env) {
@@ -25886,8 +25894,46 @@ function personToken(home) {
     throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
   }
 }
+function renewPersonToken(home) {
+  const f = personTokenFile(home);
+  mkdirSync10(join20(home, "cli"), { recursive: true, mode: 448 });
+  const t2 = randomBytes14(32).toString("base64url");
+  const tmp = `${f}.${randomBytes14(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync10(tmp, t2, { mode: 384, flag: "wx" });
+    let cleared = false;
+    for (let tries = 0; ; tries++) {
+      try {
+        renameSync8(tmp, f);
+        break;
+      } catch (e) {
+        if (!cleared && isDirectory(f)) {
+          rmSync4(f, { recursive: true, force: true });
+          cleared = true;
+          continue;
+        }
+        if (process.platform === "win32" && RENAME_BUSY.has(e.code ?? "") && tries < 20) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          continue;
+        }
+        throw e;
+      }
+    }
+  } catch (e) {
+    rmSync4(tmp, { force: true });
+    throw new CliError("conflict", `couldn't replace the person token in ${f} (${e.code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
+  }
+  return t2;
+}
+function isDirectory(p) {
+  try {
+    return lstatSync6(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 function identityHere(home) {
-  return existsSync3(join20(home, "cli", "keys.json"));
+  return existsSync3(join20(home, "cli", "keys.json")) && existsSync3(join20(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -26239,7 +26285,7 @@ function graphPinnedEnv(env, target, base = process.env) {
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
 }
-var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
+var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, RENAME_BUSY, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -26279,6 +26325,7 @@ var init_projects = __esm({
       "CODEX_SESSION_ID"
     ];
     TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+    RENAME_BUSY = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
     OVER_TEXT = {
       projects: `it worked in more than ${MAX_SESSION_PROJECTS} projects`,
       folders: "it worked in more folders than Peer2Peer keeps track of for one session",
@@ -28942,7 +28989,7 @@ var TIMEOUT_MS = 3e4;
 function nodeExec(env = process.env) {
   return {
     run: (argv, init2) => new Promise((resolve5, reject) => {
-      const child = spawn(argv[0], argv.slice(1), { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      const child = spawn(argv[0], argv.slice(1), { env: typeof env === "function" ? env() : env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       let stdout = "";
       let stderr = "";
       const timer = setTimeout(() => child.kill("SIGKILL"), init2?.timeoutMs ?? TIMEOUT_MS);
@@ -31993,9 +32040,11 @@ async function runMcpServer(o) {
   if (p2pBin && !isAbsolute3(p2pBin))
     log(`ignored P2P_BIN=${p2pBin}: it must be an absolute path (never looked up through PATH)`);
   const bin = p2pBin && isAbsolute3(p2pBin) ? [p2pBin] : o.bin;
-  const token = personTokenOf(home);
-  const front = token ? { P2P_PERSON_TOKEN: token } : {};
-  const p2p = new P2P(nodeExec(childEnv(env, front)), bin);
+  const front = () => {
+    const token = personTokenOf(home);
+    return token ? { P2P_PERSON_TOKEN: token } : {};
+  };
+  const p2p = new P2P(nodeExec(() => childEnv(env, front())), bin);
   let entry = null;
   const bridge = new Bridge({
     p2p,
@@ -36975,7 +37024,7 @@ init_sessions();
 init_state2();
 init_xstate();
 import { createHash as createHash9, createHmac } from "node:crypto";
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync14, renameSync as renameSync8, writeFileSync as writeFileSync11 } from "node:fs";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync14, renameSync as renameSync9, writeFileSync as writeFileSync11 } from "node:fs";
 import { join as join22 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
@@ -37115,7 +37164,7 @@ function extStore(home, ns) {
       mkdirSync11(dir, { recursive: true, mode: 448 });
       const tmp = `${file}.${process.pid}.tmp`;
       writeFileSync11(tmp, next, { mode: 384 });
-      renameSync8(tmp, file);
+      renameSync9(tmp, file);
     }
   };
 }
@@ -40500,6 +40549,12 @@ function buildProgram(deps) {
     let stop = () => {
     };
     try {
+      if (deps.personTokenStale) {
+        throw new CliError(
+          "person_token_stale",
+          `P2P_PERSON_TOKEN isn't this device's person token: ${personTokenFile(app.home)} is replaced when an identity is created or restored here. Nothing was done: read that file again and run the command again. A front end does this itself (in Claude Code, reloading the Peer2Peer plugin also does it)`
+        );
+      }
       if (typeof app.home === "string" && !opts.readOnly) await recoverInterruptedFollow(app.home).catch(() => false);
       const widening = wideningOf(cmd);
       if (widening) await assertPersonForWidening(app, widening, confirmTty, void 0, { noTokenBeforeIdentity: widening === "link join" });
@@ -41952,9 +42007,10 @@ async function loadInstalled(deps) {
 async function main(argvIn, deps) {
   {
     const env = { ...deps.env };
+    const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
     const front = deps.front === true || takePersonToken(env, resolveHome2(env));
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
-    deps = { ...deps, front, env };
+    deps = { ...deps, front, env, ...given && !front ? { personTokenStale: true } : {} };
   }
   const end = argvIn.indexOf("--");
   const head = end < 0 ? argvIn : argvIn.slice(0, end);

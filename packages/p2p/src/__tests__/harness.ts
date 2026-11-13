@@ -6,7 +6,7 @@
 // exercised too.
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger, createRelayCrypto, makeConfig, MemoryStore, Relay } from "@peer2peer/relay";
@@ -20,6 +20,15 @@ export function personTokenFor(home: string): string {
   mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "cli", "person.key"), t, { mode: 0o600 });
   return t;
+}
+
+/** The person token in `home` now: the CLI replaces person.key when an identity is created or restored there, so it is read again on every use. */
+export function currentPersonToken(home: string): string {
+  try {
+    return readFileSync(join(home, "cli", "person.key"), "utf8").trim();
+  } catch {
+    return "";
+  }
 }
 
 export interface TestRelay {
@@ -70,14 +79,17 @@ export class User {
     readonly extraEnv: Env = {},
   ) {
     this.home = mkdtempSync(join(tmpdir(), `p2p-${name}-`));
-    this.personToken = personTokenFor(this.home);
+    personTokenFor(this.home);
   }
 
   /**
    * The person token (projects.ts) the person's front end passes: these users act as the person. A
    * test about agents builds an env without it (and sets an agent's variables).
    */
-  readonly personToken: string;
+  get personToken(): string {
+    // The home this user's commands run on (a test may point P2P_HOME at another user's).
+    return currentPersonToken(this.extraEnv.P2P_HOME ?? this.home);
+  }
 
   get env(): Env {
     return {

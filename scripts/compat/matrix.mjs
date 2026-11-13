@@ -246,7 +246,9 @@ class Peer {
 
   run(args, stdin) {
     return new Promise((done) => {
-      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { cwd: this.home, env: this.env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
+      // The person token is read again on every run: a current CLI replaces person.key when an identity is created here.
+      const env = { ...this.env, P2P_PERSON_TOKEN: readFileSync(join(this.home, "cli", "person.key"), "utf8").trim() };
+      const child = execFile(process.execPath, [this.bin, ...args, "--json"], { cwd: this.home, env, maxBuffer: 16 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
         this.stderr.push(...String(stderr).split("\n").filter(Boolean).map((l) => `${this.name}: p2p ${args[0]}: ${l}`));
         let json;
         try {

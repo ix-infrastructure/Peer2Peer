@@ -37,6 +37,15 @@ export function personTokenFor(home: string): string {
   return t;
 }
 
+/** The person token in `home` now: the CLI replaces person.key when an identity is created or restored there, so it is read again on every use. */
+export function currentPersonToken(home: string): string {
+  try {
+    return readFileSync(join(home, "cli", "person.key"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 export interface TestRelay {
   url: string;
   port: number;
@@ -150,11 +159,14 @@ export class User {
     readonly extraEnv: Record<string, string> = {},
   ) {
     this.home = tmp(`p2p-${name}-`);
-    this.personToken = personTokenFor(this.home);
+    personTokenFor(this.home);
   }
 
   /** The person token (packages/p2p/src/projects.ts): these users act as the person. */
-  readonly personToken: string;
+  get personToken(): string {
+    // The home this user's commands run on (a test may point P2P_HOME at another user's).
+    return currentPersonToken(this.extraEnv.P2P_HOME ?? this.home);
+  }
 
   get env(): Record<string, string> {
     return {
