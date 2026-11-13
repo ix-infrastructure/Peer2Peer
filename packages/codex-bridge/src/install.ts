@@ -15,6 +15,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { GUARDED_KNOBS, readTomlTable, userHome } from "./knobs.js";
+import { trimChars } from "./lib.js";
 
 export const BEGIN = "# >>> peer2peer (managed by `p2p codex install`; edit with care) >>>";
 export const END = "# <<< peer2peer <<<";
@@ -148,13 +149,13 @@ export function replaceBlock(text: string, begin: string, end: string, block: st
   const i = text.indexOf(begin);
   const j = i >= 0 ? text.indexOf(end, i) : -1;
   if (i >= 0 && j >= 0) {
-    const before = text.slice(0, i).replace(/\n*$/, "");
+    const before = trimChars(text.slice(0, i), "\n");
     const after = text.slice(j + end.length).replace(/^\n*/, "");
     const parts = [before, block, after].filter((p): p is string => p !== null && p !== "");
     return parts.length > 0 ? `${parts.join("\n\n")}\n` : "";
   }
   if (block === null) return text;
-  const base = text.replace(/\n*$/, "");
+  const base = trimChars(text, "\n");
   return base ? `${base}\n\n${block}\n` : `${block}\n`;
 }
 
@@ -169,7 +170,11 @@ export function configConflict(text: string): string | null {
     const j = i >= 0 ? text.indexOf(END, i) : -1;
     return i >= 0 && j >= 0 ? text.slice(0, i) + text.slice(j + END.length) : text;
   })();
-  const lines = outside.split("\n").map((l) => l.replace(/#.*$/, "").trim());
+  // Every line ending (CRLF, CR, LF, U+2028, U+2029) ends a line, so a comment never swallows the lines after it.
+  const lines = outside.split(/\r\n|[\n\r\u2028\u2029]/).map((l) => {
+    const hash = l.indexOf("#");
+    return (hash >= 0 ? l.slice(0, hash) : l).trim();
+  });
   if (lines.some((l) => /^\[\s*mcp_servers\s*\.\s*["']?peer2peer["']?\s*[\].]/.test(l))) return "config.toml already defines [mcp_servers.peer2peer] outside the managed block: remove it, then run again";
   if (lines.some((l) => /^mcp_servers\s*\.\s*["']?peer2peer["']?\s*[.=]/.test(l))) return "config.toml already sets mcp_servers.peer2peer.* as dotted keys: remove them, then run again";
   if (lines.some((l) => /^mcp_servers\s*=/.test(l))) return "config.toml defines mcp_servers as an inline table: move it to [mcp_servers.<name>] tables, then run again";
