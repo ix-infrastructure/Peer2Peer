@@ -37,7 +37,9 @@ import {
   routesToP2PFirst,
   stripPaths,
 } from '../hooks/lib'
-import { ANA_ID, BEN, BEN_ID, CIRCLE } from './world'
+import { ANA_ID, BEN, BEN_ID, CIRCLE, growth } from './world'
+// Shared with the Codex bridge's tests (packages/codex-bridge lib.test.ts): both guards answer each the same.
+import { SEND_VECTORS as sendVectors } from './send-from-session.vectors'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -256,6 +258,60 @@ describe('review L2: the terminal UI under a pty wrapper is refused', () => {
     expect(mutatingP2PVerb('p2p tui # yes')).toBe('tui')
     expect(mutatingP2PVerb('p2p ls; p2p tui')).toBe('tui')
   })
+
+  test('issue #3: an interpreter reading its program from stdin, and text-first commands that run things', () => {
+    // Program text the guard can't read as commands (`'t' + 'ui'` spells it so no line says tui): refused
+    // when the command names p2p, like a pipe into a shell.
+    for (const cmd of [
+      `echo "require('child_process').spawnSync('p2p', ['t' + 'ui'], { stdio: 'inherit' })" | node`,
+      `printf '%s' "import os; os.system('p2p ' + 't' + 'ui')" | python3 -`,
+      `python3 <<< "import os; os.system('p2p t' + 'ui')"`,
+      "node <<'EOF'\nrequire('child_process').spawnSync('p2p', ['t' + 'ui'], { stdio: 'inherit' })\nEOF",
+      'node < /tmp/x.js && p2p ls',
+      // Text-first commands that run a command of their own.
+      `awk 'BEGIN { system("p2p tui") }'`,
+      `git -c alias.t='!p2p tui' t`,
+      // A substitution inside a text-first command runs (already refused before this issue: kept so).
+      'echo "$(p2p tui)"',
+      // Review of #66: stdin by its path, and more text-first commands that run one of their own.
+      "echo 'console.log(1)' | node # p2p",
+      'cat x.js | node /dev/stdin; p2p ls',
+      'cat x.py | python3 /dev/fd/0; p2p ls',
+      'cat x.py | python3 /proc/self/fd/0; p2p ls',
+      'cat x.py | timeout 5 python3; p2p ls',
+      'cat x.py | /usr/bin/env python3; p2p ls',
+      'cat x.py | sudo -u me python3; p2p ls',
+      "sed -n '1e p2p tui' f",
+      "sed 's/x/p2p tui/e' f",
+      "sed 's/x/p2p t\"\"ui/ge' f",
+      "git -c core.pager='p2p tui' log",
+      "git -c core.editor='p2p tui' commit",
+      "git -c core.sshCommand='p2p tui' fetch",
+      'git bisect run p2p tui',
+      'git submodule foreach p2p tui',
+      "git filter-branch --tree-filter 'p2p tui' HEAD",
+      "git difftool --extcmd 'p2p tui'",
+      'rg --pre p2p x tui',
+      "git -c core.pager='p2p t\"\"ui' log",
+    ]) expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
+    // A script or module named, inline code's own check, version and help, and text: unchanged.
+    for (const cmd of [
+      'p2p ls --json | node scripts/summarize.js',
+      'p2p ls --json 2>&1 | node /x/y.js',
+      'p2p ls --json | python3 -m json.tool',
+      'node --version && p2p ls',
+      'python3 script.py < input.txt; p2p ls',
+      'cat x.js | node',
+      `awk '/tui/ {print}' notes.md; p2p ls`,
+      'git log --oneline -- packages/p2p/src/tui && p2p ls',
+      'echo "try p2p tui"',
+      'echo p2p tui',
+      "git commit -m 'run p2p tui later'",
+      "grep -r 'p2p tui' docs",
+      "sed -n 's/tui/TUI/p' notes.md; p2p ls",
+      'p2p ls --json | node --version',
+    ]) expect([cmd, uncheckableShell(cmd)]).toEqual([cmd, null])
+  })
 })
 
 describe('L4: shell commands that run mutating p2p verbs are refused', () => {
@@ -342,6 +398,39 @@ describe('L4: shell commands that run mutating p2p verbs are refused', () => {
     expect(mutatingP2PVerb('script -q /dev/null p2p send --to bob hi')).toBe('send (no --from-session)')
     expect(mutatingP2PVerb('p2p send --from-session s1 --to bob hi')).toBeNull()
     expect(mutatingP2PVerb('p2p send --from-session=s1 --to bob hi')).toBeNull()
+    // Issue #3: --from-session counts only where the CLI reads it as the option. After `--` it is message
+    // text, and as another option's value it is that value: either way the send goes from `tui`.
+    for (const cmd of [
+      'p2p send --to bob -- --from-session=s1',
+      'p2p send --to bob -- --from-session s1',
+      'p2p -- send --from-session=s1 --to bob hi',
+      'p2p send --to --from-session=s1 hi',
+      'p2p send --project-dir --from-session s1 --to bob',
+      'p2p send --to --no-input --from-session=s1',
+      'p2p --no-input send --to bob -- --from-session=s1',
+    ]) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, 'send (no --from-session)'])
+    // Review of #66: the shell makes the argv, and the guard can't expand it. A word it can't read as
+    // written (quotes, escapes, expansions, globs, braces, a redirection's target) up to the deciding
+    // --from-session fails closed: refused. The vectors pin this guard and the Codex bridge's together.
+    for (const v of sendVectors) expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb])
+    expect(sendVectors.length).toBeGreaterThan(80)
+    // Review of #66: `${P2P_BIN}` with braces (simpleCommands splits on them), and node's option values
+    // (`--stack-size 999`) never pass for the script; the CLI's dist/bin.js by path is the CLI. As the bridge reads them.
+    for (const [cmd, verb] of [
+      ['${P2P_BIN} invite', 'invite'],
+      ['${P2P_BIN} send --to bob hi', 'send (no --from-session)'],
+      ['${P2P_BIN} session roster s1 --add bob', 'session roster'],
+      ['node --stack-size 999 p2p.mjs invite', 'invite'],
+      ['node --stack-size 999 /x/bin/p2p.mjs invite', 'invite'],
+      ['node -r ./x.js /x/p2p.mjs held approve h1', 'held approve'],
+      ['node --stack-size 999 /x/packages/p2p/dist/bin.js invite', 'invite'],
+      ['node /x/node_modules/@peer2peer/cli/dist/bin.js held approve h1', 'held approve'],
+    ] as const) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb])
+    // env -S: the words come from a string the guard reads again, with no source to check: refused.
+    expect(mutatingP2PVerb("env -S 'p2p send --from-session s1 --to bob hi'")).toBe('send (no --from-session)')
+    // Still the option: before any `--`, after text, after a `--no-input`, or taking `--` as its value.
+    for (const cmd of ['p2p send hi --from-session=s1 --to bob', 'p2p send --no-input --to bob --from-session s1 hi', 'p2p send --from-session -- --to bob hi', 'p2p send --to=bob --from-session=s1 -- --to'])
+      expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, null])
     // The CLI's pickers (an argument left out on a terminal) change nothing here: still refused without one.
     for (const [cmd, verb] of [['p2p invite', 'invite'], ['p2p invite noah', 'invite'], ['p2p trust add', 'trust add'], ['p2p trust remove', 'trust remove'], ['p2p tui', 'tui'], ['p2p held approve', 'held approve'], ['p2p remove', 'remove'], ['p2p circle leave', 'circle leave'], ['printf "\\r" | p2p invite', 'invite'], ['p2p --no-input invite', 'invite']] as const) {
       expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb])
@@ -583,23 +672,33 @@ describe('pre-release review: the home folder as a last word, globs at its name,
   })
 
   test('L1: 100 KB inputs stay fast; over 16 KiB, refused only when they name a home', () => {
-    const big = (s: string) => s.repeat(Math.ceil(100_000 / s.length))
-    const t0 = Date.now()
+    const big = (s: string, size = 100_000) => s.repeat(Math.ceil(size / s.length))
     const plain = p2pHomeAccess({ tool: 'Bash', command: big('a=a;') }, [home])
     const named = p2pHomeAccess({ tool: 'Bash', command: `${big('x ')} ~/.p2p` }, [home])
-    uncheckableShell(big('a;'))
-    uncheckableShell(big('/x/y '))
-    // Linear vs quadratic on 100 KB: quadratic would take minutes; a slow runner's linear pass stays far below this.
-    expect(Date.now() - t0).toBeLessThan(2000)
     expect(plain).toBeNull()
     expect(named).toBe('keys')
-    // Under the cap, the worst cases are linear too.
-    const t1 = Date.now()
-    p2pHomeAccess({ tool: 'Bash', command: 'a;'.repeat(8000) }, [home])
-    p2pHomeAccess({ tool: 'Bash', command: '/'.repeat(16000) }, [home])
-    uncheckableShell('p2p ' + ';'.repeat(16000))
-    uncheckableShell('=x'.repeat(8000))
-    expect(Date.now() - t1).toBeLessThan(2000)
+    // Linear, not quadratic: the cost from n to 4n (about 4 when linear, 16 when quadratic), measured
+    // against this machine itself, so a slow runner passes and a quadratic rescan doesn't.
+    const over = (n: number) => {
+      p2pHomeAccess({ tool: 'Bash', command: big('a=a;', n) }, [home])
+      p2pHomeAccess({ tool: 'Bash', command: `${big('x ', n)} ~/.p2p` }, [home])
+      uncheckableShell(big('a;', n))
+      uncheckableShell(big('/x/y ', n))
+    }
+    const o = growth(over, 25_000)
+    expect(o.ratio).toBeLessThan(9)
+    // And not linear but slow: one round at 100 KB well under 10 s, even on a slow runner.
+    expect(o.totalMs).toBeLessThan(10_000)
+    // Under the 16 KiB cap, the worst cases are linear too (4,000 to 16,000 characters).
+    const under = (n: number) => {
+      p2pHomeAccess({ tool: 'Bash', command: 'a;'.repeat(n / 2) }, [home])
+      p2pHomeAccess({ tool: 'Bash', command: '/'.repeat(n) }, [home])
+      uncheckableShell('p2p ' + ';'.repeat(n))
+      uncheckableShell('=x'.repeat(n / 2))
+    }
+    const u = growth(under, 4000)
+    expect(u.ratio).toBeLessThan(9)
+    expect(u.totalMs).toBeLessThan(10_000)
   })
 })
 
