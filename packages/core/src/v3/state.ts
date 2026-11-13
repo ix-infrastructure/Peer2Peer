@@ -849,7 +849,7 @@ export async function getIdentityView(store: TrustStoreV3, userId: string, opts:
   const stored = { ...raw, pendingHeads };
   // Verified views are cached per store, keyed by the exact stored versions
   // (review N2): signatures are checked once per distinct chain, not per call.
-  const key = `${stored.historyGap ? "g" : "a"}${stored.anchoredAtV1 ? "1" : ""}:${jwsHash(stored.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
+  const key = `${stored.historyGap ? "g" : "a"}${stored.anchoredAtV1 ? "1" : ""}${stored.anchoredGenesis?.length ? jwsHash(stored.anchoredGenesis.join(".")) : ""}:${jwsHash(stored.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
   let cache = viewCache.get(store);
   if (!cache) viewCache.set(store, (cache = new Map()));
   const hit = cache.get(userId);

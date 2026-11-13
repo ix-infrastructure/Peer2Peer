@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 cc370ea1055357af
+// @peer2peer/core 0.1.1 0a59ef43c0aa11fc
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6947,8 +6947,12 @@ var init_identitydoc = __esm({
       iss;
       versions = new VersionMap();
       gap = false;
-      /** See StoredIdentityChain.anchoredAtV1 (#74). */
-      anchoredV1 = false;
+      /** See StoredIdentityChain.anchoredGenesis (#74). */
+      anchoredGenesis = /* @__PURE__ */ new Set();
+      /** See StoredIdentityChain.anchoredAtV1: anchored, but which genesis isn't known. */
+      legacyAnchored = false;
+      /** Bumped whenever anchoredGenesis or legacyAnchored changes (part of the strays memo's key). */
+      anchorRev = 0;
       strayMemo;
       /** Revocation denylist carried across jumps (R1). */
       denied = /* @__PURE__ */ new Set();
@@ -6969,7 +6973,8 @@ var init_identitydoc = __esm({
         const c = new _IdentityChain(s2.iss);
         const docs = s2.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
         c.gap = s2.historyGap ?? false;
-        c.anchoredV1 = s2.anchoredAtV1 === true;
+        c.anchoredGenesis = new Set(s2.anchoredGenesis ?? []);
+        c.legacyAnchored = s2.anchoredAtV1 === true;
         c.denied = new Set(s2.denied ?? []);
         for (const j of s2.pendingHeads ?? []) {
           const p = verifyIdentityDocSignature(j);
@@ -7000,7 +7005,6 @@ var init_identitydoc = __esm({
           } else
             c.versions.set(d.hash, d);
         }
-        c.noteAnchored();
         return c;
       }
       toStored() {
@@ -7008,7 +7012,8 @@ var init_identitydoc = __esm({
           iss: this.iss,
           versions: [...this.versions.values()].map((d) => d.jws),
           ...this.gap ? { historyGap: true } : {},
-          ...this.anchoredV1 ? { anchoredAtV1: true } : {},
+          ...this.anchoredGenesis.size > 0 ? { anchoredGenesis: [...this.anchoredGenesis] } : {},
+          ...this.legacyAnchored ? { anchoredAtV1: true } : {},
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
           // Each dropped once the held head reaches its ver.
           ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {},
@@ -7132,8 +7137,14 @@ var init_identitydoc = __esm({
             return true;
         return false;
       }
-      /** True when some counted held version is a ver-1 genesis: the history is anchored (see strays, #74). */
+      /**
+       * True when the history is anchored: some counted held version is a ver-1 genesis, or the head's history
+       * reached one before pruning dropped it (anchoredGenesis, #74), so a pruned history isn't replaceable (L5)
+       * or jumped over automatically either.
+       */
       get anchored() {
+        if (this.anchoredGenesis.size > 0 || this.legacyAnchored)
+          return true;
         const strays = this.strays();
         for (const v of this.versions.values())
           if (v.prev === null && !strays.has(v.hash))
@@ -7141,33 +7152,23 @@ var init_identitydoc = __esm({
         return false;
       }
       /**
-       * #74: held versions that don't count (yet). While the held history was never anchored at ver 1
-       * (anchoredAtV1) and the head's connected history has no ver 1 behind it, every part rooted at a genesis
-       * that doesn't connect to it and lies wholly below its lowest `ver` is a stray. Anyone can replay an
-       * identity's public old versions, so a stray isn't a fork: it is kept (it counts once the versions in
-       * between connect it), it isn't a tip, it doesn't narrow the allowlist to an intersection, and it doesn't
-       * make the history anchored. What it signed still applies (view): the devices revoked along it stay out,
-       * and a rotation it carries is shown. A part reaching the head's lowest `ver` or above, any part without a
-       * genesis (pruning leaves those), and everything once anchored at ver 1 count as before. This also heals
-       * stores that kept such a replay as a fork tip.
+       * #74: held versions that don't count (yet). While the head's connected history holds no ver 1, a part
+       * rooted at a genesis that doesn't connect to it and lies wholly below its lowest `ver` is a stray when
+       * the history was never anchored, or when every genesis it holds is one pruning dropped from counted
+       * history (anchoredGenesis): anyone can replay an identity's public old versions, so it is history, not a
+       * fork. A part rooted at any other genesis, on history that was anchored, is a genuine second-genesis fork
+       * and counts. A stray is kept (it counts once the versions in between connect it), but it isn't a tip, it
+       * isn't intersected into the allowlist, and it doesn't anchor the history. What it signed still applies
+       * (view): the devices revoked along it stay out, and a rotation it carries is shown. A part reaching the
+       * head's lowest `ver` or above, any part without a genesis, and everything while the head's history holds
+       * a genesis count as before. This also heals stores that kept such a replay as a fork tip.
        */
       strays() {
-        return this.analyse().strays;
-      }
-      /** The strays and whether the head's connected history reaches a genesis, memoised per mutation. */
-      analyse() {
         const m = this.strayMemo;
-        if (m && m.rev === this.versions.rev && m.anchoredV1 === this.anchoredV1)
-          return m;
+        if (m && m.rev === this.versions.rev && m.anchorRev === this.anchorRev)
+          return m.strays;
         const out = /* @__PURE__ */ new Set();
-        let headAnchored = false;
-        let genesis = false;
-        for (const v of this.versions.values())
-          if (v.prev === null)
-            genesis = true;
-        if (genesis && this.versions.size === 1)
-          headAnchored = true;
-        else if (genesis) {
+        if (!this.legacyAnchored && this.versions.size > 1 && [...this.versions.values()].some((v) => v.prev === null)) {
           const up = /* @__PURE__ */ new Map();
           const find = (h) => {
             let r = h;
@@ -7189,29 +7190,29 @@ var init_identitydoc = __esm({
           const parts = /* @__PURE__ */ new Map();
           for (const v of this.versions.values()) {
             const r = find(v.hash);
-            const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
-            x.genesis ||= v.prev === null;
+            const x = parts.get(r) ?? { geneses: [], lo: Infinity, hi: -Infinity, hashes: [] };
+            if (v.prev === null)
+              x.geneses.push(v.hash);
             x.lo = Math.min(x.lo, v.ver);
             x.hi = Math.max(x.hi, v.ver);
             x.hashes.push(v.hash);
             parts.set(r, x);
           }
           const head = parts.get(find(this.rawTips()[0].hash));
-          headAnchored = head.genesis;
-          if (!head.genesis && !this.anchoredV1) {
-            for (const x of parts.values())
-              if (x !== head && x.genesis && x.hi < head.lo)
-                for (const h of x.hashes)
-                  out.add(h);
+          if (head.geneses.length === 0) {
+            const pruned = this.anchoredGenesis;
+            for (const x of parts.values()) {
+              if (x === head || x.geneses.length === 0 || x.hi >= head.lo)
+                continue;
+              if (pruned.size > 0 && !x.geneses.every((g) => pruned.has(g)))
+                continue;
+              for (const h of x.hashes)
+                out.add(h);
+            }
           }
         }
-        this.strayMemo = { rev: this.versions.rev, anchoredV1: this.anchoredV1, strays: out, headAnchored };
-        return this.strayMemo;
-      }
-      /** Records that the head's history reached a genesis (anchoredAtV1, #74). */
-      noteAnchored() {
-        if (!this.anchoredV1 && this.versions.size > 0 && this.analyse().headAnchored)
-          this.anchoredV1 = true;
+        this.strayMemo = { rev: this.versions.rev, anchorRev: this.anchorRev, strays: out };
+        return out;
       }
       /**
        * Adds a version when it is chain-consistent with what is held: a ver-1
@@ -7301,8 +7302,9 @@ var init_identitydoc = __esm({
             this.denied.add(d);
         this.versions.clear();
         this.versions.set(doc.hash, doc);
-        this.anchoredV1 = false;
-        this.noteAnchored();
+        this.anchoredGenesis.clear();
+        this.legacyAnchored = false;
+        this.anchorRev++;
       }
       /**
        * The dids revoked somewhere in the held ancestry of `hash` (inclusive):
@@ -7346,12 +7348,16 @@ var init_identitydoc = __esm({
       }
       put(doc) {
         this.versions.set(doc.hash, doc);
-        this.noteAnchored();
         if (this.versions.size > MAX_CHAIN_VERSIONS) {
           const tips = new Set(this.tips().map((t2) => t2.hash));
           const oldest = [...this.versions.values()].filter((v) => !tips.has(v.hash)).sort((a, b) => a.ver - b.ver)[0];
-          if (oldest)
+          if (oldest) {
+            if (oldest.prev === null && !this.strays().has(oldest.hash)) {
+              this.anchoredGenesis.add(oldest.hash);
+              this.anchorRev++;
+            }
             this.versions.delete(oldest.hash);
+          }
         }
       }
       /** Versions that no held version names as prev or merge, but for strays (#74). */
@@ -10871,7 +10877,7 @@ async function getIdentityView(store2, userId, opts = {}) {
     return void 0;
   const pendingHeads = opts.ignorePending ? [] : usablePendingHeads(raw, { now: opts.now });
   const stored2 = { ...raw, pendingHeads };
-  const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
+  const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}${stored2.anchoredGenesis?.length ? jwsHash(stored2.anchoredGenesis.join(".")) : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
   let cache2 = viewCache.get(store2);
   if (!cache2)
     viewCache.set(store2, cache2 = /* @__PURE__ */ new Map());

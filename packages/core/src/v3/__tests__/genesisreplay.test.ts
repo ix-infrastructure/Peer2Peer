@@ -370,3 +370,94 @@ describe("#74 review: a stray's revocations and rotations still apply", () => {
     expect(performance.now() - t0).toBeLessThan(10_000);
   });
 });
+
+/** Re-review of the #74 fix: long (pruned) histories, re-adds, and #67's walk anchors. */
+describe("#74 re-review: pruned histories and walk anchors", () => {
+  /** v1 [dev1] → v2 [dev1, p2] → v3 retires dev1, then enough versions that pruning drops v1..v3. */
+  function pruned() {
+    const u = makeUser("alice");
+    const p2 = u.addDevice({ keyholder: true });
+    const c = new IdentityChain(u.userId);
+    c.add(u.doc.jws, { now: NOW });
+    c.add(u.publish({ iat: NOW - 900 }).jws, { now: NOW });
+    u.keyholders = [p2.did];
+    c.add(u.publish({ devices: [p2.did], iat: NOW - 899 }).jws, { now: NOW });
+    for (let i = 0; i < MAX_CHAIN_VERSIONS; i++) c.add(u.publish({ devices: [p2.did], iat: NOW - 400 }).jws, { now: NOW });
+    expect(c.has(u.docs[0].hash)).toBe(false);
+    return { u, p2, c };
+  }
+
+  it("REPLAY-AFTER-PRUNE: a replay of the pruned genuine v1 is a stray, not a fork", async () => {
+    const { u, p2, c } = pruned();
+    const store = new MemoryTrustStoreV3();
+    await store.putIdentity(c.toStored());
+    await addIdentityVersion(store, u.docs[0].jws, { now: NOW });
+    const view = await getIdentityView(store, u.userId, { now: NOW });
+    expect(view?.forked).toBe(false);
+    expect(view?.tips.map((t) => t.hash)).toEqual([u.doc.hash]);
+    expect(view?.devices).toEqual([p2.did]);
+    // The pruned v1..v3 replayed together: still history.
+    for (const d of u.docs.slice(1, 3)) await addIdentityVersion(store, d.jws, { now: NOW });
+    expect((await getIdentityView(store, u.userId, { now: NOW }))?.devices).toEqual([p2.did]);
+  });
+
+  it("a pruned anchored history stays anchored: no L5 replacement by a non-connecting newer version", () => {
+    const { u, c } = pruned();
+    expect(c.anchored).toBe(true);
+    const reloaded = IdentityChain.fromStored(c.toStored());
+    expect(reloaded.anchored).toBe(true);
+    const head = u.doc;
+    const v2 = u.publish({ devices: head.devices });
+    const v3 = u.publish({ devices: head.devices });
+    expect(reloaded.add(v3.jws, { now: NOW })).toEqual({ status: "gap", need: v2.hash });
+  });
+
+  it("PRUNE, either genesis first: a second-genesis fork stays a fork after pruning drops v1", () => {
+    const orders = new Set<boolean>();
+    for (let attempt = 0; attempt < 40 && orders.size < 2; attempt++) {
+      const u = makeUser("alice");
+      const g2 = verifyIdentityDocSignature(
+        createIdentityDoc(u.ik, { ver: 1, prev: null, name: u.name, relays: [RELAY], devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 30 - attempt }),
+      );
+      const g2First = g2.hash > u.doc.hash; // the tie-break picks the higher jwsHash as the head while both are lone
+      if (orders.has(g2First)) continue;
+      orders.add(g2First);
+      const c = new IdentityChain(u.userId);
+      c.add(u.doc.jws, { now: NOW });
+      c.add(g2.jws, { now: NOW });
+      for (let i = 0; i < MAX_CHAIN_VERSIONS + 5; i++) c.add(u.publish({ iat: NOW - 400 }).jws, { now: NOW });
+      expect(c.has(u.docs[0].hash)).toBe(false);
+      expect(c.view().forked).toBe(true);
+      expect(IdentityChain.fromStored(c.toStored()).view().forked).toBe(true);
+    }
+    expect(orders.size).toBe(2);
+  });
+
+  it("NO-KEY: re-adding a device a held branch revoked is refused, so a replayed branch can't revoke what the head lists", () => {
+    const u = makeUser("alice");
+    u.addDevice({ keyholder: false });
+    const c = new IdentityChain(u.userId);
+    c.add(u.doc.jws, { now: NOW });
+    c.add(u.publish({ iat: NOW - 900 }).jws, { now: NOW }); // v2 +x
+    c.add(u.publish({ devices: [u.dev.did], iat: NOW - 899 }).jws, { now: NOW }); // v3 -x
+    expect(() => c.add(u.publish({ iat: NOW - 898 }).jws, { now: NOW })).toThrow(/revoked-device-returned/);
+  });
+
+  it("a walk anchor below an unanchored root walks down to v1 as a stray, never a counted fork", async () => {
+    const { u, head } = friend();
+    const store = new MemoryTrustStoreV3();
+    // As an earlier, cut-short refresh would leave it: the head held, an old version as where to walk next.
+    await store.putIdentity({ iss: u.userId, versions: [head.jws], walkAnchors: [u.docs[2].jws] });
+    const byHash = new Map(u.docs.map((d) => [d.hash, d]));
+    const fetcher = relays({ [RELAY]: [head.jws], [RELAY2]: [head.jws] }, (to) => {
+      const out: string[] = [];
+      for (let d = byHash.get(to); d; d = d.prev ? byHash.get(d.prev) : undefined) out.push(d.jws);
+      return out;
+    });
+    const view = await refreshIdentity(store, u.userId, fetcher, { now: NOW });
+    expect(view.forked).toBe(false);
+    expect(view.tips.map((t) => t.hash)).toEqual([head.hash]);
+    expect(view.devices).toEqual(head.devices);
+    expect(IdentityChain.fromStored((await store.getIdentity(u.userId))!).anchored).toBe(false);
+  });
+});

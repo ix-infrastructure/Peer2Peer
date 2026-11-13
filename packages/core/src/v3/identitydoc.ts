@@ -578,10 +578,13 @@ export interface StoredIdentityChain {
   versions: string[];
   historyGap?: boolean;
   /**
-   * The held history has been anchored at a ver-1 genesis (#74): it reached one through its own links. Kept
-   * after pruning drops ver 1, so a genuine second-genesis fork never turns into a stray; cleared by a jump
-   * or an unanchored replacement.
+   * The ver-1 geneses of counted history that pruning dropped (#74). The history stays anchored after its
+   * ver 1 is pruned, and a disconnected part rooted at one of them later is that pruned ancestry replayed (a
+   * stray), while a part rooted at any other genesis is a fork. Cleared by a jump or an unanchored
+   * replacement.
    */
+  anchoredGenesis?: string[];
+  /** Written by pre-release builds of the #74 fix instead of anchoredGenesis: anchored, genesis unknown. */
   anchoredAtV1?: boolean;
   /** Devices revoked on history this client jumped over (pre-release review R1): never allowed again. */
   denied?: string[];
@@ -660,9 +663,13 @@ class VersionMap extends Map<string, VerifiedIdentityDoc> {
 export class IdentityChain {
   private readonly versions = new VersionMap();
   private gap = false;
-  /** See StoredIdentityChain.anchoredAtV1 (#74). */
-  private anchoredV1 = false;
-  private strayMemo?: { rev: number; anchoredV1: boolean; strays: Set<string>; headAnchored: boolean };
+  /** See StoredIdentityChain.anchoredGenesis (#74). */
+  private anchoredGenesis = new Set<string>();
+  /** See StoredIdentityChain.anchoredAtV1: anchored, but which genesis isn't known. */
+  private legacyAnchored = false;
+  /** Bumped whenever anchoredGenesis or legacyAnchored changes (part of the strays memo's key). */
+  private anchorRev = 0;
+  private strayMemo?: { rev: number; anchorRev: number; strays: Set<string> };
   /** Revocation denylist carried across jumps (R1). */
   private denied = new Set<string>();
   /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -682,7 +689,8 @@ export class IdentityChain {
     const c = new IdentityChain(s.iss);
     const docs = s.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
     c.gap = s.historyGap ?? false;
-    c.anchoredV1 = s.anchoredAtV1 === true;
+    c.anchoredGenesis = new Set(s.anchoredGenesis ?? []);
+    c.legacyAnchored = s.anchoredAtV1 === true;
     c.denied = new Set(s.denied ?? []);
     for (const j of s.pendingHeads ?? []) {
       const p = verifyIdentityDocSignature(j);
@@ -709,7 +717,6 @@ export class IdentityChain {
         c.versions.set(d.hash, d);
       } else c.versions.set(d.hash, d);
     }
-    c.noteAnchored();
     return c;
   }
 
@@ -718,7 +725,8 @@ export class IdentityChain {
       iss: this.iss,
       versions: [...this.versions.values()].map((d) => d.jws),
       ...(this.gap ? { historyGap: true } : {}),
-      ...(this.anchoredV1 ? { anchoredAtV1: true } : {}),
+      ...(this.anchoredGenesis.size > 0 ? { anchoredGenesis: [...this.anchoredGenesis] } : {}),
+      ...(this.legacyAnchored ? { anchoredAtV1: true } : {}),
       ...(this.denied.size > 0 ? { denied: [...this.denied] } : {}),
       // Each dropped once the held head reaches its ver.
       ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
@@ -848,38 +856,36 @@ export class IdentityChain {
     return false;
   }
 
-  /** True when some counted held version is a ver-1 genesis: the history is anchored (see strays, #74). */
+  /**
+   * True when the history is anchored: some counted held version is a ver-1 genesis, or the head's history
+   * reached one before pruning dropped it (anchoredGenesis, #74), so a pruned history isn't replaceable (L5)
+   * or jumped over automatically either.
+   */
   get anchored(): boolean {
+    if (this.anchoredGenesis.size > 0 || this.legacyAnchored) return true;
     const strays = this.strays();
     for (const v of this.versions.values()) if (v.prev === null && !strays.has(v.hash)) return true;
     return false;
   }
 
   /**
-   * #74: held versions that don't count (yet). While the held history was never anchored at ver 1
-   * (anchoredAtV1) and the head's connected history has no ver 1 behind it, every part rooted at a genesis
-   * that doesn't connect to it and lies wholly below its lowest `ver` is a stray. Anyone can replay an
-   * identity's public old versions, so a stray isn't a fork: it is kept (it counts once the versions in
-   * between connect it), it isn't a tip, it doesn't narrow the allowlist to an intersection, and it doesn't
-   * make the history anchored. What it signed still applies (view): the devices revoked along it stay out,
-   * and a rotation it carries is shown. A part reaching the head's lowest `ver` or above, any part without a
-   * genesis (pruning leaves those), and everything once anchored at ver 1 count as before. This also heals
-   * stores that kept such a replay as a fork tip.
+   * #74: held versions that don't count (yet). While the head's connected history holds no ver 1, a part
+   * rooted at a genesis that doesn't connect to it and lies wholly below its lowest `ver` is a stray when
+   * the history was never anchored, or when every genesis it holds is one pruning dropped from counted
+   * history (anchoredGenesis): anyone can replay an identity's public old versions, so it is history, not a
+   * fork. A part rooted at any other genesis, on history that was anchored, is a genuine second-genesis fork
+   * and counts. A stray is kept (it counts once the versions in between connect it), but it isn't a tip, it
+   * isn't intersected into the allowlist, and it doesn't anchor the history. What it signed still applies
+   * (view): the devices revoked along it stay out, and a rotation it carries is shown. A part reaching the
+   * head's lowest `ver` or above, any part without a genesis, and everything while the head's history holds
+   * a genesis count as before. This also heals stores that kept such a replay as a fork tip.
    */
   private strays(): Set<string> {
-    return this.analyse().strays;
-  }
-
-  /** The strays and whether the head's connected history reaches a genesis, memoised per mutation. */
-  private analyse(): { strays: Set<string>; headAnchored: boolean } {
     const m = this.strayMemo;
-    if (m && m.rev === this.versions.rev && m.anchoredV1 === this.anchoredV1) return m;
+    if (m && m.rev === this.versions.rev && m.anchorRev === this.anchorRev) return m.strays;
     const out = new Set<string>();
-    let headAnchored = false;
-    let genesis = false;
-    for (const v of this.versions.values()) if (v.prev === null) genesis = true;
-    if (genesis && this.versions.size === 1) headAnchored = true;
-    else if (genesis) {
+    // Anchored with the genesis unknown (a pre-release store): every part counts, as before.
+    if (!this.legacyAnchored && this.versions.size > 1 && [...this.versions.values()].some((v) => v.prev === null)) {
       // Connected parts by the prev/merge links between held versions.
       const up = new Map<string, string>();
       const find = (h: string): string => {
@@ -894,29 +900,28 @@ export class IdentityChain {
       };
       for (const h of this.versions.keys()) up.set(h, h);
       for (const v of this.versions.values()) for (const p of [v.prev, v.merge]) if (p && this.versions.has(p)) up.set(find(v.hash), find(p));
-      const parts = new Map<string, { genesis: boolean; lo: number; hi: number; hashes: string[] }>();
+      const parts = new Map<string, { geneses: string[]; lo: number; hi: number; hashes: string[] }>();
       for (const v of this.versions.values()) {
         const r = find(v.hash);
-        const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
-        x.genesis ||= v.prev === null;
+        const x = parts.get(r) ?? { geneses: [], lo: Infinity, hi: -Infinity, hashes: [] };
+        if (v.prev === null) x.geneses.push(v.hash);
         x.lo = Math.min(x.lo, v.ver);
         x.hi = Math.max(x.hi, v.ver);
         x.hashes.push(v.hash);
         parts.set(r, x);
       }
       const head = parts.get(find(this.rawTips()[0].hash))!;
-      headAnchored = head.genesis;
-      if (!head.genesis && !this.anchoredV1) {
-        for (const x of parts.values()) if (x !== head && x.genesis && x.hi < head.lo) for (const h of x.hashes) out.add(h);
+      if (head.geneses.length === 0) {
+        const pruned = this.anchoredGenesis;
+        for (const x of parts.values()) {
+          if (x === head || x.geneses.length === 0 || x.hi >= head.lo) continue;
+          if (pruned.size > 0 && !x.geneses.every((g) => pruned.has(g))) continue; // another genesis: a fork
+          for (const h of x.hashes) out.add(h);
+        }
       }
     }
-    this.strayMemo = { rev: this.versions.rev, anchoredV1: this.anchoredV1, strays: out, headAnchored };
-    return this.strayMemo;
-  }
-
-  /** Records that the head's history reached a genesis (anchoredAtV1, #74). */
-  private noteAnchored(): void {
-    if (!this.anchoredV1 && this.versions.size > 0 && this.analyse().headAnchored) this.anchoredV1 = true;
+    this.strayMemo = { rev: this.versions.rev, anchorRev: this.anchorRev, strays: out };
+    return out;
   }
 
   /**
@@ -1004,8 +1009,9 @@ export class IdentityChain {
     for (const tip of this.rawTips()) for (const d of this.revokedAlong(tip.hash)) this.denied.add(d);
     this.versions.clear();
     this.versions.set(doc.hash, doc);
-    this.anchoredV1 = false;
-    this.noteAnchored();
+    this.anchoredGenesis.clear();
+    this.legacyAnchored = false;
+    this.anchorRev++;
   }
 
   /**
@@ -1047,12 +1053,17 @@ export class IdentityChain {
 
   private put(doc: VerifiedIdentityDoc): void {
     this.versions.set(doc.hash, doc);
-    // Before pruning can drop ver 1 (#74).
-    this.noteAnchored();
     if (this.versions.size > MAX_CHAIN_VERSIONS) {
       const tips = new Set(this.tips().map((t) => t.hash));
       const oldest = [...this.versions.values()].filter((v) => !tips.has(v.hash)).sort((a, b) => a.ver - b.ver)[0];
-      if (oldest) this.versions.delete(oldest.hash);
+      if (oldest) {
+        // #74: a counted genesis pruned away still anchors the history, and a later replay of it is a stray.
+        if (oldest.prev === null && !this.strays().has(oldest.hash)) {
+          this.anchoredGenesis.add(oldest.hash);
+          this.anchorRev++;
+        }
+        this.versions.delete(oldest.hash);
+      }
     }
   }
 
