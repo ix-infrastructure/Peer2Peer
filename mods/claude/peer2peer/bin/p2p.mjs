@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 d05dc6e365ac8f7a
+// @peer2peer/core 0.1.1 78c3c5d4503d2d29
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7040,12 +7040,67 @@ var init_identitydoc = __esm({
             return true;
         return false;
       }
-      /** True when some held version is a ver-1 genesis: the history is anchored. */
+      /** True when some counted held version is a ver-1 genesis: the history is anchored (see strays, #74). */
       get anchored() {
+        const strays = this.strays();
         for (const v of this.versions.values())
-          if (v.prev === null)
+          if (v.prev === null && !strays.has(v.hash))
             return true;
         return false;
+      }
+      /**
+       * #74: held versions that don't count (yet): while the head's connected history has no ver 1 behind it,
+       * every part rooted at a genesis that doesn't connect to it and lies wholly below its lowest `ver`. Anyone
+       * can replay an identity's public old versions, so such a part is history, not a fork: it is kept (it
+       * counts once the versions in between connect it to the head's history) but isn't a tip, doesn't narrow
+       * the allowlist, and doesn't make the history anchored. A part reaching the head's lowest `ver` or above,
+       * any part without a genesis (pruning leaves those), and everything on anchored history count as before,
+       * so forks are detected as before. This also heals stores that kept such a replay as a fork tip.
+       */
+      strays() {
+        const out = /* @__PURE__ */ new Set();
+        let genesis = false;
+        for (const v of this.versions.values())
+          if (v.prev === null)
+            genesis = true;
+        if (!genesis || this.versions.size < 2)
+          return out;
+        const up = /* @__PURE__ */ new Map();
+        const find = (h) => {
+          let r = h;
+          while (up.get(r) !== r)
+            r = up.get(r);
+          for (let x = h; x !== r; ) {
+            const n = up.get(x);
+            up.set(x, r);
+            x = n;
+          }
+          return r;
+        };
+        for (const h of this.versions.keys())
+          up.set(h, h);
+        for (const v of this.versions.values())
+          for (const p of [v.prev, v.merge])
+            if (p && this.versions.has(p))
+              up.set(find(v.hash), find(p));
+        const parts = /* @__PURE__ */ new Map();
+        for (const v of this.versions.values()) {
+          const r = find(v.hash);
+          const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
+          x.genesis ||= v.prev === null;
+          x.lo = Math.min(x.lo, v.ver);
+          x.hi = Math.max(x.hi, v.ver);
+          x.hashes.push(v.hash);
+          parts.set(r, x);
+        }
+        const head = parts.get(find(this.rawTips()[0].hash));
+        if (head.genesis)
+          return out;
+        for (const x of parts.values())
+          if (x !== head && x.genesis && x.hi < head.lo)
+            for (const h of x.hashes)
+              out.add(h);
+        return out;
       }
       /**
        * Adds a version when it is chain-consistent with what is held: a ver-1
@@ -7185,8 +7240,13 @@ var init_identitydoc = __esm({
             this.versions.delete(oldest.hash);
         }
       }
-      /** Versions that no held version names as prev or merge. */
+      /** Versions that no held version names as prev or merge, but for strays (#74). */
       tips() {
+        const strays = this.strays();
+        return strays.size === 0 ? this.rawTips() : this.rawTips().filter((v) => !strays.has(v.hash));
+      }
+      /** Versions that no held version names as prev or merge, highest `ver` first (tie: higher jwsHash). */
+      rawTips() {
         const parents = /* @__PURE__ */ new Set();
         for (const v of this.versions.values()) {
           if (v.prev)
