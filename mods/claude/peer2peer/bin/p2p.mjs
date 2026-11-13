@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 0a59ef43c0aa11fc
+// @peer2peer/core 0.1.1 140b0ea28906751c
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7235,6 +7235,8 @@ var init_identitydoc = __esm({
           const doc2 = verifyIdentityDocLink(void 0, jws, opts);
           if (held2 && held2.ik !== doc2.ik)
             fail("issuer-mismatch", "a different ik for this userId");
+          if (this.anchoredGenesis.has(doc2.hash))
+            return { status: "duplicate", doc: doc2 };
           this.put(doc2);
           return { status: "accepted", doc: doc2 };
         }
