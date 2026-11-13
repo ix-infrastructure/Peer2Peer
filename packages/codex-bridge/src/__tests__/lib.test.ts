@@ -15,6 +15,7 @@ import {
   modeFromTranscript,
   mutatingP2PVerb,
   indirectP2PRun,
+  nestedTooDeep,
   parseAddress,
   parseAutoDeliver,
   peerActivity,
@@ -286,6 +287,26 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
     }
   });
 
+  it("refuses nesting past the limit that still names p2p", () => {
+    for (const cmd of [
+      'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"p2p invite\\\\\\"\\"\'"',
+      "eval eval eval eval eval eval p2p invite",
+      "eval \"eval 'eval \\\"eval p2p invite\\\"'\"",
+    ]) expect([cmd, guard("Bash", { command: cmd }, [], "s1") !== null]).toEqual([cmd, true]);
+    expect(nestedTooDeep('bash -c "p2p ls"')).toBe(false);
+  });
+
+  it("shares the guard block with the mod byte for byte", () => {
+    const block = (file: string) => {
+      const t = readFileSync(new URL(file, import.meta.url), "utf8");
+      const a = t.indexOf("// ---- Shared with the Codex bridge");
+      return t.slice(a, t.indexOf("// ---- End of the shared block.", a));
+    };
+    const mine = block("../lib.ts");
+    expect(mine.length).toBeGreaterThan(1000);
+    expect(block("../../../../mods/claude/peer2peer/hooks/lib.ts")).toBe(mine);
+  });
+
   it("stays linear on adversarial 16 KiB inputs", () => {
     const n = 16 * 1024;
     for (const cmd of [
@@ -298,6 +319,13 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
       "p2p " + "a=1 ".repeat(n / 4),
       "p2p " + "$( p2p ".repeat(n / 7),
       "p2p " + " ( ) ".repeat(n / 5),
+      "p2p " + "x(   ".repeat(n / 5),
+      "p2p " + "( )  \n\n".repeat(n / 7),
+      "p2p " + "() # () () ()\n".repeat(n / 14),
+      'eval "' + "p2p x ".repeat(n / 6) + '"',
+      "env" + " -u".repeat(n / 3) + " p2p",
+      "p2p; " + "if ".repeat(n / 3),
+      "p2p; " + "xargs ".repeat(n / 6),
     ]) {
       const t = Date.now();
       indirectP2PRun(cmd);

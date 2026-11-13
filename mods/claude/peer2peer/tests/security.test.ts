@@ -26,6 +26,7 @@ import {
   isPeer2PeerHelp,
   indirectP2PRun,
   mutatingP2PVerb,
+  nestedTooDeep,
   touchesBackupFile,
   touchesP2PSettings,
   p2pHomeAccess,
@@ -795,6 +796,17 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
     }
   })
 
+  test('nesting past the limit that still names p2p is refused, not read as nothing', () => {
+    for (const cmd of [
+      'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"p2p invite\\\\\\"\\"\'"',
+      'eval eval eval eval eval eval p2p invite',
+    ]) {
+      expect([cmd, nestedTooDeep(cmd) || indirectP2PRun(cmd) !== null]).toEqual([cmd, true])
+      expect([cmd, uncheckableShell(cmd) !== null || mutatingP2PVerb(cmd) !== null]).toEqual([cmd, true])
+    }
+    expect(nestedTooDeep('bash -c "p2p ls"')).toBe(false)
+  })
+
   test('linear: adversarial 16 KiB inputs are read quickly', () => {
     const n = 16 * 1024
     for (const cmd of [
@@ -807,6 +819,13 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
       'p2p ' + 'a=1 '.repeat(n / 4),
       'p2p ' + '$( p2p '.repeat(n / 7),
       'p2p ' + ' ( ) '.repeat(n / 5),
+      'p2p ' + 'x(   '.repeat(n / 5),
+      'p2p ' + '( )  \n\n'.repeat(n / 7),
+      'p2p ' + '() # () () ()\n'.repeat(n / 14),
+      'eval "' + 'p2p x '.repeat(n / 6) + '"',
+      'env' + ' -u'.repeat(n / 3) + ' p2p',
+      'p2p; ' + 'if '.repeat(n / 3),
+      'p2p; ' + 'xargs '.repeat(n / 6),
     ]) {
       const t = Date.now()
       indirectP2PRun(cmd)

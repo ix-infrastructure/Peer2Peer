@@ -27740,9 +27740,52 @@ function envSplitString(words, from) {
 }
 var ARG_RUNNERS = /* @__PURE__ */ new Set(["parallel", "sem", "parset", "rush", "xjobs"]);
 var LEAD_WORDS = /* @__PURE__ */ new Set(["{", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "exec", "command", "builtin", "eval", "sudo", "doas", "env", "nice", "nohup", "timeout", "stdbuf", "xargs"]);
+var TEXT_ARGS = /* @__PURE__ */ new Set(["echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "git", "cat", "head", "tail", "wc", "diff", "jq", "tee", "less", "more"]);
+var NAME_STORES = ["functions[", "aliases[", "galiases[", "saliases[", "dis_functions[", "dis_aliases[", "BASH_ALIASES[", "BASH_ALIASES=", "BASH_ALIASES+=", "BASH_CMDS[", "BASH_CMDS=", "BASH_CMDS+="];
+var MAX_NESTING = 4;
+var NESTED = "a command nested too deeply to check, that names p2p";
 function cliWord(word) {
   const base = (word.split(/[\\/]/).pop() ?? word).toLowerCase();
   return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || base === "p2p.mjs" || base === "p2p.cjs" || base === "p2p.js" || word.startsWith("@peer2peer/cli") || word === "$P2P_BIN" || word === "${P2P_BIN}";
+}
+function mentionsP2P(text2) {
+  const lower = text2.toLowerCase();
+  return lower.includes("p2p") || lower.includes("@peer2peer");
+}
+function unquoted(text2) {
+  const out = text2.split("");
+  let q = "";
+  for (let i = 0; i < text2.length; i++) {
+    const c = text2[i];
+    if (q === "'") {
+      if (c === "'")
+        q = "";
+      else
+        out[i] = " ";
+      continue;
+    }
+    if (q === '"' || q === "$") {
+      if (c === "\\") {
+        out[i] = " ";
+        if (i + 1 < text2.length)
+          out[++i] = " ";
+      } else if (c === (q === "$" ? "'" : '"'))
+        q = "";
+      else
+        out[i] = " ";
+      continue;
+    }
+    if (c === "\\") {
+      out[i] = " ";
+      if (i + 1 < text2.length)
+        out[++i] = " ";
+    } else if (c === "$" && text2[i + 1] === "'") {
+      q = "$";
+      i++;
+    } else if (c === "'" || c === '"')
+      q = c;
+  }
+  return out.join("");
 }
 function definesFunction(text2) {
   const blank = (c) => c === " " || c === "	";
@@ -27755,59 +27798,108 @@ function definesFunction(text2) {
     if (text2[j] !== ")")
       continue;
     let k = j + 1;
-    while (blank(text2[k]) || text2[k] === "\n" || text2[k] === "\r")
-      k++;
-    if (text2[k] !== "{" && text2[k] !== "(")
-      continue;
+    for (; ; ) {
+      while (blank(text2[k]))
+        k++;
+      if (text2[k] === "#")
+        while (k < text2.length && text2[k] !== "\n")
+          k++;
+      if (text2[k] === "\n" || text2[k] === "\r")
+        k++;
+      else
+        break;
+    }
+    const next = text2[k];
     let m = i - 1;
     while (m >= 0 && blank(text2[m]))
       m--;
     const before = text2[m];
-    if (before !== void 0 && !" 	\n\r;&|()<>$=`'\"@!".includes(before))
+    if (before === void 0 || ";&|(){}\n\r".includes(before)) {
+      if (next === "{")
+        return true;
+    } else if (!"$=<>`@!?*+".includes(before) && next !== void 0 && !";|&)".includes(next))
       return true;
+    i = Math.max(i, k - 1);
   }
   return false;
 }
 function indirectP2PRun(command, depth = 0) {
-  if (depth === 0 && definesFunction(command))
+  if (definesFunction(unquoted(command)))
     return "a shell function defined on a command that names p2p";
   const starts = /* @__PURE__ */ new Set();
   const words = shellTokens(command, false, void 0, starts);
+  const named = [];
+  const expands = [];
+  const count2 = [];
+  for (let i = 0, s2 = -1; i < words.length; i++) {
+    if (starts.has(i) || s2 < 0)
+      s2++;
+    const w = words[i] ?? "";
+    if (mentionsP2P(w))
+      named[s2] = true;
+    if (w.includes("$") || w.includes("`"))
+      expands[s2] = true;
+    count2[s2] = (count2[s2] ?? 0) + 1;
+  }
+  let seg = -1;
   let lead = true;
   let cliSeen = false;
+  let text2 = false;
   for (let i = 0; i < words.length; i++) {
     const w = words[i] ?? "";
-    if (starts.has(i)) {
+    if (starts.has(i) || seg < 0) {
+      seg++;
       lead = true;
       cliSeen = false;
+      text2 = false;
     }
     const base = (w.split(/[\\/]/).pop() ?? w).toLowerCase();
     if (lead) {
-      if (base === "alias")
-        return "a shell alias defined on a command that names p2p";
+      const dot = base.indexOf(".");
+      const name2 = dot > 0 ? base.slice(0, dot) : base;
+      const marked = named[seg] === true || expands[seg] === true;
+      if (NAME_STORES.some((p) => w.startsWith(p)))
+        return "a shell alias or function defined on a command that names p2p";
       if (base === "function")
         return "a shell function defined on a command that names p2p";
-      if (!(w.indexOf("=") > 0 || LEAD_WORDS.has(base) || w.startsWith("-") || w !== "" && [...w].every((ch) => ch >= "0" && ch <= "9")))
+      if (base === "alias" && marked)
+        return "a shell alias defined on a command that names p2p";
+      if (base === "hash" && marked)
+        return "a hashed command name on a command that names p2p";
+      if (ARG_RUNNERS.has(name2) && marked)
+        return "GNU parallel (or a runner like it) on a command that names p2p";
+      if (name2 === "xargs" && marked)
+        return "xargs on a command that names p2p";
+      if (base === "eval" && named[seg] && expands[seg])
+        return "eval of text built at run time, on a command that names p2p";
+      if ((base === "source" || base === ".") && (named[seg] || count2[seg] === 1))
+        return "a sourced script on a command that names p2p";
+      if ((w.startsWith("$") || w.startsWith("`")) && w !== "$P2P_BIN" && w !== "${P2P_BIN}")
+        return "a command word built at run time on a command that names p2p";
+      if (!(w.indexOf("=") > 0 || LEAD_WORDS.has(base) || w.startsWith("-") || w !== "" && [...w].every((ch) => ch >= "0" && ch <= "9"))) {
         lead = false;
+        text2 = TEXT_ARGS.has(base);
+      }
     }
-    if (!cliSeen && ARG_RUNNERS.has(base))
-      return "GNU parallel (or a runner like it) on a command that names p2p";
     if (cliWord(w))
       cliSeen = true;
-    if (depth < 3 && (w.includes(" ") || w.includes("	") || w.includes("\n")) && (!cliSeen || w.includes("$(") || w.includes("`"))) {
-      const lower = w.toLowerCase();
-      if (lower.includes("p2p") || lower.includes("@peer2peer")) {
-        const found = indirectP2PRun(w, depth + 1);
-        if (found)
-          return found;
-      }
+    const subst = w.includes("$(") || w.includes("`");
+    if ((w.includes(" ") || w.includes("	") || w.includes("\n")) && (!cliSeen && !text2 || subst) && mentionsP2P(w)) {
+      if (depth + 1 >= MAX_NESTING)
+        return NESTED;
+      const found = indirectP2PRun(w, depth + 1);
+      if (found)
+        return found;
     }
   }
   return null;
 }
-function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false) {
-  if (depth > 3)
+function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep) {
+  if (depth > 3) {
+    if (deep && mentionsP2P(command))
+      deep.hit = true;
     return null;
+  }
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
@@ -27822,18 +27914,18 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false) {
       if (/^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
         const inner = flag > 0 ? words[flag + 1] : void 0;
-        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1) : null;
+        const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, false, deep) : null;
         if (found)
           return found;
       }
       if (base === "eval") {
-        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1);
+        const found = mutatingP2PVerb(words.slice(i + 1).join(" "), binNames, depth + 1, false, deep);
         if (found)
           return found;
       }
       if (base === "env") {
         const split2 = envSplitString(words, i + 1);
-        const found = split2 ? mutatingP2PVerb([split2.line, ...words.slice(split2.next)].join(" "), binNames, depth + 1, true) : null;
+        const found = split2 ? mutatingP2PVerb([split2.line, ...words.slice(split2.next)].join(" "), binNames, depth + 1, true, deep) : null;
         if (found)
           return found;
       }
@@ -27857,6 +27949,11 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false) {
       return "send (no --from-session)";
   }
   return null;
+}
+function nestedTooDeep(command) {
+  const deep = { hit: false };
+  mutatingP2PVerb(command, [], 0, false, deep);
+  return deep.hit;
 }
 function touchesSecrets(command) {
   const text2 = command.replace(/\\\\/g, "/").toLowerCase();
@@ -28791,6 +28888,8 @@ function boundaryRefusal(command, ownSid) {
   const indirect = indirectP2PRun(command);
   if (indirect)
     return `${indirect} can't be checked`;
+  if (nestedTooDeep(command))
+    return `${NESTED} can't be checked`;
   const words = shellTokens(command);
   for (let i = 0; i < words.length; i++) {
     const m = /^--(?:from-)?session(?:=(.*))?$/s.exec(words[i] ?? "");
