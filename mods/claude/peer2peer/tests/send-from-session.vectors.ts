@@ -373,5 +373,49 @@ export const SEND_VECTORS: { cmd: string; verb: string | null }[] = [
   {
     "cmd": "p2p send --from-session=s1 --to bob hi\r",
     "verb": null
+  },
+  {
+    "cmd": "env -S 'p2p send --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -S 'p2p send --from-session=s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -S'p2p send --from-session=s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -vS 'p2p send --from-session=s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -i -S 'p2p send --from-session s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -u HOME -S 'p2p send --from-session s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env --split-string='p2p send --from-session=s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env --split-string 'p2p send --from-session s1 --to bob hi'",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env -S 'p2p send --to bob' --from-session=s1 hi",
+    "verb": "send (no --from-session)"
+  },
+  {
+    "cmd": "env p2p send --from-session s1 --to bob hi",
+    "verb": null
+  },
+  {
+    "cmd": "env A=1 p2p send --from-session=s1 --to bob hi",
+    "verb": null
   }
 ]

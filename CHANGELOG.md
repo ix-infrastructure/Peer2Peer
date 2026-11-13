@@ -6,6 +6,7 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
 
 ### Behaviour changes
 
+- **The agent guards refuse command lines they can't read by their words, the same way in Claude Code and Codex.** A shell command from the agent that names p2p and also runs GNU `parallel` (or `sem`, `parset`, `rush`, `xjobs`), or defines a shell alias or function on the same line (`alias q='p2p send --to'; q …`, `f(){ p2p "$@"; }; f …`), is refused rather than emulated. The Codex bridge now unwraps `env -S '<command line>'` (and `-S<line>`, bundled `-vS`, `--split-string`) as the Claude Code mod does, so a `p2p send` inside it is refused by both. Message text after the CLI's name that only mentions these words still passes.
 - **`p2p setup` asks how you're joining before it makes any key.** At your terminal, with no identity on this device, setup first asks: `[l]` I already use Peer2Peer on another device, `[i]` I have an invite link or code, or `[n]` start a new identity.
   - `l` links this device to the identity you already have (the same as `p2p link join`, inline): run `p2p link start` on the other device (or `/peers link start` in Claude Code), then type the code it shows. Before, setup could only make a new identity, so someone who already had one ended up with a second, separate identity.
   - `i` redeems the invite (the same as `p2p join`, inline): the new identity uses the relay in the code, so no relay is asked for.

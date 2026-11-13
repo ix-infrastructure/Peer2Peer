@@ -24,6 +24,7 @@ import {
   isAutoApproving,
   isAutoDeliver,
   isPeer2PeerHelp,
+  indirectP2PRun,
   mutatingP2PVerb,
   touchesBackupFile,
   touchesP2PSettings,
@@ -40,6 +41,7 @@ import {
 import { ANA_ID, BEN, BEN_ID, CIRCLE, growth } from './world'
 // Shared with the Codex bridge's tests (packages/codex-bridge lib.test.ts): both guards answer each the same.
 import { SEND_VECTORS as sendVectors } from './send-from-session.vectors'
+import { INDIRECT_VECTORS as indirectVectors } from './indirect-run.vectors'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -772,3 +774,44 @@ describe('M1 and L3 helpers', () => {
   })
 })
 
+describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
+  test('env -S is unwrapped in each spelling; a send inside it is never read as naming --from-session', () => {
+    for (const [cmd, verb] of [
+      ["env -S 'p2p invite'", 'invite'],
+      ["env -S'p2p invite'", 'invite'],
+      ["env -vS 'p2p held approve h1'", 'held approve'],
+      ["env -u HOME --split-string='p2p join x'", 'join'],
+      ['env -C /tmp p2p invite', 'invite'],
+      ["env p2p invite -S 'echo'", 'invite'],
+    ] as const) expect([cmd, mutatingP2PVerb(cmd)]).toEqual([cmd, verb])
+  })
+
+  test('parallel, an alias or a function on a command that names p2p is refused (shared vectors)', () => {
+    expect(indirectVectors.length).toBeGreaterThan(25)
+    for (const v of indirectVectors) {
+      expect([v.cmd, indirectP2PRun(v.cmd)]).toEqual([v.cmd, v.reason])
+      // Wired into the Bash guard: refused as a command it can't check.
+      if (v.reason) expect([v.cmd, uncheckableShell(v.cmd) !== null]).toEqual([v.cmd, true])
+    }
+  })
+
+  test('linear: adversarial 16 KiB inputs are read quickly', () => {
+    const n = 16 * 1024
+    for (const cmd of [
+      'p2p ' + '('.repeat(n),
+      'p2p ' + '( '.repeat(n / 2),
+      'p2p ' + 'f' + ' '.repeat(n) + '(',
+      'p2p ' + '('.repeat(n / 4) + ' '.repeat(n / 2) + ')',
+      'p2p ' + '"p2p '.repeat(n / 5),
+      "p2p bash -c '" + 'bash -c "p2p '.repeat(n / 13),
+      'p2p ' + 'a=1 '.repeat(n / 4),
+      'p2p ' + '$( p2p '.repeat(n / 7),
+      'p2p ' + ' ( ) '.repeat(n / 5),
+    ]) {
+      const t = Date.now()
+      indirectP2PRun(cmd)
+      uncheckableShell(cmd)
+      expect([cmd.slice(0, 20), Date.now() - t < 1000]).toEqual([cmd.slice(0, 20), true])
+    }
+  })
+})

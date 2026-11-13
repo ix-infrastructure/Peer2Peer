@@ -1805,6 +1805,47 @@ function substitutions(text: string): string[] {
   return out
 }
 
+/**
+ * `env`'s split string (`-S <cmd …>`, `-S<cmd …>`, `-vS <cmd …>`, `--split-string[=]<cmd …>`) among its
+ * options and assignments, from `from` (the word after `env`) up to its command: the command line it
+ * holds and the index of the first word after it, or null. The Codex bridge has the same function;
+ * both are pinned to the same vectors. Linear.
+ */
+export function envSplitString(words: readonly string[], from: number): { line: string; next: number } | null {
+  for (let j = from; j < words.length; j++) {
+    const w = words[j] ?? ''
+    if (w === '--split-string') return words[j + 1] === undefined ? null : { line: words[j + 1] ?? '', next: j + 2 }
+    if (w.startsWith('--split-string=')) return { line: w.slice('--split-string='.length), next: j + 1 }
+    if (w === '--unset' || w === '--chdir') {
+      j++
+      continue
+    }
+    // NAME=VALUE before the command; anything else that isn't an option is the command (or `--` ends the options).
+    if (!w.startsWith('-') || w === '-') {
+      if (w.indexOf('=') > 0) continue
+
+      return null
+    }
+    if (w === '--') return null
+    if (w.startsWith('--')) continue
+    // Short options, bundled: -S takes the rest of the word or the next one; -u and -C take a value.
+    for (let k = 1; k < w.length; k++) {
+      const o = w[k]
+      if (o === 'S') {
+        if (k + 1 < w.length) return { line: w.slice(k + 1), next: j + 1 }
+
+        return words[j + 1] === undefined ? null : { line: words[j + 1] ?? '', next: j + 2 }
+      }
+      if (o === 'u' || o === 'C') {
+        if (k + 1 === w.length) j++
+        break
+      }
+    }
+  }
+
+  return null
+}
+
 /** A simple command's words from its command word on: env assignments and runner prefixes dropped. */
 function stripPrefixes(words: readonly string[]): string[] {
   let i = 0
@@ -1815,16 +1856,14 @@ function stripPrefixes(words: readonly string[]): string[] {
       i += w === 'npm' || w === 'pnpm' ? 2 : 1
       // `env -S "<cmd …>"` (split-string): the string is the command line.
       if (w === 'env') {
-        const s = words.findIndex((x, j) => j >= i && /^(-S|--split-string)$/.test(x))
-        if (s >= 0 && words[s + 1] !== undefined) return stripPrefixes([...shellWords(words[s + 1] ?? ''), ...words.slice(s + 2)])
-        const eq = words.findIndex((x, j) => j >= i && /^--split-string=/.test(x))
-        if (eq >= 0) return stripPrefixes([...shellWords((words[eq] ?? '').slice('--split-string='.length)), ...words.slice(eq + 1)])
+        const split = envSplitString(words, i)
+        if (split) return stripPrefixes([...shellWords(split.line), ...words.slice(split.next)])
       }
       // The runner's own options (and a value for the ones that take one).
       while (i < words.length && (words[i] ?? '').startsWith('-')) {
         const opt = words[i] ?? ''
         i++
-        if (/^(-u|-g|-p|--package|--user|--group|-s|--signal|-k|--kill-after|-n)$/.test(opt) && i < words.length) i++
+        if (/^(-u|-g|-p|--package|--user|--group|-s|--signal|-k|--kill-after|-n|-C|--chdir)$/.test(opt) && i < words.length) i++
       }
       if (w === 'timeout' && /^\d/.test(words[i] ?? '')) i++
       continue
@@ -1967,6 +2006,82 @@ export function namesP2P(text: string, homes: readonly string[] = []): boolean {
   return homes.some(h => h.trim().length > 1 && lower.includes(h.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()))
 }
 
+/** Runners that build a command's argv from their own arguments (`parallel p2p ::: invite`): the guards never see it. */
+const ARG_RUNNERS = new Set(['parallel', 'sem', 'parset', 'rush', 'xjobs'])
+/** Words before a simple command's command word: keywords, and builtins and runners that run the next word. */
+const LEAD_WORDS = new Set(['{', '!', 'if', 'then', 'do', 'else', 'elif', 'while', 'until', 'time', 'exec', 'command', 'builtin', 'eval', 'sudo', 'doas', 'env', 'nice', 'nohup', 'timeout', 'stdbuf', 'xargs'])
+
+/** The CLI named as a word (the guards' isCli, without configured names): `p2p`, `p2p.mjs`, `@peer2peer/cli`, `$P2P_BIN`. */
+function cliWord(word: string): boolean {
+  const base = (word.split(/[\\/]/).pop() ?? word).toLowerCase()
+
+  return base === 'p2p' || base === 'p2p.exe' || base === 'p2p.cmd' || base === 'p2p.mjs' || base === 'p2p.cjs' || base === 'p2p.js' || word.startsWith('@peer2peer/cli') || word === '$P2P_BIN' || word === '${P2P_BIN}'
+}
+
+/** `name()` or `name ( )` followed by a body (`{` or `(`) anywhere in the text, quoted or not: a shell function. One pass. */
+function definesFunction(text: string): boolean {
+  const blank = (c: string | undefined) => c === ' ' || c === '\t'
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '(') continue
+    let j = i + 1
+    while (blank(text[j])) j++
+    if (text[j] !== ')') continue
+    let k = j + 1
+    while (blank(text[k]) || text[k] === '\n' || text[k] === '\r') k++
+    if (text[k] !== '{' && text[k] !== '(') continue
+    let m = i - 1
+    while (m >= 0 && blank(text[m])) m--
+    const before = text[m]
+    // `$()`, `=()` (an empty array) and `<()` aren't function names.
+    if (before !== undefined && !' \t\n\r;&|()<>$=`\'"@!'.includes(before)) return true
+  }
+
+  return false
+}
+
+/**
+ * Why a command line that names p2p can't be read by its words, or null (the Codex bridge has the same
+ * function; both are pinned to the same vectors). GNU `parallel` and runners like it build the CLI's
+ * argv from their own arguments (`parallel p2p ::: invite`), and an alias or a function defined in the
+ * same command line gives the CLI another name (`alias q='p2p send --to'`, `f(){ p2p "$@"; }`). Not
+ * emulated: refused. A quoted word that may be a script of its own (`bash -c '…'`, `eval "…"`) is read
+ * again, a few levels deep, when it names p2p; message text after the CLI's name isn't, except a
+ * substitution. One pass per level over the text, no backtracking: linear. The caller checks that the
+ * command names p2p.
+ */
+export function indirectP2PRun(command: string, depth = 0): string | null {
+  if (depth === 0 && definesFunction(command)) return 'a shell function defined on a command that names p2p'
+  const starts = new Set<number>()
+  const words = shellTokens(command, false, undefined, starts)
+  let lead = true
+  let cliSeen = false
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? ''
+    if (starts.has(i)) {
+      lead = true
+      cliSeen = false
+    }
+    const base = (w.split(/[\\/]/).pop() ?? w).toLowerCase()
+    if (lead) {
+      if (base === 'alias') return 'a shell alias defined on a command that names p2p'
+      if (base === 'function') return 'a shell function defined on a command that names p2p'
+      // NAME=value, a keyword or runner, or a runner's option or count: the command word is still to come.
+      if (!(w.indexOf('=') > 0 || LEAD_WORDS.has(base) || w.startsWith('-') || (w !== '' && [...w].every(ch => ch >= '0' && ch <= '9')))) lead = false
+    }
+    if (!cliSeen && ARG_RUNNERS.has(base)) return 'GNU parallel (or a runner like it) on a command that names p2p'
+    if (cliWord(w)) cliSeen = true
+    if (depth < 3 && (w.includes(' ') || w.includes('\t') || w.includes('\n')) && (!cliSeen || w.includes('$(') || w.includes('`'))) {
+      const lower = w.toLowerCase()
+      if (lower.includes('p2p') || lower.includes('@peer2peer')) {
+        const found = indirectP2PRun(w, depth + 1)
+        if (found) return found
+      }
+    }
+  }
+
+  return null
+}
+
 export function uncheckableShell(command: string, homes: readonly string[] = []): string | null {
   if (command.length > MAX_CHECKED_COMMAND) return namesP2P(command, homes) ? 'a command too long to check that names p2p' : null
   const c = command.replace(/\\\n/g, ' ')
@@ -2012,6 +2127,9 @@ export function uncheckableShell(command: string, homes: readonly string[] = [])
     if (hidden === 'interpreter') return 'interpreter code on a line that names p2p'
     if (hidden === 'pty') return 'a pseudo-terminal wrapper on a line that names p2p'
     if (interpreterReadsStdin(c)) return 'an interpreter reading its program from a pipe, here-string, heredoc or file, on a command that names p2p'
+    // GNU parallel and its kin, or an alias or function defined on the line (issue #69): not emulated.
+    const indirect = indirectP2PRun(c)
+    if (indirect) return indirect
   }
   // A text-first command that runs a command of its own (sed's e, a git -c setting or alias, awk's
   // system(), rg --pre, …) with p2p anywhere in it, even after a `/` (`s/x/p2p …/e`): what it runs
