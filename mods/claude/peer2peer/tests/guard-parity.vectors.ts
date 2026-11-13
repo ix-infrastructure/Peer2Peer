@@ -919,5 +919,81 @@ export const GUARD_VECTORS: { cmd: string; refused: boolean }[] = [
   {
     "cmd": "b''ash -c 'b''ash -c \"e''val e''val e''val e''val p2p invite\"'",
     "refused": true
+  },
+  {
+    "cmd": "x eval 'echo hi' trap 'p2p invite' EXIT",
+    "refused": true
+  },
+  {
+    "cmd": "eval 'echo hi'; trap 'p2p invite' EXIT",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c 'echo hi; \"$@\"' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c '\"$@\"' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c '\"$@\"' x trap 'p2p invite' EXIT",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c '\"$@\"' x bash -c 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "sh -c 'true' sh -c 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c 'true' x; eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -lc 'echo hi' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c 'echo' -- eval 'p2p send --to bob hi'",
+    "refused": true
+  },
+  {
+    "cmd": "env -S 'echo' eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "env -S 'true' bash -c 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "trap 'echo' EXIT; bash -c 'x' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "watch -n1 'echo hi' eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -x -c 'echo' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash --norc -c '\"$@\"' x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -c \"$X\" x eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash script.sh eval 'p2p invite'",
+    "refused": true
+  },
+  {
+    "cmd": "bash -s eval 'p2p invite' <<< '\"$@\"'",
+    "refused": true
   }
 ]

@@ -28538,15 +28538,27 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
       deep.hit = true;
     return null;
   }
+  const names = (t2) => mentionsP2P(t2) || binNames.some((b) => b !== "" && t2.includes(b));
   work.left -= command.length + 1;
   if (work.left < 0)
-    return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+    return depth === 0 && names(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word) => {
     const w = word.replace(/^["']|["']$/g, "");
     const base = w.split(/[\\/]/).pop() ?? w;
     return base === "p2p" || base === "p2p.exe" || base === "p2p.cmd" || /^p2p\.(mjs|cjs|js)$/.test(base) || w === "@peer2peer/cli" || w.startsWith("@peer2peer/cli@") || w === "$P2P_BIN" || w === "${P2P_BIN}" || cliBinJs(w) || binNames.includes(w);
   };
+  const all = shellTokens(command);
+  const sh = all.findIndex((w) => /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test((w.split(/[\\/]/).pop() ?? "").toLowerCase()));
+  const shFlag = sh < 0 ? -1 : all.findIndex((w, j) => j > sh && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
+  if (shFlag > 0 && all[shFlag + 1] !== void 0) {
+    const script = shFlag + 2 < all.length ? `${all[shFlag + 1]}; ${all.slice(shFlag + 2).join(" ")}` : all[shFlag + 1] ?? "";
+    const found = mutatingP2PVerb(script, binNames, depth + 1, false, deep, work);
+    if (found)
+      return found;
+    if (work.left < 0)
+      return depth === 0 && names(command) ? TOO_COMPLEX : null;
+  }
   for (const segment of segments) {
     const raws = [];
     const words = shellTokens(segment, false, void 0, void 0, raws);
@@ -28559,8 +28571,8 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
         if (flag < 0)
           noFlag = true;
-        else
-          inner = words[flag + 1];
+        else if (words[flag + 1] !== void 0)
+          inner = flag + 2 < words.length ? `${words[flag + 1]}; ${words.slice(flag + 2).join(" ")}` : words[flag + 1];
       } else if (base === "eval" || STRING_RUNNERS.has(base)) {
         inner = words.slice(i + 1).join(" ");
       } else if (base === "env") {
@@ -28576,7 +28588,7 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
       if (found)
         return found;
       if (work.left < 0)
-        return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+        return depth === 0 && names(command) ? TOO_COMPLEX : null;
       break;
     }
     const at = words.findIndex(isCli);

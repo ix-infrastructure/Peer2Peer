@@ -822,7 +822,7 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
 
       return Date.now() - t
     }
-    for (const word of ['eval', 'trap', 'su', 'watch', 'ssh', 'complete', "e''val", 'bash -c', 'env -S']) {
+    for (const word of ['eval', 'trap', 'su', 'watch', 'ssh', 'complete', "e''val", 'bash -c', 'env -S', `bash -c '"$@"' x eval`]) {
       const pad = (n: number) => (word + ' ').repeat(Math.floor(n / (word.length + 1))) + 'p2p invite'
       const half = time(() => uncheckableShell(pad(8 * 1024)) ?? mutatingP2PVerb(pad(8 * 1024)))
       const full = time(() => uncheckableShell(pad(16 * 1024)) ?? mutatingP2PVerb(pad(16 * 1024)))
@@ -834,6 +834,7 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
     // Past the work budget, a command that names p2p is refused unread; one that doesn't is left alone.
     expect(mutatingP2PVerb('eval p2p ls', [], 0, undefined, { left: 5 })).toBe(TOO_COMPLEX)
     expect(mutatingP2PVerb('eval ls', [], 0, undefined, { left: 5 })).toBeNull()
+    expect(mutatingP2PVerb('eval mycli ls', ['mycli'], 0, undefined, { left: 5 })).toBe(TOO_COMPLEX)
     expect(WORK_BUDGET).toBeGreaterThan(16 * 1024 * 8)
   })
 

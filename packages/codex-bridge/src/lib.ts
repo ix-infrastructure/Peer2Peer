@@ -961,8 +961,10 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     return null;
   }
   // Every pass spends the text it reads from one budget: past it, a command that names p2p is refused unread.
+  // The configured binary counts as naming p2p here too.
+  const names = (t: string) => mentionsP2P(t) || binNames.some((b) => b !== "" && t.includes(b));
   work.left -= command.length + 1;
-  if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+  if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
   const segments = command.split(/\|\||&&|[|;&\n`]|\$\(|\)/);
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, "");
@@ -980,6 +982,17 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       binNames.includes(w)
     );
   };
+  // A shell's `-c` script and its positional arguments, read over the whole command (the split below doesn't
+  // know quotes, so a `;` inside the script would cut it): the first one, once per level.
+  const all = shellTokens(command);
+  const sh = all.findIndex((w) => /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test((w.split(/[\\/]/).pop() ?? "").toLowerCase()));
+  const shFlag = sh < 0 ? -1 : all.findIndex((w, j) => j > sh && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
+  if (shFlag > 0 && all[shFlag + 1] !== undefined) {
+    const script = shFlag + 2 < all.length ? `${all[shFlag + 1]}; ${all.slice(shFlag + 2).join(" ")}` : (all[shFlag + 1] ?? "");
+    const found = mutatingP2PVerb(script, binNames, depth + 1, false, deep, work);
+    if (found) return found;
+    if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
+  }
   for (const segment of segments) {
     const raws: string[] = [];
     const words = shellTokens(segment, false, undefined, undefined, raws);
@@ -993,7 +1006,8 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       if (!noFlag && /^(sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd)(\.exe)?$/.test(base)) {
         const flag = words.findIndex((w, j) => j > i && /^(-c|-lc|-command|\/c|-encodedcommand)$/i.test(w));
         if (flag < 0) noFlag = true;
-        else inner = words[flag + 1];
+        // The script and then its positional arguments, which it can run (`bash -c '"$@"' x eval 'p2p invite'`): one nested line.
+        else if (words[flag + 1] !== undefined) inner = flag + 2 < words.length ? `${words[flag + 1]}; ${words.slice(flag + 2).join(" ")}` : words[flag + 1];
       } else if (base === "eval" || STRING_RUNNERS.has(base)) {
         // `eval …`, and a string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`,
         // `su -c '…'`, `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the mod does).
@@ -1010,7 +1024,7 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
       if (inner === undefined) continue;
       const found = mutatingP2PVerb(inner, binNames, depth + 1, innerUnread, deep, work);
       if (found) return found;
-      if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null;
+      if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null;
       break;
     }
     const at = words.findIndex(isCli);

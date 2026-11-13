@@ -321,7 +321,7 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
       f();
       return Date.now() - t;
     };
-    for (const word of ["eval", "trap", "su", "watch", "ssh", "complete", "e''val", "bash -c", "env -S"]) {
+    for (const word of ["eval", "trap", "su", "watch", "ssh", "complete", "e''val", "bash -c", "env -S", `bash -c '"$@"' x eval`]) {
       const pad = (n: number) => (word + " ").repeat(Math.floor(n / (word.length + 1))) + "p2p invite";
       const half = time(() => guard("Bash", { command: pad(8 * 1024) }, [], "s1"));
       const full = time(() => guard("Bash", { command: pad(16 * 1024) }, [], "s1"));
@@ -334,6 +334,7 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
     // Past the work budget, a command that names p2p is refused unread (the guard says it can't be checked).
     expect(mutatingP2PVerb("eval p2p ls", [], 0, false, undefined, { left: 5 })).toBe(TOO_COMPLEX);
     expect(mutatingP2PVerb("eval ls", [], 0, false, undefined, { left: 5 })).toBeNull();
+    expect(mutatingP2PVerb("eval mycli ls", ["mycli"], 0, false, undefined, { left: 5 })).toBe(TOO_COMPLEX);
     const huge = "eval " + "x ".repeat(WORK_BUDGET) + "p2p ls";
     expect(guard("Bash", { command: huge }, [], "s1")).toContain("too complex to check");
   });

@@ -2470,7 +2470,14 @@ export const WORK_BUDGET = 64 * MAX_CHECKED_COMMAND
 /** mutatingP2PVerb's answer when a command that names p2p is past WORK_BUDGET: refused as one it can't check. */
 export const TOO_COMPLEX = 'a command too complex to check that names p2p'
 
-export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, deep?: { hit: boolean }, work: { left: number } = { left: WORK_BUDGET }): string | null {
+/** A shell's `-c` script at `at` and the positional arguments after it, as one command line (`script; args…`). */
+function withArguments(words: readonly string[], at: number): string {
+  const rest = words.slice(at + 1)
+
+  return rest.length > 0 ? `${words[at] ?? ''}; ${rest.join(' ')}` : (words[at] ?? '')
+}
+
+export function mutatingP2PVerb(command: string, binNames: readonly string[] = [], depth = 0, deep?: { hit: boolean }, work: { left: number } = { left: WORK_BUDGET }, joined = false): string | null {
   // Past the nesting limit nothing more is read: nestedTooDeep refuses it when it still names p2p.
   if (depth > 4) {
     if (deep && mentionsP2P(command)) deep.hit = true
@@ -2478,10 +2485,12 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     return null
   }
   // Every pass spends the text it reads from one budget: past it, a command that names p2p is refused unread.
+  // The configured binary counts as naming p2p here too.
+  const names = (t: string) => mentionsP2P(t) || binNames.some(b => b !== '' && t.includes(b))
   work.left -= command.length + 1
-  if (work.left < 0) return depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null
+  if (work.left < 0) return depth === 0 && names(command) ? TOO_COMPLEX : null
   const over = () => work.left < 0
-  const tooComplex = () => (depth === 0 && mentionsP2P(command) ? TOO_COMPLEX : null)
+  const tooComplex = () => (depth === 0 && names(command) ? TOO_COMPLEX : null)
   const isCli = (word: string) => {
     const w = word.replace(/^["']|["']$/g, '')
     const base = w.split(/[\\/]/).pop() ?? w
@@ -2500,17 +2509,24 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     const sourceOf = (k: number) => (aligned ? raws[off + k] : undefined)
     const head = words[0] ?? ''
     const base = head.split(/[\\/]/).pop()?.toLowerCase() ?? ''
+    // A text command (`echo`, `grep`) whose words are what they look like: not words that env -S or a joined
+    // line (eval, a string runner, a shell's arguments) read again, whose quoting is gone. Those fail closed.
+    const envAt = tokens.findIndex(t => (t.split(/[\\/]/).pop() ?? '').toLowerCase() === 'env')
+    const viaEnvS = envAt >= 0 && envSplitString(tokens, envAt + 1) !== null
+    const text = TEXT_FIRST_WORDS.has(base) && aligned && !viaEnvS && !joined
     // A command handed to a shell or eval as one string runs too.
     if (SHELLS.test(base)) {
+      // With `-c`, the script and then its positional arguments, which it can run (`bash -c '"$@"' x eval
+      // 'p2p invite'`): one nested line. Without, a script file's arguments, read the same way.
       const flag = words.findIndex((w, j) => j > 0 && /^(-[a-z]*c|-command|\/c|-encodedcommand)$/i.test(w))
-      const inner = flag > 0 ? words[flag + 1] : undefined
-      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep, work) : null
+      const inner = flag > 0 ? withArguments(words, flag + 1) : words.slice(1).join(' ')
+      const found = inner ? mutatingP2PVerb(inner, binNames, depth + 1, deep, work, true) : null
       if (found) return found
       if (over()) return tooComplex()
-      continue
+      // The CLI among the shell's own words is still looked for below (`sh -c p2p invite`).
     }
     if (base === 'eval') {
-      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work)
+      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work, true)
       if (found) return found
       if (over()) return tooComplex()
       continue
@@ -2532,27 +2548,36 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     // A string that a builtin or a command runs later or elsewhere (`trap '…' EXIT`, `su -c '…'`,
     // `complete -C '…'`, `ssh host '…'`, `watch '…'`): read again as a command line (as the Codex bridge does).
     if (STRING_RUNNERS.has(base)) {
-      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work)
+      const found = mutatingP2PVerb(words.slice(1).join(' '), binNames, depth + 1, deep, work, true)
       if (found) return found
       if (over()) return tooComplex()
     }
-    // The CLI as the command word, or anywhere after it unless the command is a text command (`echo`,
-    // `grep`): behind a wrapper this guard doesn't know (`setsid p2p …`, `watch -n1 p2p …`,
-    // `find -exec p2p …`, `ssh host p2p …`) or run by node (`node [opts] <…>/p2p.mjs`), any word naming
-    // the CLI, so an option's value (`--stack-size 999`) can't pass for the script (as the Codex bridge reads it).
+    // `eval` or a string runner behind another command word (`x eval '…'`, `nohup trap '…'`), or in words
+    // that env -S read again (no source left, so never taken for text): the rest of the simple command, read
+    // once as a command line (as the Codex bridge does).
+    if (!SHELLS.test(base) && !text) {
+      const j = words.findIndex((w, k) => k > 0 && (w === 'eval' || STRING_RUNNERS.has(w)))
+      const found = j > 0 ? mutatingP2PVerb(words.slice(j + 1).join(' '), binNames, depth + 1, deep, work, true) : null
+      if (found) return found
+      if (over()) return tooComplex()
+    }
     // A shell's `-c` string behind such a wrapper (`find -exec sh -c '…' \;`), read the same way.
-    if (!TEXT_FIRST_WORDS.has(base)) {
+    if (!text) {
       for (let j = 1; j < words.length; j++) {
         if (!SHELLS.test((words[j] ?? '').split(/[\\/]/).pop()?.toLowerCase() ?? '')) continue
         const flag = words.findIndex((w, k) => k > j && /^(-[a-z]*c|-command|\/c|-encodedcommand)$/i.test(w))
-        const found = flag > 0 && words[flag + 1] ? mutatingP2PVerb(words[flag + 1] ?? '', binNames, depth + 1, deep, work) : null
+        const found = flag > 0 && words[flag + 1] ? mutatingP2PVerb(withArguments(words, flag + 1), binNames, depth + 1, deep, work, true) : null
         if (found) return found
         if (over()) return tooComplex()
         break
       }
     }
+    // The CLI as the command word, or anywhere after it unless the command is a text command (`echo`,
+    // `grep`): behind a wrapper this guard doesn't know (`setsid p2p …`, `watch -n1 p2p …`,
+    // `find -exec p2p …`, `ssh host p2p …`) or run by node (`node [opts] <…>/p2p.mjs`), any word naming
+    // the CLI, so an option's value (`--stack-size 999`) can't pass for the script (as the Codex bridge reads it).
     let at = isCli(head) ? 0 : -1
-    if (at < 0 && !TEXT_FIRST_WORDS.has(base)) at = words.findIndex((w, j) => j > 0 && isCli(w))
+    if (at < 0 && !text) at = words.findIndex((w, j) => j > 0 && isCli(w))
     if (at < 0) continue
     // A mutating verb anywhere after the CLI's name (flags and their values may come between).
     const after = words.slice(at + 1).map(w => w.toLowerCase())
