@@ -17,7 +17,10 @@ import { MemoryTrustStoreV3 } from "../store.js";
 import { b64uEncode } from "../../encoding.js";
 import { randomBytes } from "../../crypto.js";
 import { decodeJws, signJws } from "../../jws.js";
-import { makeUser, NOW, storeKnowing, type TestUser } from "./fixtures.js";
+import { ctxFor, makeUser, NOW, NOW_MS, RELAY, seal, storeKnowing, type TestUser } from "./fixtures.js";
+import { verifyIncomingV3 } from "../incoming.js";
+import { createAcceptV3, createInviteV3, verifyFriendshipV3 } from "../friends.js";
+import { recordFriendshipV3 } from "../state.js";
 
 const RELAYS = [1, 2, 3, 4, 5].map((i) => `wss://r${i}.example/v3`);
 
@@ -87,7 +90,7 @@ describe("A: an incomplete commit applies what the verified newest tip revokes",
     // intermediate version that lists the laptop. The verified head (ver 60) already revoked it.
     const { u, laptop, head, store } = await laptopRevokedAtHead(60, 1);
     const fetcher: IdentityFetcher = { tips: async () => [head.jws], chain: walkFrom(u.docs) };
-    const first = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAYS[0]], checkMs: 1 });
+    const first = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAY], checkMs: 1 });
     expect(first.incomplete).toBe(true);
     expect(first.head.ver).toBeGreaterThanOrEqual(2);
     expect(first.head.ver).toBeLessThan(head.ver);
@@ -102,7 +105,8 @@ describe("A: an incomplete commit applies what the verified newest tip revokes",
     // Nothing goes on the permanent denylist: the pending head is temporary.
     expect((await store.getIdentity(u.userId))!.denied).toBeUndefined();
     // Catching up: complete, the head reached, the pending head dropped, the laptop still out (chain rules).
-    const { view } = await catchUp(() => refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAYS[0]], checkMs: 1 }), 80);
+    // (The relay the documents list, so a complete refresh counts as fresh: re-review R2.)
+    const { view } = await catchUp(() => refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [RELAY], checkMs: 1 }), 80);
     expect(view.head.hash).toBe(head.hash);
     expect(view.devices).toEqual([u.dev.did]);
     expect((await store.getIdentity(u.userId))!.pendingHeads).toBeUndefined();
@@ -170,8 +174,11 @@ describe("A: an incomplete commit applies what the verified newest tip revokes",
     expect(back.view().devices).toEqual([u.dev.did]);
     expect(back.notePending([x5], at)).toBe(false);
     expect(back.notePending([v3], at)).toBe(false);
-    // Another tip above the head joins: the intersection still leaves the laptop out.
-    expect(back.notePending([v4, y5], at)).toBe(true);
+    // Another tip above the head that keeps the laptop (y5) can't lift x5's narrowing: the laptop stays out
+    // (v4, below both and leaving nothing more out, is redundant and not kept; R3).
+    back.notePending([v4, y5], at);
+    expect(back.toStored().pendingHeads).toContain(x5.jws);
+    expect(back.toStored().pendingHeads).not.toContain(v4.jws);
     expect(back.view().devices).toEqual([u.dev.did]);
     // v4 (ver 4 < 5) is still below it: still narrowed.
     expect(back.add(v4.jws, { now: NOW }).status).toBe("accepted");
@@ -309,6 +316,8 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
   async function forgedFarFuture(iat: number) {
     const u = makeUser("alice");
     const laptop = u.addDevice({ keyholder: true });
+    const R = RELAYS.slice(0, 2);
+    u.relays = R; // the versions held list both relays
     for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 100 + i });
     const store = await storeWith(u.docs);
     const mallory = makeUser("mallory").dev.did;
@@ -321,7 +330,6 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
       prev = d.hash;
     }
     const top = forged[forged.length - 1];
-    const R = RELAYS.slice(0, 2);
     const hostile: IdentityFetcher = {
       tips: async (_u, rs) => (rs[0] === R[0] ? [u.doc.jws] : [top.jws]),
       chain: async (uid, rs, to, n) => (rs[0] === R[0] ? walkFrom(u.docs)(uid, rs, to, n) : walkFrom(forged)(uid, rs, to, n)),
@@ -348,10 +356,14 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
     expect((await store.getIdentity(u.userId))!.pendingHeads).toEqual([top.jws]);
     // ...but never on the owner's own publishing path (ignorePending), so the owner can still edit or rotate.
     expect((await getIdentityView(store, u.userId, { now: NOW, ignorePending: true }))!.devices).toEqual([u.dev.did, laptop.did]);
-    // The hostile relay gone, the next complete refresh clears it.
+    // Only one of the two listed relays answering honestly (a minority) isn't enough to clear it (R2)...
     const second = await refreshIdentity(store, u.userId, honest, { now: NOW, relays: [R[0]] });
     expect(second.incomplete).toBeUndefined();
-    expect(second.devices).toEqual([u.dev.did, laptop.did]);
+    expect(second.devices).toEqual([]);
+    // ...both answering honestly is: the next complete refresh answered by a majority clears it.
+    const third = await refreshIdentity(store, u.userId, honest, { now: NOW, relays: R });
+    expect(third.incomplete).toBeUndefined();
+    expect(third.devices).toEqual([u.dev.did, laptop.did]);
     expect((await store.getIdentity(u.userId))!.pendingHeads).toBeUndefined();
   });
 
@@ -425,6 +437,7 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
     // A slow machine: v1 held, the genuine v60 revokes the laptop; the first refresh is incomplete (pending v60).
     const u = makeUser("alice");
     const laptop = u.addDevice({ keyholder: true });
+    u.relays = RELAYS.slice(0, 2); // v2 on list both relays
     for (let i = 2; i < 60; i++) u.publish({ iat: NOW - 1000 + i });
     const head = u.publish({ devices: [u.dev.did], keyholders: [u.dev.did], iat: NOW - 10 });
     const store = await storeWith(u.docs.slice(0, 1));
@@ -451,7 +464,7 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
     expect((await store.getIdentity(u.userId))!.pendingHeads).toBeUndefined();
   });
 
-  it("re-review N3: a long run of one branch can't push another branch's revoking tip out of the 8 kept", () => {
+  it("re-review N3: a long run of one branch can't push another branch's revoking tip out", () => {
     // Held v1..v4 (the laptop trusted). Candidates: the main branch's v5..v13 (9, each naming the last) and a
     // fork x5 off v4 that drops the laptop. By ver alone, the 8 kept are v6..v13 and x5 is pushed out; the
     // tips (v13, x5) come first now, so the laptop stays out.
@@ -466,10 +479,8 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
     const run: VerifiedIdentityDoc[] = [];
     for (let i = 0; i < 9; i++) run.push(u.publish({ iat: NOW - 400 + i }));
     expect(c.notePending([x5, ...run], at)).toBe(true);
-    const kept = c.toStored().pendingHeads!;
-    expect(kept).toHaveLength(8);
-    expect(kept).toContain(x5.jws);
-    expect(kept).toContain(run[8].jws);
+    // Kept: the highest (always) and x5 (it leaves the laptop out); the rest of the run is redundant.
+    expect(c.toStored().pendingHeads).toEqual([run[8].jws, x5.jws]);
     expect(c.view().devices).toEqual([u.dev.did]);
   });
 
@@ -479,5 +490,87 @@ describe("review of #65: pending heads can't narrow for good; walk answers", () 
     const ctx = storeSignerContext(store, { now: NOW, own: u.userId });
     expect((await ctx.resolveIdentity(u.userId))!.devices).toEqual([u.dev.did, laptop.did]);
     expect((await storeSignerContext(store, { now: NOW }).resolveIdentity(u.userId))!.devices).toEqual([]);
+  });
+
+  it("re-review R1: the envelope gate reads our own identity without pending heads; a friend's stays narrowed", async () => {
+    // Bob's phone (this device) and laptop are both listed. A pending head signed with Bob's identity key
+    // (far ahead, listing only the phone) sits in the phone's store, and one of Alice's (listing only her
+    // first device) too. The laptop's sync to the phone is accepted (it would be rejected in core before
+    // any client check otherwise); Alice's second device stays out.
+    const bob = makeUser("bob");
+    const laptop = bob.addDevice({ keyholder: true });
+    bob.publish({ iat: NOW - 500 });
+    const alice = makeUser("alice");
+    const alice2 = alice.addDevice();
+    alice.publish({ iat: NOW - 500 });
+    const store = await storeKnowing(bob, alice);
+    const invite = createInviteV3(bob.signer(), { aud: alice.userId, iat: NOW - 400 });
+    await recordFriendshipV3(store, await verifyFriendshipV3({ invite, accept: createAcceptV3(alice.signer(), invite, { iat: NOW - 300 }) }, ctxFor(store)));
+    for (const [u, only] of [
+      [bob, bob.dev.did],
+      [alice, alice.dev.did],
+    ] as const) {
+      const far = doc(u, { ver: 999, prev: b64uEncode(randomBytes(32)), devices: [only], keyholders: [only], iat: NOW - 5 });
+      await store.updateIdentity(u.userId, (cur) => ({ next: { ...cur!, pendingHeads: [far.jws] }, result: undefined }));
+    }
+    const receive = (env: string) =>
+      verifyIncomingV3(env, { self: { userId: bob.userId, did: bob.dev.did, agreementSecretKey: bob.dev.agreementSecretKey, cert: bob.dev.cert }, store, nowMs: NOW_MS });
+    const sync = await receive(seal(bob, bob, "sync", { note: "hi" }, { fromDev: laptop }));
+    expect(sync.ok ? sync.rule : sync.reason).toBe("self-sync");
+    // Alice's devices: her listed one gets past the device check (and is refused later, as any sync from
+    // someone else is); the one her pending head left out is refused at the device check.
+    const fromFirst = await receive(seal(alice, bob, "sync", { note: "x" }));
+    expect(fromFirst.ok ? fromFirst.rule : fromFirst.reason).toBe("not-participant");
+    const fromSecond = await receive(seal(alice, bob, "sync", { note: "x" }, { fromDev: alice2 }));
+    expect(fromSecond.ok ? fromSecond.rule : fromSecond.reason).toBe("device-not-listed");
+  });
+
+  it("re-review R2: relays added from an unverified hint can't make up the majority that clears pending heads or marks freshness", async () => {
+    // Alice's versions list two relays. On a slow machine the first refresh is incomplete (pending v60). Then
+    // a caller adds 3 relays from an unverified hint (a circle link's bundled document): Alice's own two are
+    // silent, the 3 answer the stale head. 3 of 5 asked, but 0 of the 2 her versions list: not a majority.
+    const u = makeUser("alice");
+    const laptop = u.addDevice({ keyholder: true });
+    const own = RELAYS.slice(0, 2);
+    const hinted = RELAYS.slice(2, 5);
+    u.relays = own;
+    for (let i = 2; i < 60; i++) u.publish({ iat: NOW - 1000 + i });
+    const head = u.publish({ devices: [u.dev.did], keyholders: [u.dev.did], iat: NOW - 10 });
+    const store = await storeWith(u.docs.slice(0, 2));
+    const first = await refreshIdentity(store, u.userId, { tips: async () => [head.jws], chain: walkFrom(u.docs) }, { now: NOW, relays: own, checkMs: 1 });
+    expect(first.incomplete).toBe(true);
+    const held = first.head;
+    const hang = () => new Promise<string[]>(() => {});
+    const fetcher: IdentityFetcher = { tips: async (_u, rs) => (own.includes(rs[0]) ? hang() : [held.jws]), chain: async () => [] };
+    const second = await refreshIdentity(store, u.userId, fetcher, { now: NOW, relays: [...own, ...hinted], fetchTimeoutMs: 50 });
+    expect(second.incomplete).toBeUndefined();
+    expect(second.answeredRelays.sort()).toEqual([...hinted].sort());
+    expect(second.devices).not.toContain(laptop.did);
+    expect((await store.getIdentity(u.userId))!.pendingHeads).toEqual([head.jws]);
+    expect(await lastRefreshed(store, u.userId)).toBeUndefined();
+  });
+
+  it("re-review R3: 8 genuine non-consecutive higher versions can't push out a revoking fork tip", () => {
+    // Held v1..v13 (the laptop trusted). A fork x14 off v13 drops the laptop. The main line goes on to v44,
+    // keeping it; a relay sends v30, v32, ..., v44 (8 versions, none naming another): all "unparented".
+    const u = makeUser("alice");
+    const laptop = u.addDevice({ keyholder: true });
+    for (let i = 2; i <= 13; i++) u.publish({ iat: NOW - 2000 + i });
+    const v13 = u.doc;
+    const held = [...u.docs];
+    for (let i = 14; i <= 44; i++) u.publish({ iat: NOW - 1000 + i });
+    const x14 = doc(u, { ver: 14, prev: v13.hash, devices: [u.dev.did], keyholders: [u.dev.did], iat: NOW - 900 });
+    const spread = u.docs.filter((d) => d.ver >= 30 && d.ver % 2 === 0);
+    expect(spread).toHaveLength(8);
+    const at = { now: NOW };
+    // In one refresh, and across two (the fork tip first, the spread later).
+    for (const batches of [[[x14, ...spread]], [[x14], spread]]) {
+      const c = IdentityChain.fromStored({ iss: u.userId, versions: held.map((d) => d.jws) }, at);
+      expect(c.view().devices).toContain(laptop.did);
+      for (const b of batches) c.notePending(b, at);
+      expect(c.toStored().pendingHeads).toContain(x14.jws);
+      expect(c.view().devices).toEqual([u.dev.did]);
+      expect(c.view().keyholders).toEqual([u.dev.did]);
+    }
   });
 });

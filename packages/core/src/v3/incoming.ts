@@ -212,7 +212,9 @@ async function verifyOrThrow(jws: string, ctx: IncomingContextV3): Promise<Accep
 
   // 3. The sender's identity: freshness, then fcert under rules 1–6.
   const ownSync = p.kind === "sync" && p.from === self.userId;
-  const view = (await getIdentityView(store, p.from)) ?? (await ctx.resolveIdentity?.(p.from));
+  // Our own identity is read without pending heads (#65 re-review N1/R1): a version only the identity key
+  // signed must not make our devices reject each other's envelopes (the §2.8 rotation sync among them).
+  const view = (await getIdentityView(store, p.from, { now, ignorePending: p.from === self.userId })) ?? (await ctx.resolveIdentity?.(p.from));
   let expiredDays: number | undefined;
   if (view) {
     const f = assertNotFailClosed(view.exp, now, { ownSync });
@@ -287,7 +289,7 @@ async function finishVerify(
 
   // Proof signers' certificates: the envelope's own fcert and this device's
   // cert are candidates alongside the store's (the longest-lived wins).
-  const fromStore = storeSignerContext(store, { now, skewSec, resolveCert: ctx.resolveCert, resolveIdentity: ctx.resolveIdentity });
+  const fromStore = storeSignerContext(store, { now, skewSec, own: self.userId, resolveCert: ctx.resolveCert, resolveIdentity: ctx.resolveIdentity });
   const signerCtx: SignerContext = {
     ...fromStore,
     resolveCert: async (u, d) => {

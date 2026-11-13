@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 48a33801ac228251
+// @peer2peer/core 0.1.1 2bdfcb6fffde7d80
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6900,7 +6900,7 @@ var init_identitydoc = __esm({
     REPUBLISH_WINDOW_SEC = 3 * DAY;
     MERGE_TAKEOVER_SEC = 24 * HOUR;
     MAX_CHAIN_VERSIONS = 1024;
-    MAX_PENDING_HEADS = 8;
+    MAX_PENDING_HEADS = 64;
     IdentityChain = class _IdentityChain {
       iss;
       versions = /* @__PURE__ */ new Map();
@@ -6963,12 +6963,15 @@ var init_identitydoc = __esm({
        *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
        *    rules once connected.
        *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
-       *    refresh a majority of the listed relays answered (clearPending), and one issued in the future or past
+       *    refresh a majority of the held view's relays answered (clearPending), and one issued in the future or past
        *    its `exp` is ignored. So a version only the identity key could sign but no relay serves any more can't
        *    narrow the view for good. A client never applies them to its own identity (re-review N1).
-       *  - At most MAX_PENDING_HEADS: first those no other candidate names as prev or merge (the tips among
-       *    them, so a long run of one branch can't push out another branch's revoking tip), then the highest
-       *    `ver`. Returns whether it changed anything.
+       *  - Only the ones that narrow are kept, and none that narrows is evicted (re-review N3/R3): walking the
+       *    candidates highest `ver` first, one is kept if it leaves out a device or key holder that no kept,
+       *    higher-`ver` one already leaves out (the highest is always kept). Any other is redundant for good:
+       *    what it leaves out stays left out by a higher-`ver` one, which is dropped no sooner. So however many
+       *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
+       *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
        */
       notePending(docs, opts = {}) {
         if (this.versions.size === 0)
@@ -6982,15 +6985,25 @@ var init_identitydoc = __esm({
           if (d.ver > headVer && pendingUsable(d, opts))
             byHash.set(d.hash, d);
         }
-        const named = /* @__PURE__ */ new Set();
-        for (const d of byHash.values()) {
-          if (d.prev)
-            named.add(d.prev);
-          if (d.merge)
-            named.add(d.merge);
+        const universe = /* @__PURE__ */ new Set();
+        for (const d of [...this.versions.values(), ...byHash.values()]) {
+          for (const x of d.devices)
+            universe.add(`d:${x}`);
+          for (const x of d.keyholders)
+            universe.add(`k:${x}`);
         }
-        const tipFirst = (d) => named.has(d.hash) ? 1 : 0;
-        this.pending = [...byHash.values()].sort((a, b) => tipFirst(a) - tipFirst(b) || b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
+        const covered = /* @__PURE__ */ new Set();
+        const kept = [];
+        for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
+          const lists = /* @__PURE__ */ new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
+          const leaves = [...universe].filter((x) => !lists.has(x));
+          if (kept.length > 0 && leaves.every((x) => covered.has(x)))
+            continue;
+          kept.push(d);
+          for (const x of leaves)
+            covered.add(x);
+        }
+        this.pending = kept.slice(0, MAX_PENDING_HEADS);
         const after2 = this.pending.map((d) => d.hash);
         return after2.length !== before.length || after2.some((h) => !before.includes(h));
       }
@@ -10451,7 +10464,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     jumpTo = newest.jws;
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const majority = answeredRelays.size * 2 > relays.length;
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false;
   const unchanged = accepted.length === 0 && jumpTo === void 0 && chain.size > 0 && !pendingChange(chain);
   const jumped = unchanged ? false : await store2.updateIdentity(userId, (cur) => {
@@ -10486,7 +10500,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   if (incomplete)
     return { ...view, incomplete: true, answeredRelays: answered };
   await store2.deleteProvisional(userId);
-  if (answered.length * 2 > relays.length)
+  if (majority)
     await store2.markRefreshed(userId, now);
   return { ...view, answeredRelays: answered };
 }
@@ -11001,7 +11015,7 @@ async function verifyOrThrow(jws, ctx) {
   if (await store2.isBlocked(p.from))
     fail("blocked", `${p.from} is blocked`);
   const ownSync = p.kind === "sync" && p.from === self.userId;
-  const view = await getIdentityView(store2, p.from) ?? await ctx.resolveIdentity?.(p.from);
+  const view = await getIdentityView(store2, p.from, { now, ignorePending: p.from === self.userId }) ?? await ctx.resolveIdentity?.(p.from);
   let expiredDays;
   if (view) {
     const f = assertNotFailClosed(view.exp, now, { ownSync });
@@ -11059,7 +11073,7 @@ async function finishVerify(jws, ctx, p, sender, view, expiredDays, nowMs, now, 
     return { ok: true, envelope: p, plaintext: { kind: "unknown", envKind: p.kind }, sender, ...view ? { senderIdentity: view } : {}, ...expiredDays !== void 0 ? { expiredDays } : {}, rule: "unknown-kind" };
   }
   const plaintext = parsePlaintextV3(p.kind, opened);
-  const fromStore = storeSignerContext(store2, { now, skewSec, resolveCert: ctx.resolveCert, resolveIdentity: ctx.resolveIdentity });
+  const fromStore = storeSignerContext(store2, { now, skewSec, own: self.userId, resolveCert: ctx.resolveCert, resolveIdentity: ctx.resolveIdentity });
   const signerCtx = {
     ...fromStore,
     resolveCert: async (u, d) => {

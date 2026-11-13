@@ -173,7 +173,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    pending heads (#35): while any is above the head, the view trusts only
  *    the devices and key holders every one lists, so a committed intermediate
  *    version can't trust what a newer one already revoked. A complete refresh
- *    answered by a majority of the listed relays clears them (a minority's
+ *    answered by a majority of the held view's relays clears them (a minority's
  *    only drops those its head reached); one issued in the future or past its
  *    `exp` is ignored; a client's reads of its own identity ignore them
  *    (getIdentityView `ignorePending`, storeSignerContext `own`).
@@ -475,7 +475,12 @@ export async function refreshIdentity(
   // relay serves any more can't narrow for good); one answered by a minority only drops those its head
   // reached (re-review N2: like freshness, a stale minority answer mustn't lift a revocation).
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const majority = answeredRelays.size * 2 > relays.length;
+  // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
+  // hint (a circle link's bundled document), and those must not make up a majority while the identity's
+  // own relays are silent. Over the relays asked only when nothing is held, or when the caller asked none
+  // the view lists (an explicit override; the CLI and refreshFor always include them).
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
   // Commit once, re-applied onto whatever is stored by now. Nothing new and no jump (the usual
   // refresh): nothing to write, and no need to queue for the store's lock to find that out.
@@ -515,8 +520,9 @@ export async function refreshIdentity(
   if (incomplete) return { ...view, incomplete: true, answeredRelays: answered };
   await store.deleteProvisional(userId);
   // Freshness needs a majority of the listed relays (pre-release review): with an
-  // honest relay unreachable, a stale answer from a minority isn't "fresh".
-  if (answered.length * 2 > relays.length) await store.markRefreshed(userId, now);
+  // honest relay unreachable, a stale answer from a minority isn't "fresh". Counted over the
+  // held view's relays, like clearing pending heads (re-review R2).
+  if (majority) await store.markRefreshed(userId, now);
   return { ...view, answeredRelays: answered };
 }
 

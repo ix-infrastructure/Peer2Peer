@@ -595,8 +595,11 @@ export interface StoredIdentityChain {
 
 /** Upper bound on versions kept per identity; the oldest non-tips go first. */
 export const MAX_CHAIN_VERSIONS = 1024;
-/** Upper bound on pending heads kept per identity (#35); the highest `ver` first. */
-export const MAX_PENDING_HEADS = 8;
+/**
+ * Upper bound on pending heads kept per identity (#35). Only the ones that narrow are kept (see
+ * notePending), at most one per device or key holder left out, so this is a safety bound, not a working cap.
+ */
+export const MAX_PENDING_HEADS = 64;
 
 /** A pending head counts only while issued (not in the future) and not past its `exp` (#35). */
 function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
@@ -676,12 +679,15 @@ export class IdentityChain {
    *    dropped and a later version re-adds (S2); a revocation along held history is enforced by the chain
    *    rules once connected.
    *  - Temporary: each is dropped once the held head reaches its `ver`, all are dropped by the next complete
-   *    refresh a majority of the listed relays answered (clearPending), and one issued in the future or past
+   *    refresh a majority of the held view's relays answered (clearPending), and one issued in the future or past
    *    its `exp` is ignored. So a version only the identity key could sign but no relay serves any more can't
    *    narrow the view for good. A client never applies them to its own identity (re-review N1).
-   *  - At most MAX_PENDING_HEADS: first those no other candidate names as prev or merge (the tips among
-   *    them, so a long run of one branch can't push out another branch's revoking tip), then the highest
-   *    `ver`. Returns whether it changed anything.
+   *  - Only the ones that narrow are kept, and none that narrows is evicted (re-review N3/R3): walking the
+   *    candidates highest `ver` first, one is kept if it leaves out a device or key holder that no kept,
+   *    higher-`ver` one already leaves out (the highest is always kept). Any other is redundant for good:
+   *    what it leaves out stays left out by a higher-`ver` one, which is dropped no sooner. So however many
+   *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
+   *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
    */
   notePending(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
     if (this.versions.size === 0) return false;
@@ -692,13 +698,23 @@ export class IdentityChain {
       if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
       if (d.ver > headVer && pendingUsable(d, opts)) byHash.set(d.hash, d);
     }
-    const named = new Set<string>();
-    for (const d of byHash.values()) {
-      if (d.prev) named.add(d.prev);
-      if (d.merge) named.add(d.merge);
+    // Everything any held version or candidate lists: what a candidate "leaves out" is measured against it.
+    // (Anything outside it is left out by the highest candidate too, which is always kept.)
+    const universe = new Set<string>();
+    for (const d of [...this.versions.values(), ...byHash.values()]) {
+      for (const x of d.devices) universe.add(`d:${x}`);
+      for (const x of d.keyholders) universe.add(`k:${x}`);
     }
-    const tipFirst = (d: VerifiedIdentityDoc) => (named.has(d.hash) ? 1 : 0);
-    this.pending = [...byHash.values()].sort((a, b) => tipFirst(a) - tipFirst(b) || b.ver - a.ver || asciiCompare(b.hash, a.hash)).slice(0, MAX_PENDING_HEADS);
+    const covered = new Set<string>();
+    const kept: VerifiedIdentityDoc[] = [];
+    for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
+      const lists = new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
+      const leaves = [...universe].filter((x) => !lists.has(x));
+      if (kept.length > 0 && leaves.every((x) => covered.has(x))) continue;
+      kept.push(d);
+      for (const x of leaves) covered.add(x);
+    }
+    this.pending = kept.slice(0, MAX_PENDING_HEADS);
     const after = this.pending.map((d) => d.hash);
     return after.length !== before.length || after.some((h) => !before.includes(h));
   }
