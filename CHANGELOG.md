@@ -39,7 +39,18 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
   - the next complete refresh answered by most of the relays the identity lists clears it (a stale answer from a minority, or from relays named only by an unverified link, doesn't);
   - a pending head issued in the future or past its expiry is ignored;
   - it never applies to your own identity on your own devices: a version only your identity key signed (for example a thief's) can't stop you editing, publishing or rotating your identity, or your devices accepting each other's syncs. ([#35](https://github.com/ix-infrastructure/Peer2Peer/issues/35))
+- **You can always remove a relay that serves forged versions of your identity, and rotate.** Someone holding your identity key and one of your relays can serve versions signed with that key that don't connect to your history. Your device's check before publishing then couldn't confirm your current version, and refused every edit, including removing that relay and rotating (the only remedies). Now:
+  - `p2p relays remove <url>` checks your current version with the relays you keep, and goes ahead when they confirm it;
+  - `p2p identity rotate` leaves out a relay that sent versions whose history no relay holds (every relay was asked), when your other relays confirm your current version and no relay kept serves a newer one; otherwise it refuses, and removing the relay first still works;
+  - any other edit still refuses while such a relay is listed, and names it, with what to do;
+  - you are warned that someone else may hold your identity key only for such a relay.
+
+  What you publish is always the next version on the version your other relays confirm, so a relay can't make you publish below it or beside it. ([#67](https://github.com/ix-infrastructure/Peer2Peer/issues/67))
 - **A genuine history gap is reported as one.** A refresh is cut short by a gap only when a relay held the missing version but it wasn't checked in time. A relay answering with junk no longer turns a real gap (pruned history) into "cut short, try again" on every refresh. An honest relay that runs out of time or allowance still counts as holding the version, so no relay can turn another's slowness into a broken chain. ([#35](https://github.com/ix-infrastructure/Peer2Peer/issues/35))
+
+### Fixes
+
+- **A contact far behind catches up.** A device more than about 256 versions behind someone's identity (per relay holding it) never caught up: every refresh walked back from the newest version, ran out of allowance before reaching what it held, and ended "cut short" without progress. Where a refresh's walk stops is now kept on the device, and the next refresh goes on from there, so each refresh makes progress. Also: when the relays have nothing for one gap, the walk tries the next one instead of stopping, and a relay's junk sorted ahead of a genuine missing version can no longer keep a gap "cut short" on slow hardware. ([#67](https://github.com/ix-infrastructure/Peer2Peer/issues/67))
 
 ### Fixes (known issues from the pre-release review, [#3](https://github.com/ix-infrastructure/Peer2Peer/issues/3))
 
