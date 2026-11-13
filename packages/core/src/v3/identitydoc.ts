@@ -577,6 +577,12 @@ export interface StoredIdentityChain {
   iss: string;
   versions: string[];
   historyGap?: boolean;
+  /**
+   * The held history has been anchored at a ver-1 genesis (#74): it reached one through its own links. Kept
+   * after pruning drops ver 1, so a genuine second-genesis fork never turns into a stray; cleared by a jump
+   * or an unanchored replacement.
+   */
+  anchoredAtV1?: boolean;
   /** Devices revoked on history this client jumped over (pre-release review R1): never allowed again. */
   denied?: string[];
   /**
@@ -618,9 +624,29 @@ export function usablePendingHeads(s: StoredIdentityChain, opts: TimeOptions = {
   });
 }
 
+/** The held versions, counting mutations (strays() is memoised per mutation, #74). */
+class VersionMap extends Map<string, VerifiedIdentityDoc> {
+  rev = 0;
+  override set(k: string, v: VerifiedIdentityDoc): this {
+    this.rev++;
+    return super.set(k, v);
+  }
+  override delete(k: string): boolean {
+    this.rev++;
+    return super.delete(k);
+  }
+  override clear(): void {
+    this.rev++;
+    super.clear();
+  }
+}
+
 export class IdentityChain {
-  private readonly versions = new Map<string, VerifiedIdentityDoc>();
+  private readonly versions = new VersionMap();
   private gap = false;
+  /** See StoredIdentityChain.anchoredAtV1 (#74). */
+  private anchoredV1 = false;
+  private strayMemo?: { rev: number; anchoredV1: boolean; strays: Set<string>; headAnchored: boolean };
   /** Revocation denylist carried across jumps (R1). */
   private denied = new Set<string>();
   /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -636,6 +662,7 @@ export class IdentityChain {
     const c = new IdentityChain(s.iss);
     const docs = s.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
     c.gap = s.historyGap ?? false;
+    c.anchoredV1 = s.anchoredAtV1 === true;
     c.denied = new Set(s.denied ?? []);
     for (const j of s.pendingHeads ?? []) {
       const p = verifyIdentityDocSignature(j);
@@ -655,6 +682,7 @@ export class IdentityChain {
         c.versions.set(d.hash, d);
       } else c.versions.set(d.hash, d);
     }
+    c.noteAnchored();
     return c;
   }
 
@@ -663,6 +691,7 @@ export class IdentityChain {
       iss: this.iss,
       versions: [...this.versions.values()].map((d) => d.jws),
       ...(this.gap ? { historyGap: true } : {}),
+      ...(this.anchoredV1 ? { anchoredAtV1: true } : {}),
       ...(this.denied.size > 0 ? { denied: [...this.denied] } : {}),
       // Each dropped once the held head reaches its ver.
       ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
@@ -766,47 +795,67 @@ export class IdentityChain {
   }
 
   /**
-   * #74: held versions that don't count (yet): while the head's connected history has no ver 1 behind it,
-   * every part rooted at a genesis that doesn't connect to it and lies wholly below its lowest `ver`. Anyone
-   * can replay an identity's public old versions, so such a part is history, not a fork: it is kept (it
-   * counts once the versions in between connect it to the head's history) but isn't a tip, doesn't narrow
-   * the allowlist, and doesn't make the history anchored. A part reaching the head's lowest `ver` or above,
-   * any part without a genesis (pruning leaves those), and everything on anchored history count as before,
-   * so forks are detected as before. This also heals stores that kept such a replay as a fork tip.
+   * #74: held versions that don't count (yet). While the held history was never anchored at ver 1
+   * (anchoredAtV1) and the head's connected history has no ver 1 behind it, every part rooted at a genesis
+   * that doesn't connect to it and lies wholly below its lowest `ver` is a stray. Anyone can replay an
+   * identity's public old versions, so a stray isn't a fork: it is kept (it counts once the versions in
+   * between connect it), it isn't a tip, it doesn't narrow the allowlist to an intersection, and it doesn't
+   * make the history anchored. What it signed still applies (view): the devices revoked along it stay out,
+   * and a rotation it carries is shown. A part reaching the head's lowest `ver` or above, any part without a
+   * genesis (pruning leaves those), and everything once anchored at ver 1 count as before. This also heals
+   * stores that kept such a replay as a fork tip.
    */
   private strays(): Set<string> {
+    return this.analyse().strays;
+  }
+
+  /** The strays and whether the head's connected history reaches a genesis, memoised per mutation. */
+  private analyse(): { strays: Set<string>; headAnchored: boolean } {
+    const m = this.strayMemo;
+    if (m && m.rev === this.versions.rev && m.anchoredV1 === this.anchoredV1) return m;
     const out = new Set<string>();
+    let headAnchored = false;
     let genesis = false;
     for (const v of this.versions.values()) if (v.prev === null) genesis = true;
-    if (!genesis || this.versions.size < 2) return out;
-    // Connected parts by the prev/merge links between held versions.
-    const up = new Map<string, string>();
-    const find = (h: string): string => {
-      let r = h;
-      while (up.get(r) !== r) r = up.get(r)!;
-      for (let x = h; x !== r; ) {
-        const n = up.get(x)!;
-        up.set(x, r);
-        x = n;
+    if (genesis && this.versions.size === 1) headAnchored = true;
+    else if (genesis) {
+      // Connected parts by the prev/merge links between held versions.
+      const up = new Map<string, string>();
+      const find = (h: string): string => {
+        let r = h;
+        while (up.get(r) !== r) r = up.get(r)!;
+        for (let x = h; x !== r; ) {
+          const n = up.get(x)!;
+          up.set(x, r);
+          x = n;
+        }
+        return r;
+      };
+      for (const h of this.versions.keys()) up.set(h, h);
+      for (const v of this.versions.values()) for (const p of [v.prev, v.merge]) if (p && this.versions.has(p)) up.set(find(v.hash), find(p));
+      const parts = new Map<string, { genesis: boolean; lo: number; hi: number; hashes: string[] }>();
+      for (const v of this.versions.values()) {
+        const r = find(v.hash);
+        const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
+        x.genesis ||= v.prev === null;
+        x.lo = Math.min(x.lo, v.ver);
+        x.hi = Math.max(x.hi, v.ver);
+        x.hashes.push(v.hash);
+        parts.set(r, x);
       }
-      return r;
-    };
-    for (const h of this.versions.keys()) up.set(h, h);
-    for (const v of this.versions.values()) for (const p of [v.prev, v.merge]) if (p && this.versions.has(p)) up.set(find(v.hash), find(p));
-    const parts = new Map<string, { genesis: boolean; lo: number; hi: number; hashes: string[] }>();
-    for (const v of this.versions.values()) {
-      const r = find(v.hash);
-      const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
-      x.genesis ||= v.prev === null;
-      x.lo = Math.min(x.lo, v.ver);
-      x.hi = Math.max(x.hi, v.ver);
-      x.hashes.push(v.hash);
-      parts.set(r, x);
+      const head = parts.get(find(this.rawTips()[0].hash))!;
+      headAnchored = head.genesis;
+      if (!head.genesis && !this.anchoredV1) {
+        for (const x of parts.values()) if (x !== head && x.genesis && x.hi < head.lo) for (const h of x.hashes) out.add(h);
+      }
     }
-    const head = parts.get(find(this.rawTips()[0].hash))!;
-    if (head.genesis) return out;
-    for (const x of parts.values()) if (x !== head && x.genesis && x.hi < head.lo) for (const h of x.hashes) out.add(h);
-    return out;
+    this.strayMemo = { rev: this.versions.rev, anchoredV1: this.anchoredV1, strays: out, headAnchored };
+    return this.strayMemo;
+  }
+
+  /** Records that the head's history reached a genesis (anchoredAtV1, #74). */
+  private noteAnchored(): void {
+    if (!this.anchoredV1 && this.versions.size > 0 && this.analyse().headAnchored) this.anchoredV1 = true;
   }
 
   /**
@@ -890,9 +939,12 @@ export class IdentityChain {
   private replaceHistory(doc: VerifiedIdentityDoc): void {
     // P3: a rotated identity never comes back, by a jump or an unanchored replacement either.
     if (this.rotated) fail("identity-rotated", `${this.iss} was rotated: its history can't be replaced`);
-    for (const tip of this.tips()) for (const d of this.revokedAlong(tip.hash)) this.denied.add(d);
+    // Every held tip, strays too (#74): what any held branch revoked stays revoked.
+    for (const tip of this.rawTips()) for (const d of this.revokedAlong(tip.hash)) this.denied.add(d);
     this.versions.clear();
     this.versions.set(doc.hash, doc);
+    this.anchoredV1 = false;
+    this.noteAnchored();
   }
 
   /**
@@ -934,6 +986,8 @@ export class IdentityChain {
 
   private put(doc: VerifiedIdentityDoc): void {
     this.versions.set(doc.hash, doc);
+    // Before pruning can drop ver 1 (#74).
+    this.noteAnchored();
     if (this.versions.size > MAX_CHAIN_VERSIONS) {
       const tips = new Set(this.tips().map((t) => t.hash));
       const oldest = [...this.versions.values()].filter((v) => !tips.has(v.hash)).sort((a, b) => a.ver - b.ver)[0];
@@ -945,6 +999,14 @@ export class IdentityChain {
   tips(): VerifiedIdentityDoc[] {
     const strays = this.strays();
     return strays.size === 0 ? this.rawTips() : this.rawTips().filter((v) => !strays.has(v.hash));
+  }
+
+  /**
+   * Every held tip, strays included (#74), highest `ver` first: for what an owner must be told about (a
+   * rotation or a version it didn't publish on any held branch), never for what the view trusts.
+   */
+  allTips(): VerifiedIdentityDoc[] {
+    return this.rawTips();
   }
 
   /** Versions that no held version names as prev or merge, highest `ver` first (tie: higher jwsHash). */
@@ -964,7 +1026,14 @@ export class IdentityChain {
     const head = tips[0];
     // #35: a newer verified version not connected yet narrows the allowlist and the key holders.
     const cap = this.pendingCap();
-    const devices = head.devices.filter((d) => tips.every((t) => t.devices.includes(d)) && !this.denied.has(d) && cap.every((p) => p.devices.includes(d)));
+    // #74: a stray isn't intersected, but what it signed still applies: the devices revoked along it stay out
+    // (a replay of genuine history only carries genuine revocations, and a revoked did never returns).
+    const strays = this.strays();
+    const strayTips = strays.size === 0 ? [] : this.rawTips().filter((t) => strays.has(t.hash));
+    const strayRevoked = new Set(strayTips.flatMap((t) => [...this.revokedAlong(t.hash)]));
+    const devices = head.devices.filter(
+      (d) => tips.every((t) => t.devices.includes(d)) && !this.denied.has(d) && !strayRevoked.has(d) && cap.every((p) => p.devices.includes(d)),
+    );
     // S3: key holders are the head's (intersected across a fork), limited to the denied-filtered allowlist.
     const keyholders = head.keyholders.filter((d) => tips.every((t) => t.keyholders.includes(d)) && devices.includes(d) && cap.every((p) => p.keyholders.includes(d)));
     const relays = [...new Set(tips.flatMap((t) => t.relays))];
@@ -979,7 +1048,8 @@ export class IdentityChain {
       relays,
       exp: Math.max(...tips.map((t) => t.exp)),
       historyGap: this.gap,
-      rotations: tips.filter((t) => t.rotation !== undefined).map((t) => ({ ...t.rotation! })),
+      // A stray's rotation is shown too (#74): the identity's final version, on whichever held branch.
+      rotations: [...tips, ...strayTips].filter((t) => t.rotation !== undefined).map((t) => ({ ...t.rotation! })),
     };
   }
 

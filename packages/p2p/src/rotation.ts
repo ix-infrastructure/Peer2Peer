@@ -306,7 +306,8 @@ async function foreignRotations(app: App): Promise<{ hash: string; rotation: Ver
   if (!chain) return [];
   const log = await app.store.getPublishLog();
   const out: { hash: string; rotation: VerifiedRotation }[] = [];
-  for (const t of chain.tips()) {
+  // Every held tip, a stray's too (#74): a rotation on any held branch is the owner's to know about.
+  for (const t of chain.allTips()) {
     if (t.rotation === undefined || log.published.includes(t.hash)) continue;
     try {
       const r = verifyRotationSignatures(t.rotation);
@@ -1114,7 +1115,7 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
   const chain = await ownChain(app);
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
-  const mine = tips.find((t) => t.rotation !== undefined && rotationKey(t.rotation) === rotationKey(st.statement));
+  const mine = chain.allTips().find((t) => t.rotation !== undefined && rotationKey(t.rotation) === rotationKey(st.statement));
   if (mine) {
     // Published by an interrupted run: make sure the relays have it.
     const r = await app.publishDoc(mine.jws, mine.relays);

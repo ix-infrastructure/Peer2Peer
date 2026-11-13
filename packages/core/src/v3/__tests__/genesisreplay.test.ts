@@ -5,7 +5,8 @@
 // Forks of history anchored at version 1 are still detected, and stores poisoned before the fix heal.
 
 import { describe, expect, it } from "vitest";
-import { createIdentityDoc, IdentityChain, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { createRotation, generateIdentityKey } from "../identity.js";
 import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { makeUser, NOW, RELAY, RELAY2, TestUser } from "./fixtures.js";
@@ -251,5 +252,121 @@ describe("#74: a store poisoned before the fix heals on load", () => {
     const c = IdentityChain.fromStored({ iss: u.userId, versions: [v6.jws, ...other.docs.map((d) => d.jws)] });
     expect(c.size).toBe(8);
     expect(c.view().forked).toBe(true);
+  });
+});
+
+/**
+ * Review of the #74 fix: a stray is exempt from intersection narrowing only. What it signed still applies,
+ * a genuine fork stays a fork once anchored, and the work stays bounded.
+ */
+describe("#74 review: a stray's revocations and rotations still apply", () => {
+  /** A key thief builds v4'..v8' off v3 keeping `stolen`; the owner revokes `stolen` at v4. */
+  function thief() {
+    const u = makeUser("alice"); // v1 [dev1]
+    u.relays = [RELAY, RELAY2];
+    const stolen = u.addDevice({ keyholder: false });
+    u.publish({ iat: NOW - 900 }); // v2 [dev1, stolen]
+    const v3 = u.publish({ iat: NOW - 890 }); // v3 [dev1, stolen]
+    const forged: VerifiedIdentityDoc[] = [];
+    let p = v3;
+    for (let v = 4; v <= 8; v++) {
+      p = verifyIdentityDocSignature(
+        createIdentityDoc(u.ik, { ver: v, prev: p.hash, name: u.name, relays: u.relays, devices: [u.dev.did, stolen.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 800 + v }),
+      );
+      forged.push(p);
+    }
+    const own4 = u.publish({ devices: [u.dev.did], iat: NOW - 700 });
+    return { u, stolen, forged, own4 };
+  }
+
+  it("THIEF: the thief's head held, the owner's revoking v4 walked down to v1: the revoked device isn't trusted", async () => {
+    const { u, stolen, forged, own4 } = thief();
+    const all = new Map([...u.docs, ...forged].map((d) => [d.hash, d]));
+    const chain = (to: string) => {
+      const out: string[] = [];
+      for (let d = all.get(to); d; d = d.prev ? all.get(d.prev) : undefined) out.push(d.jws);
+      return out.slice(0, 32);
+    };
+    const f: IdentityFetcher = { tips: async () => [forged[4].jws, own4.jws], chain: async (_u, _r, to) => chain(to) };
+    const store = new MemoryTrustStoreV3();
+    // First contact: both tips are placed lowest ver first, so the owner's v4 is the first root and the thief's
+    // higher v8' replaces it (the L5 rule, unchanged by #74). The next refresh walks the owner's v4 back in.
+    await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
+    for (let i = 0; i < 2; i++) {
+      const view = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
+      expect(view.devices).not.toContain(stolen.did);
+      expect(view.keyholders).not.toContain(stolen.did);
+    }
+    expect((await getIdentityView(store, u.userId, { now: NOW }))?.devices).not.toContain(stolen.did);
+  });
+
+  it("THIEF2: an unanchored thief root with the owner's v1..v4 held: the revocation applies, and survives an L5 replacement", () => {
+    const { u, stolen, forged } = thief();
+    const c = new IdentityChain(u.userId);
+    c.add(forged[4].jws, { now: NOW });
+    for (const d of u.docs.slice(0, 4)) c.add(d.jws, { now: NOW });
+    expect(c.view().devices).not.toContain(stolen.did);
+    expect(c.allTips().map((t) => t.ver)).toEqual([8, 4]);
+    // An L5 replacement (a newer version off the thief's branch that doesn't chain) carries the stray's
+    // revocation into the denylist.
+    let p = forged[4];
+    const later: VerifiedIdentityDoc[] = [];
+    for (let v = 9; v <= 10; v++) {
+      p = verifyIdentityDocSignature(
+        createIdentityDoc(u.ik, { ver: v, prev: p.hash, name: u.name, relays: u.relays, devices: [u.dev.did, stolen.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 600 + v }),
+      );
+      later.push(p);
+    }
+    expect(c.add(later[1].jws, { now: NOW })).toMatchObject({ status: "accepted", replacedUnanchored: true });
+    expect(c.view().devices).not.toContain(stolen.did);
+    expect(IdentityChain.fromStored(c.toStored()).view().devices).not.toContain(stolen.did);
+  });
+
+  it("a rotation on a stray tip is shown in the view and among every held tip", () => {
+    const u = makeUser("alice");
+    for (let i = 0; i < 3; i++) u.publish({ iat: NOW - 900 + i });
+    const v4 = u.doc;
+    const next = new TestUser("alice2", generateIdentityKey());
+    next.addDevice();
+    next.publish();
+    const statement = createRotation(u.ik, next.ik, { iat: NOW - 120 });
+    const fin = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 5, prev: v4.hash, name: u.name, relays: u.relays, devices: [], keyholders: [], by: u.dev.did, rotation: statement, iat: NOW - 60 }),
+    );
+    // A forged branch's head at ver 9 as the unanchored root; the genuine v1..v5 (final) held below it.
+    const forged = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 9, prev: next.doc.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 50 }),
+    );
+    const c = new IdentityChain(u.userId);
+    c.add(forged.jws, { now: NOW });
+    for (const d of [...u.docs, fin]) c.add(d.jws, { now: NOW });
+    expect(c.view().tips.map((t) => t.hash)).toEqual([forged.hash]);
+    expect(c.view().rotations).toEqual([statement]);
+    expect(c.allTips().some((t) => t.hash === fin.hash)).toBe(true);
+  });
+
+  it("PRUNE: a second-genesis fork on anchored history stays a fork after pruning drops v1", () => {
+    const u = makeUser("alice");
+    const c = new IdentityChain(u.userId);
+    c.add(u.doc.jws, { now: NOW });
+    const g2 = createIdentityDoc(u.ik, { ver: 1, prev: null, name: u.name, relays: [RELAY], devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 30 });
+    c.add(g2, { now: NOW });
+    for (let i = 0; i < 20; i++) c.add(u.publish({ iat: NOW - 500 + i }).jws, { now: NOW });
+    expect(c.view().forked).toBe(true);
+    for (let i = 0; i < MAX_CHAIN_VERSIONS; i++) c.add(u.publish({ iat: NOW - 400 }).jws, { now: NOW });
+    expect(c.has(u.docs[0].hash)).toBe(false);
+    expect(c.view().forked).toBe(true);
+    expect(IdentityChain.fromStored(c.toStored()).view().forked).toBe(true);
+  });
+
+  it("COST: views of a full chain with many disconnected parts stay cheap", () => {
+    const u = makeUser("alice");
+    for (let i = 0; i < 1023; i++) u.publish({ iat: NOW - 400 });
+    const versions = u.docs.filter((_, i) => i % 2 === 0 || i === u.docs.length - 1).map((d) => d.jws);
+    const c = IdentityChain.fromStored({ iss: u.userId, versions }, { now: NOW });
+    const t0 = performance.now();
+    for (let i = 0; i < 1000; i++) c.view();
+    // Generous bound for slow runners: the strays analysis is memoised per mutation.
+    expect(performance.now() - t0).toBeLessThan(10_000);
   });
 });

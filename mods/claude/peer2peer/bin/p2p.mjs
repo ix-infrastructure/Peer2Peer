@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.1 78c3c5d4503d2d29
+// @peer2peer/core 0.1.1 f218012974e8b5db
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6875,7 +6875,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, VersionMap, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6901,10 +6901,28 @@ var init_identitydoc = __esm({
     MERGE_TAKEOVER_SEC = 24 * HOUR;
     MAX_CHAIN_VERSIONS = 1024;
     MAX_PENDING_HEADS = 64;
+    VersionMap = class extends Map {
+      rev = 0;
+      set(k, v) {
+        this.rev++;
+        return super.set(k, v);
+      }
+      delete(k) {
+        this.rev++;
+        return super.delete(k);
+      }
+      clear() {
+        this.rev++;
+        super.clear();
+      }
+    };
     IdentityChain = class _IdentityChain {
       iss;
-      versions = /* @__PURE__ */ new Map();
+      versions = new VersionMap();
       gap = false;
+      /** See StoredIdentityChain.anchoredAtV1 (#74). */
+      anchoredV1 = false;
+      strayMemo;
       /** Revocation denylist carried across jumps (R1). */
       denied = /* @__PURE__ */ new Set();
       /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -6920,6 +6938,7 @@ var init_identitydoc = __esm({
         const c = new _IdentityChain(s2.iss);
         const docs = s2.versions.map((j) => verifyIdentityDocSignature(j)).sort((a, b) => a.ver - b.ver);
         c.gap = s2.historyGap ?? false;
+        c.anchoredV1 = s2.anchoredAtV1 === true;
         c.denied = new Set(s2.denied ?? []);
         for (const j of s2.pendingHeads ?? []) {
           const p = verifyIdentityDocSignature(j);
@@ -6941,6 +6960,7 @@ var init_identitydoc = __esm({
           } else
             c.versions.set(d.hash, d);
         }
+        c.noteAnchored();
         return c;
       }
       toStored() {
@@ -6948,6 +6968,7 @@ var init_identitydoc = __esm({
           iss: this.iss,
           versions: [...this.versions.values()].map((d) => d.jws),
           ...this.gap ? { historyGap: true } : {},
+          ...this.anchoredV1 ? { anchoredAtV1: true } : {},
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
           // Each dropped once the held head reaches its ver.
           ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}
@@ -7049,58 +7070,77 @@ var init_identitydoc = __esm({
         return false;
       }
       /**
-       * #74: held versions that don't count (yet): while the head's connected history has no ver 1 behind it,
-       * every part rooted at a genesis that doesn't connect to it and lies wholly below its lowest `ver`. Anyone
-       * can replay an identity's public old versions, so such a part is history, not a fork: it is kept (it
-       * counts once the versions in between connect it to the head's history) but isn't a tip, doesn't narrow
-       * the allowlist, and doesn't make the history anchored. A part reaching the head's lowest `ver` or above,
-       * any part without a genesis (pruning leaves those), and everything on anchored history count as before,
-       * so forks are detected as before. This also heals stores that kept such a replay as a fork tip.
+       * #74: held versions that don't count (yet). While the held history was never anchored at ver 1
+       * (anchoredAtV1) and the head's connected history has no ver 1 behind it, every part rooted at a genesis
+       * that doesn't connect to it and lies wholly below its lowest `ver` is a stray. Anyone can replay an
+       * identity's public old versions, so a stray isn't a fork: it is kept (it counts once the versions in
+       * between connect it), it isn't a tip, it doesn't narrow the allowlist to an intersection, and it doesn't
+       * make the history anchored. What it signed still applies (view): the devices revoked along it stay out,
+       * and a rotation it carries is shown. A part reaching the head's lowest `ver` or above, any part without a
+       * genesis (pruning leaves those), and everything once anchored at ver 1 count as before. This also heals
+       * stores that kept such a replay as a fork tip.
        */
       strays() {
+        return this.analyse().strays;
+      }
+      /** The strays and whether the head's connected history reaches a genesis, memoised per mutation. */
+      analyse() {
+        const m = this.strayMemo;
+        if (m && m.rev === this.versions.rev && m.anchoredV1 === this.anchoredV1)
+          return m;
         const out = /* @__PURE__ */ new Set();
+        let headAnchored = false;
         let genesis = false;
         for (const v of this.versions.values())
           if (v.prev === null)
             genesis = true;
-        if (!genesis || this.versions.size < 2)
-          return out;
-        const up = /* @__PURE__ */ new Map();
-        const find = (h) => {
-          let r = h;
-          while (up.get(r) !== r)
-            r = up.get(r);
-          for (let x = h; x !== r; ) {
-            const n = up.get(x);
-            up.set(x, r);
-            x = n;
+        if (genesis && this.versions.size === 1)
+          headAnchored = true;
+        else if (genesis) {
+          const up = /* @__PURE__ */ new Map();
+          const find = (h) => {
+            let r = h;
+            while (up.get(r) !== r)
+              r = up.get(r);
+            for (let x = h; x !== r; ) {
+              const n = up.get(x);
+              up.set(x, r);
+              x = n;
+            }
+            return r;
+          };
+          for (const h of this.versions.keys())
+            up.set(h, h);
+          for (const v of this.versions.values())
+            for (const p of [v.prev, v.merge])
+              if (p && this.versions.has(p))
+                up.set(find(v.hash), find(p));
+          const parts = /* @__PURE__ */ new Map();
+          for (const v of this.versions.values()) {
+            const r = find(v.hash);
+            const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
+            x.genesis ||= v.prev === null;
+            x.lo = Math.min(x.lo, v.ver);
+            x.hi = Math.max(x.hi, v.ver);
+            x.hashes.push(v.hash);
+            parts.set(r, x);
           }
-          return r;
-        };
-        for (const h of this.versions.keys())
-          up.set(h, h);
-        for (const v of this.versions.values())
-          for (const p of [v.prev, v.merge])
-            if (p && this.versions.has(p))
-              up.set(find(v.hash), find(p));
-        const parts = /* @__PURE__ */ new Map();
-        for (const v of this.versions.values()) {
-          const r = find(v.hash);
-          const x = parts.get(r) ?? { genesis: false, lo: Infinity, hi: -Infinity, hashes: [] };
-          x.genesis ||= v.prev === null;
-          x.lo = Math.min(x.lo, v.ver);
-          x.hi = Math.max(x.hi, v.ver);
-          x.hashes.push(v.hash);
-          parts.set(r, x);
+          const head = parts.get(find(this.rawTips()[0].hash));
+          headAnchored = head.genesis;
+          if (!head.genesis && !this.anchoredV1) {
+            for (const x of parts.values())
+              if (x !== head && x.genesis && x.hi < head.lo)
+                for (const h of x.hashes)
+                  out.add(h);
+          }
         }
-        const head = parts.get(find(this.rawTips()[0].hash));
-        if (head.genesis)
-          return out;
-        for (const x of parts.values())
-          if (x !== head && x.genesis && x.hi < head.lo)
-            for (const h of x.hashes)
-              out.add(h);
-        return out;
+        this.strayMemo = { rev: this.versions.rev, anchoredV1: this.anchoredV1, strays: out, headAnchored };
+        return this.strayMemo;
+      }
+      /** Records that the head's history reached a genesis (anchoredAtV1, #74). */
+      noteAnchored() {
+        if (!this.anchoredV1 && this.versions.size > 0 && this.analyse().headAnchored)
+          this.anchoredV1 = true;
       }
       /**
        * Adds a version when it is chain-consistent with what is held: a ver-1
@@ -7185,11 +7225,13 @@ var init_identitydoc = __esm({
       replaceHistory(doc) {
         if (this.rotated)
           fail("identity-rotated", `${this.iss} was rotated: its history can't be replaced`);
-        for (const tip of this.tips())
+        for (const tip of this.rawTips())
           for (const d of this.revokedAlong(tip.hash))
             this.denied.add(d);
         this.versions.clear();
         this.versions.set(doc.hash, doc);
+        this.anchoredV1 = false;
+        this.noteAnchored();
       }
       /**
        * The dids revoked somewhere in the held ancestry of `hash` (inclusive):
@@ -7233,6 +7275,7 @@ var init_identitydoc = __esm({
       }
       put(doc) {
         this.versions.set(doc.hash, doc);
+        this.noteAnchored();
         if (this.versions.size > MAX_CHAIN_VERSIONS) {
           const tips = new Set(this.tips().map((t2) => t2.hash));
           const oldest = [...this.versions.values()].filter((v) => !tips.has(v.hash)).sort((a, b) => a.ver - b.ver)[0];
@@ -7244,6 +7287,13 @@ var init_identitydoc = __esm({
       tips() {
         const strays = this.strays();
         return strays.size === 0 ? this.rawTips() : this.rawTips().filter((v) => !strays.has(v.hash));
+      }
+      /**
+       * Every held tip, strays included (#74), highest `ver` first: for what an owner must be told about (a
+       * rotation or a version it didn't publish on any held branch), never for what the view trusts.
+       */
+      allTips() {
+        return this.rawTips();
       }
       /** Versions that no held version names as prev or merge, highest `ver` first (tie: higher jwsHash). */
       rawTips() {
@@ -7263,7 +7313,10 @@ var init_identitydoc = __esm({
           fail("identity-unknown", `no identity document for ${this.iss}`);
         const head = tips[0];
         const cap2 = this.pendingCap();
-        const devices2 = head.devices.filter((d) => tips.every((t2) => t2.devices.includes(d)) && !this.denied.has(d) && cap2.every((p) => p.devices.includes(d)));
+        const strays = this.strays();
+        const strayTips = strays.size === 0 ? [] : this.rawTips().filter((t2) => strays.has(t2.hash));
+        const strayRevoked = new Set(strayTips.flatMap((t2) => [...this.revokedAlong(t2.hash)]));
+        const devices2 = head.devices.filter((d) => tips.every((t2) => t2.devices.includes(d)) && !this.denied.has(d) && !strayRevoked.has(d) && cap2.every((p) => p.devices.includes(d)));
         const keyholders = head.keyholders.filter((d) => tips.every((t2) => t2.keyholders.includes(d)) && devices2.includes(d) && cap2.every((p) => p.keyholders.includes(d)));
         const relays = [...new Set(tips.flatMap((t2) => t2.relays))];
         return {
@@ -7277,7 +7330,8 @@ var init_identitydoc = __esm({
           relays,
           exp: Math.max(...tips.map((t2) => t2.exp)),
           historyGap: this.gap,
-          rotations: tips.filter((t2) => t2.rotation !== void 0).map((t2) => ({ ...t2.rotation }))
+          // A stray's rotation is shown too (#74): the identity's final version, on whichever held branch.
+          rotations: [...tips, ...strayTips].filter((t2) => t2.rotation !== void 0).map((t2) => ({ ...t2.rotation }))
         };
       }
       /** The ver-ordered ancestors of `hash` (inclusive), following prev and merge. */
@@ -10617,7 +10671,7 @@ async function getIdentityView(store2, userId, opts = {}) {
     return void 0;
   const pendingHeads = opts.ignorePending ? [] : usablePendingHeads(raw, { now: opts.now });
   const stored2 = { ...raw, pendingHeads };
-  const key = `${stored2.historyGap ? "g" : "a"}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
+  const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
   let cache2 = viewCache.get(store2);
   if (!cache2)
     viewCache.set(store2, cache2 = /* @__PURE__ */ new Map());
@@ -21383,7 +21437,7 @@ async function foreignRotations(app) {
   if (!chain) return [];
   const log = await app.store.getPublishLog();
   const out = [];
-  for (const t2 of chain.tips()) {
+  for (const t2 of chain.allTips()) {
     if (t2.rotation === void 0 || log.published.includes(t2.hash)) continue;
     try {
       const r = verifyRotationSignatures(t2.rotation);
@@ -21970,7 +22024,7 @@ async function publishFinal(app, st) {
   const chain = await ownChain(app);
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
-  const mine = tips.find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
+  const mine = chain.allTips().find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
   if (mine) {
     const r2 = await app.publishDoc(mine.jws, mine.relays);
     return { ver: mine.ver, ...r2 };
