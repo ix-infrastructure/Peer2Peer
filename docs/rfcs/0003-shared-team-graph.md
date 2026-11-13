@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft (2026-11-12). Not accepted. The decisions in §13.1 and the Ix Pro contract in §13.2 come first. |
+| **Status** | Draft (2026-11-12). The CEO decided §13.1 on 2026-11-12 (all as recommended, plus the operator and pricing scope in D1–D2). Not yet accepted: the Ix Pro API contract (§13.2) comes first, and §13.3 stays open. |
 | **Date** | 2026-11-12 |
 | **Applies to** | [protocol.md](../protocol.md) v3 draft 3: one additive, Ix-free field on circle versions (§9.1). Everything else is in `packages/p2p` and `packages/ext-ix`. |
 | **Epic** | [#41](https://github.com/ix-infrastructure/Peer2Peer/issues/41), piece 3 ("Shared graph"), with piece 5 (project boundaries apply to graphs) and piece 6 (an honest encryption story) |
@@ -14,7 +14,7 @@ Words in capitals (MUST, SHOULD, MAY) are used as in RFC 2119. Section signs (§
 
 Today every graph target is `local` (concepts.md, "Graph targets"; threat-model.md, "Graph targets (Ix)"). Agents in a circle receive each other's pushed events (statuses, footprints, notes), but nothing durable is shared that an agent can *query*.
 
-This RFC proposes a **shared graph per circle**: a hosted Ix memory layer (Ix Pro, or any backend that speaks the same API) that the members of one circle write their shared work into and read from.
+This RFC proposes a **shared graph per circle**: an Ix memory layer reached over https, hosted by Ix Pro or self-hosted, or run by anyone whose backend speaks the same open API (decision D1), that the members of one circle write their shared work into and read from. Protocol and client support are free and open source, and so is self-hosting; hosting by Ix Pro is a paid Ix Pro feature (D2).
 
 1. **Binding.** A circle names at most one shared graph, in an owner-signed field of its circle version (§5). It is versioned and hash-chained with the circle, and only the owner changes it. The field is generic (`x`, namespaced attributes); core validates its shape and knows nothing about Ix.
 2. **Consent, twice.** The owner's binding is an offer. Nothing is written until a member **enrolls** on their own device (§6): they see who operates the graph, that it holds plaintext, and what will be written, and they type yes.
@@ -50,7 +50,8 @@ This RFC proposes a **shared graph per circle**: a hosted Ix memory layer (Ix Pr
 - **Backfilling the local graph into the shared graph.** Enrollment writes new work only.
 - **Mapping code into the shared graph.** Ingestion (`ix map`) stays out of Peer2Peer, as today. Whether the shared graph also holds a mapped code graph is the operator's business (§13.2, Q-P11).
 - **Sandboxing Ix.** An agent with the person's shell can still run `ix` with the person's own Ix Pro login. Graph targets close Peer2Peer and ext-ix as a route, as today (threat-model.md, "What it doesn't cover").
-- **Making Ix Pro required.** A circle with no binding, and a member who doesn't enroll, work exactly as today.
+- **Making Ix Pro required.** A circle with no binding, and a member who doesn't enroll, work exactly as today. A circle may bind to any endpoint that speaks the Ix memory API, including a team's own self-hosted backend (D1).
+- **Gating anything on payment in Peer2Peer.** Ix Pro charges for the graphs it hosts (D2). Peer2Peer never checks a plan or a licence; it reaches any compatible endpoint the owner binds.
 
 ## 4. Background: what exists today
 
@@ -115,7 +116,7 @@ A malformed `x` makes the circle version `malformed`. Core gives the parsed fiel
 
 ### 5.4 Who may change it
 
-- **The owner only**, by publishing a new circle version. v1 adds **no** admin proposal op for it: pointing a whole team's writes at a server is the owner's decision. (Q-C5 asks whether admins should be able to propose it.)
+- **The owner only** (decision D5), by publishing a new circle version. There is **no** admin proposal op for binding, rebinding or unbinding: pointing a whole team's writes at a server is the owner's decision. An admin's `p2p-circle-op+jws` can't carry it, and the owner's client applies no proposal that would change `x`.
 - **The owner's client asks first.** `p2p circle graph set <circle> --endpoint … --graph … --operator …` and `p2p circle graph unset <circle>` are person-only widening commands (the person token, or `yes` at the controlling terminal), like `project share`. An agent can't run them.
 - **Rollout gate.** The owner's client publishes a version with `x` only once every member device it knows of advertises cap `circlex.v1` (§9.2), and otherwise says which members are too old.
 
@@ -270,7 +271,7 @@ It is registered under the existing `ix` namespace in protocol §8.3 and specifi
 
 ### 10.1 Content classes
 
-Each enrollment chooses classes; the defaults are all three of the first three:
+Each enrollment chooses classes. The defaults (decision D3): `sessions`, `status`, `files` and `notes` on; `footprints` off.
 
 | Class | What | Where it comes from | Default |
 |---|---|---|---|
@@ -278,7 +279,7 @@ Each enrollment chooses classes; the defaults are all three of the first three:
 | `status` | each new status one-liner | the same | on |
 | `files` | the repo-relative files it edited, as its status lists them | the same | on |
 | `notes` | notes the person (or the session's front end, on the person's behalf) publishes to the graph: `p2p ix note --to-graph` | an explicit command | on |
-| `footprints` | a summary of the session's footprint at its end (changed symbols, one hop downstream) | ext-ix's footprint state | **off**, and v1 doesn't write it (Q-C4) |
+| `footprints` | a summary of the session's footprint at its end (changed symbols, one hop downstream) | ext-ix's footprint state | **off**, and v1 has no way to turn it on (D4) |
 
 Every record keeps today's framing: tagged `finding`, first line "Recorded by Peer2Peer (agent-generated, untrusted)", `--actor=p2p:<address>` (a label: the operator's principal is the real attribution, Q-P10).
 
@@ -294,7 +295,7 @@ Every record keeps today's framing: tagged `finding`, first line "Recorded by Pe
 
 Graph memory keeps its shape. What changes in `drainBatch()`:
 
-- The **local** write stays exactly as today (piece 2): the person's local graph still gets every shared session's record. "Local only" stays first class, and the local copy is what survives an outage.
+- The **local** write stays exactly as today (piece 2; decision D7): the person's local graph still gets every shared session's record. "Local only" stays first class, and the local copy is what survives an outage.
 - A **second, per-circle queue** takes the same items when the session's target at gather time is `shared` for an enrolled circle. Each item carries the `(cid, gid)` it was gathered for.
 - At drain, the target is computed again (as today). The batch is written only if the target is still `shared` with the **same `cid` and `gid`** and the ceiling is still shared. Otherwise it is dropped and counted (`target_changed`, `not_shared`): never written to the new target, never to local in its place (local already has it).
 - The queue holds at most 256 items per circle, retries with backoff for at most 24 h, then drops and counts (`unreachable`).
@@ -323,17 +324,21 @@ Graph memory keeps its shape. What changes in `drainBatch()`:
 | An older ext-ix | only local targets (§9.4). |
 | Clock skew | expiry is the operator's; a local "expired" is advisory and only ever narrows. |
 
-## 13. Open questions
+## 13. Decisions and open questions
 
-### 13.1 For the CEO
+### 13.1 Decisions (CEO, 2026-11-12)
 
-- **Q-C1. Operators.** Is the shared graph *Ix Pro only*, or *any endpoint that speaks the Ix memory API* (for example a team's own Ix backend behind https), with Ix Pro as the offered default? *Recommendation: any compatible endpoint;* the protocol field is generic, and an open network shouldn't hard-code one operator.
-- **Q-C2. Paid feature.** Is the shared graph a paid Ix Pro feature? It fits the rule "paid features never gate the network": messaging, statuses, circles and local graphs stay free. *Recommendation: yes,* priced by the operator, never enforced by Peer2Peer.
-- **Q-C3. Default classes.** `sessions`, `status` and `files` on by default at enrollment, `notes` on, `footprints` off? *Recommendation: as in §10.1.*
-- **Q-C4. Footprints in the shared graph.** Footprint names are hashed by default for every audience; the shared graph would hold them in plaintext for the operator. *Recommendation: not in v1;* revisit with piece 4, and then only for circles whose footprints are already `names=plain`.
-- **Q-C5. Who may bind.** Owner only (as proposed), or may admins propose a binding that the owner's client applies? *Recommendation: owner only in v1.*
-- **Q-C6. The core amendment.** Accept the generic `x` field on circle versions (§5.2), or keep the protocol untouched and carry the binding in an extension envelope (§14, B)? *Recommendation: the `x` field;* it reuses the circle's signing, chain, fork and transfer rules instead of re-implementing them in an extension.
-- **Q-C7. Local copy.** Keep writing the local graph while a session also writes the shared one? *Recommendation: yes,* always.
+The CEO decided the questions put to them in the first draft. The design text above already reflects each decision.
+
+- **D1. Operators: any endpoint that speaks the Ix memory API.** A circle may bind to Ix Pro's hosted graph or to a self-hosted Ix backend behind https, or to any other backend that implements the open note and session API. The `ix.graph` attribute names an endpoint, not a vendor, and Peer2Peer hard-codes no operator (§5.3).
+- **D2. Pricing.** Ix Pro charges for hosting a shared graph. Protocol support, the client and ext-ix code, and self-hosting stay free and open source. Peer2Peer enforces no plan: whatever the operator charges is between the operator and the team, and "paid features never gate the network" holds (§3.2).
+- **D3. Default content classes:** `sessions`, `status`, `files` and `notes` on at enrollment; `footprints` off (§10.1).
+- **D4. No footprints in the shared graph in v1.** Revisit with piece 4, and then only for circles whose footprints are already `names=plain`.
+- **D5. Owner only.** Only the circle's owner binds, rebinds or unbinds its graph. There are no admin proposals for it (§5.4).
+- **D6. The core amendment.** The binding is the generic, Ix-free `x` field on circle versions (§5.2), not an extension envelope (§14, B).
+- **D7. The local copy stays.** A session that writes the shared graph also keeps writing the person's local graph, always (§10.3).
+
+The Ix Pro scope names (`graph:read`, `notes:write`, `sessions:write`) may be named in this public RFC.
 
 ### 13.2 For the Ix Pro team (the API contract, settled before implementation)
 
@@ -360,7 +365,7 @@ Graph memory keeps its shape. What changes in `drainBatch()`:
 
 ## 14. Alternatives considered
 
-- **A. A generic owner-signed attribute on circle versions** (proposed). Small, Ix-free core change; reuses every circle rule.
+- **A. A generic owner-signed attribute on circle versions** (chosen: decision D6). Small, Ix-free core change; reuses every circle rule.
 - **B. An extension envelope from the owner** (`x:ix.graph-bind`, device-signed, accepted if the sender is the head's owner). No core change, but the binding then needs its own versioning, its own handling of ownership transfer, forks and freezes, and its own delivery to new members. Every one of those has been reviewed for circle versions; re-doing them in an extension is where bugs would hide.
 - **C. Per-member local configuration** (each member types the endpoint). No core change, but members can diverge, nothing stops one being talked into another endpoint, and "the circle's graph" has no single definition for the chokepoint to check.
 - **D. The owner's identity document.** Per-user, not per-circle; wrong scope.
@@ -430,7 +435,7 @@ Unit tests next to the code they cover, plus a cross-version case in the compati
 
 | Phase | PR | Contents | Depends on |
 |---|---|---|---|
-| **G0** | this RFC | `docs/rfcs/0003-shared-team-graph.md`; a pointer in protocol.md's roadmap | — |
+| **G0** | this RFC | `docs/rfcs/0003-shared-team-graph.md`; a pointer in protocol.md's roadmap. §13.1 decided 2026-11-12 | — |
 | **G1** | the Ix Pro contract | answers to §13.2, recorded in this RFC; routes and scopes available on a staging operator | G0 accepted |
 | **G2** | core: accept `x` | §5.2 shape checks, the namespace registry, `circlex.v1` cap advertised; protocol.md amendment and review-log entry; never emitted | G0 accepted |
 | **G3** | p2p: registry and enrollment (read-only) | `circle graph set/unset` (behind a flag, not emitting until G7), `ix graph join/leave/show`, the sealed enrollment store, §7.1 registry, `graphTargets: 2` contract, doctor and `project show` lines; tests 1-11, 16-17 | G1, G2 |
