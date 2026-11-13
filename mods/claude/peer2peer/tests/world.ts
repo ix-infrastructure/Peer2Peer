@@ -537,3 +537,30 @@ export const message = (w: World, over: Record<string, unknown> = {}) => ({
 })
 
 export const lastStatus = (w: World) => [...ran(w, 'status')].reverse()[0]?.argv ?? []
+
+/**
+ * How a call's cost grows from input size n to 4n: about 4 when linear, about 16 when quadratic, against
+ * the same machine (a slow runner cancels out). The number of calls per timing is raised until n's
+ * timing is about 10 ms, so a timer tick can't hide the growth; each size is then the best of 7 runs.
+ * `totalMs`: how long one round at 4n took, for a loose absolute bound beside the ratio.
+ */
+export function growth(call: (n: number) => void, n: number): { ratio: number; totalMs: number } {
+  const time = (m: number, reps: number) => {
+    let best = Infinity
+    for (let k = 0; k < 7; k++) {
+      const t0 = performance.now()
+      for (let i = 0; i < reps; i++) call(m)
+      best = Math.min(best, performance.now() - t0)
+    }
+    return best
+  }
+  call(n) // warm up (JIT)
+  // Calibrated to about 10 ms; a re-timing a little under it (noise) is fine, but far under it means n
+  // can't be timed (the calls finish within a few timer ticks even repeated 4096 times).
+  let reps = 1
+  while (reps < 4096 && time(n, reps) < 10) reps *= 2
+  const small = time(n, reps)
+  if (small < 3) throw new Error(`growth: n=${n} is too small to time (${small.toFixed(2)} ms for ${reps} calls): use a larger n`)
+  const big = time(4 * n, reps)
+  return { ratio: big / small, totalMs: big / reps }
+}

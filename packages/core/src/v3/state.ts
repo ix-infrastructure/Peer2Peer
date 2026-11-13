@@ -103,8 +103,9 @@ export const MAX_EXAMINED_PER_RELAY = 256;
 export const MAX_REFRESH_DOCS = 1024;
 /**
  * Upper bound on a refresh's local work (fetch time doesn't count, S1), spent twice over at most: once
- * on checking the relays' answers (split evenly between them, so one relay's junk can't spend another's
- * share), and once on chain work (placing documents, the chain walk).
+ * on checking the relays' answers (`checkMs`, by default the same: half for the tips phase, half for
+ * the chain walk, each half split evenly between the relays, so one relay's junk can't spend another's
+ * share), and once on chain work (building the held chain, placing documents; `budgetMs`).
  */
 export const REFRESH_BUDGET_MS = 2000;
 /** Documents the chain walk may examine per relay, in all, apart from the tips phase (pre-release review). */
@@ -153,12 +154,17 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *  - Hostile input is cheap to reject (review R2): every document's signature,
  *    `iss == H(ik) == userId` and the held `ik` are checked before any chain
  *    work, and the refresh's local work is bounded (1024 documents; 2 s of
- *    signature checks, split evenly between the relays; 2 s of chain work;
- *    never counting fetch time). Each relay's share of the checks is its own
- *    (T1): on slow hardware, where checking a hostile relay's junk takes
- *    longer, that relay is cut short, never the honest relay after it, and
- *    every relay gets at least one check. Running out of chain work commits
- *    what was placed and returns `incomplete: true`.
+ *    signature checks, 1 s for the tips and 1 s for the chain walk, each split
+ *    evenly between the relays; 2 s of chain work; never counting fetch time).
+ *    Each relay's share of the checks is its own (T1): on slow hardware, where
+ *    checking a hostile relay's junk takes longer, that relay is cut short,
+ *    never the honest relay after it, and every relay gets at least one check
+ *    (in the walk: until its share is spent, then it is asked no more). The
+ *    walk checks the oldest versions first, so whatever it checks connects to
+ *    the held chain and is committed. Running out of chain work, or a walk cut
+ *    short (by time, quota or the request cap) with a gap left, commits what
+ *    was placed and returns `incomplete: true`: a later refresh goes on from
+ *    there.
  *  - The held chain is built and verified once; documents are placed in
  *    `ver` order, each once. Gaps are filled by walking back with the §5.6
  *    chain request.
@@ -192,7 +198,15 @@ export async function refreshIdentity(
     fetchTimeoutMs?: number;
     /** Work bounds (defaults MAX_REFRESH_DOCS, REFRESH_BUDGET_MS). */
     maxDocs?: number;
+    /** Chain work: building the held chain and placing documents (default REFRESH_BUDGET_MS). */
     budgetMs?: number;
+    /**
+     * Signature checks of the relays' answers: half for the tips phase, half for the chain walk, each
+     * half split evenly between the relays (each relay's share is its own). Default: `budgetMs`, so
+     * passing only `budgetMs` bounds both, and a refresh's local work stays within twice it; tests pass
+     * a smaller `checkMs` to stand in for slower hardware.
+     */
+    checkMs?: number;
   } = {},
 ): Promise<RefreshedView> {
   const now = opts.now ?? nowSec();
@@ -206,6 +220,7 @@ export async function refreshIdentity(
   let exhausted = false;
   const maxDocs = opts.maxDocs ?? MAX_REFRESH_DOCS;
   const budgetMs = opts.budgetMs ?? REFRESH_BUDGET_MS;
+  const checkMs = opts.checkMs ?? budgetMs;
   let examined = 0;
   const begin = () => {
     sectionStart = Date.now();
@@ -243,7 +258,7 @@ export async function refreshIdentity(
    * `ver` are signature-checked first (at most MAX_EXAMINED_PER_RELAY), and
    * the first `keep` valid ones (iss == H(ik) == userId, the held ik) are kept.
    */
-  const admit = (list: readonly string[], keep: number, quota: number, walk = false, shareMs = Infinity): { docs: VerifiedIdentityDoc[]; cut: boolean; used: number } => {
+  const admit = (list: readonly string[], keep: number, quota: number, walk = false, shareMs = Infinity): { docs: VerifiedIdentityDoc[]; cut: boolean; used: number; ms: number } => {
     const t0 = performance.now();
     // Cheap filters first (pre-release review T2): after the JSON decode, and before
     // any curve work, the payload must name this userId and (when a chain is
@@ -255,6 +270,10 @@ export async function refreshIdentity(
         try {
           const p = decodeJws(j).payload;
           if (p.iss !== userId || (before && p.ik !== before.ik)) return undefined;
+          // Already checked in this refresh (another relay had it, or an earlier walk page), or already in
+          // the held chain: no second check.
+          const h = jwsHash(j);
+          if (seen.has(h) || (walk && chain.has(h))) return undefined;
           // Hash first: iss must be the fingerprint of the ik it names, before any curve work.
           if (typeof p.ik !== "string" || userIdFromIk(b64uDecode(p.ik, 32)) !== userId) return undefined;
           return { j, ver: typeof p.ver === "number" ? p.ver : -1 };
@@ -263,19 +282,20 @@ export async function refreshIdentity(
         }
       })
       .filter((x): x is { j: string; ver: number } => x !== undefined)
-      .sort((a, b) => b.ver - a.ver)
+      // Tips: the highest claimed ver first (a revoking head can't be pushed out). The walk: the oldest
+      // first, so each check can connect to the held chain and be committed even when the walk is cut short.
+      .sort((a, b) => (walk ? a.ver - b.ver : b.ver - a.ver))
       .slice(0, MAX_EXAMINED_PER_RELAY);
     const out: VerifiedIdentityDoc[] = [];
     let used = 0;
     let cut = false;
     for (const { j } of claimed) {
       if (out.length >= keep) break; // the top `keep` valid ones: complete for this relay
-      // Each relay gets its own share of the document cap (T1), so hostile relays can't starve an honest one.
-      // The walk has its own allowance: only the CPU budget applies to it, not the tips-phase document cap.
-      // Tips: this relay's own share of the checking time (never the global chain-work budget: a slow
-      // machine spending it on hostile relays' junk would otherwise starve the honest relay checked last).
-      // At least one check per relay, however slow the machine.
-      if (used >= quota || (walk ? overBudget() : overDocs() || (used > 0 && performance.now() - t0 > shareMs))) {
+      // Each relay gets its own share of the document cap (T1), so hostile relays can't starve an honest one;
+      // the walk has its own document allowance instead. Checking time is each relay's own share too, in the
+      // tips phase and in the walk (never one budget for all: a slow machine spending it on hostile relays'
+      // junk would starve the honest relay checked last). At least one check per relay, however slow.
+      if (used >= quota || (!walk && overDocs()) || (used > 0 && performance.now() - t0 > shareMs)) {
         cut = true;
         break;
       }
@@ -290,7 +310,7 @@ export async function refreshIdentity(
         if (!(e instanceof P2PError)) throw e;
       }
     }
-    return { docs: out, cut, used };
+    return { docs: out, cut, used, ms: performance.now() - t0 };
   };
   const accepted: string[] = [];
   const rejected = new Set<string>();
@@ -315,8 +335,19 @@ export async function refreshIdentity(
   const answeredRelays = new Set<string>();
   /** Per-relay document allowance of the chain walk, separate from the tips phase (pre-release review). */
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
+  /** Per-relay checking time of the whole walk (all its pages): half of checkMs, each relay its own share. */
+  const walkTimeLeft = new Map(relays.map((r) => [r, checkMs / 2 / relays.length]));
+  /** The walk was cut short (a relay out of time or quota on a page that still gave documents, or the request cap). */
+  let walkCut = false;
   const fetchEach = async (f: (relay: string) => Promise<FetchResult>, keep: number, walk = false): Promise<VerifiedIdentityDoc[]> => {
-    const answers = await Promise.all(relays.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
+    // The walk asks only relays with walk time and allowance left: a relay whose share is spent (it had
+    // its check) is asked no more, so the time bound holds page by page.
+    const asked = walk ? relays.filter((r) => walkTimeLeft.get(r)! > 0 && walkLeft.get(r)! > 0) : relays;
+    if (walk && asked.length === 0) {
+      walkCut = true;
+      return [];
+    }
+    const answers = await Promise.all(asked.map(async (r) => ({ r, res: await withTimeout(f(r), timeoutMs) })));
     if (!walk) for (const { r, res } of answers) if (res !== undefined) answeredRelays.add(r);
     // T1: the remaining tips-phase allowance is split evenly between the relays.
     const quota = Math.floor((maxDocs - examined) / relays.length);
@@ -324,22 +355,28 @@ export async function refreshIdentity(
       docsCapped = true;
       return [];
     }
-    // The walk's checks count against the chain-work budget; the tips phase's are each relay's own share.
-    if (walk) begin();
-    const share = budgetMs / relays.length;
+    // Checking time is each relay's own share, in the tips phase and over the whole walk; it never counts
+    // against the chain-work budget (placement), so no relay's junk can use up another's.
+    const share = checkMs / 2 / relays.length;
     const results = answers.map(({ r, res }) => {
       const q = walk ? walkLeft.get(r)! : quota;
-      const a = admit(forRelay(res, r), keep, q, walk, walk ? Infinity : share);
-      if (walk) walkLeft.set(r, q - a.used);
+      const a = admit(forRelay(res, r), keep, q, walk, walk ? walkTimeLeft.get(r)! : share);
+      if (walk) {
+        walkLeft.set(r, q - a.used);
+        walkTimeLeft.set(r, walkTimeLeft.get(r)! - a.ms);
+      }
       return { answered: res !== undefined, ...a };
     });
     // Complete as long as one relay that answered was examined in full; a
     // relay cut short by its quota (junk) doesn't make the refresh incomplete.
+    // In the walk, a page that still brought valid documents is progress: the
+    // next page goes on from there (a slow machine checks fewer per page), and
+    // the walk ends incomplete only if a gap is left.
     const answered = results.filter((x) => x.answered);
-    if (answered.length > 0 && answered.every((x) => x.cut)) docsCapped = true;
-    const out = results.flatMap((x) => x.docs);
-    if (walk) end();
-    return out;
+    const docs = results.flatMap((x) => x.docs);
+    if (answered.length > 0 && answered.every((x) => x.cut) && (!walk || docs.length === 0)) docsCapped = true;
+    if (walk && docs.length > 0 && results.some((x) => x.cut)) walkCut = true;
+    return docs;
   };
 
   const tips = await fetchEach((r) => tipsOf(userId, [r]), MAX_TIPS_PER_RELAY);
@@ -350,7 +387,8 @@ export async function refreshIdentity(
   // Walk back from the LOWEST gap with the chain request (§5.6), per relay,
   // on the walk's own allowance (pre-release review): filling the lowest gap first
   // connects the most versions, and a hostile majority's tips can't use it up.
-  for (let req = 0; chainOf && gaps.length > 0 && !exhausted && req < CHAIN_WALK_MAX_REQUESTS; req++) {
+  let requests = 0;
+  for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     const lowestGap = gaps.reduce((a, b) => (b.d.ver < a.d.ver ? b : a));
     const page = await fetchEach((r) => chainOf(userId, [r], lowestGap.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true);
     if (page.length === 0) break;
@@ -358,6 +396,10 @@ export async function refreshIdentity(
     place(page);
     end();
   }
+  if (requests >= CHAIN_WALK_MAX_REQUESTS) walkCut = true;
+  // A walk cut short with a gap left isn't a gap the relays can't fill: incomplete (what was placed is
+  // committed, and the next refresh goes on from there), never chain-broken or a jump over it.
+  if (gaps.length > 0 && walkCut) docsCapped = true;
 
   // The newest version the relays returned that the chain rules didn't reject.
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
