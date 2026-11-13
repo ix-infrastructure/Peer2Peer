@@ -401,9 +401,13 @@ const CIRCLE_ID_RE = /^c_[a-z2-7]{26}$/;
  * whatever the list, the circle or an invite says).
  */
 export function parseAllowFile(text: string): { allow: string[]; deny: string[] } {
+  // Every line ending (CRLF, CR, LF, U+2028, U+2029) ends a line, so a comment never swallows the lines after it.
   const ids = text
-    .split("\n")
-    .map((l) => l.replace(/#.*$/, "").trim())
+    .split(/\r\n|[\n\r\u2028\u2029]/)
+    .map((l) => {
+      const hash = l.indexOf("#");
+      return (hash >= 0 ? l.slice(0, hash) : l).trim();
+    })
     .filter((l) => l !== "")
     .flatMap((l) => l.split(ALLOW_SPLIT));
   return { allow: ids.filter((x) => !x.startsWith("!")), deny: ids.filter((x) => x.startsWith("!")).map((x) => x.slice(1)) };

@@ -11,7 +11,7 @@
 // receiver's own `ix`.
 
 import { compareRepo, parseRepo, type RepoRef } from "./repo.js";
-import { cps, fail, frame, scrubPaths, type Roots, isObj, jsonBytes, LIMITS, line, MAX_BODY_BYTES, optInt, optStr, str, type O } from "./text.js";
+import { cps, fail, frame, scrubPaths, trimEnd, type Roots, isObj, jsonBytes, LIMITS, line, MAX_BODY_BYTES, optInt, optStr, str, type O } from "./text.js";
 import { isSafeRelativePath } from "@peer2peer/core/v3";
 
 export const SUBGRAPH_KIND = "x:ix.subgraph" as const;
@@ -44,7 +44,7 @@ const REGION_RE = /^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,127}$/;
 export function splitPattern(p: string): { prefix: string; glob?: "*" | "**" } | undefined {
   if (cps(p) > LIMITS.path || p.startsWith("-")) return undefined;
   const m = /^(.*?)(?:\/(\*\*?))?$/.exec(p);
-  const prefix = (m?.[1] ?? "").replace(/\/+$/, "");
+  const prefix = trimEnd(m?.[1] ?? "", "/");
   const glob = m?.[2] as "*" | "**" | undefined;
   if (prefix === "" || !isSafeRelativePath(prefix) || !prefix.split("/").every((s) => PATH_SEG.test(s))) return undefined;
   return { prefix, ...(glob ? { glob } : {}) };

@@ -65,6 +65,38 @@ function isPathLike(run: string): boolean {
   return run.split("/").some((s) => /^[a-z]{3,}$/.test(s) || /\.[A-Za-z0-9]{1,8}$/.test(s));
 }
 
+const SCHEME_CHAR = /[A-Za-z0-9+.-]/;
+const SCHEME_START = /[A-Za-z]/;
+const USERINFO_END = /[\s/@]/;
+
+/**
+ * URL userinfo (`scheme://user:pass@`) as `scheme://[redacted]@`: the matches of
+ * /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, found by one scan around each
+ * `://` instead (that regex retried every start in a long letter run).
+ */
+function redactUserinfo(text: string): string {
+  let out = "";
+  let done = 0; // text before `done` is already in `out`
+  let k = text.indexOf("://");
+  while (k >= 0) {
+    // The scheme: the leftmost letter of the scheme-character run that ends at `://`.
+    let s = k;
+    while (s > done && SCHEME_CHAR.test(text.charAt(s - 1))) s--;
+    while (s < k && !SCHEME_START.test(text.charAt(s))) s++;
+    // The userinfo: one or more characters up to `@`, none of them whitespace, `/` or `@`.
+    let e = k + 3;
+    while (e < text.length && !USERINFO_END.test(text.charAt(e))) e++;
+    if (s < k && e > k + 3 && text.charAt(e) === "@") {
+      out += `${text.slice(done, k + 3)}[redacted]@`;
+      done = e + 1;
+      k = text.indexOf("://", done);
+    } else {
+      k = text.indexOf("://", k + 1);
+    }
+  }
+  return out + text.slice(done);
+}
+
 /**
  * `text` with common secret shapes replaced by `[redacted]`: URL userinfo,
  * keyword secrets (`password=`, `passwd:`, `secret=`, `token:`, `api_key=`)
@@ -72,7 +104,7 @@ function isPathLike(run: string): boolean {
  * hex or base64-like runs. Git SHAs (40 or 64 hex), UUIDs and paths stay.
  */
 export function redactSecrets(text: string): string {
-  let out = text.replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+@/g, "$1[redacted]@");
+  let out = redactUserinfo(text);
   // Keyword secrets (`password=…`, `api_key: …`, `token=…`) and bearer tokens: the value goes, the keyword stays.
   out = out.replace(BEARER, (m: string) => `${m.slice(0, 6)} [redacted]`);
   out = out.replace(KEYWORD_SECRET, (_m: string, key: string, sep: string, value: string) => {
