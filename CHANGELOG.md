@@ -2,7 +2,15 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
-## Unreleased
+## 0.1.2
+
+Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.
+
+### Upgrade
+
+- **Install it with the one-line installers** (new in this release): `curl -fsSL https://ix-infra.com/p2p/install.sh | sh` on macOS and Linux, or `irm https://ix-infra.com/p2p/install.ps1 | iex` on Windows. Or `npm i -g @peer2peer/cli@0.1.2 @peer2peer/ext-ix@0.1.2`. The Claude Code mod already ships matching copies of both.
+- **Someone who already uses Peer2Peer on another device should link a new device, not start a new identity:** run `p2p setup` and answer `l`, or `p2p link start` on the device you already use and `p2p link join <code>` on the new one.
+- Each package depends on exactly `0.1.2` of the others.
 
 ### Behaviour changes
 
