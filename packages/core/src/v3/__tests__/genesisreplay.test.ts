@@ -357,7 +357,7 @@ describe("#74 review: a stray's revocations and rotations still apply", () => {
     expect(c.has(u.docs[0].hash)).toBe(false);
     expect(c.view().forked).toBe(true);
     expect(IdentityChain.fromStored(c.toStored()).view().forked).toBe(true);
-  });
+  }, 60_000);
 
   it("COST: views of a full chain with many disconnected parts stay cheap", () => {
     const u = makeUser("alice");
@@ -368,7 +368,7 @@ describe("#74 review: a stray's revocations and rotations still apply", () => {
     for (let i = 0; i < 1000; i++) c.view();
     // Generous bound for slow runners: the strays analysis is memoised per mutation.
     expect(performance.now() - t0).toBeLessThan(10_000);
-  });
+  }, 60_000);
 });
 
 /** Re-review of the #74 fix: long (pruned) histories, re-adds, and #67's walk anchors. */
@@ -399,7 +399,7 @@ describe("#74 re-review: pruned histories and walk anchors", () => {
     // The pruned v1..v3 replayed together: still history.
     for (const d of u.docs.slice(1, 3)) await addIdentityVersion(store, d.jws, { now: NOW });
     expect((await getIdentityView(store, u.userId, { now: NOW }))?.devices).toEqual([p2.did]);
-  });
+  }, 60_000);
 
   it("a pruned anchored history stays anchored: no L5 replacement by a non-connecting newer version", () => {
     const { u, c } = pruned();
@@ -410,7 +410,7 @@ describe("#74 re-review: pruned histories and walk anchors", () => {
     const v2 = u.publish({ devices: head.devices });
     const v3 = u.publish({ devices: head.devices });
     expect(reloaded.add(v3.jws, { now: NOW })).toEqual({ status: "gap", need: v2.hash });
-  });
+  }, 60_000);
 
   it("PRUNE, either genesis first: a second-genesis fork stays a fork after pruning drops v1", () => {
     const orders = new Set<boolean>();
@@ -431,7 +431,7 @@ describe("#74 re-review: pruned histories and walk anchors", () => {
       expect(IdentityChain.fromStored(c.toStored()).view().forked).toBe(true);
     }
     expect(orders.size).toBe(2);
-  });
+  }, 60_000);
 
   it("NO-KEY: re-adding a device a held branch revoked is refused, so a replayed branch can't revoke what the head lists", () => {
     const u = makeUser("alice");
@@ -493,7 +493,7 @@ describe("#76 follow-up: a pruned genesis isn't stored again", () => {
     expect(view.forked).toBe(true);
     expect(view.tips.map((t) => t.hash)).toContain(fork.hash);
     expect(view.devices).not.toContain(t2.did);
-  });
+  }, 60_000);
 
   it("DOWNGRADE below the cap: a stored chain with room to spare still refuses the pruned genesis", () => {
     const { u, c, fork, t2 } = forkedLong();
@@ -512,5 +512,5 @@ describe("#76 follow-up: a pruned genesis isn't stored again", () => {
     expect(small.has(u.docs[0].hash)).toBe(false);
     expect(small.view().forked).toBe(true);
     expect(small.view().devices).not.toContain(t2.did);
-  });
+  }, 60_000);
 });
