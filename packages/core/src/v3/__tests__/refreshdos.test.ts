@@ -162,7 +162,9 @@ describe("R2: hostile fetch results can't stall the refresh", () => {
     };
     const budget = linearBudgetMs([...u.docs.map((d) => d.jws), v63.jws, ...junkPage]);
     const t0 = performance.now();
-    await expect(refreshIdentity(store, u.userId, fetcher, { now: NOW })).rejects.toThrow(/chain-broken/);
+    // An explicit work budget: on a slow runner the default (REFRESH_BUDGET_MS) can run out first, and the refresh
+    // then ends incomplete (also fail-closed). This test is about the junk page ending the walk; time is checked below.
+    await expect(refreshIdentity(store, u.userId, fetcher, { now: NOW, budgetMs: 60_000 })).rejects.toThrow(/chain-broken/);
     expect(performance.now() - t0).toBeLessThan(budget);
     expect(requests).toBe(1); // a page with nothing valid ends the walk
     expect((await getIdentityView(store, u.userId))?.head.ver).toBe(61);
