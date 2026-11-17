@@ -46,7 +46,7 @@ Metadata privacy is [on the roadmap](docs/roadmap.md#metadata-privacy).
 </p>
 
 > [!NOTE]
-> **Status: early releases, on npm since v0.1.0 (latest v0.1.1).** The protocol is a reviewed draft ([docs/protocol.md](docs/protocol.md)), and v3 is in active development. The CLI, relay, Claude Code mod and Codex bridge work end to end and have extensive tests. There's no public relay, by design: your group runs its own, or uses one a friend runs. See [Roadmap](docs/roadmap.md).
+> **Status: early releases, on npm since v0.1.0 (latest v0.1.2).** The protocol is a reviewed draft ([docs/protocol.md](docs/protocol.md)), and v3 is in active development. The CLI, relay, Claude Code mod and Codex bridge work end to end and have extensive tests. There's no public relay, by design: your group runs its own, or uses one a friend runs. See [Roadmap](docs/roadmap.md).
 
 ## No data collection, no telemetry
 
