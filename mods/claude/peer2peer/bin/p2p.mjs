@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 f8e192bb2b8b7091
+// @peer2peer/core 0.1.2 0f3dd1701626c868
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6890,6 +6890,15 @@ function usablePendingHeads(s2, opts = {}) {
     }
   });
 }
+function revokedStep(v, get) {
+  const p = v.prev ? get(v.prev) : void 0;
+  if (!p)
+    return [];
+  const o = v.merge !== void 0 ? get(v.merge) : void 0;
+  if (v.merge !== void 0 && !o)
+    return [];
+  return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
+}
 function sendersOf(v) {
   return Array.isArray(v) ? v.filter((r) => typeof r === "string").slice(0, MAX_SENDERS) : [];
 }
@@ -6919,7 +6928,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, MAX_SENDERS, VersionMap, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, MAX_SIDE_ROOTS, MAX_SENDERS, VersionMap, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6946,6 +6955,7 @@ var init_identitydoc = __esm({
     MAX_CHAIN_VERSIONS = 1024;
     MAX_PENDING_HEADS = 64;
     MAX_WALK_ANCHORS = 16;
+    MAX_SIDE_ROOTS = 8;
     MAX_SENDERS = 16;
     VersionMap = class extends Map {
       rev = 0;
@@ -6973,6 +6983,8 @@ var init_identitydoc = __esm({
       /** Bumped whenever anchoredGenesis or legacyAnchored changes (part of the strays memo's key). */
       anchorRev = 0;
       strayMemo;
+      /** #79: held versions by the hash they name as prev or merge, memoised per mutation. */
+      childMemo;
       /** Revocation denylist carried across jumps (R1). */
       denied = /* @__PURE__ */ new Set();
       /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -7016,15 +7028,33 @@ var init_identitydoc = __esm({
           if (Array.isArray(s2.walkAnchorRelays?.[a.hash]))
             c.anchorFrom.set(a.hash, sendersOf(s2.walkAnchorRelays?.[a.hash]));
         }
+        const dropped = /* @__PURE__ */ new Set();
+        const stored2 = new Map(docs.map((d) => [d.hash, d]));
+        const drop = (d) => {
+          dropped.add(d.hash);
+          for (const x of revokedStep(d, (h) => stored2.get(h)))
+            c.denied.add(x);
+        };
         for (const d of docs) {
           if (d.iss !== s2.iss)
             fail("issuer-mismatch", "stored version of another identity");
+          if (d.prev !== null && dropped.has(d.prev) || d.merge !== void 0 && dropped.has(d.merge)) {
+            drop(d);
+            continue;
+          }
           const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === void 0 || c.versions.has(d.merge));
           if (parentsHeld && d.ver > 1) {
             const parent = c.versions.get(d.prev);
-            checkLink(parent, d, d.merge !== void 0 ? c.versions.get(d.merge) : void 0);
-            if (d.merge === void 0)
-              c.checkNoReturn(d, parent);
+            try {
+              checkLink(parent, d, d.merge !== void 0 ? c.versions.get(d.merge) : void 0);
+              if (d.merge === void 0)
+                c.checkNoReturn(d, parent);
+            } catch (e) {
+              if (!(e instanceof P2PError))
+                throw e;
+              drop(d);
+              continue;
+            }
             c.versions.set(d.hash, d);
           } else
             c.versions.set(d.hash, d);
@@ -7285,6 +7315,15 @@ var init_identitydoc = __esm({
        * history is unanchored, a version from the same ik with a higher ver than
        * everything held that doesn't chain replaces it outright (L5). Otherwise
        * a missing parent is reported as the gap to fill first.
+       *
+       * `replace: false` turns the L5 replacement off: such a version is reported as a gap too. A refresh places
+       * with it off (#79), so a higher branch fetched in the same refresh can't silently drop a version the relays
+       * also served before its ancestry (and so what it revoked) is known; the refresh decides at the end.
+       *
+       * While the history is unanchored, a version that a held root names as its parent (prev or merge) is
+       * accepted below it even though its own parent isn't held (#79): it is that root's genuine parent (bound by
+       * hash, and the link rules are checked), so what the root revoked becomes known, and a branch forking off it
+       * connects. Relays keep old versions only for a while, so a walk often can't reach version 1.
        */
       add(jws, opts = {}) {
         const peek = peekIdentityDoc(jws);
@@ -7300,7 +7339,7 @@ var init_identitydoc = __esm({
             fail("issuer-mismatch", "a different ik for this userId");
           if (this.anchoredGenesis.has(doc2.hash))
             return { status: "duplicate", doc: doc2 };
-          this.put(doc2);
+          this.placeOver(doc2);
           return { status: "accepted", doc: doc2 };
         }
         if (!held2) {
@@ -7310,7 +7349,19 @@ var init_identitydoc = __esm({
         }
         const missing = !this.versions.has(peek.prev) ? peek.prev : peek.merge !== void 0 && !this.versions.has(peek.merge) ? peek.merge : void 0;
         if (missing !== void 0) {
-          if (!this.anchored && peek.ver > this.view().head.ver) {
+          const below = this.extendDown(peek.hash, jws, opts);
+          if (below)
+            return below;
+          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.tips().filter((t2) => pendingUsable(t2, opts)).length < MAX_SIDE_ROOTS) {
+            const doc2 = verifyIdentityDoc(jws, opts);
+            if (doc2.ik !== held2.ik)
+              fail("issuer-mismatch", "a different ik for this userId");
+            if (pendingUsable(doc2, opts)) {
+              this.placeOver(doc2);
+              return { status: "accepted", doc: doc2, unanchored: true };
+            }
+          }
+          if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
               fail("issuer-mismatch", "a different ik for this userId");
@@ -7325,8 +7376,129 @@ var init_identitydoc = __esm({
         checkLink(parent, doc, other);
         if (doc.merge === void 0)
           this.checkNoReturn(doc, parent);
-        this.put(doc);
+        this.placeOver(doc);
         return { status: "accepted", doc };
+      }
+      /**
+       * #79: on unanchored history, `jws` (whose own parent isn't held) placed as the parent of the held versions
+       * that name it, when every such link checks out (a merge child whose other parent isn't held either is
+       * bound by hash alone until it is). Undefined when no held version names it, or the history is anchored
+       * (its lowest held versions are pruning's edge, not roots: nothing is gained below them).
+       */
+      extendDown(hash, jws, opts) {
+        if (this.versions.size >= MAX_CHAIN_VERSIONS)
+          return void 0;
+        const children = this.childrenOf(hash);
+        if (children.length === 0 || this.anchored)
+          return void 0;
+        const doc = verifyIdentityDoc(jws, opts);
+        if (doc.ik !== children[0].ik)
+          fail("issuer-mismatch", "a different ik for this userId");
+        this.placeOver(doc);
+        return { status: "accepted", doc, unanchored: true };
+      }
+      /**
+       * Stores `doc` (#79 re-reviews), checking first the held versions that name it as prev or merge (placed
+       * before it: below a root, or an older version arriving after a newer one that named it). Whatever add()
+       * would refuse had `doc` come first is dropped with what was placed on it, never `doc`: a child whose link
+       * to it fails the chain rules (a merge once both its parents are held), and a version re-listing a device
+       * revoked on its ancestry now that the ancestry is known. A reload, which re-checks every link, then agrees.
+       */
+      placeOver(doc) {
+        const bad = [];
+        for (const child of this.childrenOf(doc.hash)) {
+          const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev);
+          const other = child.merge === void 0 ? void 0 : child.merge === doc.hash ? doc : this.versions.get(child.merge);
+          if (!prev || child.merge !== void 0 && !other)
+            continue;
+          try {
+            checkLink(prev, child, other);
+          } catch (e) {
+            if (!(e instanceof P2PError))
+              throw e;
+            bad.push(child);
+          }
+        }
+        if (bad.length > 0)
+          this.dropWithDescendants(bad);
+        this.put(doc);
+        if (this.childrenOf(doc.hash).length === 0)
+          return;
+        const violators = [];
+        const revokedAt = /* @__PURE__ */ new Map([[doc.hash, this.revokedAlong(doc.hash)]]);
+        const queue = [doc];
+        for (let i = 0; i < queue.length; i++) {
+          const p = queue[i];
+          for (const c of this.childrenOf(p.hash)) {
+            if (revokedAt.has(c.hash))
+              continue;
+            let revoked;
+            if (c.merge === void 0) {
+              const above = revokedAt.get(p.hash);
+              if (c.devices.some((d) => !p.devices.includes(d) && (above.has(d) || this.denied.has(d)))) {
+                violators.push(c);
+                continue;
+              }
+              revoked = new Set(above);
+              for (const d of p.devices)
+                if (!c.devices.includes(d))
+                  revoked.add(d);
+            } else
+              revoked = this.revokedAlong(c.hash);
+            revokedAt.set(c.hash, revoked);
+            queue.push(c);
+          }
+        }
+        if (violators.length > 0)
+          this.dropWithDescendants(violators);
+      }
+      /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
+      dropWithDescendants(docs) {
+        const doomed = /* @__PURE__ */ new Set();
+        const stack = docs.map((d) => d.hash);
+        while (stack.length > 0) {
+          const h = stack.pop();
+          if (doomed.has(h))
+            continue;
+          doomed.add(h);
+          for (const c of this.childrenOf(h))
+            stack.push(c.hash);
+        }
+        for (const h of doomed)
+          for (const d of revokedStep(this.versions.get(h), (x) => this.versions.get(x)))
+            this.denied.add(d);
+        for (const h of doomed)
+          this.versions.delete(h);
+      }
+      /** The held versions naming `hash` as prev or merge. */
+      childrenOf(hash) {
+        let m = this.childMemo;
+        if (!m || m.rev !== this.versions.rev) {
+          const children = /* @__PURE__ */ new Map();
+          for (const v of this.versions.values()) {
+            for (const p of [v.prev, v.merge])
+              if (p)
+                (children.get(p) ?? children.set(p, []).get(p)).push(v);
+          }
+          m = this.childMemo = { rev: this.versions.rev, children };
+        }
+        return m.children.get(hash) ?? [];
+      }
+      /**
+       * #79: replaces the held history with `jws` like jumpTo, carrying the same revocation denylist, without
+       * flagging a history gap: a refresh's L5 replacement of history that was unanchored when the refresh began.
+       */
+      replaceWith(jws, opts = {}) {
+        const doc = verifyIdentityDoc(jws, opts);
+        if (doc.iss !== this.iss)
+          fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
+        const held2 = this.anyHeld();
+        if (held2 && held2.ik !== doc.ik)
+          fail("issuer-mismatch", "a different ik for this userId");
+        if (held2 && doc.ver <= this.view().head.ver)
+          fail("chain-broken", "a replacement must move forward");
+        this.replaceHistory(doc);
+        return doc;
       }
       /**
        * §2.5 gap jump: when no listed relay still holds the missing versions, a
@@ -7424,6 +7596,29 @@ var init_identitydoc = __esm({
             this.versions.delete(oldest.hash);
           }
         }
+      }
+      /**
+       * #81: `hash` is a ver-1 genesis pruning dropped from counted history (anchoredGenesis). It is known history
+       * that add() refuses to store again, so a gap whose missing version is one can't be filled, by any relay.
+       */
+      isPrunedGenesis(hash) {
+        return this.anchoredGenesis.has(hash);
+      }
+      /**
+       * #79: the held versions whose parent (or merge parent) isn't held, but for a genesis: the unanchored roots,
+       * with the first missing parent each needs. What such a root revoked (relative to its parent) isn't known
+       * until that parent is, so a refresh about to replace or jump over unanchored history walks these first.
+       */
+      roots() {
+        const out = [];
+        for (const v of this.versions.values()) {
+          if (v.prev === null)
+            continue;
+          const need = !this.versions.has(v.prev) ? v.prev : v.merge !== void 0 && !this.versions.has(v.merge) ? v.merge : void 0;
+          if (need !== void 0)
+            out.push({ d: v, need });
+        }
+        return out;
       }
       /** Versions that no held version names as prev or merge, but for strays (#74). */
       tips() {
@@ -10508,6 +10703,10 @@ function unconnectedVersionsOf(e) {
   const v = e?.unconnectedVersions;
   return Array.isArray(v) ? v : [];
 }
+function heldBackByOf(e) {
+  const r = e?.heldBackBy;
+  return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+}
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
@@ -10644,24 +10843,33 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const rejected = /* @__PURE__ */ new Set();
   let gaps = [];
   const place = (docs) => {
-    const pending2 = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
-    const next = [];
-    for (const d of pending2) {
-      if (overBudget())
-        break;
-      try {
-        const r = chain.add(d.jws, { now, skewSec: opts.skewSec });
-        if (r.status === "gap")
-          next.push({ d, need: r.need });
-        else if (r.status === "accepted")
-          accepted.push(d.jws);
-      } catch (e) {
-        if (!(e instanceof P2PError))
-          throw e;
-        rejected.add(d.hash);
+    let pending2 = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
+    let next = [];
+    for (let progress = true, up = true; progress && pending2.length > 0; up = !up) {
+      progress = false;
+      next = [];
+      for (const d of up ? pending2 : [...pending2].reverse()) {
+        if (overBudget())
+          break;
+        try {
+          const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
+          if (r.status === "gap")
+            next.push({ d, need: r.need });
+          else if (r.status === "accepted") {
+            accepted.push(d.jws);
+            progress = true;
+          }
+        } catch (e) {
+          if (!(e instanceof P2PError))
+            throw e;
+          rejected.add(d.hash);
+        }
       }
+      if (exhausted)
+        break;
+      pending2 = next.map((g) => g.d).sort((a, b) => a.ver - b.ver);
     }
-    gaps = next;
+    gaps = next.sort((a, b) => a.d.ver - b.d.ver);
   };
   const answeredRelays = /* @__PURE__ */ new Set();
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
@@ -10732,9 +10940,20 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   place([...tips, ...anchors]);
   end();
   const dead = /* @__PURE__ */ new Set();
+  const byVer = (a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1);
   const frontier = () => {
     const held2 = new Set(gaps.map((g) => g.d.hash));
-    return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
+    return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need) && !chain.isPrunedGenesis(g.need)).sort(byVer);
+  };
+  const servedTip = new Set(tips.map((d) => d.hash));
+  const rootFrontier = () => {
+    if (gaps.length === 0 || chain.size === 0 || chain.size >= MAX_CHAIN_VERSIONS || chain.anchored)
+      return [];
+    const headVer = chain.view().head.ver;
+    if (!gaps.some((g) => g.d.ver > headVer || servedTip.has(g.d.hash)))
+      return [];
+    const held2 = new Set(gaps.map((g) => g.d.hash));
+    return chain.roots().filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort(byVer);
   };
   const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
@@ -10751,10 +10970,24 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     }
     return void 0;
   };
+  let anchoredBeforeRoots;
+  const roots = () => {
+    begin2();
+    const r = rootFrontier();
+    overBudget();
+    end();
+    return r;
+  };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const open3 = frontier();
-    const next = pick(open3);
+    let open3 = frontier();
+    let next = pick(open3);
+    if (!next) {
+      open3 = roots();
+      next = pick(open3);
+      if (next && anchoredBeforeRoots === void 0)
+        anchoredBeforeRoots = chain.anchored;
+    }
     if (!next)
       break;
     wanted = new Set(open3.map((g) => g.need));
@@ -10770,11 +11003,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     end();
   }
   const sentByAnyRelay = (h) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
-  const settled = (need) => !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
+  const settled = (need) => chain.isPrunedGenesis(need) || !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
+  const openGaps = () => [...frontier(), ...roots()];
   let probeUnanswered = false;
   if (chainOf && !exhausted && gaps.length > 0) {
     wanted = /* @__PURE__ */ new Set();
-    const unsettled = frontier().filter((g) => !settled(g.need));
+    const unsettled = openGaps().filter((g) => !settled(g.need));
     const toProbe = [];
     const owners = relays.length + 1;
     for (let round = 0; toProbe.length < 2 * WALK_PROBE_GAPS && round < unsettled.length; round++) {
@@ -10803,7 +11037,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       }
     }
   }
-  const walkCut = chainOf !== void 0 && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || frontier().some((g) => !settled(g.need)));
+  const walkCut = chainOf !== void 0 && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || openGaps().some((g) => !settled(g.need)));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
   const unconnectedRelays = () => relays.filter((r) => gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAnyRelay(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))));
@@ -10811,25 +11045,75 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg) => {
+  const broken = (msg, heldBackBy2 = []) => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...heldBackBy2.length > 0 ? { heldBackBy: heldBackBy2 } : {} });
     throw e;
   };
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  const servedBy = (hash) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
+  const leftOutBy = (head, candidates) => {
+    const headSupport = servedBy(head.hash);
+    const headMajority = headSupport * 2 > listed.length;
+    return [...candidates].filter((e) => e.hash !== head.hash && !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (!headMajority || servedBy(e.hash) >= headSupport) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
+  };
+  const heldBackOf = (head, left) => opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
-  const incomplete = exhausted || docsCapped;
-  if (!incomplete && behind()) {
+  let replaceTo = false;
+  let incomplete = exhausted || docsCapped;
+  const replacing = !incomplete && behind();
+  if (replacing) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
       broken(`could not fit ${userId}'s newest version (ver ${newest.ver})`);
     if (anchoredBefore) {
-      broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
+      broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`, heldBackOf(newest, leftOutBy(newest, chain.tips())));
     }
+  }
+  const besideHead = [];
+  let heldBackBy = [];
+  if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
+    begin2();
+    const headVer = chain.view().head.ver;
+    for (const g of gaps) {
+      if (!servedTip.has(g.d.hash) || g.d.ver !== headVer || rejected.has(g.d.hash))
+        continue;
+      try {
+        if (chain.add(g.d.jws, { now, skewSec: opts.skewSec, replace: false, asRoot: true }).status === "accepted") {
+          accepted.push(g.d.jws);
+          besideHead.push(g.d.jws);
+        }
+      } catch (e) {
+        if (!(e instanceof P2PError))
+          throw e;
+      }
+    }
+    if (besideHead.length > 0)
+      gaps = gaps.filter((g) => !chain.has(g.d.hash));
+    end();
+  }
+  if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
+    const head = replacing ? newest : chain.view().head;
+    const evidence = /* @__PURE__ */ new Map();
+    for (const g of gaps)
+      if (servedTip.has(g.d.hash))
+        evidence.set(g.d.hash, g.d);
+    if (replacing)
+      for (const t2 of [...chain.tips(), ...chain.roots().map((r) => r.d)])
+        evidence.set(t2.hash, t2);
+    const leftOut = leftOutBy(head, evidence.values());
+    if (leftOut.length > 0) {
+      docsCapped = true;
+      incomplete = true;
+      heldBackBy = heldBackOf(head, leftOut);
+    }
+  }
+  if (replacing && !incomplete) {
     jumpTo = newest.jws;
+    replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const sentFrom = (h) => relays.filter((r) => sentBy.get(r)?.has(h));
   const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom) : majority ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {}) : false;
@@ -10860,19 +11144,25 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec });
+        c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
       } catch (e) {
         if (!(e instanceof P2PError))
           throw e;
       }
     }
     let didJump = false;
+    let replaced = false;
     if (jumpTo !== void 0 && !anchoredAtCommit && (c.size === 0 || c.view().head.ver < newest.ver)) {
-      c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
-      didJump = true;
+      if (replaceTo) {
+        c.replaceWith(jumpTo, { now, skewSec: opts.skewSec });
+        replaced = true;
+      } else {
+        c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
+        didJump = true;
+      }
     }
     const narrowed = c.size > 0 && stateChange(c);
-    if (accepted.length === 0 && !didJump && !narrowed && cur)
+    if (accepted.length === 0 && !didJump && !replaced && !narrowed && cur)
       return { result: false };
     return { next: c.toStored(), result: didJump };
   });
@@ -10884,8 +11174,16 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
-  if (incomplete)
-    return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() };
+  if (incomplete) {
+    return {
+      ...view,
+      incomplete: true,
+      answeredRelays: answered,
+      unconnectedRelays: unconnectedRelays(),
+      unconnectedVersions: unconnectedVersions(),
+      ...heldBackBy.length > 0 ? { heldBackBy } : {}
+    };
+  }
   await store2.deleteProvisional(userId);
   if (majority)
     await store2.markRefreshed(userId, now);
@@ -27493,7 +27791,7 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = unconnectedRelaysOf(e);
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? heldBackByOf(e) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
             if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -27511,9 +27809,10 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const fb = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
-          named = v.unconnectedRelays ?? [];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? v.heldBackBy ?? [] : []])];
+          const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+          named = unconnected;
           v = fb;
         }
         if (opts.strict && own) await this.ownPendingGuard(userId, list, v, named, opts.setAside);
