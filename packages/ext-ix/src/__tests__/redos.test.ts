@@ -8,24 +8,38 @@ import { describe, expect, it } from "vitest";
 import { splitPattern } from "../subgraph.js";
 import { scrubPaths, trimEnd } from "../text.js";
 
-/** Best-of-5 time for `reps` runs of `f(input)`. */
-function cost(f: (s: string) => unknown, input: string, reps = 20): number {
-  let best = Infinity;
-  for (let t = 0; t < 5; t++) {
-    const a = performance.now();
-    for (let r = 0; r < reps; r++) f(input);
-    best = Math.min(best, performance.now() - a);
-  }
-  return best;
+/** Time for `reps` runs of `f(input)`. */
+function run(f: (s: string) => unknown, input: string, reps: number): number {
+  const a = performance.now();
+  for (let r = 0; r < reps; r++) f(input);
+  return performance.now() - a;
 }
 
-/** How much longer `f` takes on a 100 KB input than on a 10 KB one: ~10 when linear, ~100 when quadratic. */
+/**
+ * How much longer `f` takes on a 100 KB input than on a 10 KB one: ~10 when linear, ~100 when quadratic.
+ * Relative, so a slow runner passes: the repeat count is calibrated so the 10 KB timing is at least ~2 ms
+ * (well above timer noise), the two sizes are timed alternately (a slow spell on a shared runner hits
+ * both), each is the best of 5, and a ratio just over LIMIT (under 2x it) is measured again, up to 3 times,
+ * keeping the lowest: noise doesn't repeat, a quadratic scan (~100) does every time and isn't retried.
+ */
 function growth(f: (s: string) => unknown, make: (n: number) => string): number {
   const small = make(10_000);
   const big = make(100_000);
   f(small);
   f(big);
-  return cost(f, big) / Math.max(cost(f, small), 1e-3);
+  let reps = 1;
+  while (reps < 1024 && run(f, small, reps) < 2) reps *= 2;
+  let ratio = Infinity;
+  for (let attempt = 0; attempt < 3 && (attempt === 0 || (ratio >= LIMIT && ratio < 2 * LIMIT)); attempt++) {
+    let s = Infinity;
+    let b = Infinity;
+    for (let t = 0; t < 5; t++) {
+      s = Math.min(s, run(f, small, reps));
+      b = Math.min(b, run(f, big, reps));
+    }
+    ratio = Math.min(ratio, b / Math.max(s, 1e-3));
+  }
+  return ratio;
 }
 
 /** Deterministic random strings over `alphabet`, up to `max` characters. */

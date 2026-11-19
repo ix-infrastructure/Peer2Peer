@@ -731,7 +731,9 @@ describe('peer2peer: H1, an auto-approving session holds every other person\'s m
     expect(ownSubmits(w).length).toBe(before + 1)
   })
 
-  test('H1: an agent session of mine (a peer may have told it what to say) is held in an auto-approving session; my own terminal is not', async ($, on) => {
+  // The fake clock drives it, but every settle runs the plugin's loops for real: 2-4 s on a fast laptop,
+  // past the 5 s default timeout on a slow shared runner (#55), so a longer one.
+  test('H1: an agent session of mine (a peer may have told it what to say) is held in an auto-approving session; my own terminal is not', { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on)
     await start($, w, 'bypassPermissions')
     // Injected through session A: its message to this auto-approving session waits for Deliver.
