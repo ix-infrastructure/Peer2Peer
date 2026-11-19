@@ -21,7 +21,7 @@
 //  - `p2p tui` and `p2p send` typed at a terminal with no --from-session are the person's own
 //    session: never bound, no ceiling.
 
-import { agentAncestor, ancestryUnknown, isAgentProcess } from "./ancestry.js";
+import { agentAncestor, ancestryUnknown, ancestryWhy, isAgentProcess } from "./ancestry.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -1212,6 +1212,37 @@ function writeWhole(f: string, text: string): void {
 }
 
 /**
+ * The home's salt, made once: exclusively when there is none (two first runs at once agree on
+ * the one that was made first), replaced whole when what is there isn't a salt.
+ */
+function ensureSalt(home: string): void {
+  const f = personSaltFile(home);
+  if (TOKEN_RE.test(readTrim(f) ?? "")) return;
+  if (!existsSync(f)) {
+    try {
+      writeFileSync(f, randomBytes(32).toString("base64url"), { mode: 0o600, flag: "wx" });
+      return;
+    } catch {
+      // made meanwhile by another process: that one, if it is a salt
+      if (TOKEN_RE.test(readTrim(f) ?? "")) return;
+    }
+  }
+  writeWhole(f, randomBytes(32).toString("base64url"));
+}
+
+/**
+ * Whether `token` is the one the identity keys `spk` derive in `home` (its salt), and the home's
+ * files are its own. Run against the keys a command actually loaded (App.load), so a home whose
+ * files changed after the token was checked never lends the token to other keys.
+ */
+export function personTokenMatchesKeys(home: string, spk: string, token: string): boolean {
+  if (!homeFilesOwn(home)) return false;
+  const salt = readTrim(personSaltFile(home));
+  if (!salt || !TOKEN_RE.test(salt)) return false;
+  return same(token, deriveToken(spk, salt));
+}
+
+/**
  * The person token, made or brought up to date in the CLI's own folder (0600; the mod's guards keep
  * the model from it). With an identity here: the derived token, written to person.key when the
  * file holds anything else (a home from before derived tokens, a front end's random first-run
@@ -1222,7 +1253,7 @@ export function personToken(home: string): string {
   const f = personTokenFile(home);
   if (identityHere(home)) {
     if (!homeFilesOwn(home)) return "";
-    if (!TOKEN_RE.test(readTrim(personSaltFile(home)) ?? "")) writeWhole(personSaltFile(home), randomBytes(32).toString("base64url"));
+    ensureSalt(home);
     const want = derivedToken(home);
     if (!want) return "";
     if (readTrim(f) !== want) writeWhole(f, want);
@@ -1371,7 +1402,7 @@ export async function assertPersonForWidening(
   if (ancestryUnknown()) {
     throw new CliError(
       "refused",
-      `\`p2p ${what}\` ${why}, so only you run it: with /peers in Claude Code, or with your person token (P2P_PERSON_TOKEN). It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session`,
+      `\`p2p ${what}\` ${why}, so only you run it: with /peers in Claude Code, or with your person token (P2P_PERSON_TOKEN). It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session${ancestryWhy() ? ` (${ancestryWhy()})` : ""}`,
     );
   }
   if (!(await confirm(`p2p ${what} ${why}.`))) {

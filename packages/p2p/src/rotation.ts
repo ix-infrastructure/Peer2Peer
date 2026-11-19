@@ -54,7 +54,7 @@
 //  - rotation can't recover a compromised owner's circles: those need a new
 //    circle (§3.3); this hands over only what the old key still controls.
 
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile, chmod } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, rename, rm, stat, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import {
   addIdentityVersion,
@@ -206,6 +206,15 @@ async function dropState(home: string): Promise<void> {
 
 const after = (s: RotationState, step: RotationStep) => STEPS.indexOf(s.step) >= STEPS.indexOf(step);
 
+/** Whether `p` is a symbolic link (a missing path isn't). */
+async function isLink(p: string): Promise<boolean> {
+  try {
+    return (await lstat(p)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 async function exists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -248,6 +257,8 @@ async function moveHomes(home: string, src: string, tag: string): Promise<string
  * the old identity's work here has stopped (moveHomes).
  */
 export async function adoptHome(app: App, src: string, tag: string): Promise<string> {
+  // The identity swapped in is this command's own (the person's token was for the one it replaces).
+  app.identityMadeHere = true;
   // Nothing of the old identity may still be writing: an envelope handled mid-swap would take its
   // lock into the archive (or write the old identity's state into the new home).
   await app.close();
@@ -2118,6 +2129,10 @@ export async function recoverInterruptedFollow(home: string): Promise<boolean> {
     marker = JSON.parse(await readFile(join(tmp, "linked.json"), "utf8")) as { to?: string; tag?: string };
   } catch {
     return false;
+  }
+  // Only the folders a follow made here: a link (to another home's state) is never moved into this one.
+  for (const p of [rotationDir(home), tmp, join(tmp, "linked.json"), join(tmp, "cli"), join(tmp, "v3"), join(tmp, "cursors")]) {
+    if (await isLink(p)) return false;
   }
   if (!(await exists(join(tmp, "cli"))) && (await exists(join(home, "cli")))) {
     // The new identity is already in place (the swap finished but the marker stayed).

@@ -81,6 +81,12 @@ export interface ProgramDeps {
   front?: boolean;
   /** A person token was passed that isn't this home's (person.key was replaced since): every command refuses it (main()). */
   personTokenStale?: boolean;
+  /** A person token was passed to a home whose files are links (projects.ts homeFilesOwn): every command refuses it (main()). */
+  personTokenLinked?: boolean;
+  /** The token `front` rests on (main() keeps it in memory, never in the environment): re-checked against the home as the command finds it, and against the keys it loads (App.load). */
+  frontToken?: string;
+  /** The home held no identity when main() checked the token. */
+  frontFresh?: boolean;
   /** The person's "yes" on their controlling terminal (tty-confirm.ts; tests stand in). */
   confirmTty?: projects.ConfirmTty;
 }
@@ -235,6 +241,10 @@ export function buildProgram(deps: ProgramDeps): Command {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
     app.front = deps.front === true;
+    if (app.front && deps.frontToken !== undefined) {
+      app.frontToken = deps.frontToken;
+      app.frontFresh = deps.frontFresh === true;
+    }
     app.confirmTty = confirmTty;
     return app;
   };
@@ -255,6 +265,12 @@ export function buildProgram(deps: ProgramDeps): Command {
       const app = makeApp(deps.env, io, opts.readOnly ? { readOnly: true } : undefined);
       let stop = () => {};
       try {
+        if (deps.personTokenLinked) {
+          throw new CliError(
+            "refused",
+            `the person token is never taken in ${app.home}: its cli folder, keys, self document, token, salt or v3 store is a symbolic link (or a hard-linked copy). A home kept by a dotfile manager or linked from elsewhere can't use the token: point P2P_HOME at the real folder. Nothing was done`,
+          );
+        }
         if (deps.personTokenStale) {
           throw new CliError(
             "person_token_stale",
@@ -264,6 +280,14 @@ export function buildProgram(deps: ProgramDeps): Command {
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a
         // read-only command, which must leave the home exactly as it found it).
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
+        // The token was checked when the command started; the home may have changed since (an
+        // interrupted follow finished just now, or files swapped in by something else). Checked again
+        // as the home is now, before any gate: a home that had no identity then and has one now keeps
+        // no token. The keys the command loads are checked against it too (App.load).
+        if (app.front && app.frontToken !== undefined) {
+          const still = projects.personTokenOk({ P2P_PERSON_TOKEN: app.frontToken }, app.home);
+          if (!still || (app.frontFresh && projects.identityHere(app.home))) app.front = false;
+        }
         // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
         const widening = wideningOf(cmd);
         if (widening) await projects.assertPersonForWidening(app, widening, confirmTty, undefined, { noTokenBeforeIdentity: widening === "link join" });
@@ -2228,14 +2252,24 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
   {
     // A copy without it (an embedder's object is left as it was); the process's own environment loses it too.
     const env = { ...deps.env };
-    const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
-    const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
-    if (given && !front) projects.healPersonToken(resolveHome(env));
+    const token = (env.P2P_PERSON_TOKEN ?? "").trim();
+    const given = token !== "";
+    const home = resolveHome(env);
+    const byToken = projects.takePersonToken(env, home);
+    const front = deps.front === true || byToken;
+    const linked = given && !front && !projects.homeFilesOwn(home);
+    if (given && !front && !linked) projects.healPersonToken(home);
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
     // A token that isn't this home's is refused outright, never quietly taken as "not the person": the
     // person.key it was read from was replaced when an identity was created or restored here
     // (projects.ts renewPersonToken), and the front end that passed it reads the file again.
-    deps = { ...deps, front, env, ...(given && !front ? { personTokenStale: true } : {}) };
+    deps = {
+      ...deps,
+      front,
+      env,
+      ...(byToken && deps.front !== true ? { frontToken: token, frontFresh: !projects.identityHere(home) } : {}),
+      ...(linked ? { personTokenLinked: true } : given && !front ? { personTokenStale: true } : {}),
+    };
   }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
   const end = argvIn.indexOf("--");

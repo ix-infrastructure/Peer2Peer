@@ -9,5 +9,5 @@ import { vi } from "vitest";
 vi.mock("../ancestry.js", async (importOriginal) => {
   const real = await importOriginal<typeof import("../ancestry.js")>();
   const now = () => (globalThis as { __p2pTestAncestry?: "agent" | "none" | "unknown" }).__p2pTestAncestry ?? "none";
-  return { ...real, ancestry: now, agentAncestor: () => now() === "agent", ancestryUnknown: () => now() === "unknown" };
+  return { ...real, ancestry: now, agentAncestor: () => now() === "agent", ancestryUnknown: () => now() === "unknown", ancestryWhy: () => (now() === "unknown" ? "a test said so" : "") };
 });

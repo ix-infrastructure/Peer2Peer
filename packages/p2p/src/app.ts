@@ -10,7 +10,7 @@
 // §5.8), finding caps, resolving addresses and petnames, and syncing state to
 // the user's other devices.
 
-import { personTokenOk } from "./projects.js";
+import { identityHere, personTokenMatchesKeys, personTokenOk } from "./projects.js";
 import { confirmOnTty } from "./tty-confirm.js";
 import { hostname, userInfo } from "node:os";
 import {
@@ -173,6 +173,16 @@ const CAP_PRIORITY = (c: { kinds: string[] }) => (c.kinds[0] === "*" ? 0 : 1);
 export class App {
   /** The person's front end vouched for this command (P2P_PERSON_TOKEN, checked once and removed: projects.ts). */
   front = false;
+  /**
+   * The token `front` rests on, kept in memory (never in the environment), so the keys this command
+   * loads are checked against it (load): a home whose files change after the start never lends the
+   * token to other keys. Undefined for an embedder that vouches without one.
+   */
+  frontToken?: string;
+  /** The home held no identity when the token was checked (a front end's first run). */
+  frontFresh = false;
+  /** This command made, restored or swapped in the identity it holds (init, link join, restore, a rotation's swap). */
+  identityMadeHere = false;
   /** The person's "yes" on their controlling terminal (tty-confirm.ts); cli.ts may stand another in (tests). */
   confirmTty: (question: string) => Promise<boolean> = confirmOnTty;
   readonly env: Env;
@@ -228,6 +238,10 @@ export class App {
     // An embedder holding the person token is a front end (the CLI's main() checks and removes it first,
     // then sets this from its own check).
     this.front = personTokenOk(this.env, this.home);
+    if (this.front) {
+      this.frontToken = this.env.P2P_PERSON_TOKEN?.trim();
+      this.frontFresh = !identityHere(this.home);
+    }
     // Progress and P2P_DEBUG lines go to stderr (never secrets: see progress.ts).
     this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
     this.readOnly = opts.readOnly === true;
@@ -250,8 +264,22 @@ export class App {
       if (require) throw new CliError("no_identity", "no identity here yet: run `p2p init` (or `p2p link join` / `p2p backup restore`)");
       return false;
     }
+    this.checkFrontKeys(keys);
     this.setKeys(keys, self);
     return true;
+  }
+
+  /**
+   * The person token this command was given must be the one these keys derive (projects.ts
+   * personTokenMatchesKeys), unless this command made the identity itself. A home that had no
+   * identity when the token was checked, and has one now that this command didn't make, never
+   * keeps it. Otherwise the command stops: the home changed under it.
+   */
+  private checkFrontKeys(keys: KeysDoc): void {
+    if (!this.front || this.frontToken === undefined || this.identityMadeHere) return;
+    if (!this.frontFresh && personTokenMatchesKeys(this.home, keys.spk, this.frontToken)) return;
+    this.front = false;
+    throw new CliError("refused", `the person token doesn't belong to the identity ${this.home} holds now (its files changed while the command ran): it stopped here. Run it again`);
   }
 
   setKeys(keys: KeysDoc, self: SelfDoc): void {

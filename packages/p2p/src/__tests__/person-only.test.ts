@@ -9,19 +9,21 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { main } from "../cli.js";
-import { homeFilesOwn, personToken, personTokenFile, personTokenOk, personSaltFile } from "../projects.js";
+import { App } from "../app.js";
+import { main, type ProgramDeps } from "../cli.js";
+import { homeFilesOwn, identityHere, personToken, personTokenFile, personTokenOk, personSaltFile } from "../projects.js";
 import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-person-only.test/v3";
 const R2 = "wss://relay-person-only-2.test/v3";
 const R3 = "wss://relay-person-only-3.test/v3";
+const R4 = "wss://relay-person-only-4.test/v3";
 
 type How = "agent" | "token" | "yes" | "no";
 
@@ -442,5 +444,114 @@ describe("p2p invites inside an agent's session", () => {
     const whole = (await u.ok(["invites"])) as { invites: { code: string }[]; redacted?: boolean };
     expect(whole.redacted).toBeUndefined();
     expect(whole.invites[0].code).toBe(code);
+  });
+});
+
+describe("a token checked at the start never carries over to a home that changes under the command", () => {
+  let relay: TestRelay;
+  const users: User[] = [];
+  const dirs: string[] = [];
+  let ann: User;
+  beforeAll(async () => {
+    relay = await startRelay(R4, { limits: { identityPublishPerIpPerHour: 100_000, newDevicesPerIpPerDay: 100_000, newDevicesPerIpv4PerDay: 100_000 } });
+    ann = new User("po4-ann", { [R4]: `ws://127.0.0.1:${relay.port}/v3` }, { P2P_DEFAULT_RELAYS: R4 });
+    users.push(ann);
+    await ann.ok(["init", "--name", "ann", "--relay", R4, "--yes"]);
+  }, 60_000);
+  afterAll(async () => {
+    await relay?.close();
+    for (const u of users) u.cleanup();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  /** A fresh-looking home with a token of the agent's choosing in it. */
+  const plantedHome = () => {
+    const h = mkdtempSync(join(tmpdir(), "po-planted-"));
+    dirs.push(h);
+    mkdirSync(join(h, "cli"), { recursive: true, mode: 0o700 });
+    const mine = randomBytes(32).toString("base64url");
+    writeFileSync(personTokenFile(h), mine, { mode: 0o600 });
+    return { h, mine };
+  };
+  const run = async (env: Record<string, string | undefined>, argv: string[], makeApp?: ProgramDeps["makeApp"]) => {
+    const out: string[] = [];
+    const code = await main([...argv, "--json"], { env, io: { out: (l) => out.push(l), err: () => {} }, confirmTty: async () => false, ...(makeApp ? { makeApp } : {}) });
+    process.exitCode = 0;
+    return { code, json: JSON.parse(out.at(-1) ?? "{}") as Record<string, unknown> };
+  };
+
+  it("an interrupted-follow folder of links to the real identity is never moved in, and the phrase is never shown", async () => {
+    const { h, mine } = plantedHome();
+    const follow = join(h, "rotation", "follow");
+    mkdirSync(follow, { recursive: true, mode: 0o700 });
+    writeFileSync(join(follow, "linked.json"), "{}");
+    symlinkSync(join(ann.home, "cli"), join(follow, "cli"));
+    symlinkSync(join(ann.home, "v3"), join(follow, "v3"));
+    const r = await run({ ...ann.env, P2P_HOME: h, P2P_PERSON_TOKEN: mine, CLAUDECODE: "1" }, ["backup", "show"]);
+    expect(r.code).toBe(1);
+    expect(r.json.phrase).toBeUndefined();
+    // The links stayed where they were: nothing of the real home was moved into this one.
+    expect(existsSync(join(h, "cli", "keys.json"))).toBe(false);
+    expect(lstatSync(join(follow, "cli")).isSymbolicLink()).toBe(true);
+    expect(identityHere(ann.home)).toBe(true);
+  });
+
+  it("files dropped into the home after the token was checked: the token goes, and the gate refuses", async () => {
+    for (const how of ["symlink", "copy"] as const) {
+      const { h, mine } = plantedHome();
+      // Between main()'s check and the command's gates: the identity's files appear in the home.
+      const makeApp: ProgramDeps["makeApp"] = (env, io) => {
+        for (const f of ["keys.json", "self.json"]) {
+          if (how === "symlink") symlinkSync(join(ann.home, "cli", f), join(h, "cli", f));
+          else copyFileSync(join(ann.home, "cli", f), join(h, "cli", f));
+        }
+        if (how === "symlink") symlinkSync(join(ann.home, "v3"), join(h, "v3"));
+        return new App({ env, io });
+      };
+      const r = await run({ ...ann.env, P2P_HOME: h, P2P_PERSON_TOKEN: mine, CLAUDECODE: "1" }, ["backup", "show"], makeApp);
+      expect(r.json.error, how).toBe("refused");
+      expect(r.json.phrase, how).toBeUndefined();
+    }
+  });
+
+  it("the keys a command loads must be the ones the token derives (App.load), unless the command made them", async () => {
+    const app = await ann.app();
+    try {
+      app.front = true;
+      app.frontToken = randomBytes(32).toString("base64url");
+      await expect(app.load()).rejects.toMatchObject({ code: "refused" });
+      expect(app.front).toBe(false);
+      app.front = true;
+      app.frontToken = ann.personToken;
+      await expect(app.load()).resolves.toBe(true);
+      // A home that had no identity when the token was checked keeps no token for keys it didn't make.
+      app.frontFresh = true;
+      await expect(app.load()).rejects.toMatchObject({ code: "refused" });
+      app.front = true;
+      app.identityMadeHere = true;
+      await expect(app.load()).resolves.toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("a home of links says why the token isn't taken there", async () => {
+    const h = mkdtempSync(join(tmpdir(), "po-dotfiles-"));
+    dirs.push(h);
+    symlinkSync(join(ann.home, "cli"), join(h, "cli"));
+    const r = await run({ ...ann.env, P2P_HOME: h, P2P_PERSON_TOKEN: ann.personToken }, ["whoami"]);
+    expect(r.json.error).toBe("refused");
+    expect(String(r.json.reason)).toMatch(/symbolic link.*point P2P_HOME at the real folder/);
+  });
+
+  it("ancestry: a nested PID namespace is unknown; another user's (or a hidden) process ends the walk as none", async () => {
+    const real = await vi.importActual<typeof import("../ancestry.js")>("../ancestry.js");
+    expect(real.nestedPidNamespace("Name:\tnode\nNSpid:\t4242\t7\n")).toBe(true);
+    expect(real.nestedPidNamespace("Name:\tnode\nNSpid:\t4242\n")).toBe(false);
+    expect(real.nestedPidNamespace("Name:\tnode\n")).toBe(false);
+    const read = (pid: number) => {
+      if (pid === 30) return { ppid: 20, comm: "bash", args: () => "" };
+      throw new real.OtherUsersProcess();
+    };
+    expect(real.walkAncestry(30, read)).toBe("none");
   });
 });

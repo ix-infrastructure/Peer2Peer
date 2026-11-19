@@ -11,11 +11,19 @@
 // (projects.ts assertPersonForWidening): fail closed. The person's token still works there.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 
 export type Ancestry = "agent" | "none" | "unknown";
 
 let cached: Ancestry | undefined;
+let why = "";
+
+/**
+ * Thrown by a reader for a process that is not this user's (another user's, or hidden by /proc's
+ * `hidepid`): the end of this user's own process tree, so the walk answers "none". An agent's
+ * session runs as the person, so its processes are always this user's and always readable.
+ */
+export class OtherUsersProcess extends Error {}
 
 /** An executable that is Claude Code or Codex, by its basename (argv0) only: never a word elsewhere on a command line. */
 export function isAgentProcess(executable: string): boolean {
@@ -54,9 +62,38 @@ function systemPs(): string | undefined {
   return PS_PATHS.find((p) => existsSync(p));
 }
 
-/** Reads one process from /proc (Linux). Throws when it can't. */
+/** Whether /proc hides other users' processes (`hidepid` among its mount options). */
+function procHidesOthers(): boolean {
+  try {
+    return readFileSync("/proc/mounts", "utf8")
+      .split("\n")
+      .some((l) => {
+        const f = l.split(" ");
+        return f[1] === "/proc" && (f[3] ?? "").split(",").some((o) => o.startsWith("hidepid=") && o !== "hidepid=0" && o !== "hidepid=off");
+      });
+  } catch {
+    return false;
+  }
+}
+
+/** Reads one process from /proc (Linux). Throws when it can't; OtherUsersProcess past the end of this user's tree. */
 function procRead(pid: number): ProcInfo {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM" || code === "ENOENT") {
+      // Another user's process (visible but unreadable), or one /proc hides because it isn't ours.
+      try {
+        if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) throw new OtherUsersProcess();
+      } catch (s) {
+        if (s instanceof OtherUsersProcess) throw s;
+        if ((s as NodeJS.ErrnoException).code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess();
+      }
+    }
+    throw e;
+  }
   // "<pid> (<comm>) <state> <ppid> …": comm may hold spaces and parentheses, so read after the last ")".
   const close = stat.lastIndexOf(")");
   if (close < 0) throw new Error("unreadable stat");
@@ -109,24 +146,63 @@ export function walkAncestry(start: number, read: (pid: number) => ProcInfo): An
     let p: ProcInfo;
     try {
       p = read(pid);
-    } catch {
+    } catch (e) {
+      if (e instanceof OtherUsersProcess) return "none";
+      why = (e as NodeJS.ErrnoException).code === "ETIMEDOUT" || /timed? ?out/i.test(String((e as Error).message)) ? "reading it timed out: run the command again" : "a process in it couldn't be read: run the command again";
       return "unknown";
     }
     if (isAgentProcess(p.comm) || (isScriptHost(p.comm) && isAgentScript(p.args()))) return "agent";
-    if (p.ppid === pid) return "unknown";
+    if (p.ppid === pid) {
+      why = "it loops";
+      return "unknown";
+    }
     pid = p.ppid;
   }
+  why = "it is deeper than 64 processes";
   return "unknown";
+}
+
+/**
+ * Linux: whether this process runs in a nested PID namespace (a container, `bwrap --unshare-pid`):
+ * /proc/self/status lists more than one pid in `NSpid`. The walk there ends at the namespace's own
+ * pid 1, before any agent outside it could be seen, so the answer is "unknown", never "none".
+ */
+export function nestedPidNamespace(status: string): boolean {
+  const line = status.split("\n").find((l) => l.startsWith("NSpid:"));
+  return line !== undefined && line.slice(6).trim().split(/\s+/).filter(Boolean).length > 1;
 }
 
 /** This process's ancestry, read once. Windows: "none" (the token and the terminal confirmation still apply). */
 export function ancestry(): Ancestry {
   if (cached !== undefined) return cached;
+  // Windows: no process-tree check at all (fails open there: the agents' variables, the person
+  // token and the terminal confirmation still apply).
   if (process.platform === "win32") return (cached = "none");
-  if (process.platform === "linux" && existsSync("/proc/self/stat")) return (cached = walkAncestry(process.ppid, procRead));
+  if (process.platform === "linux" && existsSync("/proc/self/stat")) {
+    let status = "";
+    try {
+      status = readFileSync("/proc/self/status", "utf8");
+    } catch {
+      // read below
+    }
+    if (nestedPidNamespace(status)) {
+      why = "it runs in a container or sandbox with its own process namespace, where an agent outside can't be seen: pass your person token there";
+      return (cached = "unknown");
+    }
+    return (cached = walkAncestry(process.ppid, procRead));
+  }
   const ps = systemPs();
-  cached = ps ? walkAncestry(process.ppid, (pid) => psRead(ps, pid)) : "unknown";
+  if (!ps) {
+    why = "there is no system ps (/bin/ps or /usr/bin/ps)";
+    return (cached = "unknown");
+  }
+  cached = walkAncestry(process.ppid, (pid) => psRead(ps, pid));
   return cached;
+}
+
+/** Why the ancestry is "unknown" (for the refusal), or "". */
+export function ancestryWhy(): string {
+  return ancestry() === "unknown" ? why : "";
 }
 
 /** Whether a Claude Code or Codex process is an ancestor of this one. */
