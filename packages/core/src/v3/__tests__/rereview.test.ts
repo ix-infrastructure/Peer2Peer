@@ -108,7 +108,9 @@ describe("N1: a planted provisional document doesn't disable M1", () => {
     // U's first device D was later revoked; the relays pruned everything between v1 and the head.
     const u = new TestUser("alice");
     const d = u.addDevice({ keyholder: true });
-    const v1 = u.publish();
+    // Stale: past its exp. (A current version left out of a jump, with nothing connecting it to the head, holds
+    // the refresh back instead, #79; relays keep a current version's ancestry, so that's a thief's branch.)
+    const v1 = u.publish({ iat: NOW - 40 * 86_400 });
     const real = u.addDevice({ keyholder: true });
     u.keyholders = [real.did];
     for (let i = 0; i < 3; i++) u.publish({ devices: [real.did] });

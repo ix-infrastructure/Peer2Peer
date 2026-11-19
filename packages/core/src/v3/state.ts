@@ -36,7 +36,7 @@ import {
 } from "./circles.js";
 import { unfriendApplies, verifyFriendshipV3, verifyInviteV3, type VerifiedFriendshipV3, type VerifiedInviteV3 } from "./friends.js";
 import { verifyDeviceCertV3 } from "./device.js";
-import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, MAX_WALK_ANCHORS, peekIdentityDoc, pendingUsable, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
+import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, MAX_CHAIN_VERSIONS, MAX_WALK_ANCHORS, peekIdentityDoc, pendingUsable, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
 import type { CertResolverV3, IdentityResolver, SignerContext } from "./signers.js";
 import type { StoredCapV3, StoredCircleV3, TrustStoreV3 } from "./store.js";
 
@@ -245,9 +245,11 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    happens only at the end, carrying what every held branch revoked. A
  *    version a held unanchored root names as its parent is placed below it
  *    (IdentityChain.add), so the walk needn't reach version 1. When the
- *    root's parent can't be had either, a current root a relay served as its
- *    tip isn't dropped for a newer version listing a device or key holder it
- *    doesn't: the refresh ends incomplete, the newer version pending.
+ *    versions can't be connected, a current version the result would leave
+ *    out (a held tip or root, or a served tip left unconnected) doesn't give
+ *    way to a head listing a device or key holder it doesn't: the refresh
+ *    ends incomplete, nothing is replaced, a newer version is pending. Two
+ *    unconnected same-ver tips are kept side by side (a fork).
  *  - A gap whose missing version is a genesis pruning dropped (a replay of a
  *    long history's pruned versions) is settled, never walked (#81).
  *  - Fails closed if no relay returns anything usable, or if the identity is
@@ -585,10 +587,14 @@ export async function refreshIdentity(
     const held = new Set(gaps.map((g) => g.d.hash));
     return gaps.filter((g) => !held.has(g.need) && !rejected.has(g.need) && !chain.isPrunedGenesis(g.need)).sort(byVer);
   };
+  const servedTip = new Set(tips.map((d) => d.hash));
   const rootFrontier = () => {
-    if (gaps.length === 0 || chain.size === 0 || chain.anchored) return [];
+    // At the cap a root's parent wouldn't be kept (it would be pruned at once): not asked for, so settled.
+    if (gaps.length === 0 || chain.size === 0 || chain.size >= MAX_CHAIN_VERSIONS || chain.anchored) return [];
     const headVer = chain.view().head.ver;
-    if (!gaps.some((g) => g.d.ver > headVer)) return []; // nothing would replace the held history
+    // Only when something would replace the held history, or a tip a relay served is left unconnected (the end's
+    // check below would hold the refresh back for it: walking the roots down connects an honest one).
+    if (!gaps.some((g) => g.d.ver > headVer || servedTip.has(g.d.hash))) return [];
     const held = new Set(gaps.map((g) => g.d.hash));
     return chain
       .roots()
@@ -725,39 +731,70 @@ export async function refreshIdentity(
    */
   let replaceTo = false;
   let incomplete = exhausted || docsCapped;
-  if (!incomplete && behind()) {
+  const replacing = !incomplete && behind();
+  if (replacing) {
     if (!gaps.some((g) => g.d.hash === newest!.hash)) broken(`could not fit ${userId}'s newest version (ver ${newest!.ver})`);
     if (anchoredBefore) {
       broken(`${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
-    // #79 review: a current version a relay served as its tip in this refresh, held as an unanchored root whose
-    // parent no relay gave (so what it revoked is unknown), isn't dropped for a newer version that doesn't
-    // connect to it and lists a device or key holder it doesn't: that is what a key thief's branch keeping a
-    // device the owner just revoked looks like. The refresh ends incomplete instead (no freshness, approvals
-    // refused), the root stays held and the newer version is a pending head, so only what both list is
-    // trusted, until the chain connects them or the root expires (at most 30 days: an honest replay of an old
-    // version can't hold a refresh back longer, and relays keep a current version's parent). A newer version
-    // listing nothing the root doesn't (honest removals, or nothing changed) still replaces it (L5).
-    const n = newest!;
-    const served = new Set(tips.map((d) => d.hash));
-    const contradicted = chain
-      .roots()
-      .some(
-        ({ d: r }) =>
-          served.has(r.hash) &&
-          r.ver < n.ver &&
-          pendingUsable(r, { now, skewSec: opts.skewSec }) &&
-          (n.devices.some((x) => !r.devices.includes(x)) || n.keyholders.some((x) => !r.keyholders.includes(x))),
-      );
+  }
+  // #79 (and its reviews): a current version that the result would leave out, with nothing connecting it to the
+  // head the result would have, doesn't give way to a head listing a device or key holder it doesn't: that is
+  // what a key thief's branch keeping a device the owner just revoked (or adding one) looks like, and what the
+  // left-out version revoked can't be carried without its ancestry. The refresh ends incomplete instead (no
+  // freshness, approvals refused); nothing is replaced, and a newer version is a pending head, so only what
+  // both list is trusted. Until the chain connects them or that version expires: at most 30 days, and an
+  // honest relay keeps a current version's ancestry, which the walk (rootFrontier) uses to connect it, so an
+  // old version replayed can't hold refreshes back longer. A head listing nothing more still wins (L5).
+  // What counts:
+  //  - replacing (or jumping over) held history: every current held tip and unanchored root (connected or not,
+  //    stored earlier or placed now, served again or not), and every current tip a relay served left on a gap;
+  //  - otherwise, on unanchored history: every current tip a relay served left on a gap (on anchored history
+  //    such a version is old history or a fork, as before).
+  // #79 re-review: on unanchored history, a tip a relay served at the head's own `ver` that doesn't connect is a
+  // same-ver branch signed with the identity key (which one was placed first is only the order the relays'
+  // answers arrived in): kept as another root, so the view shows the fork and trusts only what both list.
+  const besideHead: string[] = [];
+  if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
+    begin();
+    const headVer = chain.view().head.ver;
+    for (const g of gaps) {
+      if (!servedTip.has(g.d.hash) || g.d.ver !== headVer || rejected.has(g.d.hash)) continue;
+      try {
+        if (chain.add(g.d.jws, { now, skewSec: opts.skewSec, replace: false, asRoot: true }).status === "accepted") {
+          accepted.push(g.d.jws);
+          besideHead.push(g.d.jws);
+        }
+      } catch (e) {
+        if (!(e instanceof P2PError)) throw e;
+      }
+    }
+    if (besideHead.length > 0) gaps = gaps.filter((g) => !chain.has(g.d.hash));
+    end();
+  }
+  if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
+    const head = replacing ? newest! : chain.view().head;
+    const evidence = new Map<string, VerifiedIdentityDoc>();
+    for (const g of gaps) if (servedTip.has(g.d.hash)) evidence.set(g.d.hash, g.d);
+    // Strays (#74) aside: a replay of old history below an unanchored head is history, not a branch.
+    if (replacing) for (const t of [...chain.tips(), ...chain.roots().map((r) => r.d)]) evidence.set(t.hash, t);
+    evidence.delete(head.hash);
+    const contradicted = [...evidence.values()].some(
+      (e) =>
+        !rejected.has(e.hash) &&
+        pendingUsable(e, { now, skewSec: opts.skewSec }) &&
+        (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))),
+    );
     if (contradicted) {
       docsCapped = true;
       incomplete = true;
-    } else {
-      jumpTo = n.jws;
-      // History anchored only by this refresh's walk below a root (a relay replaying old versions) doesn't turn
-      // an L5 replacement into a jump: decided by what was held before that walk.
-      replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
     }
+  }
+  if (replacing && !incomplete) {
+    jumpTo = newest!.jws;
+    // History anchored only by this refresh's walk below a root (a relay replaying old versions) doesn't turn
+    // an L5 replacement into a jump: decided by what was held before that walk.
+    replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
   }
   // #35: an incomplete refresh may commit an intermediate version (or none) below the verified tips. Those
   // above the head are recorded as pending heads, so until the stored head reaches them, the view trusts
@@ -812,7 +849,7 @@ export async function refreshIdentity(
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec, replace: false });
+        c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
       } catch (e) {
         if (!(e instanceof P2PError)) throw e;
       }

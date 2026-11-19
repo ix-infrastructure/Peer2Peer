@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 836ec15f2676e890
+// @peer2peer/core 0.1.2 c9b435ea50f534df
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7261,6 +7261,13 @@ var init_identitydoc = __esm({
           const below = this.extendDown(peek.hash, jws, opts);
           if (below)
             return below;
+          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver) {
+            const doc2 = verifyIdentityDoc(jws, opts);
+            if (doc2.ik !== held2.ik)
+              fail("issuer-mismatch", "a different ik for this userId");
+            this.put(doc2);
+            return { status: "accepted", doc: doc2, unanchored: true };
+          }
           if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
@@ -7286,25 +7293,74 @@ var init_identitydoc = __esm({
        * (its lowest held versions are pruning's edge, not roots: nothing is gained below them).
        */
       extendDown(hash, jws, opts) {
+        if (this.versions.size >= MAX_CHAIN_VERSIONS)
+          return void 0;
         const children = this.childrenOf(hash);
         if (children.length === 0 || this.anchored)
           return void 0;
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== children[0].ik)
           fail("issuer-mismatch", "a different ik for this userId");
+        const bad = [];
         for (const child of children) {
-          if (child.merge === void 0) {
-            checkLink(doc, child, void 0);
-            this.checkNoReturn(child, doc);
-            continue;
-          }
           const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev);
-          const other = child.merge === doc.hash ? doc : this.versions.get(child.merge);
-          if (prev && other)
+          const other = child.merge === void 0 ? void 0 : child.merge === doc.hash ? doc : this.versions.get(child.merge);
+          if (!prev || child.merge !== void 0 && !other)
+            continue;
+          try {
             checkLink(prev, child, other);
+          } catch (e) {
+            if (!(e instanceof P2PError))
+              throw e;
+            bad.push(child);
+          }
         }
+        if (bad.length > 0)
+          this.dropWithDescendants(bad);
         this.put(doc);
+        const violators = [];
+        const revokedAt = /* @__PURE__ */ new Map([[doc.hash, /* @__PURE__ */ new Set()]]);
+        const queue = [doc];
+        for (let i = 0; i < queue.length; i++) {
+          const p = queue[i];
+          for (const c of this.childrenOf(p.hash)) {
+            if (revokedAt.has(c.hash))
+              continue;
+            let revoked;
+            if (c.merge === void 0) {
+              const above = revokedAt.get(p.hash);
+              if (c.devices.some((d) => !p.devices.includes(d) && (above.has(d) || this.denied.has(d)))) {
+                violators.push(c);
+                continue;
+              }
+              revoked = new Set(above);
+              for (const d of p.devices)
+                if (!c.devices.includes(d))
+                  revoked.add(d);
+            } else
+              revoked = this.revokedAlong(c.hash);
+            revokedAt.set(c.hash, revoked);
+            queue.push(c);
+          }
+        }
+        if (violators.length > 0)
+          this.dropWithDescendants(violators);
         return { status: "accepted", doc, unanchored: true };
+      }
+      /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
+      dropWithDescendants(docs) {
+        const doomed = /* @__PURE__ */ new Set();
+        const stack = docs.map((d) => d.hash);
+        while (stack.length > 0) {
+          const h = stack.pop();
+          if (doomed.has(h))
+            continue;
+          doomed.add(h);
+          for (const c of this.childrenOf(h))
+            stack.push(c.hash);
+        }
+        for (const h of doomed)
+          this.versions.delete(h);
       }
       /** The held versions naming `hash` as prev or merge. */
       childrenOf(hash) {
@@ -10777,11 +10833,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const held2 = new Set(gaps.map((g) => g.d.hash));
     return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need) && !chain.isPrunedGenesis(g.need)).sort(byVer);
   };
+  const servedTip = new Set(tips.map((d) => d.hash));
   const rootFrontier = () => {
-    if (gaps.length === 0 || chain.size === 0 || chain.anchored)
+    if (gaps.length === 0 || chain.size === 0 || chain.size >= MAX_CHAIN_VERSIONS || chain.anchored)
       return [];
     const headVer = chain.view().head.ver;
-    if (!gaps.some((g) => g.d.ver > headVer))
+    if (!gaps.some((g) => g.d.ver > headVer || servedTip.has(g.d.hash)))
       return [];
     const held2 = new Set(gaps.map((g) => g.d.hash));
     return chain.roots().filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort(byVer);
@@ -10886,22 +10943,54 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   let jumpTo;
   let replaceTo = false;
   let incomplete = exhausted || docsCapped;
-  if (!incomplete && behind()) {
+  const replacing = !incomplete && behind();
+  if (replacing) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
       broken(`could not fit ${userId}'s newest version (ver ${newest.ver})`);
     if (anchoredBefore) {
       broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
-    const n = newest;
-    const served = new Set(tips.map((d) => d.hash));
-    const contradicted = chain.roots().some(({ d: r }) => served.has(r.hash) && r.ver < n.ver && pendingUsable(r, { now, skewSec: opts.skewSec }) && (n.devices.some((x) => !r.devices.includes(x)) || n.keyholders.some((x) => !r.keyholders.includes(x))));
+  }
+  const besideHead = [];
+  if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
+    begin2();
+    const headVer = chain.view().head.ver;
+    for (const g of gaps) {
+      if (!servedTip.has(g.d.hash) || g.d.ver !== headVer || rejected.has(g.d.hash))
+        continue;
+      try {
+        if (chain.add(g.d.jws, { now, skewSec: opts.skewSec, replace: false, asRoot: true }).status === "accepted") {
+          accepted.push(g.d.jws);
+          besideHead.push(g.d.jws);
+        }
+      } catch (e) {
+        if (!(e instanceof P2PError))
+          throw e;
+      }
+    }
+    if (besideHead.length > 0)
+      gaps = gaps.filter((g) => !chain.has(g.d.hash));
+    end();
+  }
+  if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
+    const head = replacing ? newest : chain.view().head;
+    const evidence = /* @__PURE__ */ new Map();
+    for (const g of gaps)
+      if (servedTip.has(g.d.hash))
+        evidence.set(g.d.hash, g.d);
+    if (replacing)
+      for (const t2 of [...chain.tips(), ...chain.roots().map((r) => r.d)])
+        evidence.set(t2.hash, t2);
+    evidence.delete(head.hash);
+    const contradicted = [...evidence.values()].some((e) => !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
     if (contradicted) {
       docsCapped = true;
       incomplete = true;
-    } else {
-      jumpTo = n.jws;
-      replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
     }
+  }
+  if (replacing && !incomplete) {
+    jumpTo = newest.jws;
+    replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
@@ -10934,7 +11023,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec, replace: false });
+        c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
       } catch (e) {
         if (!(e instanceof P2PError))
           throw e;
