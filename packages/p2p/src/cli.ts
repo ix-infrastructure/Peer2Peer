@@ -112,6 +112,77 @@ export function wideningOf(cmd: Command): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * Commands that touch the person's identity key, their identity document, or their own setup (or
+ * narrow who reaches them): run only by the person, through the same gate as widening (their
+ * front end's token, or their "yes" typed on their own terminal; never from inside an agent's
+ * session). The CLI decides by the command it parsed, so however an agent spells the command line
+ * (a name built at run time, a script it wrote) it is refused. Internal maintenance (`p2p watch`
+ * renewing the document and certificates, the retry of unpublished relays on connect) calls the
+ * App directly, never these commands, and is not gated.
+ */
+const PERSON_ONLY = new Map<string, string>([
+  ["backup show", "shows your identity key (its backup phrase)"],
+  ["backup restore", "replaces this device's identity key"],
+  ["identity rotate", "moves your identity to a new key"],
+  ["identity republish", "publishes your identity document"],
+  ["identity dispute", "decides which identity a friend of yours is"],
+  ["devices revoke", "changes the devices your identity lists"],
+  ["relays add", "changes the relays your identity lists"],
+  ["relays remove", "changes the relays your identity lists"],
+  ["trust remove", "changes who you trust"],
+  ["invites revoke", "changes your invites"],
+  ["remove", "changes your friendships and circles"],
+  ["unfriend", "changes your friendships"],
+  ["circle propose", "changes a circle's members"],
+  ["circle transfer", "changes who owns a circle"],
+  ["circle hold", "changes how your circle takes changes"],
+  ["extensions disable", "changes which extensions run with your identity"],
+  ["ix import", "writes into your Ix graph"],
+  ["ix resolve", "runs your Ix for a peer's reference"],
+  ["ix config", "changes how your Ix footprints name files"],
+  ["receipts", "changes whether you send delivery receipts"],
+]);
+
+/** `identity rotate` options that do something beyond making or showing the plan. */
+const ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes"] as const;
+
+/**
+ * The person-only command `cmd` is ({what, why}), or undefined. Reads stay open: a bare
+ * `receipts`, `circle hold <cid>` and `ix config`, and a bare `identity rotate --plan` (it makes
+ * or shows the plan: the new fingerprint and which devices follow; nothing is published or
+ * revealed, and accepting it is gated).
+ */
+export function personOnlyOf(cmd: Command): { what: string; why: string; agentOnly?: boolean } | undefined {
+  const path: string[] = [];
+  for (let c: Command | null = cmd; c && c.parent; c = c.parent) path.unshift(c.name());
+  const p = path.join(" ");
+  const why = PERSON_ONLY.get(p);
+  if (why === undefined) return undefined;
+  const args = cmd.args ?? [];
+  switch (p) {
+    case "receipts":
+      return args.length > 0 ? { what: args[0] === "on" || args[0] === "off" ? `receipts ${args[0]}` : "receipts", why } : undefined;
+    case "circle hold":
+      return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why } : undefined;
+    case "ix config":
+      return args.length > 0 ? { what: "ix config", why } : undefined;
+    // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
+    // person's proof outside an agent's session (a fresh home has no person token yet, and a
+    // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
+    case "backup restore":
+      return { what: p, why, agentOnly: true };
+    case "identity rotate": {
+      const o = cmd.opts() as Record<string, unknown>;
+      const acts = ROTATE_ACTS.filter((k) => o[k] !== undefined && o[k] !== false && !(Array.isArray(o[k]) && (o[k] as unknown[]).length === 0));
+      if (o.plan && acts.length === 0) return undefined;
+      return { what: o.cancel ? "identity rotate --cancel" : o.plan ? "identity rotate --plan" : "identity rotate", why };
+    }
+    default:
+      return { what: p, why };
+  }
+}
 const posInt = (name: string) => (v: string) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n < 0) throw new CliError("usage", `${name} must be a non-negative integer`);
@@ -185,6 +256,9 @@ export function buildProgram(deps: ProgramDeps): Command {
         // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
         const widening = wideningOf(cmd);
         if (widening) await projects.assertPersonForWidening(app, widening, confirmTty, undefined, { noTokenBeforeIdentity: widening === "link join" });
+        // Nor touch the identity key, the identity document or the person's own setup (PERSON_ONLY).
+        const personOnly = personOnlyOf(cmd);
+        if (personOnly && !(personOnly.agentOnly && projects.personHere(app))) await projects.assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
         if (opts.requireIdentity !== false) await app.load(true);
         // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
         if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
@@ -468,6 +542,11 @@ export function buildProgram(deps: ProgramDeps): Command {
         async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; allowPrivateRelay?: boolean; json?: boolean }) => {
           let mode: identity.BackupMode | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
           const existed = await app.load(false);
+          // On a home that already holds an identity, setup's backup options reveal the existing key's
+          // phrase (`backup show`'s gate): the person's only. A new identity's own phrase is not.
+          if (existed && (o.printBackup || o.backupFile !== undefined)) {
+            await projects.assertPersonForWidening(app, o.printBackup ? "setup --print-backup" : "setup --backup-file", confirmTty, PERSON_ONLY.get("backup show"));
+          }
           const p2p = identity.p2pCommand();
           // Asked only once an identity exists here (its key was just made): never before.
           const askBackup = async (): Promise<identity.BackupMode> => {

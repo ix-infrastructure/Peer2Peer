@@ -2,6 +2,18 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **Commands that touch your identity key or document, or narrow who reaches you, are now the person's only, checked by the CLI itself.** The agent guards in the Claude Code mod and the Codex bridge read command lines, so an agent could get past them by building the CLI's name at run time or by running a script it wrote, and these commands had no check of their own: an agent could print your 24-word backup phrase (`backup show`), or rotate your identity with `--yes --backup-file <path>` and read the new phrase. They now take the same gate as the widening commands: your front end's token (the mod's typed `/peers`, the Codex bridge), or your `yes` typed on your own terminal, and never from inside an agent's session. The CLI decides from the command it parsed and its agent detection (environment and process ancestry), so the spelling of the command line doesn't matter. Covered:
+  - `backup show`, `backup restore`, and `setup --print-backup|--backup-file` on a home that already holds an identity (`backup restore` runs only on a fresh home and needs the phrase itself, so outside an agent's session the phrase is the proof and nothing more is asked; inside one it is refused);
+  - `identity rotate`, except a bare `--plan` (it makes or shows the plan and reveals nothing; accepting it with `--resume`, `--cancel`, `--backup-file`, `--exclude`/`--keep`/`--invite`, `--keep-keyholders`, `--contest`, `--resend` and `--yes` are gated), `identity republish`, `identity dispute`;
+  - `devices revoke`, `relays add`, `relays remove`;
+  - `trust remove`, `invites revoke`, `remove`, `unfriend`, `circle propose`, `circle transfer`, `circle hold <cid> on|off`, `extensions disable`, `receipts on|off`;
+  - ext-ix: `ix import`, `ix resolve`, `ix config <setting>`.
+  Reads stay open (`receipts`, `circle hold <cid>`, `ix config`). `p2p watch`'s automatic renewal of your document and certificates is maintenance, not a command, and keeps working inside an agent's session. Scripts and CI that run these as you pass the person token, as for the widening commands.
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.

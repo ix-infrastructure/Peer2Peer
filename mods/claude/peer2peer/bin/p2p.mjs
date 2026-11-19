@@ -41290,6 +41290,58 @@ function wideningOf(cmd) {
   }
   return void 0;
 }
+var PERSON_ONLY = /* @__PURE__ */ new Map([
+  ["backup show", "shows your identity key (its backup phrase)"],
+  ["backup restore", "replaces this device's identity key"],
+  ["identity rotate", "moves your identity to a new key"],
+  ["identity republish", "publishes your identity document"],
+  ["identity dispute", "decides which identity a friend of yours is"],
+  ["devices revoke", "changes the devices your identity lists"],
+  ["relays add", "changes the relays your identity lists"],
+  ["relays remove", "changes the relays your identity lists"],
+  ["trust remove", "changes who you trust"],
+  ["invites revoke", "changes your invites"],
+  ["remove", "changes your friendships and circles"],
+  ["unfriend", "changes your friendships"],
+  ["circle propose", "changes a circle's members"],
+  ["circle transfer", "changes who owns a circle"],
+  ["circle hold", "changes how your circle takes changes"],
+  ["extensions disable", "changes which extensions run with your identity"],
+  ["ix import", "writes into your Ix graph"],
+  ["ix resolve", "runs your Ix for a peer's reference"],
+  ["ix config", "changes how your Ix footprints name files"],
+  ["receipts", "changes whether you send delivery receipts"]
+]);
+var ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes"];
+function personOnlyOf(cmd) {
+  const path2 = [];
+  for (let c = cmd; c && c.parent; c = c.parent) path2.unshift(c.name());
+  const p = path2.join(" ");
+  const why = PERSON_ONLY.get(p);
+  if (why === void 0) return void 0;
+  const args = cmd.args ?? [];
+  switch (p) {
+    case "receipts":
+      return args.length > 0 ? { what: args[0] === "on" || args[0] === "off" ? `receipts ${args[0]}` : "receipts", why } : void 0;
+    case "circle hold":
+      return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why } : void 0;
+    case "ix config":
+      return args.length > 0 ? { what: "ix config", why } : void 0;
+    // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
+    // person's proof outside an agent's session (a fresh home has no person token yet, and a
+    // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
+    case "backup restore":
+      return { what: p, why, agentOnly: true };
+    case "identity rotate": {
+      const o = cmd.opts();
+      const acts = ROTATE_ACTS.filter((k) => o[k] !== void 0 && o[k] !== false && !(Array.isArray(o[k]) && o[k].length === 0));
+      if (o.plan && acts.length === 0) return void 0;
+      return { what: o.cancel ? "identity rotate --cancel" : o.plan ? "identity rotate --plan" : "identity rotate", why };
+    }
+    default:
+      return { what: p, why };
+  }
+}
 var posInt = (name2) => (v) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n < 0) throw new CliError("usage", `${name2} must be a non-negative integer`);
@@ -41346,6 +41398,8 @@ function buildProgram(deps) {
       if (typeof app.home === "string" && !opts.readOnly) await recoverInterruptedFollow(app.home).catch(() => false);
       const widening = wideningOf(cmd);
       if (widening) await assertPersonForWidening(app, widening, confirmTty, void 0, { noTokenBeforeIdentity: widening === "link join" });
+      const personOnly = personOnlyOf(cmd);
+      if (personOnly && !(personOnly.agentOnly && personHere(app))) await assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
       if (opts.requireIdentity !== false) await app.load(true);
       if (app.keys && !opts.readOnly && typeof app.home === "string") personToken(app.home);
       if (app.keys) receiving(app);
@@ -41582,6 +41636,9 @@ ${backup2}
       async (app, o) => {
         let mode = o.backupFile !== void 0 ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : void 0;
         const existed = await app.load(false);
+        if (existed && (o.printBackup || o.backupFile !== void 0)) {
+          await assertPersonForWidening(app, o.printBackup ? "setup --print-backup" : "setup --backup-file", confirmTty, PERSON_ONLY.get("backup show"));
+        }
         const p2p = p2pCommand();
         const askBackup = async () => {
           io2.out(`
