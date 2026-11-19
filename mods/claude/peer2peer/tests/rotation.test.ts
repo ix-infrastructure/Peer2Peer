@@ -11,7 +11,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { isMutating, mutatingP2PVerb, parseEvent, parsePeersArgs, rotationAlertText, statusLine } from '../hooks/lib'
+import { isMutating, mutatingP2PVerb, parseEvent, parsePeersArgs, renewalHeldText, rotationAlertText, statusLine } from '../hooks/lib'
 import { ANA_ADDR, ANA_ID, BEN_ADDR, BEN_ID, ME_ADDR, ME_ID, NOW_MS, from, ran, settle, slash, start, world } from './world'
 
 const mountBand = ($: Engine) => $.ui.mount({ plugin: 'peer2peer', surface: 'terminal', component: 'AbovePrompt', props: {} } as never)
@@ -278,6 +278,20 @@ describe('held rotation items', () => {
     expect(w.statuses.at(-1)).toContain('p2p identity rotate --contest')
     expect(w.toasts.some(t => t.includes('Peer2Peer ALERT'))).toBe(true)
     expect(w.submits).toEqual([])
+  })
+
+  test('#78: a renewal held up by a silent relay raises a status-line alert with only the day count from the event', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    w.emit({ kind: 'p2p.alert', id: 'ev-rh', at: NOW_MS, from: from(ME_ID, ME_ADDR, true), what: 'renewal-held', daysLeft: 3, heldBy: ['wss://<b>x</b>/v3'] })
+    await settle(w, () => (w.statuses.at(-1) ?? '').includes('ALERT'))
+    expect(w.statuses.at(-1)).toContain('expires in 3 days and can\'t be renewed')
+    expect(w.statuses.at(-1)).toContain('p2p doctor')
+    expect(w.statuses.at(-1)).not.toContain('<b>')
+    expect(w.toasts.some(t => t.includes('Peer2Peer ALERT'))).toBe(true)
+    expect(w.submits).toEqual([])
+    expect(renewalHeldText({ daysLeft: 'x' })).toContain('expires soon')
+    expect(renewalHeldText({ daysLeft: 0 })).toContain('within a day')
   })
 
   test('watch lines and the alert text: the new types parse; malformed ones are dropped', () => {

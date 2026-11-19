@@ -46,6 +46,7 @@ import {
   sanitizePeerText,
   TYP3,
   unfriendApplies,
+  pendingHeadSenders,
   refreshIdentity as coreRefreshIdentity,
   type ChainFetcher,
   type IdentityView,
@@ -537,6 +538,38 @@ async function circlesOf(app: App, ms: number): Promise<CircleSummary[]> {
   return (await bounded(listCircles(app), ms)).value ?? [];
 }
 
+/**
+ * #78: newer versions of our own identity this device holds as pending heads, with the listed relays that
+ * sent them. While one of those relays doesn't answer, edits and the key holder's renewal are refused
+ * (App.ownPendingGuard), so the document can lapse: name the relays this probe couldn't reach, and the fix.
+ * Local data only (no refresh).
+ */
+async function pendingHeadsCheck(c: Checks, app: App, view: { head: { ver: number }; relays: readonly string[] }, reports: readonly RelayReport[], ms: number): Promise<void> {
+  const stored = (await bounded(app.store.getIdentity(app.userId), ms)).value;
+  if (!stored) return;
+  const above = pendingHeadSenders(stored).filter((p) => p.ver > view.head.ver && p.relays.some((r) => view.relays.includes(r)));
+  if (above.length === 0) return;
+  const newest = Math.max(...above.map((p) => p.ver));
+  const senders = [...new Set(above.flatMap((p) => p.relays.filter((r) => view.relays.includes(r))))];
+  const down = senders.filter((r) => reports.find((x) => x.relay === r)?.reachable === false);
+  const what = `this device holds version ${newest} of your identity, newer than its head (version ${view.head.ver}), from ${senders.join(", ")}`;
+  if (down.length === 0 && senders.some((r) => !reports.some((x) => x.relay === r))) {
+    c.add("pending-heads", "unknown", "newer versions of your identity", `${what}; not probed here`, "run `p2p doctor` again; if one of them stays unreachable, edits and renewals are refused until it answers or you remove it (`p2p relays remove <url>`)");
+    return;
+  }
+  if (down.length === 0) {
+    c.add("pending-heads", "ok", "newer versions of your identity", `${what}; ${senders.length === 1 ? "it answers" : "they answer"}, so your next edit or renewal fetches it`);
+    return;
+  }
+  c.add(
+    "pending-heads",
+    "fail",
+    "newer versions of your identity",
+    `${what}; ${down.join(", ")} ${down.length === 1 ? "doesn't" : "don't"} answer, so edits and renewing your identity document are refused until ${down.length === 1 ? "it answers" : "they answer"}`,
+    `wait for ${down.length === 1 ? "it" : "them"} to come back; if ${down.length === 1 ? "it is" : "they are"} gone for good, or no device of yours published that version: \`p2p relays remove ${down.join(" ")}\``,
+  );
+}
+
 async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, reports: readonly RelayReport[]): Promise<DataFlow> {
   const view = (await bounded(app.view(app.userId), ms)).value;
   const name = view?.head.name ?? app.self?.name ?? "?";
@@ -554,6 +587,7 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
     else c.add("document", "ok", "identity document", `version ${view.head.ver}, fresh (expires in ${days(left)})`);
     if (view.forked) c.add("document-fork", "fail", "identity document history", "forked (two versions claim the same place)", "run `p2p identity republish` on a key holder: it merges the branches");
     if (view.rotations.length > 0) c.add("document-rotated", "fail", "identity", "this identity moved to a new key", "follow it: `p2p held` shows the move (approve it there), or re-link with `p2p link join <code> --rotated`");
+    await pendingHeadsCheck(c, app, view, reports, ms);
   }
   relayChecks(c, app, reports, view ? { hash: view.head.hash, ver: view.head.ver } : undefined);
   clockCheck(c, reports);

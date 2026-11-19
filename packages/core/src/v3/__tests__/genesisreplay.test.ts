@@ -289,10 +289,9 @@ describe("#74 review: a stray's revocations and rotations still apply", () => {
     };
     const f: IdentityFetcher = { tips: async () => [forged[4].jws, own4.jws], chain: async (_u, _r, to) => chain(to) };
     const store = new MemoryTrustStoreV3();
-    // First contact: both tips are placed lowest ver first, so the owner's v4 is the first root and the thief's
-    // higher v8' replaces it (the L5 rule, unchanged by #74). The next refresh walks the owner's v4 back in.
-    await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
-    for (let i = 0; i < 2; i++) {
+    // First contact (#79): the thief's higher v8' doesn't replace the owner's v4 before v4's ancestry is
+    // walked, so the revocation applies from the first refresh on.
+    for (let i = 0; i < 3; i++) {
       const view = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
       expect(view.devices).not.toContain(stolen.did);
       expect(view.keyholders).not.toContain(stolen.did);

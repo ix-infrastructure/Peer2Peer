@@ -32,6 +32,7 @@ import {
   mergePrevTip,
   scheduledWriter,
   refreshIdentity as coreRefreshIdentity,
+  heldBackByOf,
   unconnectedRelaysOf,
   unconnectedVersionsOf,
   type UnconnectedVersion,
@@ -43,6 +44,7 @@ import {
   nowSec,
   P2PError,
   peekIdentityDoc,
+  pendingHeadSenders,
   canonicalRelayUrl,
   sealEnvelopeV3,
   storeCertResolver,
@@ -572,13 +574,24 @@ export class App {
    * Network I/O for core's refreshIdentity (§5.6), per relay so core can cap
    * each relay's answer on its own: `tips` and the `chain` walk
    * (`/v3/identity/<id>/chain?to=&n=`) on every listed relay (at most 5).
+   *
+   * #78: a relay that couldn't be reached (an error or a timeout) is left out of the answer, and when none
+   * of the relays asked answered the call fails, so core counts it as a relay that didn't answer (core asks
+   * one relay per call), never as one that answered "nothing": its silence doesn't make up a majority that
+   * clears pending heads or counts as fresh, and a relay is never named as forging over a gap the silent
+   * one wasn't really asked about.
    */
   fetcher(): IdentityFetcher {
     const t = this.tun.connectTimeoutMs;
     const perRelay = async (relays: readonly string[], get: (r: string) => Promise<string[]>): Promise<Record<string, string[]>> => {
       const list = [...new Set(relays)].slice(0, 5);
-      const answers = await Promise.all(list.map((r) => get(r).catch(() => [] as string[])));
-      return Object.fromEntries(list.map((r, i) => [r, answers[i]]));
+      const answers = await Promise.allSettled(list.map((r) => get(r)));
+      const ok = list.flatMap((r, i) => {
+        const a = answers[i];
+        return a.status === "fulfilled" ? [[r, a.value] as const] : [];
+      });
+      if (list.length > 0 && ok.length === 0) throw (answers[0] as PromiseRejectedResult).reason;
+      return Object.fromEntries(ok);
     };
     return {
       tips: (userId, relays) => perRelay(relays, (r) => fetchTips(this.transport(r), userId, t, this.progress, this.guardedLookup(r))),
@@ -609,19 +622,25 @@ export class App {
       if (opts.strict) throw new CliError("refresh_failed", `no relays to refresh ${userId} from`);
       return held;
     }
-    const refreshFrom = (rs: readonly string[]) => step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => coreRefreshIdentity(this.store, userId, this.fetcher(), { relays: rs }));
+    const own = userId === this.keys?.userId;
+    const refreshFrom = (rs: readonly string[]) =>
+      step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => coreRefreshIdentity(this.store, userId, this.fetcher(), { relays: rs, own }));
     let v: RefreshedView;
+    /** #78: the relays core named as serving versions that don't connect (a forged chain's). */
+    let named: readonly string[] = [];
     try {
       v = await refreshFrom(list);
     } catch (e) {
       if (!(e instanceof P2PError)) throw e;
       // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
       if (opts.strict) {
-        const unconnected = unconnectedRelaysOf(e);
+        // #79: relays core held the refresh back for count like the ones it names (see the incomplete case below).
+        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? heldBackByOf(e) : [])])];
         const versions = unconnectedVersionsOf(e);
-        const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
-        if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
-        v = own;
+        const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
+        if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
+        v = fb;
+        named = unconnected;
       } else {
         if (e.reason === "chain-broken" && held && !opts.quiet) {
           this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
@@ -635,10 +654,16 @@ export class App {
         if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
         return held;
       }
-      const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-      if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
-      v = own;
+      // #79: relays core held the refresh back for (they sent a version of our identity that doesn't connect to
+      // a current one we hold and lists more than it) count like the relays it names as serving versions that
+      // don't connect: a rotation sets them aside, any other edit refuses and names them.
+      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? (v.heldBackBy ?? []) : [])])];
+      const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+      if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+      named = unconnected;
+      v = fb;
     }
+    if (opts.strict && own) await this.ownPendingGuard(userId, list, v, named, opts.setAside);
     // Recorded moments ago by another p2p process of this home (a watch and a command refresh
     // the same people in a burst): no write. Only ever leaves the time a little older, so the
     // next refresh comes no later.
@@ -688,8 +713,7 @@ export class App {
    *    none), never one whose genuine gap the walk merely didn't reach. And the confirmed head must not be
    *    below any version the full refresh left unconnected, unless every relay that sent that version is set
    *    aside: a lagging kept relay can't "confirm" a stale head while another relay serves a newer version.
-   *    (Pending heads stored by earlier refreshes can't be traced to a relay; a relay still serving a newer
-   *    version shows it in this refresh.)
+   *    (A newer version an earlier refresh stored as a pending head, from a relay silent now: ownPendingGuard.)
    * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
    */
   private async ownStrictFallback(
@@ -722,6 +746,49 @@ export class App {
       );
     }
     return v;
+  }
+
+  /**
+   * #78: a strict refresh of our own identity skips relays that don't answer, so a lagging relay could
+   * "confirm" a stale head while the up-to-date one times out. This device may already hold the newer
+   * version, as a pending head an earlier, incomplete refresh recorded with the relays that sent it. Refuses
+   * when a pending head above the confirmed head was sent by a relay that:
+   *  - is still listed and isn't set aside by this edit (`setAside.relays`: the relays it removes), so
+   *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head another relay
+   *    sent too still holds the edit up while that one is silent (#78 re-review: removing a relay that
+   *    replayed an honest relay's version, and now withholds it, mustn't fork against it); silent relays
+   *    that hold each other up are removed together (`relays remove` takes several);
+   *  - wasn't named as serving versions that don't connect (a forged chain's, core's unconnectedRelays);
+   *  - didn't answer this refresh: a relay that answered gave its current tips, so what it still serves is
+   *    already in this refresh (connected, or the refresh failed or was cut short), and what it no longer
+   *    serves doesn't hold the owner up.
+   * So one relay can hold an edit up only while it stays silent, and only with a version signed with the
+   * identity key above the head the other relays confirm (a genuine newer version, which building below would
+   * fork, or a thief's); removing that relay always goes ahead. A pending head stored without its senders
+   * (older builds), expired, or not a valid version of this identity never holds an edit up.
+   */
+  private async ownPendingGuard(userId: string, list: readonly string[], v: RefreshedView, named: readonly string[], setAside: SetAside | undefined): Promise<void> {
+    const stored = await this.store.getIdentity(userId);
+    if (!stored) return;
+    const heard = new Set(v.answeredRelays);
+    const skip = new Set([...(setAside?.relays ?? []), ...named]);
+    const silent = new Set<string>();
+    let newest = 0;
+    for (const p of pendingHeadSenders(stored)) {
+      if (p.ver <= v.head.ver) continue;
+      const by = p.relays.filter((r) => list.includes(r) && !skip.has(r) && !heard.has(r));
+      if (by.length === 0) continue;
+      for (const r of by) silent.add(r);
+      newest = Math.max(newest, p.ver);
+    }
+    if (silent.size === 0) return;
+    const rs = [...silent];
+    const one = rs.length === 1;
+    throw new CliError(
+      "refresh_failed",
+      `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove ${one ? "<url>" : "<url> <url>"}\`)`,
+      { heldBy: rs, pendingVer: newest, confirmedVer: v.head.ver },
+    );
   }
 
   /** Relays a (bundled, unverified) identity document lists: only a hint for where to refresh from. */
@@ -960,6 +1027,12 @@ export class App {
     const devices = [...view.devices, ...readd].slice(0, MAX_DEVICES);
     const keyholders = [...view.keyholders, ...unionKeyholders.filter((d) => readd.includes(d) && devices.includes(d))];
     if (!opts.restoring && (!devices.includes(this.did) || !keyholders.includes(this.did))) {
+      // #75: the merges above were never published; kept, they'd leave this device unlisted in its own
+      // view (a fork made by a version that leaves it out), and rotation, the remedy, couldn't find its branch.
+      if (merges.length > 0) {
+        const drop = new Set(merges.map((m) => peekIdentityDoc(m).hash));
+        await this.store.updateIdentity(this.userId, (cur) => (cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(peekIdentityDoc(v).hash)) }, result: undefined } : { result: undefined }));
+      }
       throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity: it can't publish (only identity rotation, §2.8, replaces a lost key holder's key; run it from a listed key holder)");
     }
     const p: CreateIdentityDocParams = {

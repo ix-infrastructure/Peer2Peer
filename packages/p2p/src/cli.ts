@@ -769,12 +769,12 @@ export function buildProgram(deps: ProgramDeps): Command {
     );
   for (const verb of ["add", "remove"] as const) {
     relays
-      .command(`${verb} <url>`)
-      .description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove a relay (one must stay)")
+      .command(verb === "add" ? "add <url>" : "remove <url...>")
+      .description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove one or more relays, in one new version (one must stay)")
       .option("--json", "JSON output")
       .action(
-        run(async (app, url: string) => {
-          const r = verb === "add" ? await ops.relaysAdd(app, url) : await ops.relaysRemove(app, url);
+        run(async (app, url: string | string[]) => {
+          const r = verb === "add" ? await ops.relaysAdd(app, url as string) : await ops.relaysRemove(app, url);
           const failed = r.failed.length ? `; not yet on ${r.failed.map((f) => f.relay).join(", ")} (retried later)` : "";
           return { json: r, human: `Your relays (document version ${r.ver}): ${r.relays.join(", ")}${failed}.` };
         }),
@@ -806,6 +806,7 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--keep-keyholders", "Devices that held the old identity key also get the new one (default: they follow as ordinary devices)")
     .option("--wait <seconds>", "How long to wait for your other devices to follow (default 600, the link code's life)", posInt("--wait"))
     .option("--backup-file [path]", "Save the new key's 24-word backup phrase to a 0600 file (default <home>/backup-phrase-<fingerprint>.txt)")
+    .option("--branch <hash>", "Your identity is forked by a version that leaves this device out and more than one branch still lists it: the one that is yours (its jwsHash, as the error lists them)")
     .option("--contest", "On a key holder: answer a rotation of your identity this device didn't publish with a competing one, so your friends see a conflict and apply neither")
     .option("--resend", "After a rotation: send the new identity's invite again to the friends it didn't reach (throttled)")
     .option("-y, --yes", "Accept the plan without asking (scripts)")
@@ -835,7 +836,7 @@ export function buildProgram(deps: ProgramDeps): Command {
       run(
         async (
           app,
-          o: { plan?: boolean; resume?: boolean; cancel?: boolean; exclude?: string[]; keep?: string[]; invite?: string[]; keepKeyholders?: boolean; wait?: number; backupFile?: string | true; contest?: boolean; resend?: boolean; yes?: boolean; json?: boolean },
+          o: { plan?: boolean; resume?: boolean; cancel?: boolean; exclude?: string[]; keep?: string[]; invite?: string[]; keepKeyholders?: boolean; wait?: number; backupFile?: string | true; branch?: string; contest?: boolean; resend?: boolean; yes?: boolean; json?: boolean },
         ) => {
           const backupFile = o.backupFile === undefined ? undefined : typeof o.backupFile === "string" ? o.backupFile : true;
           const backup = backupFile === true ? { backupFileDefault: true } : backupFile ? { backupFile } : {};
@@ -850,7 +851,7 @@ export function buildProgram(deps: ProgramDeps): Command {
               human: `Sent your new identity's invite to ${fmt.plural(r.sent, "friend")}${r.failed.length ? `; ${r.failed.length} still not reached` : ""}${r.throttled ? ` (${r.remaining} wait for the relays' hourly limit: run it again later)` : ""}.`,
             };
           }
-          const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, contest: o.contest, ...backup };
+          const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, branch: o.branch, contest: o.contest, ...backup };
           if (o.plan) {
             const plan = await ops.rotatePlan(app, opts);
             return { json: { plan: true, ...plan }, human: `${fmt.formatRotationPlan(plan)}\nAccept it with \`p2p identity rotate --resume\` (add --exclude <did> to drop a device), or drop it with --cancel.` };

@@ -108,7 +108,9 @@ describe("N1: a planted provisional document doesn't disable M1", () => {
     // U's first device D was later revoked; the relays pruned everything between v1 and the head.
     const u = new TestUser("alice");
     const d = u.addDevice({ keyholder: true });
-    const v1 = u.publish();
+    // Stale: past its exp. (A current version left out of a jump, with nothing connecting it to the head, holds
+    // the refresh back instead, #79; relays keep a current version's ancestry, so that's a thief's branch.)
+    const v1 = u.publish({ iat: NOW - 40 * 86_400 });
     const real = u.addDevice({ keyholder: true });
     u.keyholders = [real.did];
     for (let i = 0; i < 3; i++) u.publish({ devices: [real.did] });
@@ -130,6 +132,31 @@ describe("N1: a planted provisional document doesn't disable M1", () => {
     expect(fromD.ok ? "ok" : fromD.reason).toBe("device-not-listed");
     const fromReal = await receive(store, b, seal(u, b, "msg", { text: "x", roster }, { fromDev: real }));
     expect(fromReal.ok ? "ok" : fromReal.reason).toBe("viewer-no-friendship"); // past rule 6; Bob just isn't a friend
+  });
+
+  it("C, current: a version 1 still current, served beside the head with nothing between", async () => {
+    const u = new TestUser("alice");
+    const d = u.addDevice({ keyholder: true });
+    const v1 = u.publish();
+    const real = u.addDevice({ keyholder: true });
+    u.keyholders = [real.did];
+    for (let i = 0; i < 3; i++) u.publish({ devices: [real.did] });
+    const head = u.doc;
+    const b = makeUser("bob");
+    const store = await storeKnowing(b);
+    const invite = createInviteV3(u.signer(d), { aud: b.userId, iat: NOW - 10, doc: v1.jws });
+    expect((await receive(store, b, seal(u, b, "contact", { text: invite }, { fromDev: d }))).ok).toBe(true);
+    const view = await refreshIdentity(store, u.userId, async () => [v1.jws, head.jws], { now: NOW });
+    // The same relay serves both as tips and nothing connects them, so the current v1 counts as much as the head
+    // (#79): nothing is replaced, the refresh is incomplete (the provisional entry stays, no freshness), and the
+    // view trusts only what both list: neither device. Fail-closed until the chain connects them or v1 expires
+    // (a relay serving the chain connects them at once; the stale case is above).
+    expect([view.head.hash, view.incomplete, view.historyGap, view.devices]).toEqual([v1.hash, true, false, []]);
+    expect(await store.getProvisional(u.userId, NOW)).toBeDefined();
+    const roster = createRosterV3(u.signer(real), { sid: "s1", ver: 1, vis: "private", parts: [u.userId, b.userId], iat: NOW - 10 });
+    const fromD = await receive(store, b, seal(u, b, "msg", { text: "x", roster }, { fromDev: d }));
+    const fromReal = await receive(store, b, seal(u, b, "msg", { text: "x", roster }, { fromDev: real }));
+    expect([fromD.ok ? "ok" : fromD.reason, fromReal.ok ? "ok" : fromReal.reason]).toEqual(["device-not-listed", "device-not-listed"]);
   });
 });
 
