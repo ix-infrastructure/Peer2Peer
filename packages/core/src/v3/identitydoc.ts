@@ -932,8 +932,12 @@ export class IdentityChain {
    * history is unanchored, a version from the same ik with a higher ver than
    * everything held that doesn't chain replaces it outright (L5). Otherwise
    * a missing parent is reported as the gap to fill first.
+   *
+   * `replace: false` turns the L5 replacement off: such a version is reported as a gap too. A refresh places
+   * with it off (#79), so a higher branch fetched in the same refresh can't silently drop a version the relays
+   * also served before its ancestry (and so what it revoked) is known; the refresh decides at the end.
    */
-  add(jws: string, opts: TimeOptions = {}): ChainAddResult {
+  add(jws: string, opts: TimeOptions & { replace?: boolean } = {}): ChainAddResult {
     const peek = peekIdentityDoc(jws);
     if (peek.iss !== this.iss) fail("issuer-mismatch", `document of ${peek.iss}, chain of ${this.iss}`);
     const known = this.versions.get(peek.hash);
@@ -957,7 +961,7 @@ export class IdentityChain {
     }
     const missing = !this.versions.has(peek.prev) ? peek.prev : peek.merge !== undefined && !this.versions.has(peek.merge) ? peek.merge : undefined;
     if (missing !== undefined) {
-      if (!this.anchored && peek.ver > this.view().head.ver) {
+      if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
         // Like a jump, the replacement keeps what the dropped history revoked (R1).
@@ -1068,6 +1072,29 @@ export class IdentityChain {
         this.versions.delete(oldest.hash);
       }
     }
+  }
+
+  /**
+   * #81: `hash` is a ver-1 genesis pruning dropped from counted history (anchoredGenesis). It is known history
+   * that add() refuses to store again, so a gap whose missing version is one can't be filled, by any relay.
+   */
+  isPrunedGenesis(hash: string): boolean {
+    return this.anchoredGenesis.has(hash);
+  }
+
+  /**
+   * #79: the held versions whose parent (or merge parent) isn't held, but for a genesis: the unanchored roots,
+   * with the first missing parent each needs. What such a root revoked (relative to its parent) isn't known
+   * until that parent is, so a refresh about to replace or jump over unanchored history walks these first.
+   */
+  roots(): { d: VerifiedIdentityDoc; need: string }[] {
+    const out: { d: VerifiedIdentityDoc; need: string }[] = [];
+    for (const v of this.versions.values()) {
+      if (v.prev === null) continue;
+      const need = !this.versions.has(v.prev) ? v.prev : v.merge !== undefined && !this.versions.has(v.merge) ? v.merge : undefined;
+      if (need !== undefined) out.push({ d: v, need });
+    }
+    return out;
   }
 
   /** Versions that no held version names as prev or merge, but for strays (#74). */

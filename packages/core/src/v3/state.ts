@@ -238,7 +238,13 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    only unanchored history (re-checked at commit, S4), the client jumps to
  *    it (carrying a revocation denylist); over anchored or forked history it
  *    fails closed with `chain-broken` (N7), leaving the jump to an explicit
- *    jumpIdentity.
+ *    jumpIdentity. Placement never applies the L5 replacement itself (#79):
+ *    a version that would replace unanchored history waits as a gap, the walk
+ *    also asks for the parents of the unanchored roots it would drop, and the
+ *    replacement (no history gap while what is held is still unanchored)
+ *    happens only at the end, carrying what every held branch revoked.
+ *  - A gap whose missing version is a genesis pruning dropped (a replay of a
+ *    long history's pruned versions) is settled, never walked (#81).
  *  - Fails closed if no relay returns anything usable, or if the identity is
  *    in the §2.5 fail-closed state. On success the provisional entry is
  *    dropped.
@@ -433,7 +439,9 @@ export async function refreshIdentity(
     for (const d of pending) {
       if (overBudget()) break; // the rest stays unplaced; what was placed is committed
       try {
-        const r = chain.add(d.jws, { now, skewSec: opts.skewSec });
+        // #79: no L5 replacement while placing: a higher version that doesn't chain waits as a gap, so it can't
+        // drop a version this refresh also fetched before that version's ancestry is walked (the end decides).
+        const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
         if (r.status === "gap") next.push({ d, need: r.need });
         else if (r.status === "accepted") accepted.push(d.jws);
       } catch (e) {
@@ -540,10 +548,32 @@ export async function refreshIdentity(
   // none this time, take a turn of their own). So a relay sending many versions whose gaps no relay can fill
   // (an identity-key holder's forgeries) can't use up the shared request cap before another relay's gap is
   // asked for.
+  //
+  // #81: a gap whose missing version is a genesis pruning dropped (anchoredGenesis) is known history that is
+  // never stored again, so no relay can fill it: it is never asked for and counts as settled (a replay of a
+  // long history's pruned versions can't keep every refresh incomplete).
+  //
+  // #79: over unanchored history, a version left on a gap above the held head would replace the held history
+  // at the end (L5, or a jump), and what an unanchored root (a held version whose parent isn't held) revoked
+  // can't be carried without its parent. So once no ordinary gap is left to ask for, the walk asks for those
+  // roots' parents too (`rootFrontier`), in the same turns: then the replacement carries what the root's branch
+  // revoked (a revoking owner's version can't be dropped by a key thief's higher branch), or the walk connects
+  // both branches and the view shows the fork. Unsettled, they keep the refresh incomplete like a gap.
   const dead = new Set<string>();
+  const byVer = (a: { d: VerifiedIdentityDoc; need: string }, b: { d: VerifiedIdentityDoc; need: string }) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1);
   const frontier = () => {
     const held = new Set(gaps.map((g) => g.d.hash));
-    return gaps.filter((g) => !held.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
+    return gaps.filter((g) => !held.has(g.need) && !rejected.has(g.need) && !chain.isPrunedGenesis(g.need)).sort(byVer);
+  };
+  const rootFrontier = () => {
+    if (gaps.length === 0 || chain.size === 0 || chain.anchored) return [];
+    const headVer = chain.view().head.ver;
+    if (!gaps.some((g) => g.d.ver > headVer)) return []; // nothing would replace the held history
+    const held = new Set(gaps.map((g) => g.d.hash));
+    return chain
+      .roots()
+      .filter((g) => !held.has(g.need) && !rejected.has(g.need))
+      .sort(byVer);
   };
   const sentByAny = (h: string) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
@@ -562,8 +592,12 @@ export async function refreshIdentity(
   };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const open = frontier();
-    const next = pick(open);
+    let open = frontier();
+    let next = pick(open);
+    if (!next) {
+      open = rootFrontier();
+      next = pick(open);
+    }
     if (!next) break;
     wanted = new Set(open.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
@@ -589,11 +623,13 @@ export async function refreshIdentity(
   // it, hashes only (no signature check, so the time bound holds): at most 2 * WALK_PROBE_GAPS gaps, taken in
   // turns by the relay that sent them (#67 review G2: one relay's many gaps can't take every probe).
   const sentByAnyRelay = (h: string) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
-  const settled = (need: string) => !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
+  const settled = (need: string) => chain.isPrunedGenesis(need) || (!sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r)));
+  /** Every gap the end still depends on: the ordinary frontier, and the unanchored roots a replacement would drop (#79). */
+  const openGaps = () => [...frontier(), ...rootFrontier()];
   let probeUnanswered = false;
   if (chainOf && !exhausted && gaps.length > 0) {
     wanted = new Set();
-    const unsettled = frontier().filter((g) => !settled(g.need));
+    const unsettled = openGaps().filter((g) => !settled(g.need));
     const toProbe: typeof unsettled = [];
     const owners = relays.length + 1;
     for (let round = 0; toProbe.length < 2 * WALK_PROBE_GAPS && round < unsettled.length; round++) {
@@ -619,7 +655,7 @@ export async function refreshIdentity(
     }
   }
   // (Without a chain fetcher there is no walk: a gap left is a real one, as before.)
-  const walkCut = chainOf !== undefined && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || frontier().some((g) => !settled(g.need)));
+  const walkCut = chainOf !== undefined && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || openGaps().some((g) => !settled(g.need)));
   if (gaps.length > 0 && walkCut) docsCapped = true;
   /**
    * #67: the relays that sent a version left on a DEAD gap: its missing version was asked of every relay
@@ -652,6 +688,11 @@ export async function refreshIdentity(
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== undefined && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo: string | undefined;
+  /**
+   * #79: the newest version replaces unanchored history (L5, no history gap) rather than being jumped to. Placing
+   * left it for here, after the walk: the replacement carries what every held branch revoked, the roots' too.
+   */
+  let replaceTo = false;
   const incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
     if (!gaps.some((g) => g.d.hash === newest!.hash)) broken(`could not fit ${userId}'s newest version (ver ${newest!.ver})`);
@@ -659,6 +700,7 @@ export async function refreshIdentity(
       broken(`${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
     jumpTo = newest!.jws;
+    replaceTo = !chain.anchored;
   }
   // #35: an incomplete refresh may commit an intermediate version (or none) below the verified tips. Those
   // above the head are recorded as pending heads, so until the stored head reaches them, the view trusts
@@ -713,20 +755,30 @@ export async function refreshIdentity(
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec });
+        c.add(j, { now, skewSec: opts.skewSec, replace: false });
       } catch (e) {
         if (!(e instanceof P2PError)) throw e;
       }
     }
     let didJump = false;
+    let replaced = false;
     if (jumpTo !== undefined && !anchoredAtCommit && (c.size === 0 || c.view().head.ver < newest!.ver)) {
-      c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
-      didJump = true;
+      if (replaceTo) {
+        // L5 (#79): only while what is stored now is unanchored; otherwise the check below fails closed.
+        try {
+          replaced = c.add(jumpTo, { now, skewSec: opts.skewSec }).status === "accepted";
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+        }
+      } else {
+        c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
+        didJump = true;
+      }
     }
     const narrowed = c.size > 0 && stateChange(c);
     // Nothing new: the stored chain stays as it is, with no write (every write is an fsync under
     // the store's cross-process lock, which every p2p process of the home queues for).
-    if (accepted.length === 0 && !didJump && !narrowed && cur) return { result: false };
+    if (accepted.length === 0 && !didJump && !replaced && !narrowed && cur) return { result: false };
     return { next: c.toStored(), result: didJump };
   });
   const view = await getIdentityView(store, userId, { now });

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 140b0ea28906751c
+// @peer2peer/core 0.1.2 083b08da3c8e76b8
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7222,6 +7222,10 @@ var init_identitydoc = __esm({
        * history is unanchored, a version from the same ik with a higher ver than
        * everything held that doesn't chain replaces it outright (L5). Otherwise
        * a missing parent is reported as the gap to fill first.
+       *
+       * `replace: false` turns the L5 replacement off: such a version is reported as a gap too. A refresh places
+       * with it off (#79), so a higher branch fetched in the same refresh can't silently drop a version the relays
+       * also served before its ancestry (and so what it revoked) is known; the refresh decides at the end.
        */
       add(jws, opts = {}) {
         const peek = peekIdentityDoc(jws);
@@ -7247,7 +7251,7 @@ var init_identitydoc = __esm({
         }
         const missing = !this.versions.has(peek.prev) ? peek.prev : peek.merge !== void 0 && !this.versions.has(peek.merge) ? peek.merge : void 0;
         if (missing !== void 0) {
-          if (!this.anchored && peek.ver > this.view().head.ver) {
+          if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
               fail("issuer-mismatch", "a different ik for this userId");
@@ -7361,6 +7365,29 @@ var init_identitydoc = __esm({
             this.versions.delete(oldest.hash);
           }
         }
+      }
+      /**
+       * #81: `hash` is a ver-1 genesis pruning dropped from counted history (anchoredGenesis). It is known history
+       * that add() refuses to store again, so a gap whose missing version is one can't be filled, by any relay.
+       */
+      isPrunedGenesis(hash) {
+        return this.anchoredGenesis.has(hash);
+      }
+      /**
+       * #79: the held versions whose parent (or merge parent) isn't held, but for a genesis: the unanchored roots,
+       * with the first missing parent each needs. What such a root revoked (relative to its parent) isn't known
+       * until that parent is, so a refresh about to replace or jump over unanchored history walks these first.
+       */
+      roots() {
+        const out = [];
+        for (const v of this.versions.values()) {
+          if (v.prev === null)
+            continue;
+          const need = !this.versions.has(v.prev) ? v.prev : v.merge !== void 0 && !this.versions.has(v.merge) ? v.merge : void 0;
+          if (need !== void 0)
+            out.push({ d: v, need });
+        }
+        return out;
       }
       /** Versions that no held version names as prev or merge, but for strays (#74). */
       tips() {
@@ -10587,7 +10614,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       if (overBudget())
         break;
       try {
-        const r = chain.add(d.jws, { now, skewSec: opts.skewSec });
+        const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
         if (r.status === "gap")
           next.push({ d, need: r.need });
         else if (r.status === "accepted")
@@ -10669,9 +10696,19 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   place([...tips, ...anchors]);
   end();
   const dead = /* @__PURE__ */ new Set();
+  const byVer = (a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1);
   const frontier = () => {
     const held2 = new Set(gaps.map((g) => g.d.hash));
-    return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort((a, b) => a.d.ver - b.d.ver || (a.need < b.need ? -1 : 1));
+    return gaps.filter((g) => !held2.has(g.need) && !rejected.has(g.need) && !chain.isPrunedGenesis(g.need)).sort(byVer);
+  };
+  const rootFrontier = () => {
+    if (gaps.length === 0 || chain.size === 0 || chain.anchored)
+      return [];
+    const headVer = chain.view().head.ver;
+    if (!gaps.some((g) => g.d.ver > headVer))
+      return [];
+    const held2 = new Set(gaps.map((g) => g.d.hash));
+    return chain.roots().filter((g) => !held2.has(g.need) && !rejected.has(g.need)).sort(byVer);
   };
   const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
@@ -10690,8 +10727,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    const open3 = frontier();
-    const next = pick(open3);
+    let open3 = frontier();
+    let next = pick(open3);
+    if (!next) {
+      open3 = rootFrontier();
+      next = pick(open3);
+    }
     if (!next)
       break;
     wanted = new Set(open3.map((g) => g.need));
@@ -10707,11 +10748,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     end();
   }
   const sentByAnyRelay = (h) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
-  const settled = (need) => !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
+  const settled = (need) => chain.isPrunedGenesis(need) || !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
+  const openGaps = () => [...frontier(), ...rootFrontier()];
   let probeUnanswered = false;
   if (chainOf && !exhausted && gaps.length > 0) {
     wanted = /* @__PURE__ */ new Set();
-    const unsettled = frontier().filter((g) => !settled(g.need));
+    const unsettled = openGaps().filter((g) => !settled(g.need));
     const toProbe = [];
     const owners = relays.length + 1;
     for (let round = 0; toProbe.length < 2 * WALK_PROBE_GAPS && round < unsettled.length; round++) {
@@ -10740,7 +10782,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       }
     }
   }
-  const walkCut = chainOf !== void 0 && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || frontier().some((g) => !settled(g.need)));
+  const walkCut = chainOf !== void 0 && (requests >= CHAIN_WALK_MAX_REQUESTS || probeUnanswered || openGaps().some((g) => !settled(g.need)));
   if (gaps.length > 0 && walkCut)
     docsCapped = true;
   const unconnectedRelays = () => relays.filter((r) => gaps.some((g) => sentBy.get(r)?.has(g.d.hash) && !sentByAnyRelay(g.need) && relays.every((x) => askedFor.get(g.need)?.has(x))));
@@ -10756,6 +10798,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
+  let replaceTo = false;
   const incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
@@ -10764,6 +10807,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
     jumpTo = newest.jws;
+    replaceTo = !chain.anchored;
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
@@ -10796,19 +10840,29 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec });
+        c.add(j, { now, skewSec: opts.skewSec, replace: false });
       } catch (e) {
         if (!(e instanceof P2PError))
           throw e;
       }
     }
     let didJump = false;
+    let replaced = false;
     if (jumpTo !== void 0 && !anchoredAtCommit && (c.size === 0 || c.view().head.ver < newest.ver)) {
-      c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
-      didJump = true;
+      if (replaceTo) {
+        try {
+          replaced = c.add(jumpTo, { now, skewSec: opts.skewSec }).status === "accepted";
+        } catch (e) {
+          if (!(e instanceof P2PError))
+            throw e;
+        }
+      } else {
+        c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
+        didJump = true;
+      }
     }
     const narrowed = c.size > 0 && stateChange(c);
-    if (accepted.length === 0 && !didJump && !narrowed && cur)
+    if (accepted.length === 0 && !didJump && !replaced && !narrowed && cur)
       return { result: false };
     return { next: c.toStored(), result: didJump };
   });

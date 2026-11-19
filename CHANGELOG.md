@@ -2,6 +2,13 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **A key thief's higher branch can no longer drop the owner's revoking version at first contact ([#79](https://github.com/ix-infrastructure/Peer2Peer/issues/79)).** When a refresh over no (or only unanchored) history got two tips that don't connect, say the owner's version revoking a device and a higher version a thief signed with the identity key keeping it, the owner's version was placed first and then replaced by the thief's (the rule that lets a newer version replace unanchored history). Its parent wasn't held, so what it revoked was lost and the revoked device stayed trusted until a later refresh. Now a refresh never replaces held history while placing versions: the higher version waits as a gap, the walk also asks for the parent of each unanchored root a replacement would drop, and the replacement (or jump) happens only at the end, carrying what every held branch revoked. With both chains served, the view shows the fork; with the thief's relay withholding its chain, the owner's version is walked down and its revocation stays on the denylist. A newer version still replaces unanchored history when the relays can't connect it, without a history gap, as before.
+- **Replaying a long history's pruned old versions no longer keeps its refreshes incomplete ([#81](https://github.com/ix-infrastructure/Peer2Peer/issues/81)).** On a history longer than 1024 versions, one relay serving a pruned old version (with its ancestry) left a gap whose missing parent was the pruned version 1, which is never stored again. Every refresh then ended incomplete: freshness was never recorded and approvals were refused. Such a gap is now settled and never walked. A second version 1 below the pruned range is still a fork.
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.
