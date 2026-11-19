@@ -619,6 +619,17 @@ export function rotationAlertText(a: { fingerprint?: string; keyholder?: boolean
 }
 
 /**
+ * The status-line words for a `p2p.alert` with `what: "renewal-held"` (#78): this key holder can't renew the
+ * identity document because a relay that doesn't answer sent a newer version earlier. Only a day count from
+ * the event (no relay names or other text from it).
+ */
+export function renewalHeldText(a: { daysLeft?: unknown }): string {
+  const d = typeof a.daysLeft === 'number' && Number.isInteger(a.daysLeft) && a.daysLeft >= 0 && a.daysLeft < 10_000 ? a.daysLeft : undefined
+  const when = d === undefined ? 'soon' : d === 0 ? 'within a day' : `in ${d} day${d === 1 ? '' : 's'}`
+  return `your identity document expires ${when} and can't be renewed: a relay that doesn't answer holds a newer version. Run \`p2p doctor\` in a terminal`
+}
+
+/**
  * The status line. Failures are never silent: no CLI, no identity, an
  * expired or expiring identity document, every relay down, a watcher that
  * keeps failing, a status that didn't go out: each says so in words.

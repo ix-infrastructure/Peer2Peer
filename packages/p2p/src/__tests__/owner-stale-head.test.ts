@@ -9,13 +9,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { b64uDecode, createIdentityDoc, generateDeviceKeysV3, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { b64uDecode, createIdentityDoc, generateDeviceKeysV3, IDENTITY_DOC_MAX_TTL_SEC, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const RA = "wss://relay-current.test/v3";
 const RB = "wss://relay-lagging.test/v3";
+const RC = "wss://relay-third.test/v3";
 let ra: TestRelay;
 let rb: TestRelay;
+let rc: TestRelay;
 
 const keysOf = (u: User) => JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")) as { userId: string; did: string; ik?: string };
 const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
@@ -23,6 +26,7 @@ const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, head
 beforeAll(async () => {
   ra = await startRelay(RA);
   rb = await startRelay(RB);
+  rc = await startRelay(RC);
 }, 60_000);
 
 afterEach(() => {
@@ -32,6 +36,7 @@ afterEach(() => {
 afterAll(async () => {
   await ra?.close();
   await rb?.close();
+  await rc?.close();
 });
 
 async function heldHead(u: User) {
@@ -83,11 +88,16 @@ function network(userId: string, opts: { silent?: number[]; lagging?: { port: nu
   });
 }
 
-/** A user listing RA and RB whose device holds a stale head, with the newest version stored as a pending head from `from`. */
-async function behind(name: string, from: string[]) {
-  const u = new User(name, { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3` });
+/**
+ * A user listing RA and RB (and RC with `three`) whose device holds a stale head, with the newest version
+ * stored as a pending head from `from` (or, with `split`, each listed relay's own pending head: the newest
+ * from the first, the one before from the second).
+ */
+async function behind(name: string, from: string[], opts: { three?: boolean; split?: boolean } = {}) {
+  const u = new User(name, { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3`, [RC]: `ws://127.0.0.1:${rc.port}/v3` });
   const userId = (await u.ok(["init", "--name", name, "--relay", RA, "--yes"])).userId as string;
   await u.ok(["relays", "add", RB]);
+  if (opts.three) await u.ok(["relays", "add", RC]);
   const stale = await heldHead(u);
   let staleVersions: string[] = [];
   await storeOwn(u, userId, (cur) => {
@@ -95,10 +105,16 @@ async function behind(name: string, from: string[]) {
     return cur;
   });
   // Another device of ours went on (here: this one, then forgotten), and RA holds it all.
-  for (let i = 0; i < 5; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+  for (let i = 0; i < 4; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+  const before = await heldHead(u);
+  await u.ok(["profile", "set", "--bio", "edit 4"]);
   const newest = await heldHead(u);
   // An earlier, incomplete refresh left the newest version as a pending head, sent by `from`.
-  await storeOwn(u, userId, (cur) => ({ ...cur, versions: staleVersions, pendingHeads: [newest.jws], pendingHeadRelays: { [newest.hash]: from } }));
+  await storeOwn(u, userId, (cur) =>
+    opts.split
+      ? { ...cur, versions: staleVersions, pendingHeads: [newest.jws, before.jws], pendingHeadRelays: { [newest.hash]: [from[0]], [before.hash]: [from[1]] } }
+      : { ...cur, versions: staleVersions, pendingHeads: [newest.jws], pendingHeadRelays: { [newest.hash]: from } },
+  );
   expect((await heldHead(u)).hash).toBe(stale.hash);
   return { u, userId, stale, staleVersions, newest };
 }
@@ -186,5 +202,79 @@ describe("#78 (T1): a relay can't hold the owner up for good with a pending head
     await storeOwn(u, userId, (cur) => ({ ...cur, pendingHeads: [lapsed], pendingHeadRelays: { [jwsHash(lapsed)]: [RB] } }));
     network(userId, { silent: [rb.port] });
     expect((await u.ok(["profile", "set", "--bio", "lapsed"])).profile.bio).toBe("lapsed");
+  }, 180_000);
+});
+
+describe("#78 review: more than one relay, removal, renewal", () => {
+  it("three relays: RA silent, RB and RC (a majority) answer the stale head: refused, and the pending head is kept", async () => {
+    const { u, userId, stale, staleVersions, newest } = await behind("eli", [RA], { three: true });
+    network(userId, { silent: [ra.port], lagging: [{ port: rb.port, stale: staleVersions }, { port: rc.port, stale: staleVersions }] });
+    for (let i = 0; i < 2; i++) {
+      // Again: the majority's complete refresh didn't clear it, so a retry can't fork either.
+      const edit = await u.run(["profile", "set", "--bio", "on a stale head?"]);
+      expect(edit.code, `${edit.out}\n${edit.err}`).not.toBe(0);
+      expect(edit.json.error).toBe("refresh_failed");
+      expect(edit.json.heldBy).toEqual([RA]);
+    }
+    vi.restoreAllMocks();
+    const app = await u.app();
+    await app.load();
+    try {
+      const st = (await app.store.getIdentity(userId))!;
+      expect(st.pendingHeads).toEqual([newest.jws]);
+      expect(st.pendingHeadRelays).toEqual({ [newest.hash]: [RA] });
+    } finally {
+      await app.close();
+    }
+    expect((await heldHead(u)).hash).toBe(stale.hash);
+  }, 180_000);
+
+  it("two silent relays that sent the same version: removing either goes ahead", async () => {
+    const { u, userId, staleVersions } = await behind("fay", [RA, RB], { three: true });
+    network(userId, { silent: [ra.port, rb.port], lagging: [{ port: rc.port, stale: staleVersions }] });
+    const edit = await u.run(["profile", "set", "--bio", "x"]);
+    expect(edit.code).not.toBe(0);
+    expect(edit.json.heldBy).toEqual([RA, RB]);
+    const removed = await u.run(["relays", "remove", RA]);
+    expect(removed.code, `${removed.out}\n${removed.err}`).toBe(0);
+    expect(removed.json.relays).toEqual([RB, RC]);
+  }, 180_000);
+
+  it("two silent relays that sent different versions: one alone is refused, both at once go ahead", async () => {
+    const { u, userId, staleVersions } = await behind("gus", [RA, RB], { three: true, split: true });
+    network(userId, { silent: [ra.port, rb.port], lagging: [{ port: rc.port, stale: staleVersions }] });
+    const one = await u.run(["relays", "remove", RA]);
+    expect(one.code).not.toBe(0);
+    expect(one.json.heldBy).toEqual([RB]);
+    const both = await u.run(["relays", "remove", RA, RB]);
+    expect(both.code, `${both.out}\n${both.err}`).toBe(0);
+    expect(both.json.relays).toEqual([RC]);
+  }, 180_000);
+
+  it("maintain() doesn't renew silently: a warning every run, and a status-line alert once renewal is due", async () => {
+    const { u, userId, staleVersions } = await behind("hal", [RA]);
+    network(userId, { silent: [ra.port], lagging: [{ port: rb.port, stale: staleVersions }] });
+    const app = await u.app();
+    await app.load();
+    try {
+      await maintain(app);
+      expect(app.warnings.some((w) => w.includes("can't renew your identity document") && w.includes(RA) && w.includes("p2p relays remove"))).toBe(true);
+      const alerts = async () => ((await app.state.get("events"))?.items ?? []).filter((e) => e.kind === "p2p.alert" && e.data.what === "renewal-held");
+      // Not due yet (a fresh document): only the warning.
+      expect(await alerts()).toEqual([]);
+      // Days before it expires: due, and held up: the alert, with the day count.
+      const real = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(real + (IDENTITY_DOC_MAX_TTL_SEC - 3 * 86_400) * 1000);
+      await maintain(app);
+      const raised = await alerts();
+      expect(raised).toHaveLength(1);
+      expect(raised[0].data.heldBy).toEqual([RA]);
+      expect(raised[0].data.daysLeft).toBeLessThanOrEqual(3);
+      // Same day: not raised again.
+      await maintain(app);
+      expect(await alerts()).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
   }, 180_000);
 });

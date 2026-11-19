@@ -720,7 +720,10 @@ export class App {
    * version, as a pending head an earlier, incomplete refresh recorded with the relays that sent it. Refuses
    * when a pending head above the confirmed head was sent by a relay that:
    *  - is still listed and isn't set aside by this edit (`setAside.relays`: the relays it removes), so
-   *    `p2p relays remove` always gets past a relay that holds the owner up;
+   *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head one of the
+   *    removed relays sent holds nothing up at all (#78 review: the user is saying that relay's version isn't
+   *    to be trusted), so two silent relays that sent the same version don't each hold up removing the
+   *    other; `relays remove` takes several relays for those that sent different ones;
    *  - wasn't named as serving versions that don't connect (a forged chain's, core's unconnectedRelays);
    *  - didn't answer this refresh: a relay that answered gave its current tips, so what it still serves is
    *    already in this refresh (connected, or the refresh failed or was cut short), and what it no longer
@@ -737,8 +740,9 @@ export class App {
     const skip = new Set([...(setAside?.relays ?? []), ...named]);
     const silent = new Set<string>();
     let newest = 0;
+    const removing = new Set(setAside?.relays ?? []);
     for (const p of pendingHeadSenders(stored)) {
-      if (p.ver <= v.head.ver) continue;
+      if (p.ver <= v.head.ver || p.relays.some((r) => removing.has(r))) continue;
       const by = p.relays.filter((r) => list.includes(r) && !skip.has(r) && !heard.has(r));
       if (by.length === 0) continue;
       for (const r of by) silent.add(r);
@@ -749,7 +753,8 @@ export class App {
     const one = rs.length === 1;
     throw new CliError(
       "refresh_failed",
-      `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove <url>\`)`,
+      `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove ${one ? "<url>" : "<url> <url>"}\`)`,
+      { heldBy: rs, pendingVer: newest, confirmedVer: v.head.ver },
     );
   }
 

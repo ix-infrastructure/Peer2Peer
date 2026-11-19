@@ -868,7 +868,19 @@ export class IdentityChain {
       for (const x of leaves) covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
       for (const r of sent) keptFrom.add(r);
     }
-    this.pending = kept.slice(0, MAX_PENDING_HEADS);
+    // The safety cap (#78 review): each relay's highest kept head is reserved first, so many versions from
+    // one sender (an identity-key holder's) can't evict the record of what another relay sent.
+    const reserved = new Set<string>();
+    const claimed = new Set<string>();
+    for (const d of kept) {
+      for (const r of senders.get(d.hash) ?? []) {
+        if (claimed.has(r)) continue;
+        claimed.add(r);
+        reserved.add(d.hash);
+      }
+    }
+    const capped = new Set([...kept.filter((d) => reserved.has(d.hash)), ...kept.filter((d) => !reserved.has(d.hash))].slice(0, MAX_PENDING_HEADS).map((d) => d.hash));
+    this.pending = kept.filter((d) => capped.has(d.hash));
     this.pendingFrom = new Map(
       this.pending.map((d) => [d.hash, [...(senders.get(d.hash) ?? [])].slice(0, MAX_SENDERS)] as [string, string[]]).filter(([, r]) => r.length > 0),
     );

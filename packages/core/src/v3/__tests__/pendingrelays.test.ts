@@ -9,7 +9,8 @@
 //    didn't answer sent; for anyone else it still clears them all (#35 review M1).
 
 import { describe, expect, it } from "vitest";
-import { createIdentityDoc, IdentityChain, pendingHeadSenders, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { createIdentityDoc, IdentityChain, MAX_PENDING_HEADS, pendingHeadSenders, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { generateDeviceKeysV3 } from "../device.js";
 import { addIdentityVersion, refreshIdentity, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { makeUser, NOW, type TestUser } from "./fixtures.js";
@@ -32,7 +33,7 @@ async function storeWith(docs: readonly { jws: string }[]): Promise<MemoryTrustS
   return s;
 }
 
-function doc(u: TestUser, f: { ver: number; prev: string | null; devices: string[]; keyholders: string[]; iat: number }): VerifiedIdentityDoc {
+function doc(u: TestUser, f: { ver: number; prev: string | null; devices: string[]; keyholders: string[]; iat: number; ttlSec?: number }): VerifiedIdentityDoc {
   return verifyIdentityDocSignature(
     createIdentityDoc(u.ik, {
       ver: f.ver,
@@ -44,6 +45,7 @@ function doc(u: TestUser, f: { ver: number; prev: string | null; devices: string
       by: f.keyholders[0],
       certs: u.devices.filter((d) => f.devices.includes(d.did)).map((d) => d.cert),
       iat: f.iat,
+      ...(f.ttlSec !== undefined ? { ttlSec: f.ttlSec } : {}),
     }),
   );
 }
@@ -120,6 +122,28 @@ describe("#78: the relays that sent each pending head", () => {
     const lost: IdentityFetcher = { tips: async () => [v5.jws], chain: async () => [] };
     await refreshIdentity(store, u.userId, lost, { now: NOW, relays: [A, B, C], own: true });
     expect((await store.getIdentity(u.userId))!.pendingHeads).toBeUndefined();
+  });
+
+  it("the safety cap keeps each relay's highest: many narrowing versions from one sender can't evict another relay's", () => {
+    const u = makeUser("alice");
+    const v2 = u.publish({ iat: NOW - 900 });
+    const me = [u.dev.did];
+    const laptop = generateDeviceKeysV3(u.userId).did;
+    const at = { now: NOW };
+    const c = IdentityChain.fromStored({ iss: u.userId, versions: [u.docs[0].jws, v2.jws] }, at);
+    // A's version lists everything: it narrows nothing, kept only as A's record.
+    const fromA = doc(u, { ver: 3, prev: v2.hash, devices: [...me, laptop], keyholders: me, iat: NOW - 800 });
+    c.notePending([fromA], at, () => [A]);
+    // H's: each leaves the laptop out and lasts longer than every higher one, so every one narrows (E1), more
+    // than the cap.
+    const n = MAX_PENDING_HEADS + 6;
+    const fromH = Array.from({ length: n }, (_, i) => doc(u, { ver: 10 + i, prev: "A".repeat(43), devices: me, keyholders: me, iat: NOW - 700, ttlSec: 10 * 86_400 + (n - i) * 60 }));
+    c.notePending(fromH, at, () => [H]);
+    const kept = c.toStored().pendingHeads!;
+    expect(kept).toHaveLength(MAX_PENDING_HEADS);
+    expect(kept).toContain(fromA.jws);
+    expect(kept).toContain(fromH[fromH.length - 1].jws);
+    expect(c.toStored().pendingHeadRelays?.[fromA.hash]).toEqual([A]);
   });
 
   it("stores written before this (pending heads without senders) still load; their senders are unknown", () => {

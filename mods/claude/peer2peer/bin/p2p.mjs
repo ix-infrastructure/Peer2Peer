@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 b4e42db8afa6c3f4
+// @peer2peer/core 0.1.2 f8e192bb2b8b7091
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7138,7 +7138,18 @@ var init_identitydoc = __esm({
           for (const r of sent)
             keptFrom.add(r);
         }
-        this.pending = kept.slice(0, MAX_PENDING_HEADS);
+        const reserved = /* @__PURE__ */ new Set();
+        const claimed = /* @__PURE__ */ new Set();
+        for (const d of kept) {
+          for (const r of senders.get(d.hash) ?? []) {
+            if (claimed.has(r))
+              continue;
+            claimed.add(r);
+            reserved.add(d.hash);
+          }
+        }
+        const capped = new Set([...kept.filter((d) => reserved.has(d.hash)), ...kept.filter((d) => !reserved.has(d.hash))].slice(0, MAX_PENDING_HEADS).map((d) => d.hash));
+        this.pending = kept.filter((d) => capped.has(d.hash));
         this.pendingFrom = new Map(this.pending.map((d) => [d.hash, [...senders.get(d.hash) ?? []].slice(0, MAX_SENDERS)]).filter(([, r]) => r.length > 0));
         const after2 = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
         return after2.length !== before.length || after2.some((h) => !before.includes(h));
@@ -21049,19 +21060,24 @@ async function relaysAdd(app, url) {
   if (cur.length >= MAX_RELAYS) throw new CliError("bad_relay", `at most ${MAX_RELAYS} relays: remove one first`);
   return changeRelays(app, (list) => [...list.filter((x) => x !== r), r]);
 }
-async function relaysRemove(app, url) {
-  const r = normalizeRelays([url])[0];
+async function relaysRemove(app, urls) {
+  const rs = [...new Set(normalizeRelays(typeof urls === "string" ? [urls] : [...urls]))];
+  if (rs.length === 0) throw new CliError("usage", "name the relay to remove");
   const cur = (await app.ownView()).head.relays;
-  if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
-  if (cur.length === 1) throw new CliError("usage", "that is your only relay: add another first");
-  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.includes(r));
-  const out = await changeRelays(app, (list) => list.filter((x) => x !== r), [r]);
+  for (const r of rs) if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
+  if (cur.every((r) => rs.includes(r))) throw new CliError("usage", cur.length === 1 ? "that is your only relay: add another first" : "at least one relay must stay: add another first");
+  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.some((r) => rs.includes(r)));
+  const out = await changeRelays(app, (list) => list.filter((x) => !rs.includes(x)), rs);
   let revokedAtRemoved = 0;
+  let tried = 0;
   const pool = app.pool ?? await app.connect({ allowNone: true });
   for (const c of old) {
-    if ((await pool.revoke(c.capid, [r]).catch(() => [])).length > 0) revokedAtRemoved++;
+    for (const r of rs.filter((x) => c.relays.includes(x))) {
+      tried++;
+      if ((await pool.revoke(c.capid, [r]).catch(() => [])).length > 0) revokedAtRemoved++;
+    }
   }
-  if (revokedAtRemoved < old.length) app.warn(`couldn't revoke ${old.length - revokedAtRemoved} of your old caps at ${r}; they expire on their own`);
+  if (revokedAtRemoved < tried) app.warn(`couldn't revoke ${tried - revokedAtRemoved} of your old caps at ${rs.join(", ")}; they expire on their own`);
   return { ...out, revokedAtRemoved };
 }
 async function devices(app) {
@@ -27425,7 +27441,10 @@ var init_app = __esm({
        * version, as a pending head an earlier, incomplete refresh recorded with the relays that sent it. Refuses
        * when a pending head above the confirmed head was sent by a relay that:
        *  - is still listed and isn't set aside by this edit (`setAside.relays`: the relays it removes), so
-       *    `p2p relays remove` always gets past a relay that holds the owner up;
+       *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head one of the
+       *    removed relays sent holds nothing up at all (#78 review: the user is saying that relay's version isn't
+       *    to be trusted), so two silent relays that sent the same version don't each hold up removing the
+       *    other; `relays remove` takes several relays for those that sent different ones;
        *  - wasn't named as serving versions that don't connect (a forged chain's, core's unconnectedRelays);
        *  - didn't answer this refresh: a relay that answered gave its current tips, so what it still serves is
        *    already in this refresh (connected, or the refresh failed or was cut short), and what it no longer
@@ -27442,8 +27461,9 @@ var init_app = __esm({
         const skip = /* @__PURE__ */ new Set([...setAside2?.relays ?? [], ...named]);
         const silent = /* @__PURE__ */ new Set();
         let newest = 0;
+        const removing = new Set(setAside2?.relays ?? []);
         for (const p of pendingHeadSenders(stored2)) {
-          if (p.ver <= v.head.ver) continue;
+          if (p.ver <= v.head.ver || p.relays.some((r) => removing.has(r))) continue;
           const by = p.relays.filter((r) => list.includes(r) && !skip.has(r) && !heard.has(r));
           if (by.length === 0) continue;
           for (const r of by) silent.add(r);
@@ -27454,7 +27474,8 @@ var init_app = __esm({
         const one = rs.length === 1;
         throw new CliError(
           "refresh_failed",
-          `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove <url>\`)`
+          `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove ${one ? "<url>" : "<url> <url>"}\`)`,
+          { heldBy: rs, pendingVer: newest, confirmedVer: v.head.ver }
         );
       }
       /** Relays a (bundled, unverified) identity document lists: only a hint for where to refresh from. */
@@ -38671,6 +38692,34 @@ async function refreshContacts(app) {
   await retryRotationJoins(app).catch(() => []);
   await app.adoptCertFromDoc();
 }
+function renewalDue(head, now) {
+  const certSoon = (head.certs ?? []).some((c) => {
+    try {
+      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp;
+      return certExpiresWithin({ exp }, 30 * 86400, now);
+    } catch {
+      return false;
+    }
+  });
+  return certSoon || head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
+}
+async function renewalHeld(app, e) {
+  const heldBy = e.extra.heldBy.filter((r) => typeof r === "string");
+  const v = await app.ownView();
+  const now = nowSec();
+  const daysLeft2 = Math.max(0, Math.floor((v.head.exp - now) / 86400));
+  const fix = `try again when ${heldBy.length === 1 ? "it answers" : "they answer"}, or remove ${heldBy.length === 1 ? "it" : "them"} (\`p2p relays remove ${heldBy.join(" ")}\`) if gone for good or no device of yours published that version; \`p2p doctor\` shows the details`;
+  app.warn(`can't renew your identity document (expires in ${daysLeft2} days): ${heldBy.join(", ")} didn't answer and earlier sent a newer version of it; ${fix}`);
+  if (!renewalDue(v.head, now)) return;
+  await app.state.addEvents([
+    makeEvent(`renewal-held|${v.head.hash}|${daysLeft2}`, "p2p.alert", Date.now(), {
+      from: { userId: app.userId, did: app.did, address: await app.addressOf(app.userId), self: true },
+      what: "renewal-held",
+      daysLeft: daysLeft2,
+      heldBy
+    })
+  ]);
+}
 async function maintain(app) {
   if (!app.isKeyholder) {
     await app.adoptCertFromDoc();
@@ -38679,22 +38728,16 @@ async function maintain(app) {
   try {
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true });
   } catch (e) {
-    if (e instanceof CliError) return;
+    if (e instanceof CliError) {
+      if (Array.isArray(e.extra.heldBy)) await renewalHeld(app, e).catch(() => void 0);
+      return;
+    }
     throw e;
   }
   const v = await app.ownView();
   if (!v.devices.includes(app.did) || !v.keyholders.includes(app.did)) return;
   const now = nowSec();
-  const certSoon = (v.head.certs ?? []).some((c) => {
-    try {
-      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp;
-      return certExpiresWithin({ exp }, 30 * 86400, now);
-    } catch {
-      return false;
-    }
-  });
-  const docSoon = v.head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
-  if ((docSoon || certSoon) && mayRepublish(app.did, v.head, now)) {
+  if (renewalDue(v.head, now) && mayRepublish(app.did, v.head, now)) {
     await app.publishNext(() => {
     }).catch((e) => {
       if (!(e instanceof CliError)) throw e;
@@ -39021,6 +39064,31 @@ async function versionCheck(c, app, o, ms) {
 async function circlesOf(app, ms) {
   return (await bounded(listCircles(app), ms)).value ?? [];
 }
+async function pendingHeadsCheck(c, app, view, reports, ms) {
+  const stored2 = (await bounded(app.store.getIdentity(app.userId), ms)).value;
+  if (!stored2) return;
+  const above = pendingHeadSenders(stored2).filter((p) => p.ver > view.head.ver && p.relays.some((r) => view.relays.includes(r)));
+  if (above.length === 0) return;
+  const newest = Math.max(...above.map((p) => p.ver));
+  const senders = [...new Set(above.flatMap((p) => p.relays.filter((r) => view.relays.includes(r))))];
+  const down = senders.filter((r) => reports.find((x) => x.relay === r)?.reachable === false);
+  const what = `this device holds version ${newest} of your identity, newer than its head (version ${view.head.ver}), from ${senders.join(", ")}`;
+  if (down.length === 0 && senders.some((r) => !reports.some((x) => x.relay === r))) {
+    c.add("pending-heads", "unknown", "newer versions of your identity", `${what}; not probed here`, "run `p2p doctor` again; if one of them stays unreachable, edits and renewals are refused until it answers or you remove it (`p2p relays remove <url>`)");
+    return;
+  }
+  if (down.length === 0) {
+    c.add("pending-heads", "ok", "newer versions of your identity", `${what}; ${senders.length === 1 ? "it answers" : "they answer"}, so your next edit or renewal fetches it`);
+    return;
+  }
+  c.add(
+    "pending-heads",
+    "fail",
+    "newer versions of your identity",
+    `${what}; ${down.join(", ")} ${down.length === 1 ? "doesn't" : "don't"} answer, so edits and renewing your identity document are refused until ${down.length === 1 ? "it answers" : "they answer"}`,
+    `wait for ${down.length === 1 ? "it" : "them"} to come back; if ${down.length === 1 ? "it is" : "they are"} gone for good, or no device of yours published that version: \`p2p relays remove ${down.join(" ")}\``
+  );
+}
 async function deviceChecks(c, app, o, ms, reports) {
   const view = (await bounded(app.view(app.userId), ms)).value;
   const name2 = view?.head.name ?? app.self?.name ?? "?";
@@ -39038,6 +39106,7 @@ async function deviceChecks(c, app, o, ms, reports) {
     else c.add("document", "ok", "identity document", `version ${view.head.ver}, fresh (expires in ${days(left)})`);
     if (view.forked) c.add("document-fork", "fail", "identity document history", "forked (two versions claim the same place)", "run `p2p identity republish` on a key holder: it merges the branches");
     if (view.rotations.length > 0) c.add("document-rotated", "fail", "identity", "this identity moved to a new key", "follow it: `p2p held` shows the move (approve it there), or re-link with `p2p link join <code> --rotated`");
+    await pendingHeadsCheck(c, app, view, reports, ms);
   }
   relayChecks(c, app, reports, view ? { hash: view.head.hash, ver: view.head.ver } : void 0);
   clockCheck(c, reports);
@@ -41844,7 +41913,7 @@ Friendships aren't in the phrase: invite your friends again.`
     })
   );
   for (const verb of ["add", "remove"]) {
-    relays.command(`${verb} <url>`).description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove a relay (one must stay)").option("--json", "JSON output").action(
+    relays.command(verb === "add" ? "add <url>" : "remove <url...>").description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove one or more relays, in one new version (one must stay)").option("--json", "JSON output").action(
       run(async (app, url) => {
         const r = verb === "add" ? await ops.relaysAdd(app, url) : await ops.relaysRemove(app, url);
         const failed = r.failed.length ? `; not yet on ${r.failed.map((f) => f.relay).join(", ")} (retried later)` : "";

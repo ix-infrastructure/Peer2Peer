@@ -101,6 +101,7 @@ import {
   peersSummary,
   onlineCount,
   reachable,
+  renewalHeldText,
   rotationAlertText,
   relayHealth,
   resolveTarget,
@@ -1712,6 +1713,14 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
       // contested (pre-release re-review N1). Loud, never acted on.
       if (event.what === 'rotation-dispute') {
         S.health.alert = 'an approved move to a new key is contested: the identity you approved is suspended until you choose (above the prompt)'
+        $.ui.toast(`Peer2Peer ALERT: ${S.health.alert}`)
+        await render(S, $)
+
+        return
+      }
+      // #78: renewing the identity document is held up by a relay that doesn't answer; raised again each day left.
+      if (event.what === 'renewal-held') {
+        S.health.alert = renewalHeldText(event)
         $.ui.toast(`Peer2Peer ALERT: ${S.health.alert}`)
         await render(S, $)
 
