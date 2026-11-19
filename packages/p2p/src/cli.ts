@@ -655,12 +655,12 @@ export function buildProgram(deps: ProgramDeps): Command {
     );
   for (const verb of ["add", "remove"] as const) {
     relays
-      .command(`${verb} <url>`)
-      .description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove a relay (one must stay)")
+      .command(verb === "add" ? "add <url>" : "remove <url...>")
+      .description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove one or more relays, in one new version (one must stay)")
       .option("--json", "JSON output")
       .action(
-        run(async (app, url: string) => {
-          const r = verb === "add" ? await ops.relaysAdd(app, url) : await ops.relaysRemove(app, url);
+        run(async (app, url: string | string[]) => {
+          const r = verb === "add" ? await ops.relaysAdd(app, url as string) : await ops.relaysRemove(app, url);
           const failed = r.failed.length ? `; not yet on ${r.failed.map((f) => f.relay).join(", ")} (retried later)` : "";
           return { json: r, human: `Your relays (document version ${r.ver}): ${r.relays.join(", ")}${failed}.` };
         }),

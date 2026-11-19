@@ -229,7 +229,9 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    answered by a majority of the held view's relays clears them (a minority's
  *    only drops those its head reached); one issued in the future or past its
  *    `exp` is ignored; a client's reads of its own identity ignore them
- *    (getIdentityView `ignorePending`, storeSignerContext `own`).
+ *    (getIdentityView `ignorePending`, storeSignerContext `own`). Each is
+ *    stored with the relays that sent it (#78, local only); with `own`, a
+ *    majority's complete refresh keeps those a silent relay sent.
  *  - The held chain is built and verified once; documents are placed in
  *    `ver` order, each once. Gaps are filled by walking back with the §5.6
  *    chain request.
@@ -272,6 +274,13 @@ export async function refreshIdentity(
      * a smaller `checkMs` to stand in for slower hardware.
      */
     checkMs?: number;
+    /**
+     * #78: `userId` is the refreshing client's own identity. A complete refresh answered by a majority then
+     * keeps the pending heads a relay that didn't answer sent (with only those senders): the owner's view
+     * never uses pending heads (re-review N1), and its strict refresh won't build below one while the relay
+     * that sent it stays silent.
+     */
+    own?: boolean;
   } = {},
 ): Promise<RefreshedView> {
   const now = opts.now ?? nowSec();
@@ -673,7 +682,15 @@ export async function refreshIdentity(
   // the view lists (an explicit override; the CLI and refreshFor always include them).
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
-  const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
+  // #78: with the relays that sent each one (local only), and for our own identity a majority doesn't clear
+  // those a relay that didn't answer sent.
+  const sentFrom = (h: string) => relays.filter((r) => sentBy.get(r)?.has(h));
+  const pendingChange = (c: IdentityChain) =>
+    incomplete
+      ? c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom)
+      : majority
+        ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {})
+        : false;
   // #67: on an incomplete refresh, where the walk stopped, for the next one: the frontier gaps left (where
   // each walked stretch stops), plus the earlier anchors still unplaced (the tops of the stretches walked
   // before, needed again on the way back up), the tips aside (they are fetched again anyway). Not a settled

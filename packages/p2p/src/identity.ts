@@ -302,24 +302,33 @@ export async function relaysAdd(app: App, url: string): Promise<RelaysChange> {
   return changeRelays(app, (list) => [...list.filter((x) => x !== r), r]);
 }
 
-/** Removes a relay (at least one must stay). The removed relay gets the new version too, so it stops admitting removed state. */
-export async function relaysRemove(app: App, url: string): Promise<RelaysChange> {
-  const r = normalizeRelays([url])[0];
+/**
+ * Removes relays (at least one must stay), in one new version. The removed relays get it too, so they stop
+ * admitting removed state. Several at once (#78 review): two relays that both went silent while holding a
+ * newer version each hold up removing the other one alone (App.ownPendingGuard).
+ */
+export async function relaysRemove(app: App, urls: string | readonly string[]): Promise<RelaysChange> {
+  const rs = [...new Set(normalizeRelays(typeof urls === "string" ? [urls] : [...urls]))];
+  if (rs.length === 0) throw new CliError("usage", "name the relay to remove");
   const cur = (await app.ownView()).head.relays;
-  if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
-  if (cur.length === 1) throw new CliError("usage", "that is your only relay: add another first");
-  // Caps naming the dropped relay, captured before the re-issue adds new ones.
-  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.includes(r));
-  const out = await changeRelays(app, (list) => list.filter((x) => x !== r), [r]);
-  // review L2: revoke them at the dropped relay only (our devices are still in its allowlist). Other
+  for (const r of rs) if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
+  if (cur.every((r) => rs.includes(r))) throw new CliError("usage", cur.length === 1 ? "that is your only relay: add another first" : "at least one relay must stay: add another first");
+  // Caps naming a dropped relay, captured before the re-issue adds new ones.
+  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.some((r) => rs.includes(r)));
+  const out = await changeRelays(app, (list) => list.filter((x) => !rs.includes(x)), rs);
+  // review L2: revoke them at the dropped relays only (our devices are still in their allowlists). Other
   // relays keep honouring them, so friends who haven't picked up the new caps stay covered.
   // Best effort: the relay may be down.
   let revokedAtRemoved = 0;
+  let tried = 0;
   const pool = app.pool ?? (await app.connect({ allowNone: true }));
   for (const c of old) {
-    if ((await pool.revoke(c.capid, [r]).catch(() => [] as string[])).length > 0) revokedAtRemoved++;
+    for (const r of rs.filter((x) => c.relays.includes(x))) {
+      tried++;
+      if ((await pool.revoke(c.capid, [r]).catch(() => [] as string[])).length > 0) revokedAtRemoved++;
+    }
   }
-  if (revokedAtRemoved < old.length) app.warn(`couldn't revoke ${old.length - revokedAtRemoved} of your old caps at ${r}; they expire on their own`);
+  if (revokedAtRemoved < tried) app.warn(`couldn't revoke ${tried - revokedAtRemoved} of your old caps at ${rs.join(", ")}; they expire on their own`);
   return { ...out, revokedAtRemoved };
 }
 

@@ -142,7 +142,7 @@ export type P2PEvent =
       }
     }
   /** A rotation of this user's own identity that this device didn't publish (§2.8): shown loudly. */
-  | { kind: 'p2p.alert'; id: string; at: number; from: EventFrom; what: string; to?: string; fingerprint?: string; by?: string; byLabel?: string; keyholder?: boolean; contest?: string }
+  | { kind: 'p2p.alert'; id: string; at: number; from: EventFrom; what: string; to?: string; fingerprint?: string; by?: string; byLabel?: string; keyholder?: boolean; contest?: string; daysLeft?: number; heldBy?: string[] }
   | { kind: 'p2p.friend'; id: string; at: number; from: EventFrom; friend: { userId: string; address: string }; via?: { label?: string; cid?: string; circleName?: string } }
   /** Someone redeemed one of this user's short invite codes; `remove` is the CLI command that undoes it. */
   | { kind: 'p2p.joined'; id: string; at: number; from: EventFrom; label?: string | null; cid?: string | null; circleName?: string | null; circleStatus?: 'added' | 'proposed' | 'failed'; code?: string; lid?: string; codeId?: string; remove?: string }
