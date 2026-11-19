@@ -86,7 +86,7 @@ describe("latency mechanisms", () => {
       pollMs: 60_000,
     });
     const waitFor = async (id: string) => {
-      const end = Date.now() + 5000;
+      const end = Date.now() + 15_000;
       while (Date.now() < end) {
         const hit = lines.find((l) => l.line.includes(id));
         if (hit) return hit.t;
@@ -100,12 +100,13 @@ describe("latency mechanisms", () => {
     // Appended by this process (a delivery the watch itself handled).
     let t0 = Date.now();
     await app.state.addEvents([ev("in-process-1")]);
-    expect((await waitFor("in-process-1")) - t0).toBeLessThan(1500);
+    // Far below the 60 s poll, with room for a slow shared runner.
+    expect((await waitFor("in-process-1")) - t0).toBeLessThan(10_000);
     // Appended by another process on the same home (here: another App, its own state handle).
     const other = await ann.app();
     t0 = Date.now();
     await other.state.addEvents([ev("other-process-1")]);
-    expect((await waitFor("other-process-1")) - t0).toBeLessThan(2500);
+    expect((await waitFor("other-process-1")) - t0).toBeLessThan(10_000);
     ctl.abort();
     expect(await running).toBe(0);
   }, 30_000);

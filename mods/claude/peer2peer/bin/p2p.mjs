@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 403c97e1076687d7
+// @peer2peer/core 0.1.2 0929b765c72ea400
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6899,6 +6899,24 @@ function revokedStep(v, get) {
     return [];
   return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
 }
+function sendersOf(v) {
+  return Array.isArray(v) ? v.filter((r) => typeof r === "string").slice(0, MAX_SENDERS) : [];
+}
+function pendingHeadSenders(s2, opts = {}) {
+  const out = [];
+  for (const j of s2.pendingHeads ?? []) {
+    try {
+      const d = verifyIdentityDocSignature(j);
+      if (d.iss !== s2.iss || !pendingUsable(d, opts))
+        continue;
+      out.push({ ver: d.ver, hash: d.hash, relays: sendersOf(s2.pendingHeadRelays?.[d.hash]) });
+    } catch (e) {
+      if (!(e instanceof P2PError))
+        throw e;
+    }
+  }
+  return out;
+}
 function docCertFor(doc, did) {
   for (const c of doc.certs ?? []) {
     try {
@@ -6910,7 +6928,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, MAX_SIDE_ROOTS, VersionMap, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, MAX_SIDE_ROOTS, MAX_SENDERS, VersionMap, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6938,6 +6956,7 @@ var init_identitydoc = __esm({
     MAX_PENDING_HEADS = 64;
     MAX_WALK_ANCHORS = 16;
     MAX_SIDE_ROOTS = 8;
+    MAX_SENDERS = 16;
     VersionMap = class extends Map {
       rev = 0;
       set(k, v) {
@@ -6970,6 +6989,8 @@ var init_identitydoc = __esm({
       denied = /* @__PURE__ */ new Set();
       /** Verified newer versions that don't connect yet (#35, see notePending). */
       pending = [];
+      /** Which relays sent each pending head (#78). */
+      pendingFrom = /* @__PURE__ */ new Map();
       /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
       anchors = [];
       /** Which relays sent each anchor (#67 re-review G2). */
@@ -6992,17 +7013,20 @@ var init_identitydoc = __esm({
           const p = verifyIdentityDocSignature(j);
           if (p.iss !== s2.iss)
             fail("issuer-mismatch", "stored pending head of another identity");
-          if (pendingUsable(p, opts))
+          if (pendingUsable(p, opts)) {
             c.pending.push(p);
+            const from = sendersOf(s2.pendingHeadRelays?.[p.hash]);
+            if (from.length > 0)
+              c.pendingFrom.set(p.hash, from);
+          }
         }
         for (const j of s2.walkAnchors ?? []) {
           const a = verifyIdentityDocSignature(j);
           if (a.iss !== s2.iss)
             fail("issuer-mismatch", "stored walk anchor of another identity");
           c.anchors.push(a);
-          const from = s2.walkAnchorRelays?.[a.hash];
-          if (Array.isArray(from))
-            c.anchorFrom.set(a.hash, from.filter((r) => typeof r === "string").slice(0, 16));
+          if (Array.isArray(s2.walkAnchorRelays?.[a.hash]))
+            c.anchorFrom.set(a.hash, sendersOf(s2.walkAnchorRelays?.[a.hash]));
         }
         const dropped = /* @__PURE__ */ new Set();
         const stored2 = new Map(docs.map((d) => [d.hash, d]));
@@ -7047,6 +7071,7 @@ var init_identitydoc = __esm({
           ...this.denied.size > 0 ? { denied: [...this.denied] } : {},
           // Each dropped once the held head reaches its ver.
           ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {},
+          ...this.pendingCap().some((d) => this.pendingFrom.has(d.hash)) ? { pendingHeadRelays: Object.fromEntries(this.pendingCap().filter((d) => this.pendingFrom.has(d.hash)).map((d) => [d.hash, [...this.pendingFrom.get(d.hash)]])) } : {},
           ...this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {},
           ...this.walkAnchors().some((d) => this.anchorFrom.has(d.hash)) ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)]])) } : {}
         };
@@ -7100,18 +7125,26 @@ var init_identitydoc = __esm({
        *    dropped no sooner, by the head reaching it or by expiry (re-review E1). So however many
        *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
        *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
+       *  - #78: `from` names the relays that sent each one (local only, added to those already recorded). A
+       *    candidate is redundant only if every relay that sent it also sent a kept, higher-`ver` one, so each
+       *    relay's highest stays (one more per relay at most): another relay's higher version can't push out the
+       *    one an honest relay sent, which the owner's strict refresh won't build below (App.ownPendingGuard).
        */
-      notePending(docs, opts = {}) {
+      notePending(docs, opts = {}, from = () => []) {
         if (this.versions.size === 0)
           return false;
         const headVer = this.tips()[0].ver;
-        const before = this.pendingCap().map((d) => d.hash);
+        const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
         const byHash = new Map(this.pendingCap().map((d) => [d.hash, d]));
+        const senders = new Map([...this.pendingFrom].filter(([h]) => byHash.has(h)).map(([h, r]) => [h, new Set(r)]));
         for (const d of docs) {
           if (d.iss !== this.iss)
             fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
-          if (d.ver > headVer && pendingUsable(d, opts))
+          if (d.ver > headVer && pendingUsable(d, opts)) {
             byHash.set(d.hash, d);
+            for (const r of from(d.hash))
+              (senders.get(d.hash) ?? senders.set(d.hash, /* @__PURE__ */ new Set()).get(d.hash)).add(r);
+          }
         }
         const universe = /* @__PURE__ */ new Set();
         for (const d of [...this.versions.values(), ...byHash.values()]) {
@@ -7121,25 +7154,55 @@ var init_identitydoc = __esm({
             universe.add(`k:${x}`);
         }
         const covered = /* @__PURE__ */ new Map();
+        const keptFrom = /* @__PURE__ */ new Set();
         const kept = [];
         for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
           const lists = /* @__PURE__ */ new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
           const leaves = [...universe].filter((x) => !lists.has(x));
-          if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp))
+          const sent = [...senders.get(d.hash) ?? []];
+          if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp) && sent.every((r) => keptFrom.has(r)))
             continue;
           kept.push(d);
           for (const x of leaves)
             covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
+          for (const r of sent)
+            keptFrom.add(r);
         }
-        this.pending = kept.slice(0, MAX_PENDING_HEADS);
-        const after2 = this.pending.map((d) => d.hash);
+        const reserved = /* @__PURE__ */ new Set();
+        const claimed = /* @__PURE__ */ new Set();
+        for (const d of kept) {
+          for (const r of senders.get(d.hash) ?? []) {
+            if (claimed.has(r))
+              continue;
+            claimed.add(r);
+            reserved.add(d.hash);
+          }
+        }
+        const capped = new Set([...kept.filter((d) => reserved.has(d.hash)), ...kept.filter((d) => !reserved.has(d.hash))].slice(0, MAX_PENDING_HEADS).map((d) => d.hash));
+        this.pending = kept.filter((d) => capped.has(d.hash));
+        this.pendingFrom = new Map(this.pending.map((d) => [d.hash, [...senders.get(d.hash) ?? []].slice(0, MAX_SENDERS)]).filter(([, r]) => r.length > 0));
+        const after2 = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
         return after2.length !== before.length || after2.some((h) => !before.includes(h));
       }
-      /** Drops every pending head (a complete refresh, #35). Returns whether there was one. */
-      clearPending() {
-        const had = this.pendingCap().length > 0;
-        this.pending = [];
-        return had;
+      /**
+       * Drops the pending heads (a complete refresh, #35). Returns whether it changed anything.
+       * #78: `keepSentBy` (the owner's own identity only, whose view never uses pending heads): a pending head
+       * one of these relays (the ones that didn't answer this refresh) sent is kept, with only those senders, so
+       * the owner's strict refresh still won't build below it while that relay stays silent.
+       */
+      clearPending(opts = {}) {
+        const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+        const keep = new Set(opts.keepSentBy ?? []);
+        const from = /* @__PURE__ */ new Map();
+        for (const d of this.pendingCap()) {
+          const silent = (this.pendingFrom.get(d.hash) ?? []).filter((r) => keep.has(r));
+          if (silent.length > 0)
+            from.set(d.hash, silent);
+        }
+        this.pending = this.pendingCap().filter((d) => from.has(d.hash));
+        this.pendingFrom = from;
+        const after2 = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+        return after2.length !== before.length || after2.some((h) => !before.includes(h));
       }
       /** The pending heads still newer than the held head (#35). */
       pendingCap() {
@@ -11043,7 +11106,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
-  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false;
+  const sentFrom = (h) => relays.filter((r) => sentBy.get(r)?.has(h));
+  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom) : majority ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {}) : false;
   const tipHashes = new Set(tips.map((d) => d.hash));
   const gapHashes = new Set(gaps.map((g) => g.d.hash));
   const wasAnchor = new Set(anchors.map((d) => d.hash));
@@ -21277,19 +21341,24 @@ async function relaysAdd(app, url) {
   if (cur.length >= MAX_RELAYS) throw new CliError("bad_relay", `at most ${MAX_RELAYS} relays: remove one first`);
   return changeRelays(app, (list) => [...list.filter((x) => x !== r), r]);
 }
-async function relaysRemove(app, url) {
-  const r = normalizeRelays([url])[0];
+async function relaysRemove(app, urls) {
+  const rs = [...new Set(normalizeRelays(typeof urls === "string" ? [urls] : [...urls]))];
+  if (rs.length === 0) throw new CliError("usage", "name the relay to remove");
   const cur = (await app.ownView()).head.relays;
-  if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
-  if (cur.length === 1) throw new CliError("usage", "that is your only relay: add another first");
-  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.includes(r));
-  const out = await changeRelays(app, (list) => list.filter((x) => x !== r), [r]);
+  for (const r of rs) if (!cur.includes(r)) throw new CliError("not_found", `${r} is not one of your relays`);
+  if (cur.every((r) => rs.includes(r))) throw new CliError("usage", cur.length === 1 ? "that is your only relay: add another first" : "at least one relay must stay: add another first");
+  const old = (await app.store.listCapsIssued()).filter((c) => c.iss === app.userId && c.relays.some((r) => rs.includes(r)));
+  const out = await changeRelays(app, (list) => list.filter((x) => !rs.includes(x)), rs);
   let revokedAtRemoved = 0;
+  let tried = 0;
   const pool = app.pool ?? await app.connect({ allowNone: true });
   for (const c of old) {
-    if ((await pool.revoke(c.capid, [r]).catch(() => [])).length > 0) revokedAtRemoved++;
+    for (const r of rs.filter((x) => c.relays.includes(x))) {
+      tried++;
+      if ((await pool.revoke(c.capid, [r]).catch(() => [])).length > 0) revokedAtRemoved++;
+    }
   }
-  if (revokedAtRemoved < old.length) app.warn(`couldn't revoke ${old.length - revokedAtRemoved} of your old caps at ${r}; they expire on their own`);
+  if (revokedAtRemoved < tried) app.warn(`couldn't revoke ${tried - revokedAtRemoved} of your old caps at ${rs.join(", ")}; they expire on their own`);
   return { ...out, revokedAtRemoved };
 }
 async function devices(app) {
@@ -21930,6 +21999,65 @@ async function preRotationHead(app) {
   }
   return void 0;
 }
+async function ownBranchFork(app) {
+  const chain = await ownChain(app);
+  if (!chain) return void 0;
+  const plain = chain.tips().filter((t2) => t2.rotation === void 0);
+  const candidates = plain.filter((t2) => t2.devices.includes(app.did) && t2.keyholders.includes(app.did));
+  if (plain.length < 2 || candidates.length === 0 || candidates.length === plain.length) return void 0;
+  return { chain, plain, candidates };
+}
+async function ownBranchTip(app, choice) {
+  const fork = await ownBranchFork(app);
+  if (!fork) {
+    if (choice !== void 0) throw new CliError("usage", "--branch: your identity isn't forked by a version that leaves this device out");
+    return void 0;
+  }
+  const { chain, plain, candidates } = fork;
+  if (choice !== void 0) {
+    const chosen = candidates.find((t2) => t2.hash === choice);
+    if (!chosen) throw new CliError("usage", `--branch ${choice}: not a branch of your identity that lists this device (${candidates.map((t2) => t2.hash).join(", ")})`);
+    return chosen;
+  }
+  if (candidates.length === 1) return candidates[0];
+  const log = new Set((await app.store.getPublishLog()).published);
+  const trusted = /* @__PURE__ */ new Set([app.did, ...[...log].flatMap((h) => chain.get(h)?.devices ?? [])]);
+  const behind = plain.map((t2) => new Set(chain.ancestors(t2.hash).map((v) => v.hash)));
+  const common = new Set([...behind[0]].filter((h) => behind.every((set) => set.has(h))));
+  const since = (t2) => chain.ancestors(t2.hash).filter((v) => !common.has(v.hash));
+  const plausible = candidates.filter((t2) => since(t2).every((v) => log.has(v.hash) || trusted.has(v.by)));
+  if (plausible.length === 1) return plausible[0];
+  const branches = candidates.map((t2) => ({ hash: t2.hash, ver: t2.ver, by: [...new Set(since(t2).map((v) => v.by))], relays: [...t2.relays] }));
+  throw new CliError(
+    "branch_ambiguous",
+    `your identity is forked by a version that leaves this device out, and more than one branch still lists it: ${branches.map((x) => `${x.hash} (ver ${x.ver}, published by ${x.by.join(", ")}; relays ${x.relays.join(", ")})`).join("; ")}. Someone else holds your identity key. Check which branch is yours, then run \`p2p identity rotate --plan --branch <hash>\``,
+    { branches }
+  );
+}
+function ownBranchFinalFields(app, chain, tip, log) {
+  const mine = chain.ancestors(tip.hash).filter((v) => log.has(v.hash)).pop();
+  const relays = [.../* @__PURE__ */ new Set([...mine?.relays ?? [], ...app.relays])];
+  return { name: mine?.name ?? app.self?.name ?? tip.name, relays, extra: tip.relays.filter((r) => !relays.includes(r)) };
+}
+async function dropUnheldOwnMerges(app) {
+  const chain = await ownChain(app);
+  if (!chain) return;
+  const log = new Set((await app.store.getPublishLog()).published);
+  const stale = chain.tips().filter((t2) => t2.merge !== void 0 && t2.rotation === void 0 && log.has(t2.hash) && !t2.devices.includes(app.did));
+  if (stale.length === 0) return;
+  const view = await app.ownView();
+  const answers = await Promise.all(view.relays.slice(0, 5).map((r) => fetchTips(app.transport(r), app.userId, app.tun.connectTimeoutMs, app.progress).catch(() => [])));
+  const held2 = new Set(answers.flatMap((tips) => tips.map((j) => jwsHash(j))));
+  await dropVersions(
+    app,
+    stale.filter((t2) => !held2.has(t2.hash)).map((t2) => t2.hash)
+  );
+}
+async function dropVersions(app, hashes) {
+  if (hashes.length === 0) return;
+  const drop = new Set(hashes);
+  await app.store.updateIdentity(app.userId, (cur) => cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(jwsHash(v))) }, result: void 0 } : { result: void 0 });
+}
 async function foreignRotations(app) {
   const chain = await ownChain(app);
   if (!chain) return [];
@@ -21974,7 +22102,7 @@ async function alertForeignRotations(app) {
 function friendVerdict(st, peer2) {
   const entries = st.friendSigners?.[peer2] ?? [];
   const trusted = (did) => did === st.selfDid || st.devices[did] !== void 0 && st.devices[did].status !== "excluded" && st.devices[did].status !== "aborted";
-  if (entries.some((e) => trusted(e.did) && (st.contest || e.live))) return { invite: true };
+  if (entries.some((e) => trusted(e.did) && (st.contest || st.ownBranch || e.live))) return { invite: true };
   const dropped = entries.map((e) => st.devices[e.did]).find((d) => d?.status === "excluded");
   const why = entries.some((e) => trusted(e.did)) ? "the friendship doesn't verify now" : dropped ? `made by a device the plan drops (${dropped.why ?? "you dropped it"})` : "made by a device your identity no longer lists";
   return { invite: (st.inviteOptIn ?? []).includes(peer2), why };
@@ -22168,8 +22296,17 @@ async function begin(app, opts) {
     await app.connectAndDrain().catch((e) => app.io.err(`p2p: ${e.message}`));
     await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
   } else {
-    await app.connectAndDrain();
+    await app.connectAndDrain().catch(async (e) => {
+      if (!(e instanceof CliError) || e.code !== "device_revoked") throw e;
+      await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+      await dropUnheldOwnMerges(app);
+      if (!await ownBranchFork(app)) {
+        throw new CliError("device_revoked", "the relays refuse this device, and no branch of your identity that leaves another device of yours out lists it as a key holder: it can't rotate (it may have been revoked)");
+      }
+      app.io.err(`p2p: ${e.message}`);
+    });
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true, setAside: { unconnected: true } });
+    await dropUnheldOwnMerges(app);
   }
   const view = await app.ownView();
   const foreign = await foreignRotations(app);
@@ -22185,13 +22322,21 @@ async function begin(app, opts) {
     if (view.rotations.length > 0 && foreign.length === 0) throw new CliError("usage", "that rotation is this device's own: there is nothing to contest");
     const alerted = (await app.state.get("rotationAlerts") ?? []).length > 0;
     if (foreign.length === 0 && !alerted) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
-  } else if (!view.keyholders.includes(app.did)) {
+  }
+  const own = view.rotations.length > 0 ? void 0 : await ownBranchTip(app, opts.branch);
+  if (!opts.contest && !(own ?? view).keyholders.includes(app.did)) {
     throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity");
   }
-  const base = view.rotations.length > 0 ? await preRotationHead(app) : view.head;
+  let ownBranch;
+  if (own) {
+    const f = ownBranchFinalFields(app, await ownChain(app), own, new Set((await app.store.getPublishLog()).published));
+    ownBranch = { tip: own.hash, name: f.name, relays: f.relays };
+    if (f.extra.length > 0) app.warn(`your own branch lists relays no version this device published added (${f.extra.join(", ")}): your old identity's final version leaves them out`);
+  }
+  const base = view.rotations.length > 0 ? await preRotationHead(app) : own ?? view.head;
   if (!base) throw new CliError("refresh_failed", "couldn't find your identity's last version before the rotation");
-  const baseDevices = view.rotations.length > 0 ? base.devices : view.devices;
-  const baseKeyholders = view.rotations.length > 0 ? base.keyholders : view.keyholders;
+  const baseDevices = view.rotations.length > 0 || own ? base.devices : view.devices;
+  const baseKeyholders = view.rotations.length > 0 || own ? base.keyholders : view.keyholders;
   const exclude = [...new Set(opts.exclude ?? [])];
   for (const d of exclude) if (!baseDevices.includes(d) || d === app.did) throw new CliError("usage", `--exclude ${d}: not one of your other devices`);
   const others = baseDevices.filter((d) => d !== app.did);
@@ -22252,6 +22397,7 @@ async function begin(app, opts) {
     step: "created",
     accepted: false,
     ...opts.contest ? { contest: true } : {},
+    ...ownBranch ? { ownBranch } : {},
     keepKeyholders: !!opts.keepKeyholders,
     devices: Object.fromEntries(
       others.map((d) => {
@@ -22350,7 +22496,9 @@ async function revokeExcluded(app, st) {
   if (excluded.length === 0) return;
   const view = await app.ownView();
   const listed = excluded.filter((d) => view.devices.includes(d));
-  if (listed.length > 0 && view.rotations.length === 0) {
+  if (listed.length > 0 && view.rotations.length === 0 && st.ownBranch) {
+    app.warn(`couldn't revoke ${listed.join(", ")} on your old identity before the rotation (it is forked by a version that leaves this device out); the old identity's final version revokes every device`);
+  } else if (listed.length > 0 && view.rotations.length === 0) {
     try {
       await app.publishNext((p) => {
         p.devices = p.devices.filter((d) => !listed.includes(d));
@@ -22523,6 +22671,7 @@ async function publishFinal(app, st) {
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
   const mine = chain.allTips().find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
+  if (st.ownBranch && !contesting) return publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
   if (mine) {
     const r2 = await app.publishDoc(mine.jws, mine.relays);
     return { ver: mine.ver, ...r2 };
@@ -22539,12 +22688,84 @@ async function publishFinal(app, st) {
   const doc = createIdentityDoc(ik, { ver: base.ver + 1, prev: base.hash, name: base.name, relays: [...base.relays], devices: [], keyholders: [], by: app.did, rotation: st.statement });
   await addIdentityVersion(app.store, doc);
   await app.store.recordPublished({ hash: jwsHash(doc) });
-  const r = await app.publishDoc(doc, [.../* @__PURE__ */ new Set([...base.relays, ...app.relays])]);
+  const targets = [.../* @__PURE__ */ new Set([...base.relays, ...app.relays])];
+  const r = await app.publishDoc(doc, targets);
   if (r.ok.length === 0) {
     if (!contesting) throw new CliError("not_published", `no relay took your old identity's final version (${r.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
     app.warn("no relay took your competing final version (they already refuse your old devices); your friends still see the conflict from your new identity's invites");
   }
   return { ver: base.ver + 1, ...r };
+}
+async function publishOwnBranchFinal(app, ik, st, own, pinned) {
+  const targets = [.../* @__PURE__ */ new Set([...own.relays, ...app.relays])];
+  let final = pinned ?? await finalOnOwnBranch(app, ik, st, own);
+  let r = await publishFinalDoc(app, ik, final.jws, targets);
+  if (r.ok.length === 0 && r.failed.some((f) => f.code === "forbidden" || f.code === "identity-gap")) {
+    await discardOwnFinal(app, final);
+    await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+    final = await finalOnOwnBranch(app, ik, st, own);
+    r = await publishFinalDoc(app, ik, final.jws, targets);
+  }
+  if (r.ok.length === 0) throw new CliError("not_published", `no relay took your old identity's final version (${r.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
+  return { ver: final.ver, ...r };
+}
+async function discardOwnFinal(app, final) {
+  const chain = await ownChain(app);
+  const log = new Set((await app.store.getPublishLog()).published);
+  const drop = [final.hash];
+  const stack = [final.prev, final.merge];
+  while (stack.length > 0) {
+    const h = stack.pop();
+    const v = h ? chain?.get(h) : void 0;
+    if (!v || v.merge === void 0 || v.devices.length > 0 || v.keyholders.length > 0 || v.by !== app.did || !log.has(v.hash) || drop.includes(v.hash)) continue;
+    drop.push(v.hash);
+    stack.push(v.prev, v.merge);
+  }
+  await dropVersions(app, drop);
+}
+async function finalOnOwnBranch(app, ik, st, own) {
+  const plainTips = async () => ((await ownChain(app))?.tips() ?? []).filter((t2) => t2.rotation === void 0);
+  let tips = await plainTips();
+  for (let i = 0; tips.length > 1; i++) {
+    if (i >= 64) throw new CliError("internal", "couldn't merge the branches of your identity document");
+    const { prev, other } = mergePrevTip(tips[0], tips[1]);
+    const m = createIdentityDoc(ik, { ver: Math.max(prev.ver, other.ver) + 1, prev: prev.hash, merge: other.hash, name: own.name, relays: [...own.relays], devices: [], keyholders: [], by: app.did });
+    if ((await addIdentityVersion(app.store, m)).status === "gap") throw new CliError("internal", "the merge does not chain onto the held tips");
+    await app.store.recordPublished({ hash: jwsHash(m) });
+    tips = await plainTips();
+  }
+  const base = tips[0];
+  if (!base) throw new CliError("refresh_failed", "couldn't find your identity's last version before the rotation");
+  const doc = createIdentityDoc(ik, { ver: base.ver + 1, prev: base.hash, name: own.name, relays: [...own.relays], devices: [], keyholders: [], by: app.did, rotation: st.statement });
+  const added = await addIdentityVersion(app.store, doc);
+  if (added.status === "gap") throw new CliError("internal", "the final version does not chain onto the held tips");
+  await app.store.recordPublished({ hash: jwsHash(doc) });
+  return added.doc;
+}
+async function publishFinalDoc(app, ik, doc, relays) {
+  const r = await app.publishDoc(doc, relays);
+  const refused = r.failed.filter((f) => f.code === "auth_failed");
+  if (refused.length === 0) return r;
+  const prev = (await ownChain(app))?.get(jwsHash(doc))?.prev;
+  const history = prev ? await app.ownHistory(prev) : [];
+  const keys = generateDeviceKeysV3(ik.userId);
+  const cert = createDeviceCert(ik, { signingPublicKey: keys.signingPublicKey, agreementPublicKey: keys.agreementPublicKey, label: "rotation" }, { ttlSec: 3600 });
+  const ok = [...r.ok];
+  const failed = r.failed.filter((f) => f.code !== "auth_failed");
+  for (const { relay } of refused) {
+    const conn = new RelayConnection(relay, app.transport(relay), { auth: { cert, signingSecretKey: keys.signingSecretKey }, allowRestricted: true, timeoutMs: app.tun.connectTimeoutMs });
+    try {
+      await conn.open();
+      const code2 = await publishOver(conn, doc, history);
+      if (code2 === "ok") ok.push(relay);
+      else failed.push({ relay, code: code2 });
+    } catch (e) {
+      failed.push({ relay, code: e.code ?? "network" });
+    } finally {
+      conn.close();
+    }
+  }
+  return { ok, failed };
 }
 async function syncCircle(dst, src, cid) {
   const exp = await exportCircle(src, cid);
@@ -27501,13 +27722,24 @@ var init_app = __esm({
        * Network I/O for core's refreshIdentity (§5.6), per relay so core can cap
        * each relay's answer on its own: `tips` and the `chain` walk
        * (`/v3/identity/<id>/chain?to=&n=`) on every listed relay (at most 5).
+       *
+       * #78: a relay that couldn't be reached (an error or a timeout) is left out of the answer, and when none
+       * of the relays asked answered the call fails, so core counts it as a relay that didn't answer (core asks
+       * one relay per call), never as one that answered "nothing": its silence doesn't make up a majority that
+       * clears pending heads or counts as fresh, and a relay is never named as forging over a gap the silent
+       * one wasn't really asked about.
        */
       fetcher() {
         const t2 = this.tun.connectTimeoutMs;
         const perRelay = async (relays, get) => {
           const list = [...new Set(relays)].slice(0, 5);
-          const answers = await Promise.all(list.map((r) => get(r).catch(() => [])));
-          return Object.fromEntries(list.map((r, i) => [r, answers[i]]));
+          const answers = await Promise.allSettled(list.map((r) => get(r)));
+          const ok = list.flatMap((r, i) => {
+            const a = answers[i];
+            return a.status === "fulfilled" ? [[r, a.value]] : [];
+          });
+          if (list.length > 0 && ok.length === 0) throw answers[0].reason;
+          return Object.fromEntries(ok);
         };
         return {
           tips: (userId, relays) => perRelay(relays, (r) => fetchTips(this.transport(r), userId, t2, this.progress, this.guardedLookup(r))),
@@ -27533,8 +27765,10 @@ var init_app = __esm({
           if (opts.strict) throw new CliError("refresh_failed", `no relays to refresh ${userId} from`);
           return held2;
         }
-        const refreshFrom = (rs) => step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => refreshIdentity(this.store, userId, this.fetcher(), { relays: rs }));
+        const own = userId === this.keys?.userId;
+        const refreshFrom = (rs) => step(this.progress, `refreshing ${userId}'s identity document from ${rs.join(", ")}`, () => refreshIdentity(this.store, userId, this.fetcher(), { relays: rs, own }));
         let v;
+        let named = [];
         try {
           v = await refreshFrom(list);
         } catch (e) {
@@ -27542,9 +27776,10 @@ var init_app = __esm({
           if (opts.strict) {
             const unconnected = unconnectedRelaysOf(e);
             const versions = unconnectedVersionsOf(e);
-            const own = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
-            if (!own) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
-            v = own;
+            const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
+            if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
+            v = fb;
+            named = unconnected;
           } else {
             if (e.reason === "chain-broken" && held2 && !opts.quiet) {
               this.warn(`${await this.addressOf(userId)}'s newest identity document doesn't connect to the history held here (§2.5 history gap); keeping the held one`);
@@ -27557,10 +27792,12 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const own = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-          if (!own) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
-          v = own;
+          const fb = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
+          named = v.unconnectedRelays ?? [];
+          v = fb;
         }
+        if (opts.strict && own) await this.ownPendingGuard(userId, list, v, named, opts.setAside);
         const now = Date.now();
         const last = (await this.state.get("fetched"))?.[userId];
         if (last === void 0 || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: void 0 }));
@@ -27605,8 +27842,7 @@ var init_app = __esm({
        *    none), never one whose genuine gap the walk merely didn't reach. And the confirmed head must not be
        *    below any version the full refresh left unconnected, unless every relay that sent that version is set
        *    aside: a lagging kept relay can't "confirm" a stale head while another relay serves a newer version.
-       *    (Pending heads stored by earlier refreshes can't be traced to a relay; a relay still serving a newer
-       *    version shows it in this refresh.)
+       *    (A newer version an earlier refresh stored as a pending head, from a relay silent now: ownPendingGuard.)
        * Returns the view, or undefined when this doesn't apply (the caller then refuses as before).
        */
       async ownStrictFallback(userId, list, unconnected, versions, setAside2, refreshFrom) {
@@ -27631,6 +27867,48 @@ var init_app = __esm({
           );
         }
         return v;
+      }
+      /**
+       * #78: a strict refresh of our own identity skips relays that don't answer, so a lagging relay could
+       * "confirm" a stale head while the up-to-date one times out. This device may already hold the newer
+       * version, as a pending head an earlier, incomplete refresh recorded with the relays that sent it. Refuses
+       * when a pending head above the confirmed head was sent by a relay that:
+       *  - is still listed and isn't set aside by this edit (`setAside.relays`: the relays it removes), so
+       *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head another relay
+       *    sent too still holds the edit up while that one is silent (#78 re-review: removing a relay that
+       *    replayed an honest relay's version, and now withholds it, mustn't fork against it); silent relays
+       *    that hold each other up are removed together (`relays remove` takes several);
+       *  - wasn't named as serving versions that don't connect (a forged chain's, core's unconnectedRelays);
+       *  - didn't answer this refresh: a relay that answered gave its current tips, so what it still serves is
+       *    already in this refresh (connected, or the refresh failed or was cut short), and what it no longer
+       *    serves doesn't hold the owner up.
+       * So one relay can hold an edit up only while it stays silent, and only with a version signed with the
+       * identity key above the head the other relays confirm (a genuine newer version, which building below would
+       * fork, or a thief's); removing that relay always goes ahead. A pending head stored without its senders
+       * (older builds), expired, or not a valid version of this identity never holds an edit up.
+       */
+      async ownPendingGuard(userId, list, v, named, setAside2) {
+        const stored2 = await this.store.getIdentity(userId);
+        if (!stored2) return;
+        const heard = new Set(v.answeredRelays);
+        const skip = /* @__PURE__ */ new Set([...setAside2?.relays ?? [], ...named]);
+        const silent = /* @__PURE__ */ new Set();
+        let newest = 0;
+        for (const p of pendingHeadSenders(stored2)) {
+          if (p.ver <= v.head.ver) continue;
+          const by = p.relays.filter((r) => list.includes(r) && !skip.has(r) && !heard.has(r));
+          if (by.length === 0) continue;
+          for (const r of by) silent.add(r);
+          newest = Math.max(newest, p.ver);
+        }
+        if (silent.size === 0) return;
+        const rs = [...silent];
+        const one = rs.length === 1;
+        throw new CliError(
+          "refresh_failed",
+          `${rs.join(", ")} didn't answer, and ${one ? "it" : "they"} earlier sent a newer version of your identity (ver ${newest}) than the relays that answered confirm (ver ${v.head.ver}): not publishing on a possibly stale head. Try again when ${one ? "it answers" : "they answer"}; if ${one ? "that relay is" : "those relays are"} gone for good, or no device of yours published that version, remove ${one ? "it" : "them"} (\`p2p relays remove ${one ? "<url>" : "<url> <url>"}\`)`,
+          { heldBy: rs, pendingVer: newest, confirmedVer: v.head.ver }
+        );
       }
       /** Relays a (bundled, unverified) identity document lists: only a hint for where to refresh from. */
       static relaysOf(docJws) {
@@ -27818,6 +28096,10 @@ var init_app = __esm({
         const devices2 = [...view.devices, ...readd].slice(0, MAX_DEVICES);
         const keyholders = [...view.keyholders, ...unionKeyholders.filter((d) => readd.includes(d) && devices2.includes(d))];
         if (!opts.restoring && (!devices2.includes(this.did) || !keyholders.includes(this.did))) {
+          if (merges.length > 0) {
+            const drop = new Set(merges.map((m) => peekIdentityDoc(m).hash));
+            await this.store.updateIdentity(this.userId, (cur) => cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(peekIdentityDoc(v).hash)) }, result: void 0 } : { result: void 0 });
+          }
           throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity: it can't publish (only identity rotation, §2.8, replaces a lost key holder's key; run it from a listed key holder)");
         }
         const p = {
@@ -28400,8 +28682,14 @@ var MUTATING_TOOLS = /* @__PURE__ */ new Set([
   "p2p_link",
   "p2p_release"
 ]);
-var MUTATING_ONE = /* @__PURE__ */ new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "petname", "link", "release", "history"]);
+var MUTATING_ONE = /* @__PURE__ */ new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "unblock", "petname", "link", "release", "tui", "history"]);
 var MUTATING_TWO = /* @__PURE__ */ new Set([
+  "trust add",
+  "trust remove",
+  "ix import",
+  "ix resolve",
+  "extensions enable",
+  "extensions disable",
   "held approve",
   "held decline",
   "relays add",
@@ -28414,19 +28702,27 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "circle transfer",
   "circle policy",
   "circle default",
+  "circle hold",
   "devices revoke",
   "session roster",
   "identity republish",
+  "identity rotate",
+  "identity follow",
+  "identity dispute",
   "profile set",
   "proof add",
+  "invites revoke",
+  "codex install",
   "codex release",
   "codex decline",
-  "codex install",
-  // Who sees a project's sessions (projects.ts): the person's alone.
+  "ix note",
+  "ix subgraph",
+  "ix impact",
+  "ix config",
   "project share",
   "project private"
 ]);
-var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
+var MUTATING_FIRST = /* @__PURE__ */ new Set(["status", "receipt", "own-agents"]);
 var SEND_VALUE_OPTIONS = /* @__PURE__ */ new Set(["--to", "--project-dir"]);
 var NOT_PLAIN = "$`{}*?[]~\\'\"<>\r";
 function isPlainWord(raw) {
@@ -28883,6 +29179,8 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
       const two = `${plain[i]} ${plain[i + 1] ?? ""}`;
       if (MUTATING_TWO.has(two))
         return two;
+      if (two === "ix footprint" && after2.some((w) => /^--(publish|names|force)(=|$)/.test(w)))
+        return "ix footprint --publish";
     }
     if (MUTATING_FIRST.has(plain[0] ?? ""))
       return plain[0];
@@ -38846,6 +39144,34 @@ async function refreshContacts(app) {
   await retryRotationJoins(app).catch(() => []);
   await app.adoptCertFromDoc();
 }
+function renewalDue(head, now) {
+  const certSoon = (head.certs ?? []).some((c) => {
+    try {
+      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp;
+      return certExpiresWithin({ exp }, 30 * 86400, now);
+    } catch {
+      return false;
+    }
+  });
+  return certSoon || head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
+}
+async function renewalHeld(app, e) {
+  const heldBy = e.extra.heldBy.filter((r) => typeof r === "string");
+  const v = await app.ownView();
+  const now = nowSec();
+  const daysLeft2 = Math.max(0, Math.floor((v.head.exp - now) / 86400));
+  const fix = `try again when ${heldBy.length === 1 ? "it answers" : "they answer"}, or remove ${heldBy.length === 1 ? "it" : "them"} (\`p2p relays remove ${heldBy.join(" ")}\`) if gone for good or no device of yours published that version; \`p2p doctor\` shows the details`;
+  app.warn(`can't renew your identity document (expires in ${daysLeft2} days): ${heldBy.join(", ")} didn't answer and earlier sent a newer version of it; ${fix}`);
+  if (!renewalDue(v.head, now)) return;
+  await app.state.addEvents([
+    makeEvent(`renewal-held|${v.head.hash}|${daysLeft2}`, "p2p.alert", Date.now(), {
+      from: { userId: app.userId, did: app.did, address: await app.addressOf(app.userId), self: true },
+      what: "renewal-held",
+      daysLeft: daysLeft2,
+      heldBy
+    })
+  ]);
+}
 async function maintain(app) {
   if (!app.isKeyholder) {
     await app.adoptCertFromDoc();
@@ -38854,22 +39180,16 @@ async function maintain(app) {
   try {
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true });
   } catch (e) {
-    if (e instanceof CliError) return;
+    if (e instanceof CliError) {
+      if (Array.isArray(e.extra.heldBy)) await renewalHeld(app, e).catch(() => void 0);
+      return;
+    }
     throw e;
   }
   const v = await app.ownView();
   if (!v.devices.includes(app.did) || !v.keyholders.includes(app.did)) return;
   const now = nowSec();
-  const certSoon = (v.head.certs ?? []).some((c) => {
-    try {
-      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp;
-      return certExpiresWithin({ exp }, 30 * 86400, now);
-    } catch {
-      return false;
-    }
-  });
-  const docSoon = v.head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
-  if ((docSoon || certSoon) && mayRepublish(app.did, v.head, now)) {
+  if (renewalDue(v.head, now) && mayRepublish(app.did, v.head, now)) {
     await app.publishNext(() => {
     }).catch((e) => {
       if (!(e instanceof CliError)) throw e;
@@ -39196,6 +39516,31 @@ async function versionCheck(c, app, o, ms) {
 async function circlesOf(app, ms) {
   return (await bounded(listCircles(app), ms)).value ?? [];
 }
+async function pendingHeadsCheck(c, app, view, reports, ms) {
+  const stored2 = (await bounded(app.store.getIdentity(app.userId), ms)).value;
+  if (!stored2) return;
+  const above = pendingHeadSenders(stored2).filter((p) => p.ver > view.head.ver && p.relays.some((r) => view.relays.includes(r)));
+  if (above.length === 0) return;
+  const newest = Math.max(...above.map((p) => p.ver));
+  const senders = [...new Set(above.flatMap((p) => p.relays.filter((r) => view.relays.includes(r))))];
+  const down = senders.filter((r) => reports.find((x) => x.relay === r)?.reachable === false);
+  const what = `this device holds version ${newest} of your identity, newer than its head (version ${view.head.ver}), from ${senders.join(", ")}`;
+  if (down.length === 0 && senders.some((r) => !reports.some((x) => x.relay === r))) {
+    c.add("pending-heads", "unknown", "newer versions of your identity", `${what}; not probed here`, "run `p2p doctor` again; if one of them stays unreachable, edits and renewals are refused until it answers or you remove it (`p2p relays remove <url>`)");
+    return;
+  }
+  if (down.length === 0) {
+    c.add("pending-heads", "ok", "newer versions of your identity", `${what}; ${senders.length === 1 ? "it answers" : "they answer"}, so your next edit or renewal fetches it`);
+    return;
+  }
+  c.add(
+    "pending-heads",
+    "fail",
+    "newer versions of your identity",
+    `${what}; ${down.join(", ")} ${down.length === 1 ? "doesn't" : "don't"} answer, so edits and renewing your identity document are refused until ${down.length === 1 ? "it answers" : "they answer"}`,
+    `wait for ${down.length === 1 ? "it" : "them"} to come back; if ${down.length === 1 ? "it is" : "they are"} gone for good, or no device of yours published that version: \`p2p relays remove ${down.join(" ")}\``
+  );
+}
 async function deviceChecks(c, app, o, ms, reports) {
   const view = (await bounded(app.view(app.userId), ms)).value;
   const name2 = view?.head.name ?? app.self?.name ?? "?";
@@ -39213,6 +39558,7 @@ async function deviceChecks(c, app, o, ms, reports) {
     else c.add("document", "ok", "identity document", `version ${view.head.ver}, fresh (expires in ${days(left)})`);
     if (view.forked) c.add("document-fork", "fail", "identity document history", "forked (two versions claim the same place)", "run `p2p identity republish` on a key holder: it merges the branches");
     if (view.rotations.length > 0) c.add("document-rotated", "fail", "identity", "this identity moved to a new key", "follow it: `p2p held` shows the move (approve it there), or re-link with `p2p link join <code> --rotated`");
+    await pendingHeadsCheck(c, app, view, reports, ms);
   }
   relayChecks(c, app, reports, view ? { hash: view.head.hash, ver: view.head.ver } : void 0);
   clockCheck(c, reports);
@@ -42019,7 +42365,7 @@ Friendships aren't in the phrase: invite your friends again.`
     })
   );
   for (const verb of ["add", "remove"]) {
-    relays.command(`${verb} <url>`).description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove a relay (one must stay)").option("--json", "JSON output").action(
+    relays.command(verb === "add" ? "add <url>" : "remove <url...>").description(verb === "add" ? "Add a relay (1-5 in all)" : "Remove one or more relays, in one new version (one must stay)").option("--json", "JSON output").action(
       run(async (app, url) => {
         const r = verb === "add" ? await ops.relaysAdd(app, url) : await ops.relaysRemove(app, url);
         const failed = r.failed.length ? `; not yet on ${r.failed.map((f) => f.relay).join(", ")} (retried later)` : "";
@@ -42035,7 +42381,7 @@ Friendships aren't in the phrase: invite your friends again.`
       return { json: r, human: `Version ${r.ver} is on ${plural(r.ok.length, "relay")}: ${r.ok.join(", ")}.` };
     })
   );
-  ident.command("rotate").description("Move to a new identity key: the remedy for a lost or stolen key-holding device (§2.8)").option("--plan", "Make the new key and show the plan (its fingerprint, which devices would follow); publish nothing").option("--resume", "Accept a plan made with --plan, or finish a rotation that was interrupted").option("--cancel", "Drop a plan that wasn't accepted (nothing was published)").option("--exclude <did>", "A device that must NOT follow (the lost or stolen one): revoked first; repeatable", collect).option("--keep <did>", "Let a device the plan dropped by default follow anyway (added by a version you didn't publish, or not seen lately); repeatable", collect).option("--invite <user>", "Invite a friend the plan leaves out by default (a friendship made by a device it drops, or one that doesn't verify now); repeatable", collect).option("--keep-keyholders", "Devices that held the old identity key also get the new one (default: they follow as ordinary devices)").option("--wait <seconds>", "How long to wait for your other devices to follow (default 600, the link code's life)", posInt("--wait")).option("--backup-file [path]", "Save the new key's 24-word backup phrase to a 0600 file (default <home>/backup-phrase-<fingerprint>.txt)").option("--contest", "On a key holder: answer a rotation of your identity this device didn't publish with a competing one, so your friends see a conflict and apply neither").option("--resend", "After a rotation: send the new identity's invite again to the friends it didn't reach (throttled)").option("-y, --yes", "Accept the plan without asking (scripts)").option("--json", "JSON output").addHelpText(
+  ident.command("rotate").description("Move to a new identity key: the remedy for a lost or stolen key-holding device (§2.8)").option("--plan", "Make the new key and show the plan (its fingerprint, which devices would follow); publish nothing").option("--resume", "Accept a plan made with --plan, or finish a rotation that was interrupted").option("--cancel", "Drop a plan that wasn't accepted (nothing was published)").option("--exclude <did>", "A device that must NOT follow (the lost or stolen one): revoked first; repeatable", collect).option("--keep <did>", "Let a device the plan dropped by default follow anyway (added by a version you didn't publish, or not seen lately); repeatable", collect).option("--invite <user>", "Invite a friend the plan leaves out by default (a friendship made by a device it drops, or one that doesn't verify now); repeatable", collect).option("--keep-keyholders", "Devices that held the old identity key also get the new one (default: they follow as ordinary devices)").option("--wait <seconds>", "How long to wait for your other devices to follow (default 600, the link code's life)", posInt("--wait")).option("--backup-file [path]", "Save the new key's 24-word backup phrase to a 0600 file (default <home>/backup-phrase-<fingerprint>.txt)").option("--branch <hash>", "Your identity is forked by a version that leaves this device out and more than one branch still lists it: the one that is yours (its jwsHash, as the error lists them)").option("--contest", "On a key holder: answer a rotation of your identity this device didn't publish with a competing one, so your friends see a conflict and apply neither").option("--resend", "After a rotation: send the new identity's invite again to the friends it didn't reach (throttled)").option("-y, --yes", "Accept the plan without asking (scripts)").option("--json", "JSON output").addHelpText(
     "after",
     [
       "",
@@ -42071,7 +42417,7 @@ Friendships aren't in the phrase: invite your friends again.`
             human: `Sent your new identity's invite to ${plural(r2.sent, "friend")}${r2.failed.length ? `; ${r2.failed.length} still not reached` : ""}${r2.throttled ? ` (${r2.remaining} wait for the relays' hourly limit: run it again later)` : ""}.`
           };
         }
-        const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, contest: o.contest, ...backup2 };
+        const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, branch: o.branch, contest: o.contest, ...backup2 };
         if (o.plan) {
           const plan = await ops.rotatePlan(app, opts);
           return { json: { plan: true, ...plan }, human: `${formatRotationPlan(plan)}

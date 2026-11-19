@@ -14,6 +14,9 @@ import {
   mergeMode,
   modeFromTranscript,
   mutatingP2PVerb,
+  MUTATING_FIRST,
+  MUTATING_ONE,
+  MUTATING_TWO,
   indirectP2PRun,
   nestedTooDeep,
   TOO_COMPLEX,
@@ -285,6 +288,22 @@ describe("issue #69: env -S, GNU parallel, aliases and functions (parity with th
       expect([v.cmd, indirectP2PRun(v.cmd)]).toEqual([v.cmd, v.reason]);
       // Wired into the PreToolUse guard: refused. (Whole-line answers, refused or not, are guard-parity.vectors.ts.)
       if (v.reason) expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, true]);
+    }
+  });
+
+  it("holds exactly the mod's verb lists and names the same verb for each command (vectors shared with the mod)", () => {
+    const file = readFileSync(new URL("../../../../mods/claude/peer2peer/tests/guard-verbs.vectors.ts", import.meta.url), "utf8");
+    const g = JSON.parse(file.slice(file.indexOf("= {") + 2)) as { one: string[]; two: string[]; first: string[]; vectors: { cmd: string; verb: string | null }[] };
+    // A verb added to this guard and not the mod's (or the other way round) fails here and in the mod's suite.
+    expect([...MUTATING_ONE].sort()).toEqual([...g.one].sort());
+    expect([...MUTATING_TWO].sort()).toEqual([...g.two].sort());
+    expect([...MUTATING_FIRST].sort()).toEqual([...g.first].sort());
+    // Every listed verb has vectors, refused by the PreToolUse guard too.
+    for (const v of [...g.one, ...g.two, ...g.first]) expect([v, g.vectors.some((x) => x.verb === v)]).toEqual([v, true]);
+    expect(g.vectors.length).toBeGreaterThan(600);
+    for (const v of g.vectors) {
+      expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb]);
+      expect([v.cmd, guard("Bash", { command: v.cmd }, [], "s1") !== null]).toEqual([v.cmd, v.verb !== null]);
     }
   });
 

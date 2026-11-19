@@ -26,6 +26,9 @@ import {
   isPeer2PeerHelp,
   indirectP2PRun,
   mutatingP2PVerb,
+  MUTATING_FIRST,
+  MUTATING_ONE,
+  MUTATING_TWO,
   nestedTooDeep,
   TOO_COMPLEX,
   WORK_BUDGET,
@@ -46,6 +49,7 @@ import { ANA_ID, BEN, BEN_ID, CIRCLE, growth } from './world'
 import { SEND_VECTORS as sendVectors } from './send-from-session.vectors'
 import { INDIRECT_VECTORS as indirectVectors } from './indirect-run.vectors'
 import { GUARD_VECTORS as guardVectors } from './guard-parity.vectors'
+import { GUARD_VERBS as guardVerbs } from './guard-verbs.vectors'
 
 describe('H1: who may start work', () => {
   test('only default and plan ask; every other mode, and an unknown one, auto-approves', () => {
@@ -796,6 +800,20 @@ describe('issue #69: env -S, GNU parallel, aliases and functions', () => {
       expect([v.cmd, indirectP2PRun(v.cmd)]).toEqual([v.cmd, v.reason])
       // Wired into the Bash guard: refused as a command it can't check.
       if (v.reason) expect([v.cmd, uncheckableShell(v.cmd) !== null]).toEqual([v.cmd, true])
+    }
+  })
+
+  test('the verb lists are the Codex bridge\'s, and each command names the same verb (shared vectors)', () => {
+    // A verb added to this guard and not the bridge's (or the other way round) fails here and in the bridge's suite.
+    expect([...MUTATING_ONE].sort()).toEqual([...guardVerbs.one].sort())
+    expect([...MUTATING_TWO].sort()).toEqual([...guardVerbs.two].sort())
+    expect([...MUTATING_FIRST].sort()).toEqual([...guardVerbs.first].sort())
+    for (const v of [...guardVerbs.one, ...guardVerbs.two, ...guardVerbs.first]) expect([v, guardVerbs.vectors.some(x => x.verb === v)]).toEqual([v, true])
+    expect(guardVerbs.vectors.length).toBeGreaterThan(600)
+    for (const v of guardVerbs.vectors) {
+      expect([v.cmd, mutatingP2PVerb(v.cmd)]).toEqual([v.cmd, v.verb])
+      // Wired into the Bash guard: refused (or, for a read, not).
+      expect([v.cmd, (uncheckableShell(v.cmd) ?? mutatingP2PVerb(v.cmd)) !== null]).toEqual([v.cmd, v.verb !== null])
     }
   })
 

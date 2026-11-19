@@ -5,7 +5,7 @@
 // so a device the owner revoked never ends up trusted.
 
 import { describe, expect, it } from "vitest";
-import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, MAX_SIDE_ROOTS, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, MAX_SIDE_ROOTS, pendingHeadSenders, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
 import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { makeUser, NOW, RELAY, RELAY2 } from "./fixtures.js";
@@ -268,6 +268,8 @@ describe("#79 re-review: versions left out of the result, links checked below a 
       const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
       expect([lowest, v.incomplete, v.devices.includes(stolen.did), v.devices.includes(t.did)]).toEqual([lowest, true, false, false]);
       expect(await lastRefreshed(store, u.userId)).toBeUndefined();
+      // The held-back head is a pending head with the relay that sent it recorded (#78).
+      expect(pendingHeadSenders((await store.getIdentity(u.userId))!, { now: NOW })).toEqual([{ ver: 8, hash: head.hash, relays: [RELAY] }]);
       const stored = await getIdentityView(store, u.userId, { now: NOW });
       expect([stored?.devices.includes(stolen.did), stored?.devices.includes(t.did)]).toEqual([false, false]);
     }

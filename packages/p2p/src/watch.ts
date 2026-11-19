@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { certExpiresWithin, mayRepublish, nowSec } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
 import { CLOSE_GRACE_MS, REPUBLISH_DOC_WITHIN_SEC } from "./app.js";
-import { receiving } from "./inbound.js";
+import { makeEvent, receiving } from "./inbound.js";
 import { answerDeferredWants, renewOpenJoinCaps } from "./circle-ops.js";
 import { checkSid, expireSubs } from "./sessions.js";
 import type { EventRec } from "./state.js";
@@ -305,6 +305,43 @@ export async function refreshContacts(app: App): Promise<void> {
   await app.adoptCertFromDoc();
 }
 
+/** Whether the head's document or one of its device certificates is due for renewal. */
+function renewalDue(head: { exp: number; certs?: string[] }, now: number): boolean {
+  const certSoon = (head.certs ?? []).some((c) => {
+    try {
+      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp as number;
+      return certExpiresWithin({ exp }, 30 * 86_400, now);
+    } catch {
+      return false;
+    }
+  });
+  return certSoon || head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
+}
+
+/**
+ * #78 review: the strict refresh before a renewal was refused because a relay that doesn't answer sent a newer
+ * version of our identity earlier (App.ownPendingGuard). Never silent: a warning on every run, and once the
+ * renewal is due, a `p2p.alert` (`what: "renewal-held"`) for the mod's status line, raised again each day
+ * left, so it escalates as the document nears expiry instead of letting it lapse unnoticed.
+ */
+async function renewalHeld(app: App, e: CliError): Promise<void> {
+  const heldBy = (e.extra.heldBy as unknown[]).filter((r): r is string => typeof r === "string");
+  const v = await app.ownView();
+  const now = nowSec();
+  const daysLeft = Math.max(0, Math.floor((v.head.exp - now) / 86_400));
+  const fix = `try again when ${heldBy.length === 1 ? "it answers" : "they answer"}, or remove ${heldBy.length === 1 ? "it" : "them"} (\`p2p relays remove ${heldBy.join(" ")}\`) if gone for good or no device of yours published that version; \`p2p doctor\` shows the details`;
+  app.warn(`can't renew your identity document (expires in ${daysLeft} days): ${heldBy.join(", ")} didn't answer and earlier sent a newer version of it; ${fix}`);
+  if (!renewalDue(v.head, now)) return;
+  await app.state.addEvents([
+    makeEvent(`renewal-held|${v.head.hash}|${daysLeft}`, "p2p.alert", Date.now(), {
+      from: { userId: app.userId, did: app.did, address: await app.addressOf(app.userId), self: true },
+      what: "renewal-held",
+      daysLeft,
+      heldBy,
+    }),
+  ]);
+}
+
 /** Key holders keep the document and certificates fresh (§2.3 renewal, §2.5 re-publish, single writer). */
 export async function maintain(app: App): Promise<void> {
   if (!app.isKeyholder) {
@@ -315,22 +352,16 @@ export async function maintain(app: App): Promise<void> {
   try {
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true });
   } catch (e) {
-    if (e instanceof CliError) return;
+    if (e instanceof CliError) {
+      if (Array.isArray(e.extra.heldBy)) await renewalHeld(app, e).catch(() => undefined);
+      return;
+    }
     throw e;
   }
   const v = await app.ownView();
   if (!v.devices.includes(app.did) || !v.keyholders.includes(app.did)) return;
   const now = nowSec();
-  const certSoon = (v.head.certs ?? []).some((c) => {
-    try {
-      const exp = JSON.parse(Buffer.from(c.split(".")[1], "base64url").toString()).exp as number;
-      return certExpiresWithin({ exp }, 30 * 86_400, now);
-    } catch {
-      return false;
-    }
-  });
-  const docSoon = v.head.exp - now <= REPUBLISH_DOC_WITHIN_SEC;
-  if ((docSoon || certSoon) && mayRepublish(app.did, v.head, now)) {
+  if (renewalDue(v.head, now) && mayRepublish(app.did, v.head, now)) {
     await app.publishNext(() => {}).catch((e) => {
       if (!(e instanceof CliError)) throw e;
     });
