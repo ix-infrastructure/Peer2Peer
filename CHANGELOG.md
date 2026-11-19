@@ -2,6 +2,13 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **The Codex bridge's agent guard refuses every `p2p` verb the Claude Code mod's refuses.** Its verb lists had fallen behind the mod's, so a Codex agent's shell could run `identity rotate`, `identity follow`, `identity dispute`, `trust add`, `trust remove`, `extensions enable`, `extensions disable`, `invites revoke`, `circle hold`, `unblock`, `tui`, `status`, `ix import`, `ix resolve`, `ix note`, `ix subgraph`, `ix impact`, `ix config` and `ix footprint --publish` without the guard refusing them. The CLI itself refuses some of these inside an agent's session (`trust add`, `identity follow`, `extensions enable` and `unblock` need the person; `status`, `ix note|subgraph|impact` and a footprint publish need the session's front end; `tui` refuses an agent), so for those the bridge's guard was a second check. The others (`identity rotate --yes`, `identity dispute`, `trust remove`, `extensions disable`, `invites revoke`, `circle hold`, `ix import`, `ix resolve`, `ix config`) had no other check against the agent. Both guards now hold the same lists, word for word; the mod also refuses `release` anywhere after the CLI's name, as the bridge already did.
+  - The lists are pinned in `mods/claude/peer2peer/tests/guard-verbs.vectors.ts`, which both test suites read: each guard's lists must equal it, and every verb has command lines (flags before, between and after its words, inside `bash -c` and `sh -c`, behind `nohup`, `nice`, `timeout`, `eval`, `env -S` and `npx`) that both must refuse with the same verb. A verb added to one guard and not the other fails both suites.
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.

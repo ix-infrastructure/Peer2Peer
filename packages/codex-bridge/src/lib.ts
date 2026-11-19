@@ -505,10 +505,31 @@ export const MUTATING_TOOLS = new Set([
   "p2p_release",
 ]);
 
-/** `p2p` verbs that change who reaches this user, or touch its keys (the mod's guard list). */
-// `history`: the person's messages (and `history --clear` deletes them); a session's own come through p2p_history.
-const MUTATING_ONE = new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "petname", "link", "release", "history"]);
-const MUTATING_TWO = new Set([
+// The three lists below are the Claude mod's (hooks/lib.ts), word for word: both are pinned to
+// mods/claude/peer2peer/tests/guard-verbs.vectors.ts, so a verb added to one and not the other fails
+// both suites. Anything either guard refuses, the other refuses.
+/**
+ * `p2p` verbs that change who reaches this user, or touch its keys, refused wherever they sit after the
+ * CLI's name. `history`: the person's messages (and `history --clear` deletes them); a session's own come
+ * through p2p_history. `unblock` lifts a block the person chose. `tui` is the person's full-screen
+ * terminal UI (it accepts, declines, trusts and sends on key presses). `release`: this bridge's held
+ * messages (`codex release`), refused in any position.
+ */
+export const MUTATING_ONE: ReadonlySet<string> = new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "unblock", "petname", "link", "release", "tui", "history"]);
+/**
+ * Pairs of words (flags between them skipped). `identity rotate|follow|dispute` move the person's
+ * identity; `trust add|remove`, `invites revoke` and `circle hold` decide who reaches them; `extensions
+ * enable|disable` decide what code p2p runs with their identity; `ix import|resolve` act on a peer's
+ * note or reference in the person's own Ix graph, `ix note|subgraph|impact` send the person's Ix data
+ * and `ix config` sets how footprints name files. `project share|private`: who sees a project's sessions.
+ */
+export const MUTATING_TWO: ReadonlySet<string> = new Set([
+  "trust add",
+  "trust remove",
+  "ix import",
+  "ix resolve",
+  "extensions enable",
+  "extensions disable",
   "held approve",
   "held decline",
   "relays add",
@@ -521,23 +542,32 @@ const MUTATING_TWO = new Set([
   "circle transfer",
   "circle policy",
   "circle default",
+  "circle hold",
   "devices revoke",
   "session roster",
   "identity republish",
+  "identity rotate",
+  "identity follow",
+  "identity dispute",
   "profile set",
   "proof add",
+  "invites revoke",
+  "codex install",
   "codex release",
   "codex decline",
-  "codex install",
-  // Who sees a project's sessions (projects.ts): the person's alone.
+  "ix note",
+  "ix subgraph",
+  "ix impact",
+  "ix config",
   "project share",
   "project private",
 ]);
 /**
- * Verbs refused only as the subcommand itself (common words in message text): `receipt` reports for a
- * session (its front end's job), `own-agents` decides whether your agent sessions skip the hold (yours).
+ * Verbs refused only as the subcommand itself (common words in message text): `status` posts a
+ * session's status (its front end's job: this bridge posts its own), `receipt` reports for a session
+ * (its front end's job), `own-agents` decides whether your agent sessions skip the hold (yours).
  */
-const MUTATING_FIRST = new Set(["receipt", "own-agents"]);
+export const MUTATING_FIRST: ReadonlySet<string> = new Set(["status", "receipt", "own-agents"]);
 
 
 /** `p2p send` options that take the next word as their value, whatever it is (`--` and `--from-session=x` included). */
@@ -1034,6 +1064,9 @@ export function mutatingP2PVerb(command: string, binNames: readonly string[] = [
     for (let i = 0; i < plain.length; i++) {
       const two = `${plain[i]} ${plain[i + 1] ?? ""}`;
       if (MUTATING_TWO.has(two)) return two;
+      // `ix footprint` alone only computes and prints; publishing (and choosing plain names or skipping the
+      // spacing for a publish) shares with the session's audience: the person's decision (as the mod reads it).
+      if (two === "ix footprint" && after.some((w) => /^--(publish|names|force)(=|$)/.test(w))) return "ix footprint --publish";
     }
     if (MUTATING_FIRST.has(plain[0] ?? "")) return plain[0] as string;
     for (const w of after) if (MUTATING_ONE.has(w)) return w;
