@@ -21649,16 +21649,64 @@ async function preRotationHead(app) {
   }
   return void 0;
 }
-async function ownBranchTip(app) {
+async function ownBranchFork(app) {
   const chain = await ownChain(app);
   if (!chain) return void 0;
   const plain = chain.tips().filter((t2) => t2.rotation === void 0);
-  const mine = plain.filter((t2) => t2.devices.includes(app.did) && t2.keyholders.includes(app.did));
-  if (plain.length < 2 || mine.length === 0 || mine.length === plain.length) return void 0;
-  if (mine.length === 1) return mine[0];
+  const candidates = plain.filter((t2) => t2.devices.includes(app.did) && t2.keyholders.includes(app.did));
+  if (plain.length < 2 || candidates.length === 0 || candidates.length === plain.length) return void 0;
+  return { chain, plain, candidates };
+}
+async function ownBranchTip(app, choice) {
+  const fork = await ownBranchFork(app);
+  if (!fork) {
+    if (choice !== void 0) throw new CliError("usage", "--branch: your identity isn't forked by a version that leaves this device out");
+    return void 0;
+  }
+  const { chain, plain, candidates } = fork;
+  if (choice !== void 0) {
+    const chosen = candidates.find((t2) => t2.hash === choice);
+    if (!chosen) throw new CliError("usage", `--branch ${choice}: not a branch of your identity that lists this device (${candidates.map((t2) => t2.hash).join(", ")})`);
+    return chosen;
+  }
+  if (candidates.length === 1) return candidates[0];
   const log = new Set((await app.store.getPublishLog()).published);
-  const newestOwn = (t2) => Math.max(-1, ...chain.ancestors(t2.hash).filter((v) => log.has(v.hash)).map((v) => v.ver));
-  return [...mine].sort((a, b) => newestOwn(b) - newestOwn(a) || b.ver - a.ver)[0];
+  const trusted = /* @__PURE__ */ new Set([app.did, ...[...log].flatMap((h) => chain.get(h)?.devices ?? [])]);
+  const behind = plain.map((t2) => new Set(chain.ancestors(t2.hash).map((v) => v.hash)));
+  const common = new Set([...behind[0]].filter((h) => behind.every((set) => set.has(h))));
+  const since = (t2) => chain.ancestors(t2.hash).filter((v) => !common.has(v.hash));
+  const plausible = candidates.filter((t2) => since(t2).every((v) => log.has(v.hash) || trusted.has(v.by)));
+  if (plausible.length === 1) return plausible[0];
+  const branches = candidates.map((t2) => ({ hash: t2.hash, ver: t2.ver, by: [...new Set(since(t2).map((v) => v.by))], relays: [...t2.relays] }));
+  throw new CliError(
+    "branch_ambiguous",
+    `your identity is forked by a version that leaves this device out, and more than one branch still lists it: ${branches.map((x) => `${x.hash} (ver ${x.ver}, published by ${x.by.join(", ")}; relays ${x.relays.join(", ")})`).join("; ")}. Someone else holds your identity key. Check which branch is yours, then run \`p2p identity rotate --plan --branch <hash>\``,
+    { branches }
+  );
+}
+function ownBranchFinalFields(app, chain, tip, log) {
+  const mine = chain.ancestors(tip.hash).filter((v) => log.has(v.hash)).pop();
+  const relays = [.../* @__PURE__ */ new Set([...mine?.relays ?? [], ...app.relays])];
+  return { name: mine?.name ?? app.self?.name ?? tip.name, relays, extra: tip.relays.filter((r) => !relays.includes(r)) };
+}
+async function dropUnheldOwnMerges(app) {
+  const chain = await ownChain(app);
+  if (!chain) return;
+  const log = new Set((await app.store.getPublishLog()).published);
+  const stale = chain.tips().filter((t2) => t2.merge !== void 0 && t2.rotation === void 0 && log.has(t2.hash) && !t2.devices.includes(app.did));
+  if (stale.length === 0) return;
+  const view = await app.ownView();
+  const answers = await Promise.all(view.relays.slice(0, 5).map((r) => fetchTips(app.transport(r), app.userId, app.tun.connectTimeoutMs, app.progress).catch(() => [])));
+  const held2 = new Set(answers.flatMap((tips) => tips.map((j) => jwsHash(j))));
+  await dropVersions(
+    app,
+    stale.filter((t2) => !held2.has(t2.hash)).map((t2) => t2.hash)
+  );
+}
+async function dropVersions(app, hashes) {
+  if (hashes.length === 0) return;
+  const drop = new Set(hashes);
+  await app.store.updateIdentity(app.userId, (cur) => cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(jwsHash(v))) }, result: void 0 } : { result: void 0 });
 }
 async function foreignRotations(app) {
   const chain = await ownChain(app);
@@ -21901,10 +21949,14 @@ async function begin(app, opts) {
     await app.connectAndDrain().catch(async (e) => {
       if (!(e instanceof CliError) || e.code !== "device_revoked") throw e;
       await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
-      if (!await ownBranchTip(app)) throw e;
+      await dropUnheldOwnMerges(app);
+      if (!await ownBranchFork(app)) {
+        throw new CliError("device_revoked", "the relays refuse this device, and no branch of your identity that leaves another device of yours out lists it as a key holder: it can't rotate (it may have been revoked)");
+      }
       app.io.err(`p2p: ${e.message}`);
     });
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true, setAside: { unconnected: true } });
+    await dropUnheldOwnMerges(app);
   }
   const view = await app.ownView();
   const foreign = await foreignRotations(app);
@@ -21921,9 +21973,15 @@ async function begin(app, opts) {
     const alerted = (await app.state.get("rotationAlerts") ?? []).length > 0;
     if (foreign.length === 0 && !alerted) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
   }
-  const own = view.rotations.length > 0 ? void 0 : await ownBranchTip(app);
+  const own = view.rotations.length > 0 ? void 0 : await ownBranchTip(app, opts.branch);
   if (!opts.contest && !(own ?? view).keyholders.includes(app.did)) {
     throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity");
+  }
+  let ownBranch;
+  if (own) {
+    const f = ownBranchFinalFields(app, await ownChain(app), own, new Set((await app.store.getPublishLog()).published));
+    ownBranch = { tip: own.hash, name: f.name, relays: f.relays };
+    if (f.extra.length > 0) app.warn(`your own branch lists relays no version this device published added (${f.extra.join(", ")}): your old identity's final version leaves them out`);
   }
   const base = view.rotations.length > 0 ? await preRotationHead(app) : own ?? view.head;
   if (!base) throw new CliError("refresh_failed", "couldn't find your identity's last version before the rotation");
@@ -21989,7 +22047,7 @@ async function begin(app, opts) {
     step: "created",
     accepted: false,
     ...opts.contest ? { contest: true } : {},
-    ...own ? { ownBranch: true } : {},
+    ...ownBranch ? { ownBranch } : {},
     keepKeyholders: !!opts.keepKeyholders,
     devices: Object.fromEntries(
       others.map((d) => {
@@ -22088,7 +22146,7 @@ async function revokeExcluded(app, st) {
   if (excluded.length === 0) return;
   const view = await app.ownView();
   const listed = excluded.filter((d) => view.devices.includes(d));
-  if (listed.length > 0 && view.rotations.length === 0 && await ownBranchTip(app)) {
+  if (listed.length > 0 && view.rotations.length === 0 && st.ownBranch) {
     app.warn(`couldn't revoke ${listed.join(", ")} on your old identity before the rotation (it is forked by a version that leaves this device out); the old identity's final version revokes every device`);
   } else if (listed.length > 0 && view.rotations.length === 0) {
     try {
@@ -22263,18 +22321,12 @@ async function publishFinal(app, st) {
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
   const mine = chain.allTips().find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
+  if (st.ownBranch && !contesting) return publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
   if (mine) {
-    const r2 = contesting ? await app.publishDoc(mine.jws, mine.relays) : await publishFinalDoc(app, ik, mine.jws, mine.relays);
+    const r2 = await app.publishDoc(mine.jws, mine.relays);
     return { ver: mine.ver, ...r2 };
   }
   const plain = tips.filter((t2) => t2.rotation === void 0);
-  const own = plain.length > 1 && !contesting ? await ownBranchTip(app) : void 0;
-  if (own) {
-    const final = await finalOnOwnBranch(app, ik, st, own);
-    const r2 = await publishFinalDoc(app, ik, final.jws, [.../* @__PURE__ */ new Set([...own.relays, ...app.relays])]);
-    if (r2.ok.length === 0) throw new CliError("not_published", `no relay took your old identity's final version (${r2.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
-    return { ver: final.ver, ...r2 };
-  }
   if (plain.length > 1 && !contesting) {
     const pub = await app.publishNext(() => {
     }, { rotation: st.statement });
@@ -22287,12 +22339,39 @@ async function publishFinal(app, st) {
   await addIdentityVersion(app.store, doc);
   await app.store.recordPublished({ hash: jwsHash(doc) });
   const targets = [.../* @__PURE__ */ new Set([...base.relays, ...app.relays])];
-  const r = contesting ? await app.publishDoc(doc, targets) : await publishFinalDoc(app, ik, doc, targets);
+  const r = await app.publishDoc(doc, targets);
   if (r.ok.length === 0) {
     if (!contesting) throw new CliError("not_published", `no relay took your old identity's final version (${r.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
     app.warn("no relay took your competing final version (they already refuse your old devices); your friends still see the conflict from your new identity's invites");
   }
   return { ver: base.ver + 1, ...r };
+}
+async function publishOwnBranchFinal(app, ik, st, own, pinned) {
+  const targets = [.../* @__PURE__ */ new Set([...own.relays, ...app.relays])];
+  let final = pinned ?? await finalOnOwnBranch(app, ik, st, own);
+  let r = await publishFinalDoc(app, ik, final.jws, targets);
+  if (r.ok.length === 0 && r.failed.some((f) => f.code === "forbidden" || f.code === "identity-gap")) {
+    await discardOwnFinal(app, final);
+    await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+    final = await finalOnOwnBranch(app, ik, st, own);
+    r = await publishFinalDoc(app, ik, final.jws, targets);
+  }
+  if (r.ok.length === 0) throw new CliError("not_published", `no relay took your old identity's final version (${r.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
+  return { ver: final.ver, ...r };
+}
+async function discardOwnFinal(app, final) {
+  const chain = await ownChain(app);
+  const log = new Set((await app.store.getPublishLog()).published);
+  const drop = [final.hash];
+  const stack = [final.prev, final.merge];
+  while (stack.length > 0) {
+    const h = stack.pop();
+    const v = h ? chain?.get(h) : void 0;
+    if (!v || v.merge === void 0 || v.devices.length > 0 || v.keyholders.length > 0 || v.by !== app.did || !log.has(v.hash) || drop.includes(v.hash)) continue;
+    drop.push(v.hash);
+    stack.push(v.prev, v.merge);
+  }
+  await dropVersions(app, drop);
 }
 async function finalOnOwnBranch(app, ik, st, own) {
   const plainTips = async () => ((await ownChain(app))?.tips() ?? []).filter((t2) => t2.rotation === void 0);
@@ -41831,7 +41910,7 @@ Friendships aren't in the phrase: invite your friends again.`
       return { json: r, human: `Version ${r.ver} is on ${plural(r.ok.length, "relay")}: ${r.ok.join(", ")}.` };
     })
   );
-  ident.command("rotate").description("Move to a new identity key: the remedy for a lost or stolen key-holding device (§2.8)").option("--plan", "Make the new key and show the plan (its fingerprint, which devices would follow); publish nothing").option("--resume", "Accept a plan made with --plan, or finish a rotation that was interrupted").option("--cancel", "Drop a plan that wasn't accepted (nothing was published)").option("--exclude <did>", "A device that must NOT follow (the lost or stolen one): revoked first; repeatable", collect).option("--keep <did>", "Let a device the plan dropped by default follow anyway (added by a version you didn't publish, or not seen lately); repeatable", collect).option("--invite <user>", "Invite a friend the plan leaves out by default (a friendship made by a device it drops, or one that doesn't verify now); repeatable", collect).option("--keep-keyholders", "Devices that held the old identity key also get the new one (default: they follow as ordinary devices)").option("--wait <seconds>", "How long to wait for your other devices to follow (default 600, the link code's life)", posInt("--wait")).option("--backup-file [path]", "Save the new key's 24-word backup phrase to a 0600 file (default <home>/backup-phrase-<fingerprint>.txt)").option("--contest", "On a key holder: answer a rotation of your identity this device didn't publish with a competing one, so your friends see a conflict and apply neither").option("--resend", "After a rotation: send the new identity's invite again to the friends it didn't reach (throttled)").option("-y, --yes", "Accept the plan without asking (scripts)").option("--json", "JSON output").addHelpText(
+  ident.command("rotate").description("Move to a new identity key: the remedy for a lost or stolen key-holding device (§2.8)").option("--plan", "Make the new key and show the plan (its fingerprint, which devices would follow); publish nothing").option("--resume", "Accept a plan made with --plan, or finish a rotation that was interrupted").option("--cancel", "Drop a plan that wasn't accepted (nothing was published)").option("--exclude <did>", "A device that must NOT follow (the lost or stolen one): revoked first; repeatable", collect).option("--keep <did>", "Let a device the plan dropped by default follow anyway (added by a version you didn't publish, or not seen lately); repeatable", collect).option("--invite <user>", "Invite a friend the plan leaves out by default (a friendship made by a device it drops, or one that doesn't verify now); repeatable", collect).option("--keep-keyholders", "Devices that held the old identity key also get the new one (default: they follow as ordinary devices)").option("--wait <seconds>", "How long to wait for your other devices to follow (default 600, the link code's life)", posInt("--wait")).option("--backup-file [path]", "Save the new key's 24-word backup phrase to a 0600 file (default <home>/backup-phrase-<fingerprint>.txt)").option("--branch <hash>", "Your identity is forked by a version that leaves this device out and more than one branch still lists it: the one that is yours (its jwsHash, as the error lists them)").option("--contest", "On a key holder: answer a rotation of your identity this device didn't publish with a competing one, so your friends see a conflict and apply neither").option("--resend", "After a rotation: send the new identity's invite again to the friends it didn't reach (throttled)").option("-y, --yes", "Accept the plan without asking (scripts)").option("--json", "JSON output").addHelpText(
     "after",
     [
       "",
@@ -41867,7 +41946,7 @@ Friendships aren't in the phrase: invite your friends again.`
             human: `Sent your new identity's invite to ${plural(r2.sent, "friend")}${r2.failed.length ? `; ${r2.failed.length} still not reached` : ""}${r2.throttled ? ` (${r2.remaining} wait for the relays' hourly limit: run it again later)` : ""}.`
           };
         }
-        const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, contest: o.contest, ...backup2 };
+        const opts = { resume: o.resume, exclude: o.exclude, keep: o.keep, invite: o.invite, keepKeyholders: o.keepKeyholders, branch: o.branch, contest: o.contest, ...backup2 };
         if (o.plan) {
           const plan = await ops.rotatePlan(app, opts);
           return { json: { plan: true, ...plan }, human: `${formatRotationPlan(plan)}
