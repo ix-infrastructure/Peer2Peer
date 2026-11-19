@@ -11,6 +11,31 @@ import { loadThread, loadThreadDirs, saveThreadDirs } from "../bridge.js";
 import { findEntry, readEntries, serve, socketPath, writeEntry, type Entry } from "../ipc.js";
 import { lineFeeder, McpServer, text } from "../mcp.js";
 
+/**
+ * How a call's cost grows from input size n to 4n: about 4 when linear, about 16 when quadratic, against
+ * the same machine (a slow runner cancels out). The number of calls per timing is raised until n's timing
+ * is about 10 ms, so a timer tick can't hide the growth; the two sizes are timed alternately, each the
+ * best of 7.
+ */
+function growth(call: (n: number) => void, n: number): number {
+  const time = (m: number, reps: number) => {
+    const t0 = performance.now();
+    for (let i = 0; i < reps; i++) call(m);
+    return performance.now() - t0;
+  };
+  call(n); // warm up (JIT)
+  call(4 * n);
+  let reps = 1;
+  while (reps < 4096 && time(n, reps) < 10) reps *= 2;
+  let small = Infinity;
+  let big = Infinity;
+  for (let k = 0; k < 7; k++) {
+    small = Math.min(small, time(n, reps));
+    big = Math.min(big, time(4 * n, reps));
+  }
+  return big / Math.max(small, 1e-3);
+}
+
 const homes: string[] = [];
 afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
@@ -290,12 +315,12 @@ describe("shell paths after the #49 review (same rules as the mod): command posi
   });
 
   it("linear on hostile input (CodeQL js/polynomial-redos): many newlines, and a brace with many commas", () => {
-    let t = performance.now();
     expect(tp("\n".repeat(50_000))).toEqual({ paths: [], over: false });
-    expect(performance.now() - t).toBeLessThan(100);
-    t = performance.now();
     expect(tp(`rm -rf {{,${",".repeat(50_000)}`).paths).toEqual([]);
-    expect(performance.now() - t).toBeLessThan(100);
+    // Linear: the cost from n to 4n (about 4 when linear, 16 when quadratic), measured against this
+    // machine itself, so a slow runner passes and a polynomial scan doesn't.
+    expect(growth((n) => tp("\n".repeat(n)), 12_500)).toBeLessThan(9);
+    expect(growth((n) => tp(`rm -rf {{,${",".repeat(n)}`), 12_500)).toBeLessThan(9);
     // Still read as before: eval after a newline or a keyword, and a brace with a choice.
     expect(tp('\n\n  eval "$x"; cat $HOME/k').over).toBe(true);
     expect(tp("if x; then eval y; fi; cat $HOME/k").over).toBe(true);

@@ -14,6 +14,31 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { braceChoice, broadRoot, dirProjectId, MAX_SESSION_PROJECTS, NESTED_SCAN_ENTRIES, nestedBoundaries, PRIVATE_MARKER, projectOf, pseudoPath, type ProjectsDoc } from "../projects.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
+/**
+ * How a call's cost grows from input size n to 4n: about 4 when linear, about 16 when quadratic, against
+ * the same machine (a slow runner cancels out). The number of calls per timing is raised until n's timing
+ * is about 10 ms, so a timer tick can't hide the growth; the two sizes are timed alternately, each the
+ * best of 7.
+ */
+function growth(call: (n: number) => void, n: number): number {
+  const time = (m: number, reps: number) => {
+    const t0 = performance.now();
+    for (let i = 0; i < reps; i++) call(m);
+    return performance.now() - t0;
+  };
+  call(n); // warm up (JIT)
+  call(4 * n);
+  let reps = 1;
+  while (reps < 4096 && time(n, reps) < 10) reps *= 2;
+  let small = Infinity;
+  let big = Infinity;
+  for (let k = 0; k < 7; k++) {
+    small = Math.min(small, time(n, reps));
+    big = Math.min(big, time(4 * n, reps));
+  }
+  return big / Math.max(small, 1e-3);
+}
+
 const R = "wss://relay-projects-folders.test/v3";
 
 function gitRepo(dir: string, remote?: string): string {
@@ -200,9 +225,10 @@ describe("folder projects after the #49 review: gone folders, opt-in coverage, b
   });
 
   it("linear on hostile input (CodeQL js/polynomial-redos): a brace with many commas", () => {
-    const t = performance.now();
     expect(braceChoice(`{{,${",".repeat(50_000)}`)).toBe(false);
-    expect(performance.now() - t).toBeLessThan(100);
+    // Linear: the cost from n to 4n (about 4 when linear, 16 when quadratic), measured against this
+    // machine itself, so a slow runner passes and a polynomial scan doesn't.
+    expect(growth((n) => braceChoice(`{{,${",".repeat(n)}`), 12_500)).toBeLessThan(9);
     expect(projectOf(join(src, "team", `{{,${",".repeat(50_000)}`), docOf([src])).root).toBe(src);
     // Same answers as before: a choice inside one pair of braces, nothing across braces.
     for (const [c, want] of [["{.git,a}", true], ["{a..z}", true], ["x{a,b}y", true], ["{a}", false], ["{a,{b}", false], ["{,", false], ["a,b}", false], ["{a,}", true]] as const) expect([c, braceChoice(c)]).toEqual([c, want]);
