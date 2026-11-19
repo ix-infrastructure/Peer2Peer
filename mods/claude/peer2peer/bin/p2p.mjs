@@ -28401,8 +28401,14 @@ var MUTATING_TOOLS = /* @__PURE__ */ new Set([
   "p2p_link",
   "p2p_release"
 ]);
-var MUTATING_ONE = /* @__PURE__ */ new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "petname", "link", "release", "history"]);
+var MUTATING_ONE = /* @__PURE__ */ new Set(["join", "accept", "invite", "backup", "setup", "init", "remove", "unfriend", "block", "unblock", "petname", "link", "release", "tui", "history"]);
 var MUTATING_TWO = /* @__PURE__ */ new Set([
+  "trust add",
+  "trust remove",
+  "ix import",
+  "ix resolve",
+  "extensions enable",
+  "extensions disable",
   "held approve",
   "held decline",
   "relays add",
@@ -28415,19 +28421,27 @@ var MUTATING_TWO = /* @__PURE__ */ new Set([
   "circle transfer",
   "circle policy",
   "circle default",
+  "circle hold",
   "devices revoke",
   "session roster",
   "identity republish",
+  "identity rotate",
+  "identity follow",
+  "identity dispute",
   "profile set",
   "proof add",
+  "invites revoke",
+  "codex install",
   "codex release",
   "codex decline",
-  "codex install",
-  // Who sees a project's sessions (projects.ts): the person's alone.
+  "ix note",
+  "ix subgraph",
+  "ix impact",
+  "ix config",
   "project share",
   "project private"
 ]);
-var MUTATING_FIRST = /* @__PURE__ */ new Set(["receipt", "own-agents"]);
+var MUTATING_FIRST = /* @__PURE__ */ new Set(["status", "receipt", "own-agents"]);
 var SEND_VALUE_OPTIONS = /* @__PURE__ */ new Set(["--to", "--project-dir"]);
 var NOT_PLAIN = "$`{}*?[]~\\'\"<>\r";
 function isPlainWord(raw) {
@@ -28884,6 +28898,8 @@ function mutatingP2PVerb(command, binNames = [], depth = 0, unread = false, deep
       const two = `${plain[i]} ${plain[i + 1] ?? ""}`;
       if (MUTATING_TWO.has(two))
         return two;
+      if (two === "ix footprint" && after2.some((w) => /^--(publish|names|force)(=|$)/.test(w)))
+        return "ix footprint --publish";
     }
     if (MUTATING_FIRST.has(plain[0] ?? ""))
       return plain[0];

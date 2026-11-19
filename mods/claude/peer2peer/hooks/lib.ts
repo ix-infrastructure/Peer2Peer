@@ -1698,17 +1698,20 @@ export function isOwnCode(codes: Iterable<{ code: string; label?: string | null 
 // `tui` is the person's full-screen terminal UI (it accepts, declines, trusts and sends on key presses): never the
 // model's, wherever it sits after the CLI's name (`p2p --session x tui`). See also uncheckableShell (pty wrappers).
 // `history`: the person's own messages (and `history --clear` deletes them): theirs, typed (/peers history) or in their terminal.
-const MUTATING_ONE = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'tui', 'history'])
+// `release`: the Codex bridge's held messages (`codex release`), refused in any position as the bridge does.
+// These three lists are the Codex bridge's (packages/codex-bridge/src/lib.ts), word for word: both are pinned to
+// tests/guard-verbs.vectors.ts, so a verb added to one and not the other fails both suites.
+export const MUTATING_ONE: ReadonlySet<string> = new Set(['join', 'accept', 'invite', 'backup', 'setup', 'init', 'remove', 'unfriend', 'block', 'unblock', 'petname', 'link', 'release', 'tui', 'history'])
 /**
  * Verbs refused only as the subcommand itself (the first word after the CLI): they're common words in message text.
  * `receipt` tells a sender what became of their message (the mod's own report, never the model's);
  * `own-agents` decides whether your agent sessions skip the hold (the person's alone).
  */
-const MUTATING_FIRST = new Set(['status', 'receipt', 'own-agents'])
+export const MUTATING_FIRST: ReadonlySet<string> = new Set(['status', 'receipt', 'own-agents'])
 // `ix import` writes a peer's note into the local Ix graph and `ix resolve` runs Ix for a peer's reference:
 // the user's decisions (ext-ix SPEC §2), never the model's. `extensions enable` makes p2p load and run
 // an extension's code with the user's identity: the user's call too.
-const MUTATING_TWO = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config', 'project share', 'project private'])
+export const MUTATING_TWO: ReadonlySet<string> = new Set(['trust add', 'trust remove', 'ix import', 'ix resolve', 'extensions enable', 'held approve', 'held decline', 'relays add', 'relays remove', 'circle invite', 'circle join', 'circle create', 'circle leave', 'circle propose', 'circle transfer', 'circle policy', 'circle default', 'devices revoke', 'session roster', 'identity republish', 'identity rotate', 'identity follow', 'identity dispute', 'circle hold', 'profile set', 'proof add', 'invites revoke', 'extensions disable', 'codex install', 'codex release', 'codex decline', 'ix note', 'ix subgraph', 'ix impact', 'ix config', 'project share', 'project private'])
 
 /** Shell words of one simple command, quotes removed (no expansion). */
 function shellWords(segment: string): string[] {
