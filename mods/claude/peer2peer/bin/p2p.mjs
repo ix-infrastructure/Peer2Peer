@@ -21649,6 +21649,17 @@ async function preRotationHead(app) {
   }
   return void 0;
 }
+async function ownBranchTip(app) {
+  const chain = await ownChain(app);
+  if (!chain) return void 0;
+  const plain = chain.tips().filter((t2) => t2.rotation === void 0);
+  const mine = plain.filter((t2) => t2.devices.includes(app.did) && t2.keyholders.includes(app.did));
+  if (plain.length < 2 || mine.length === 0 || mine.length === plain.length) return void 0;
+  if (mine.length === 1) return mine[0];
+  const log = new Set((await app.store.getPublishLog()).published);
+  const newestOwn = (t2) => Math.max(-1, ...chain.ancestors(t2.hash).filter((v) => log.has(v.hash)).map((v) => v.ver));
+  return [...mine].sort((a, b) => newestOwn(b) - newestOwn(a) || b.ver - a.ver)[0];
+}
 async function foreignRotations(app) {
   const chain = await ownChain(app);
   if (!chain) return [];
@@ -21693,7 +21704,7 @@ async function alertForeignRotations(app) {
 function friendVerdict(st, peer2) {
   const entries = st.friendSigners?.[peer2] ?? [];
   const trusted = (did) => did === st.selfDid || st.devices[did] !== void 0 && st.devices[did].status !== "excluded" && st.devices[did].status !== "aborted";
-  if (entries.some((e) => trusted(e.did) && (st.contest || e.live))) return { invite: true };
+  if (entries.some((e) => trusted(e.did) && (st.contest || st.ownBranch || e.live))) return { invite: true };
   const dropped = entries.map((e) => st.devices[e.did]).find((d) => d?.status === "excluded");
   const why = entries.some((e) => trusted(e.did)) ? "the friendship doesn't verify now" : dropped ? `made by a device the plan drops (${dropped.why ?? "you dropped it"})` : "made by a device your identity no longer lists";
   return { invite: (st.inviteOptIn ?? []).includes(peer2), why };
@@ -21887,7 +21898,12 @@ async function begin(app, opts) {
     await app.connectAndDrain().catch((e) => app.io.err(`p2p: ${e.message}`));
     await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
   } else {
-    await app.connectAndDrain();
+    await app.connectAndDrain().catch(async (e) => {
+      if (!(e instanceof CliError) || e.code !== "device_revoked") throw e;
+      await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+      if (!await ownBranchTip(app)) throw e;
+      app.io.err(`p2p: ${e.message}`);
+    });
     await app.refreshIdentity(app.userId, app.relays, { force: true, strict: true, setAside: { unconnected: true } });
   }
   const view = await app.ownView();
@@ -21904,13 +21920,15 @@ async function begin(app, opts) {
     if (view.rotations.length > 0 && foreign.length === 0) throw new CliError("usage", "that rotation is this device's own: there is nothing to contest");
     const alerted = (await app.state.get("rotationAlerts") ?? []).length > 0;
     if (foreign.length === 0 && !alerted) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
-  } else if (!view.keyholders.includes(app.did)) {
+  }
+  const own = view.rotations.length > 0 ? void 0 : await ownBranchTip(app);
+  if (!opts.contest && !(own ?? view).keyholders.includes(app.did)) {
     throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity");
   }
-  const base = view.rotations.length > 0 ? await preRotationHead(app) : view.head;
+  const base = view.rotations.length > 0 ? await preRotationHead(app) : own ?? view.head;
   if (!base) throw new CliError("refresh_failed", "couldn't find your identity's last version before the rotation");
-  const baseDevices = view.rotations.length > 0 ? base.devices : view.devices;
-  const baseKeyholders = view.rotations.length > 0 ? base.keyholders : view.keyholders;
+  const baseDevices = view.rotations.length > 0 || own ? base.devices : view.devices;
+  const baseKeyholders = view.rotations.length > 0 || own ? base.keyholders : view.keyholders;
   const exclude = [...new Set(opts.exclude ?? [])];
   for (const d of exclude) if (!baseDevices.includes(d) || d === app.did) throw new CliError("usage", `--exclude ${d}: not one of your other devices`);
   const others = baseDevices.filter((d) => d !== app.did);
@@ -21971,6 +21989,7 @@ async function begin(app, opts) {
     step: "created",
     accepted: false,
     ...opts.contest ? { contest: true } : {},
+    ...own ? { ownBranch: true } : {},
     keepKeyholders: !!opts.keepKeyholders,
     devices: Object.fromEntries(
       others.map((d) => {
@@ -22069,7 +22088,9 @@ async function revokeExcluded(app, st) {
   if (excluded.length === 0) return;
   const view = await app.ownView();
   const listed = excluded.filter((d) => view.devices.includes(d));
-  if (listed.length > 0 && view.rotations.length === 0) {
+  if (listed.length > 0 && view.rotations.length === 0 && await ownBranchTip(app)) {
+    app.warn(`couldn't revoke ${listed.join(", ")} on your old identity before the rotation (it is forked by a version that leaves this device out); the old identity's final version revokes every device`);
+  } else if (listed.length > 0 && view.rotations.length === 0) {
     try {
       await app.publishNext((p) => {
         p.devices = p.devices.filter((d) => !listed.includes(d));
@@ -22243,10 +22264,17 @@ async function publishFinal(app, st) {
   const tips = chain.tips();
   const mine = chain.allTips().find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
   if (mine) {
-    const r2 = await app.publishDoc(mine.jws, mine.relays);
+    const r2 = contesting ? await app.publishDoc(mine.jws, mine.relays) : await publishFinalDoc(app, ik, mine.jws, mine.relays);
     return { ver: mine.ver, ...r2 };
   }
   const plain = tips.filter((t2) => t2.rotation === void 0);
+  const own = plain.length > 1 && !contesting ? await ownBranchTip(app) : void 0;
+  if (own) {
+    const final = await finalOnOwnBranch(app, ik, st, own);
+    const r2 = await publishFinalDoc(app, ik, final.jws, [.../* @__PURE__ */ new Set([...own.relays, ...app.relays])]);
+    if (r2.ok.length === 0) throw new CliError("not_published", `no relay took your old identity's final version (${r2.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
+    return { ver: final.ver, ...r2 };
+  }
   if (plain.length > 1 && !contesting) {
     const pub = await app.publishNext(() => {
     }, { rotation: st.statement });
@@ -22258,12 +22286,57 @@ async function publishFinal(app, st) {
   const doc = createIdentityDoc(ik, { ver: base.ver + 1, prev: base.hash, name: base.name, relays: [...base.relays], devices: [], keyholders: [], by: app.did, rotation: st.statement });
   await addIdentityVersion(app.store, doc);
   await app.store.recordPublished({ hash: jwsHash(doc) });
-  const r = await app.publishDoc(doc, [.../* @__PURE__ */ new Set([...base.relays, ...app.relays])]);
+  const targets = [.../* @__PURE__ */ new Set([...base.relays, ...app.relays])];
+  const r = contesting ? await app.publishDoc(doc, targets) : await publishFinalDoc(app, ik, doc, targets);
   if (r.ok.length === 0) {
     if (!contesting) throw new CliError("not_published", `no relay took your old identity's final version (${r.failed.map((f) => `${f.relay}: ${f.code}`).join(", ")}); run \`p2p identity rotate --resume\``);
     app.warn("no relay took your competing final version (they already refuse your old devices); your friends still see the conflict from your new identity's invites");
   }
   return { ver: base.ver + 1, ...r };
+}
+async function finalOnOwnBranch(app, ik, st, own) {
+  const plainTips = async () => ((await ownChain(app))?.tips() ?? []).filter((t2) => t2.rotation === void 0);
+  let tips = await plainTips();
+  for (let i = 0; tips.length > 1; i++) {
+    if (i >= 64) throw new CliError("internal", "couldn't merge the branches of your identity document");
+    const { prev, other } = mergePrevTip(tips[0], tips[1]);
+    const m = createIdentityDoc(ik, { ver: Math.max(prev.ver, other.ver) + 1, prev: prev.hash, merge: other.hash, name: own.name, relays: [...own.relays], devices: [], keyholders: [], by: app.did });
+    if ((await addIdentityVersion(app.store, m)).status === "gap") throw new CliError("internal", "the merge does not chain onto the held tips");
+    await app.store.recordPublished({ hash: jwsHash(m) });
+    tips = await plainTips();
+  }
+  const base = tips[0];
+  if (!base) throw new CliError("refresh_failed", "couldn't find your identity's last version before the rotation");
+  const doc = createIdentityDoc(ik, { ver: base.ver + 1, prev: base.hash, name: own.name, relays: [...own.relays], devices: [], keyholders: [], by: app.did, rotation: st.statement });
+  const added = await addIdentityVersion(app.store, doc);
+  if (added.status === "gap") throw new CliError("internal", "the final version does not chain onto the held tips");
+  await app.store.recordPublished({ hash: jwsHash(doc) });
+  return added.doc;
+}
+async function publishFinalDoc(app, ik, doc, relays) {
+  const r = await app.publishDoc(doc, relays);
+  const refused = r.failed.filter((f) => f.code === "auth_failed");
+  if (refused.length === 0) return r;
+  const prev = (await ownChain(app))?.get(jwsHash(doc))?.prev;
+  const history = prev ? await app.ownHistory(prev) : [];
+  const keys = generateDeviceKeysV3(ik.userId);
+  const cert = createDeviceCert(ik, { signingPublicKey: keys.signingPublicKey, agreementPublicKey: keys.agreementPublicKey, label: "rotation" }, { ttlSec: 3600 });
+  const ok = [...r.ok];
+  const failed = r.failed.filter((f) => f.code !== "auth_failed");
+  for (const { relay } of refused) {
+    const conn = new RelayConnection(relay, app.transport(relay), { auth: { cert, signingSecretKey: keys.signingSecretKey }, allowRestricted: true, timeoutMs: app.tun.connectTimeoutMs });
+    try {
+      await conn.open();
+      const code2 = await publishOver(conn, doc, history);
+      if (code2 === "ok") ok.push(relay);
+      else failed.push({ relay, code: code2 });
+    } catch (e) {
+      failed.push({ relay, code: e.code ?? "network" });
+    } finally {
+      conn.close();
+    }
+  }
+  return { ok, failed };
 }
 async function syncCircle(dst, src, cid) {
   const exp = await exportCircle(src, cid);
@@ -27537,6 +27610,10 @@ var init_app = __esm({
         const devices2 = [...view.devices, ...readd].slice(0, MAX_DEVICES);
         const keyholders = [...view.keyholders, ...unionKeyholders.filter((d) => readd.includes(d) && devices2.includes(d))];
         if (!opts.restoring && (!devices2.includes(this.did) || !keyholders.includes(this.did))) {
+          if (merges.length > 0) {
+            const drop = new Set(merges.map((m) => peekIdentityDoc(m).hash));
+            await this.store.updateIdentity(this.userId, (cur) => cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(peekIdentityDoc(v).hash)) }, result: void 0 } : { result: void 0 });
+          }
           throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity: it can't publish (only identity rotation, §2.8, replaces a lost key holder's key; run it from a listed key holder)");
         }
         const p = {

@@ -2,6 +2,12 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **The owner can rotate after someone holding the identity key forks it with a version that leaves the owner's devices out.** Such a version connects to the owner's history, so the owner's view forks, the owner's devices fall out of the allowlist, and the relays refuse them. Before, `p2p identity rotate` refused with `device_revoked`, and so did the final version's publish, which merged the fork first. A failed edit also kept that merge, which hid the owner's own branch afterwards. Now rotation runs from the device's own branch (a tip that still lists it as a key holder): the plan lists that branch's devices, friends this device made are invited, and the old identity's final version follows a merge of the tips that lists nobody. A relay that refuses the device gets it over a restricted connection with a throwaway device certificate. Friends follow it as usual. A device that no tip lists still can't rotate. The owner's other devices can't be reached through the relays then, so they re-link by hand. ([#75](https://github.com/ix-infrastructure/Peer2Peer/issues/75))
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.
