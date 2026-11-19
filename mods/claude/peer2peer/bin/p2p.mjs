@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 7cf6a1f58ae788b2
+// @peer2peer/core 0.1.2 403c97e1076687d7
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6890,6 +6890,15 @@ function usablePendingHeads(s2, opts = {}) {
     }
   });
 }
+function revokedStep(v, get) {
+  const p = v.prev ? get(v.prev) : void 0;
+  if (!p)
+    return [];
+  const o = v.merge !== void 0 ? get(v.merge) : void 0;
+  if (v.merge !== void 0 && !o)
+    return [];
+  return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
+}
 function docCertFor(doc, did) {
   for (const c of doc.certs ?? []) {
     try {
@@ -6996,11 +7005,17 @@ var init_identitydoc = __esm({
             c.anchorFrom.set(a.hash, from.filter((r) => typeof r === "string").slice(0, 16));
         }
         const dropped = /* @__PURE__ */ new Set();
+        const stored2 = new Map(docs.map((d) => [d.hash, d]));
+        const drop = (d) => {
+          dropped.add(d.hash);
+          for (const x of revokedStep(d, (h) => stored2.get(h)))
+            c.denied.add(x);
+        };
         for (const d of docs) {
           if (d.iss !== s2.iss)
             fail("issuer-mismatch", "stored version of another identity");
           if (d.prev !== null && dropped.has(d.prev) || d.merge !== void 0 && dropped.has(d.merge)) {
-            dropped.add(d.hash);
+            drop(d);
             continue;
           }
           const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === void 0 || c.versions.has(d.merge));
@@ -7013,7 +7028,7 @@ var init_identitydoc = __esm({
             } catch (e) {
               if (!(e instanceof P2PError))
                 throw e;
-              dropped.add(d.hash);
+              drop(d);
               continue;
             }
             c.versions.set(d.hash, d);
@@ -7274,7 +7289,7 @@ var init_identitydoc = __esm({
           const below = this.extendDown(peek.hash, jws, opts);
           if (below)
             return below;
-          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.rawTips().length < MAX_SIDE_ROOTS) {
+          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.tips().filter((t2) => pendingUsable(t2, opts)).length < MAX_SIDE_ROOTS) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
               fail("issuer-mismatch", "a different ik for this userId");
@@ -7386,6 +7401,9 @@ var init_identitydoc = __esm({
           for (const c of this.childrenOf(h))
             stack.push(c.hash);
         }
+        for (const h of doomed)
+          for (const d of revokedStep(this.versions.get(h), (x) => this.versions.get(x)))
+            this.denied.add(d);
         for (const h of doomed)
           this.versions.delete(h);
       }

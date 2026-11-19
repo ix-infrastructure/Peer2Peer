@@ -453,3 +453,50 @@ describe("#79 third review: relay support, versions placed before their parent, 
     expect(c.allTips().length).toBeLessThanOrEqual(MAX_SIDE_ROOTS);
   });
 });
+
+describe("#79 fourth review: dropping only narrows", () => {
+  /** v5 [dev, D]; v6 adds E; v7 revokes D. E is on the denylist (as after a replacement), so v6 can't follow v5. */
+  function setup() {
+    const u = makeUser("alice");
+    const d = u.addDevice({ keyholder: false });
+    for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 900 + i }); // v2..v5 [dev, D]
+    const v5 = u.doc;
+    const e = u.addDevice({ keyholder: false });
+    const v6 = u.publish({ devices: [u.dev.did, d.did, e.did], iat: NOW - 800 });
+    const v7 = u.publish({ devices: [u.dev.did, e.did], iat: NOW - 790 });
+    return { u, d, e, v5, v6, v7 };
+  }
+
+  it("a version placed below drops a no-return violator and its descendants, and what they revoked stays revoked", () => {
+    const { u, d, e, v5, v6, v7 } = setup();
+    const c = IdentityChain.fromStored({ iss: u.userId, versions: [v6.jws, v7.jws], denied: [e.did] }, { now: NOW });
+    expect(c.view().devices).not.toContain(d.did);
+    expect(c.add(v5.jws, { now: NOW }).status).toBe("accepted");
+    expect(c.has(v6.hash)).toBe(false);
+    expect(c.view().devices).not.toContain(d.did);
+    expect(c.view().devices).not.toContain(e.did);
+    expect(IdentityChain.fromStored(c.toStored(), { now: NOW }).view().devices).not.toContain(d.did);
+  });
+
+  it("loading the same versions with the same denylist: the dropped ones' revocations stay too", () => {
+    const { u, d, e, v5, v6, v7 } = setup();
+    const c = IdentityChain.fromStored({ iss: u.userId, versions: [v5.jws, v6.jws, v7.jws], denied: [e.did] }, { now: NOW });
+    expect(c.has(v6.hash)).toBe(false);
+    expect(c.view().devices).not.toContain(d.did);
+    expect(c.view().devices).not.toContain(e.did);
+  });
+
+  it("side roots past their exp don't count toward MAX_SIDE_ROOTS", () => {
+    const u = makeUser("alice");
+    u.publish({ iat: NOW - 900 });
+    const v3 = u.publish({ iat: NOW - 890 });
+    const v4 = u.publish({ iat: NOW - 880 });
+    const sibling = (iat: number) =>
+      createIdentityDoc(u.ik, { ver: 4, prev: v3.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat, ttlSec: 3600 });
+    const c = new IdentityChain(u.userId);
+    c.add(v4.jws, { now: NOW });
+    for (let i = 0; i < MAX_SIDE_ROOTS; i++) c.add(sibling(NOW - 100 + i), { now: NOW, replace: false, asRoot: true });
+    const later = NOW + 7200; // every side root (and v4) still current? v4 yes; the short-lived siblings no
+    expect(c.add(sibling(later - 10), { now: later, replace: false, asRoot: true }).status).toBe("accepted");
+  });
+});

@@ -645,6 +645,19 @@ export function usablePendingHeads(s: StoredIdentityChain, opts: TimeOptions = {
   });
 }
 
+/**
+ * The dids `v` revoked relative to its parent(s) found by `get`, as revokedAlong counts one step: a non-merge
+ * version revokes what its parent listed and it doesn't; a merge only what both parents listed (S2). Nothing
+ * when a parent isn't found.
+ */
+function revokedStep(v: VerifiedIdentityDoc, get: (hash: string) => VerifiedIdentityDoc | undefined): string[] {
+  const p = v.prev ? get(v.prev) : undefined;
+  if (!p) return [];
+  const o = v.merge !== undefined ? get(v.merge) : undefined;
+  if (v.merge !== undefined && !o) return [];
+  return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
+}
+
 /** The held versions, counting mutations (strays() is memoised per mutation, #74). */
 class VersionMap extends Map<string, VerifiedIdentityDoc> {
   rev = 0;
@@ -713,11 +726,17 @@ export class IdentityChain {
     // #79 re-review: a stored version whose link to its stored parent breaks the chain rules (a store written
     // before add() checked versions placed ahead of their parent) is dropped with what was placed on it, as
     // add() now does, instead of making every load fail.
+    // What each dropped version revoked relative to its stored parent(s) is denied, so dropping only narrows.
     const dropped = new Set<string>();
+    const stored = new Map(docs.map((d) => [d.hash, d]));
+    const drop = (d: VerifiedIdentityDoc) => {
+      dropped.add(d.hash);
+      for (const x of revokedStep(d, (h) => stored.get(h))) c.denied.add(x);
+    };
     for (const d of docs) {
       if (d.iss !== s.iss) fail("issuer-mismatch", "stored version of another identity");
       if ((d.prev !== null && dropped.has(d.prev)) || (d.merge !== undefined && dropped.has(d.merge))) {
-        dropped.add(d.hash);
+        drop(d);
         continue;
       }
       const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === undefined || c.versions.has(d.merge));
@@ -729,7 +748,7 @@ export class IdentityChain {
           if (d.merge === undefined) c.checkNoReturn(d, parent);
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
-          dropped.add(d.hash);
+          drop(d);
           continue;
         }
         c.versions.set(d.hash, d);
@@ -989,7 +1008,8 @@ export class IdentityChain {
       // #79 re-review (refresh only): on unanchored history, a version at the head's own `ver` that doesn't connect
       // is kept as another unanchored root, a tip beside the head (a fork: only the identity key signs one).
       // Only a current version, and at most MAX_SIDE_ROOTS tips held: a key holder can't grow the chain this way.
-      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.rawTips().length < MAX_SIDE_ROOTS) {
+      // (Counted: current tips, strays aside, so tips that expired make room again.)
+      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.tips().filter((t) => pendingUsable(t, opts)).length < MAX_SIDE_ROOTS) {
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
         if (pendingUsable(doc, opts)) {
@@ -1097,6 +1117,9 @@ export class IdentityChain {
       doomed.add(h);
       for (const c of this.childrenOf(h)) stack.push(c.hash);
     }
+    // Dropping only ever narrows (#79 fourth review): what each dropped version revoked relative to its held
+    // parent(s) goes on the denylist first, as a replacement carries a replaced branch's revocations (R1).
+    for (const h of doomed) for (const d of revokedStep(this.versions.get(h)!, (x) => this.versions.get(x))) this.denied.add(d);
     for (const h of doomed) this.versions.delete(h);
   }
 
