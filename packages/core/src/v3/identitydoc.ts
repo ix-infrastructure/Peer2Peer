@@ -22,7 +22,7 @@
 import { b64uDecode, b64uEncode } from "../encoding.js";
 import { assertStrongEd25519PublicKey } from "../crypto.js";
 import { signJws, verifyJws, MAX_JWS_BYTES } from "../jws.js";
-import { fail } from "../errors.js";
+import { fail, P2PError } from "../errors.js";
 import {
   asciiCompare,
   bytesField,
@@ -596,6 +596,13 @@ export interface StoredIdentityChain {
    */
   pendingHeads?: string[];
   /**
+   * The relays that sent each pending head (#78), by the head's jwsHash: local only, like walkAnchorRelays.
+   * The owner's strict refresh of its own identity won't build below a pending head a relay it couldn't hear
+   * from this time sent (App.ownPendingGuard in the CLI). Never trusted for anything else; a pending head
+   * stored without it (older builds) has no known sender.
+   */
+  pendingHeadRelays?: Record<string, string[]>;
+  /**
    * Where an incomplete refresh's chain walk stopped (#67), at most MAX_WALK_ANCHORS: signature-verified
    * versions of this identity whose ancestors the walk hadn't reached yet. The next refresh starts its walk
    * from them instead of from the tips, so a client further behind than one refresh can walk still catches
@@ -643,6 +650,33 @@ export function usablePendingHeads(s: StoredIdentityChain, opts: TimeOptions = {
   });
 }
 
+/** At most this many relays are kept per pending head or walk anchor (local data; a document lists at most a few). */
+const MAX_SENDERS = 16;
+
+/** The relays a stored record names, kept only if they are strings (local data, read defensively). */
+function sendersOf(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((r): r is string => typeof r === "string").slice(0, MAX_SENDERS) : [];
+}
+
+/**
+ * The stored pending heads still usable at `now` that are versions of this identity (signature-verified,
+ * `iss` = H(ik)), each with the relays that sent it (#78; none when stored by an older build). The owner's
+ * strict refresh reads these: its own view ignores pending heads (re-review N1).
+ */
+export function pendingHeadSenders(s: StoredIdentityChain, opts: TimeOptions = {}): { ver: number; hash: string; relays: string[] }[] {
+  const out: { ver: number; hash: string; relays: string[] }[] = [];
+  for (const j of s.pendingHeads ?? []) {
+    try {
+      const d = verifyIdentityDocSignature(j);
+      if (d.iss !== s.iss || !pendingUsable(d, opts)) continue;
+      out.push({ ver: d.ver, hash: d.hash, relays: sendersOf(s.pendingHeadRelays?.[d.hash]) });
+    } catch (e) {
+      if (!(e instanceof P2PError)) throw e;
+    }
+  }
+  return out;
+}
+
 /** The held versions, counting mutations (strays() is memoised per mutation, #74). */
 class VersionMap extends Map<string, VerifiedIdentityDoc> {
   rev = 0;
@@ -674,6 +708,8 @@ export class IdentityChain {
   private denied = new Set<string>();
   /** Verified newer versions that don't connect yet (#35, see notePending). */
   private pending: VerifiedIdentityDoc[] = [];
+  /** Which relays sent each pending head (#78). */
+  private pendingFrom = new Map<string, string[]>();
   /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
   private anchors: VerifiedIdentityDoc[] = [];
   /** Which relays sent each anchor (#67 re-review G2). */
@@ -696,14 +732,17 @@ export class IdentityChain {
       const p = verifyIdentityDocSignature(j);
       // iss is H(ik), checked with the signature: the same iss is the same ik.
       if (p.iss !== s.iss) fail("issuer-mismatch", "stored pending head of another identity");
-      if (pendingUsable(p, opts)) c.pending.push(p);
+      if (pendingUsable(p, opts)) {
+        c.pending.push(p);
+        const from = sendersOf(s.pendingHeadRelays?.[p.hash]);
+        if (from.length > 0) c.pendingFrom.set(p.hash, from);
+      }
     }
     for (const j of s.walkAnchors ?? []) {
       const a = verifyIdentityDocSignature(j);
       if (a.iss !== s.iss) fail("issuer-mismatch", "stored walk anchor of another identity");
       c.anchors.push(a);
-      const from = s.walkAnchorRelays?.[a.hash];
-      if (Array.isArray(from)) c.anchorFrom.set(a.hash, from.filter((r): r is string => typeof r === "string").slice(0, 16));
+      if (Array.isArray(s.walkAnchorRelays?.[a.hash])) c.anchorFrom.set(a.hash, sendersOf(s.walkAnchorRelays?.[a.hash]));
     }
     // Roots (versions whose parents aren't stored, after a gap jump or pruning) are trusted as stored.
     for (const d of docs) {
@@ -730,6 +769,9 @@ export class IdentityChain {
       ...(this.denied.size > 0 ? { denied: [...this.denied] } : {}),
       // Each dropped once the held head reaches its ver.
       ...(this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {}),
+      ...(this.pendingCap().some((d) => this.pendingFrom.has(d.hash))
+        ? { pendingHeadRelays: Object.fromEntries(this.pendingCap().filter((d) => this.pendingFrom.has(d.hash)).map((d) => [d.hash, [...this.pendingFrom.get(d.hash)!]])) }
+        : {}),
       ...(this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}),
       ...(this.walkAnchors().some((d) => this.anchorFrom.has(d.hash))
         ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)!]])) }
@@ -787,15 +829,23 @@ export class IdentityChain {
    *    dropped no sooner, by the head reaching it or by expiry (re-review E1). So however many
    *    versions a relay sends, another branch's revoking tip stays. At most one per device or key holder
    *    left out; MAX_PENDING_HEADS is a safety bound. Returns whether it changed anything.
+   *  - #78: `from` names the relays that sent each one (local only, added to those already recorded). A
+   *    candidate is redundant only if every relay that sent it also sent a kept, higher-`ver` one, so each
+   *    relay's highest stays (one more per relay at most): another relay's higher version can't push out the
+   *    one an honest relay sent, which the owner's strict refresh won't build below (App.ownPendingGuard).
    */
-  notePending(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
+  notePending(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}, from: (hash: string) => readonly string[] = () => []): boolean {
     if (this.versions.size === 0) return false;
     const headVer = this.tips()[0].ver;
-    const before = this.pendingCap().map((d) => d.hash);
+    const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
     const byHash = new Map(this.pendingCap().map((d) => [d.hash, d]));
+    const senders = new Map([...this.pendingFrom].filter(([h]) => byHash.has(h)).map(([h, r]) => [h, new Set(r)]));
     for (const d of docs) {
       if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
-      if (d.ver > headVer && pendingUsable(d, opts)) byHash.set(d.hash, d);
+      if (d.ver > headVer && pendingUsable(d, opts)) {
+        byHash.set(d.hash, d);
+        for (const r of from(d.hash)) (senders.get(d.hash) ?? senders.set(d.hash, new Set()).get(d.hash)!).add(r);
+      }
     }
     // Everything any held version or candidate lists: what a candidate "leaves out" is measured against it.
     // (Anything outside it is left out by the highest candidate too, which is always kept.)
@@ -807,24 +857,43 @@ export class IdentityChain {
     // What each kept head leaves out, with the latest `exp` among the kept heads leaving it out: a higher
     // head covers a candidate only while it lasts at least as long (expiry isn't ver-ordered; re-review E1).
     const covered = new Map<string, number>();
+    const keptFrom = new Set<string>();
     const kept: VerifiedIdentityDoc[] = [];
     for (const d of [...byHash.values()].sort((a, b) => b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
       const lists = new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
       const leaves = [...universe].filter((x) => !lists.has(x));
-      if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp)) continue;
+      const sent = [...(senders.get(d.hash) ?? [])];
+      if (kept.length > 0 && leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp) && sent.every((r) => keptFrom.has(r))) continue;
       kept.push(d);
       for (const x of leaves) covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
+      for (const r of sent) keptFrom.add(r);
     }
     this.pending = kept.slice(0, MAX_PENDING_HEADS);
-    const after = this.pending.map((d) => d.hash);
+    this.pendingFrom = new Map(
+      this.pending.map((d) => [d.hash, [...(senders.get(d.hash) ?? [])].slice(0, MAX_SENDERS)] as [string, string[]]).filter(([, r]) => r.length > 0),
+    );
+    const after = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
     return after.length !== before.length || after.some((h) => !before.includes(h));
   }
 
-  /** Drops every pending head (a complete refresh, #35). Returns whether there was one. */
-  clearPending(): boolean {
-    const had = this.pendingCap().length > 0;
-    this.pending = [];
-    return had;
+  /**
+   * Drops the pending heads (a complete refresh, #35). Returns whether it changed anything.
+   * #78: `keepSentBy` (the owner's own identity only, whose view never uses pending heads): a pending head
+   * one of these relays (the ones that didn't answer this refresh) sent is kept, with only those senders, so
+   * the owner's strict refresh still won't build below it while that relay stays silent.
+   */
+  clearPending(opts: { keepSentBy?: readonly string[] } = {}): boolean {
+    const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+    const keep = new Set(opts.keepSentBy ?? []);
+    const from = new Map<string, string[]>();
+    for (const d of this.pendingCap()) {
+      const silent = (this.pendingFrom.get(d.hash) ?? []).filter((r) => keep.has(r));
+      if (silent.length > 0) from.set(d.hash, silent);
+    }
+    this.pending = this.pendingCap().filter((d) => from.has(d.hash));
+    this.pendingFrom = from;
+    const after = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+    return after.length !== before.length || after.some((h) => !before.includes(h));
   }
 
   /** The pending heads still newer than the held head (#35). */

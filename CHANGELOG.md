@@ -2,6 +2,16 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **Your edits no longer build on an old version of your identity when your up-to-date relay doesn't answer ([#78](https://github.com/ix-infrastructure/Peer2Peer/issues/78)).** Before publishing, your device checks your current version with the relays you list, and skips the ones that don't answer. If the relay holding your newest version timed out while a relay behind it answered, an edit could be published on the older version, even though your device already held the newer one from an earlier, cut-short check. That forked your own identity. Now:
+  - your device keeps, next to each newer version it couldn't connect yet, which relays sent it (stored locally only);
+  - an edit refuses while one of those relays doesn't answer and the relays that did answer only confirm an older version. The error names the relay: try again when it answers, or remove it with `p2p relays remove <url>` if it's gone for good or no device of yours published that version;
+  - a relay can hold your edits up only while it stays silent. Once it answers, or is removed (removing it always goes ahead), or is found serving versions that don't connect to your history, it no longer does. Newer versions stored by earlier releases, with no record of who sent them, never hold an edit up;
+  - a relay that can't be reached no longer counts as having answered "nothing" when your device refreshes anyone's identity, so it doesn't make up the majority that counts a refresh as fresh.
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.
