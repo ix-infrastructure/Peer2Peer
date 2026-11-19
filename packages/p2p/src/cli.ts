@@ -117,8 +117,13 @@ export function wideningOf(cmd: Command): string | undefined {
  * Commands that touch the person's identity key, their identity document, or their own setup (or
  * narrow who reaches them): run only by the person, through the same gate as widening (their
  * front end's token, or their "yes" typed on their own terminal; never from inside an agent's
- * session). The CLI decides by the command it parsed, so however an agent spells the command line
- * (a name built at run time, a script it wrote) it is refused. Internal maintenance (`p2p watch`
+ * session). The CLI decides by the command it parsed and its agent detection (environment and
+ * process ancestry), not by the command line's words: a name built at run time, or a script the
+ * agent wrote and runs in its own process tree, is refused like the plain command. It is not a
+ * boundary against an agent that runs as the same user and means to get past it: a process started
+ * outside the agent's tree that fakes a terminal can answer the "yes", and the key files can be
+ * read directly. That boundary is the OS sandbox's read and write deny on P2P_HOME
+ * (docs/security/threat-model.md). Internal maintenance (`p2p watch`
  * renewing the document and certificates, the retry of unpublished relays on connect) calls the
  * App directly, never these commands, and is not gated.
  */
@@ -143,6 +148,12 @@ const PERSON_ONLY = new Map<string, string>([
   ["ix resolve", "runs your Ix for a peer's reference"],
   ["ix config", "changes how your Ix footprints name files"],
   ["receipts", "changes whether you send delivery receipts"],
+  ["profile set", "publishes a new version of your identity document"],
+  ["proof add", "publishes a new version of your identity document"],
+  ["block", "changes who reaches you"],
+  ["petname", "changes the names you know people by"],
+  ["circle leave", "changes your circles"],
+  ["held decline", "decides a held request for you"],
 ]);
 
 /** `identity rotate` options that do something beyond making or showing the plan. */
@@ -258,7 +269,7 @@ export function buildProgram(deps: ProgramDeps): Command {
         if (widening) await projects.assertPersonForWidening(app, widening, confirmTty, undefined, { noTokenBeforeIdentity: widening === "link join" });
         // Nor touch the identity key, the identity document or the person's own setup (PERSON_ONLY).
         const personOnly = personOnlyOf(cmd);
-        if (personOnly && !(personOnly.agentOnly && projects.personHere(app))) await projects.assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
+        if (personOnly && !(personOnly.agentOnly && projects.personHereStrict(app))) await projects.assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
         if (opts.requireIdentity !== false) await app.load(true);
         // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
         if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
@@ -1141,8 +1152,13 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--json", "JSON output")
     .action(
       run(async (app) => {
-        const r = await ops.listCodes(app);
-        return { json: { invites: r }, human: fmt.formatCodes(r), pretty: (p) => pretty.prettyCodes(r, p) };
+        const all = await ops.listCodes(app);
+        // A live code (open, or taken and not yet joined) lets whoever holds it in: inside an agent's
+        // session (or where that can't be told) without the person's token, it is cut as a redeemed
+        // one is, in the JSON too. The status stays readable.
+        const redacted = !projects.personHereStrict(app);
+        const r = redacted ? all.map((c) => ({ ...c, code: fmt.shortCode(c.code), ...(c.status === "open" || c.status === "taken" ? { redacted: true } : {}) })) : all;
+        return { json: { invites: r, ...(redacted ? { redacted: true } : {}) }, human: fmt.formatCodes(r), pretty: (p) => pretty.prettyCodes(r, p) };
       }),
     );
   invites
@@ -2214,6 +2230,7 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
     const env = { ...deps.env };
     const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
     const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
+    if (given && !front) projects.healPersonToken(resolveHome(env));
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
     // A token that isn't this home's is refused outright, never quietly taken as "not the person": the
     // person.key it was read from was replaced when an identity was created or restored here

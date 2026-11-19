@@ -7,17 +7,21 @@
 // so the way an agent spells the line (a name built at run time, a script it wrote) can't matter.
 // Internal maintenance (`p2p watch` renewing the document) is not a command and keeps working.
 
-import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { main } from "../cli.js";
+import { homeFilesOwn, personToken, personTokenFile, personTokenOk, personSaltFile } from "../projects.js";
 import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R = "wss://relay-person-only.test/v3";
+const R2 = "wss://relay-person-only-2.test/v3";
+const R3 = "wss://relay-person-only-3.test/v3";
 
 type How = "agent" | "token" | "yes" | "no";
 
@@ -101,6 +105,12 @@ describe("person-only commands", () => {
     { argv: ["circle", "propose", "c_nope", "rename", "x"] },
     { argv: ["circle", "transfer", "c_nope", "nobody@0000"] },
     { argv: ["circle", "hold", "c_nope", "on"] },
+    { argv: ["circle", "leave", "c_nope"] },
+    { argv: ["held", "decline", "nope"] },
+    { argv: ["block", "nobody@0000"] },
+    { argv: ["petname", "nobody@0000", "x"] },
+    { argv: ["profile", "set", "--bio", "set by whom?"] },
+    { argv: ["proof", "add", "github", "nobody"] },
     { argv: ["extensions", "disable", "ix"] },
     { argv: ["receipts", "off"] },
     { argv: ["setup", "--print-backup"] },
@@ -253,5 +263,184 @@ describe("person-only commands", () => {
     expect(add.json.error).not.toBe("refused");
     const rm = await as(ann, "token", ["remove", benId]);
     expect(rm.code, JSON.stringify(rm.json)).toBe(0);
+  });
+});
+
+describe("the gate holds against a home made of links, a shadowed ps, and an unreadable process tree", () => {
+  let relay: TestRelay;
+  let tr: Record<string, string>;
+  const users: User[] = [];
+  const dirs: string[] = [];
+  let ann: User;
+  beforeAll(async () => {
+    relay = await startRelay(R2, { limits: { identityPublishPerIpPerHour: 100_000, newDevicesPerIpPerDay: 100_000, newDevicesPerIpv4PerDay: 100_000 } });
+    tr = { [R2]: `ws://127.0.0.1:${relay.port}/v3` };
+    ann = new User("po2-ann", tr, { P2P_DEFAULT_RELAYS: R2 });
+    users.push(ann);
+    await ann.ok(["init", "--name", "ann", "--relay", R2, "--yes"]);
+  }, 60_000);
+  afterAll(async () => {
+    (globalThis as { __p2pTestAncestry?: string }).__p2pTestAncestry = undefined;
+    await relay?.close();
+    for (const u of users) u.cleanup();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  const tmp = (p: string) => {
+    const d = mkdtempSync(join(tmpdir(), p));
+    dirs.push(d);
+    return d;
+  };
+  const run = async (env: Record<string, string | undefined>, argv: string[], yes = false) => {
+    const out: string[] = [];
+    const code = await main([...argv, "--json"], { env, io: { out: (l) => out.push(l), err: () => {} }, confirmTty: async () => yes });
+    process.exitCode = 0;
+    return { code, json: JSON.parse(out.at(-1) ?? "{}") as Record<string, unknown> };
+  };
+
+  it("the person token is derived: a person.key written by anything else never verifies, and the derived one does", () => {
+    const real = ann.personToken;
+    expect(real).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: real }, ann.home)).toBe(true);
+    // Overwritten with a value of someone else's choosing: neither it nor the old one verifies.
+    const planted = randomBytes(32).toString("base64url");
+    writeFileSync(personTokenFile(ann.home), planted);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: planted }, ann.home)).toBe(false);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: real }, ann.home)).toBe(false);
+    // The CLI writes the derived one back (the next command), and it verifies again.
+    expect(personToken(ann.home)).toBe(real);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: real }, ann.home)).toBe(true);
+  });
+
+  it("a home made of symbolic links to the identity's files, with a token of the agent's choosing, is never the person's", async () => {
+    const h = tmp("po-linked-");
+    mkdirSync(join(h, "cli"), { recursive: true, mode: 0o700 });
+    for (const f of ["keys.json", "self.json"]) symlinkSync(join(ann.home, "cli", f), join(h, "cli", f));
+    symlinkSync(join(ann.home, "v3"), join(h, "v3"));
+    const mine = randomBytes(32).toString("base64url");
+    writeFileSync(personTokenFile(h), mine, { mode: 0o600 });
+    expect(homeFilesOwn(h)).toBe(false);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: mine }, h)).toBe(false);
+    const env = { ...ann.env, P2P_HOME: h, P2P_PERSON_TOKEN: mine, CLAUDECODE: "1" };
+    const r = await run(env, ["backup", "show"]);
+    expect(r.code).toBe(1);
+    expect(["refused", "person_token_stale"]).toContain(r.json.error);
+    expect(r.json.phrase).toBeUndefined();
+    // Nothing that verifies was written into that home for the agent to read.
+    expect(readFileSync(personTokenFile(h), "utf8")).toBe(mine);
+    expect(existsSync(personSaltFile(h))).toBe(false);
+  });
+
+  it("hard links to the identity's files don't make a home the person's either", async () => {
+    const h = tmp("po-hard-");
+    mkdirSync(join(h, "cli"), { recursive: true, mode: 0o700 });
+    try {
+      for (const f of ["keys.json", "self.json"]) linkSync(join(ann.home, "cli", f), join(h, "cli", f));
+    } catch {
+      return; // another file system: hard links can't be made here
+    }
+    const mine = randomBytes(32).toString("base64url");
+    writeFileSync(personTokenFile(h), mine, { mode: 0o600 });
+    writeFileSync(personSaltFile(h), randomBytes(32).toString("base64url"), { mode: 0o600 });
+    expect(homeFilesOwn(h)).toBe(false);
+    expect(personTokenOk({ P2P_PERSON_TOKEN: mine }, h)).toBe(false);
+    const r = await run({ ...ann.env, P2P_HOME: h, P2P_PERSON_TOKEN: mine, CLAUDECODE: "1" }, ["backup", "show"]);
+    expect(r.json.phrase).toBeUndefined();
+    expect(readFileSync(personTokenFile(h), "utf8")).toBe(mine);
+    // And the real home's own files are untouched (one link each again once these go).
+    rmSync(join(h, "cli"), { recursive: true, force: true });
+    expect(homeFilesOwn(ann.home)).toBe(true);
+  });
+
+  it("an unreadable process tree fails closed: refused without the token, even with a terminal yes; the token still works", async () => {
+    const g = globalThis as { __p2pTestAncestry?: string };
+    g.__p2pTestAncestry = "unknown";
+    try {
+      const noToken = { ...ann.env, P2P_PERSON_TOKEN: "" };
+      for (const argv of [["backup", "show"], ["receipts", "off"], ["backup", "restore", "--relay", R2], ["invite", "--no-circle"]]) {
+        const r = await run(noToken, argv, true);
+        expect(r.json.error, argv.join(" ")).toBe("refused");
+        expect(String(r.json.reason), argv.join(" ")).toMatch(/couldn't read its process tree|inside an agent's session/);
+      }
+      expect((await run(ann.env, ["backup", "show"])).code).toBe(0);
+      // Reads stay open.
+      expect((await run(noToken, ["receipts"])).code).toBe(0);
+    } finally {
+      g.__p2pTestAncestry = undefined;
+    }
+  });
+
+  it("the process tree is read without PATH: a `ps` put first on PATH is never run", async () => {
+    const bin = fileURLToPath(new URL("../../dist/bin.js", import.meta.url));
+    const fake = tmp("po-fakeps-");
+    const marker = join(fake, "ran");
+    writeFileSync(join(fake, "ps"), `#!/bin/sh\necho ran > "${marker}"\necho "1 sh"\n`);
+    chmodSync(join(fake, "ps"), 0o755);
+    const env: NodeJS.ProcessEnv = { ...ann.env, PATH: `${fake}:${process.env.PATH ?? ""}` };
+    delete env.P2P_PERSON_TOKEN;
+    // Detached: no terminal to answer, so whatever the tree says the command is refused; the point is which ps ran.
+    const stdout = await new Promise<string>((done) => {
+      const c = spawn(process.execPath, [bin, "backup", "show", "--json"], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      c.stdout.on("data", (d) => (out += String(d)));
+      c.on("close", () => done(out));
+    });
+    expect(stdout).toMatch(/"error":"refused"/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("ancestry walks fail closed: an unreadable step or a loop is unknown, the root is none, an agent anywhere is agent", async () => {
+    const real = await vi.importActual<typeof import("../ancestry.js")>("../ancestry.js");
+    const tree: Record<number, { ppid: number; comm: string; args?: string }> = {
+      30: { ppid: 20, comm: "/bin/zsh" },
+      20: { ppid: 10, comm: "/usr/local/bin/claude" },
+      10: { ppid: 1, comm: "launchd" },
+      40: { ppid: 41, comm: "node", args: "node /x/node_modules/@openai/codex/bin/codex.js" },
+      50: { ppid: 50, comm: "sh" },
+      60: { ppid: 10, comm: "sh" },
+    };
+    const read = (pid: number) => {
+      const p = tree[pid];
+      if (!p) throw new Error("gone");
+      return { ppid: p.ppid, comm: p.comm, args: () => p.args ?? "" };
+    };
+    expect(real.walkAncestry(30, read)).toBe("agent");
+    expect(real.walkAncestry(40, read)).toBe("agent");
+    expect(real.walkAncestry(60, read)).toBe("none");
+    expect(real.walkAncestry(50, read)).toBe("unknown");
+    expect(real.walkAncestry(99, read)).toBe("unknown");
+    expect(real.PS_PATHS.every((p) => p.startsWith("/"))).toBe(true);
+  });
+});
+
+describe("p2p invites inside an agent's session", () => {
+  let relay: TestRelay;
+  let u: User;
+  beforeAll(async () => {
+    relay = await startRelay(R3);
+    u = new User("po3", { [R3]: `ws://127.0.0.1:${relay.port}/v3` }, { P2P_DEFAULT_RELAYS: R3 });
+    await u.ok(["init", "--name", "po3", "--relay", R3, "--yes"]);
+  }, 60_000);
+  afterAll(async () => {
+    await relay?.close();
+    u?.cleanup();
+  });
+
+  it("cuts live codes (JSON and text) without the token; the person sees them whole", async () => {
+    const code = String((await u.ok(["invite", "--no-circle"])).code);
+    expect(code.length).toBeGreaterThan(8);
+    const out: string[] = [];
+    const agentEnv = { ...u.env, P2P_PERSON_TOKEN: "", CLAUDECODE: "1" };
+    await main(["invites", "--json"], { env: agentEnv, io: { out: (l) => out.push(l), err: () => {} } });
+    await main(["invites"], { env: agentEnv, io: { out: (l) => out.push(l), err: () => {} } });
+    process.exitCode = 0;
+    const j = JSON.parse(out[0]) as { invites: { code: string; status: string; redacted?: boolean }[]; redacted?: boolean };
+    expect(j.redacted).toBe(true);
+    expect(j.invites[0].status).toBe("open");
+    expect(j.invites[0].redacted).toBe(true);
+    expect(out.join("\n")).not.toContain(code);
+    expect(out.join("\n")).not.toContain(code.slice(-6));
+    const whole = (await u.ok(["invites"])) as { invites: { code: string }[]; redacted?: boolean };
+    expect(whole.redacted).toBeUndefined();
+    expect(whole.invites[0].code).toBe(code);
   });
 });

@@ -21,8 +21,8 @@
 //  - `p2p tui` and `p2p send` typed at a terminal with no --from-session are the person's own
 //    session: never bound, no ceiling.
 
-import { agentAncestor, isAgentProcess } from "./ancestry.js";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { agentAncestor, ancestryUnknown, isAgentProcess } from "./ancestry.js";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -1096,23 +1096,141 @@ export function agentContext(env: Record<string, string | undefined> | undefined
 
 export { isAgentProcess };
 
-/** `<home>/cli/person.key`: a random secret the person's front ends (the Claude mod, the Codex bridge) pass back as P2P_PERSON_TOKEN. */
+/**
+ * `<home>/cli/person.key`: the secret the person's front ends (the Claude mod, the Codex bridge)
+ * pass back as P2P_PERSON_TOKEN. On a home with an identity it is derived, never just stored: an
+ * HMAC under this device's signing key over the home's salt (`person.salt`, replaced whenever an
+ * identity is created or restored here), so a person.key that anything else wrote never verifies
+ * (personTokenOk recomputes it). On a fresh home (no identity yet) it is a random value, as the
+ * front ends make it on a first run.
+ */
 export function personTokenFile(home: string): string {
   return join(home, "cli", "person.key");
 }
 
-const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+/** `<home>/cli/person.salt`: the per-home salt of the derived person token (replaced with the identity). */
+export function personSaltFile(home: string): string {
+  return join(home, "cli", "person.salt");
+}
 
-/** The person token, made once (exclusively, 0600, in the CLI's own folder, which the mod's guards keep from the model). */
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+const TOKEN_LABEL = "peer2peer/person-token/v1\0";
+
+/** The token for `spk` (a device's b64u signing seed) and `salt`: base64url of HMAC-SHA256, 43 characters. */
+function deriveToken(spk: string, salt: string): string {
+  return createHmac("sha256", Buffer.from(spk, "base64url")).update(TOKEN_LABEL).update(salt).digest("base64url");
+}
+
+function readTrim(f: string): string | undefined {
+  try {
+    return readFileSync(f, "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the files the person token rests on are this home's own: the `cli` folder, its keys and
+ * self documents, the token and its salt, and the `v3` store are no symbolic links, and the keys
+ * and self documents have one link each (the CLI writes them by rename, so a second hard link was
+ * made by something else). A home put together from links to another home's files (to pair that
+ * identity's keys with a token of the maker's choosing) is never the person's.
+ */
+export function homeFilesOwn(home: string): boolean {
+  const cli = join(home, "cli");
+  try {
+    const d = lstatSync(cli);
+    if (d.isSymbolicLink() || !d.isDirectory()) return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  const checks: [string, boolean][] = [
+    [join(cli, "keys.json"), true],
+    [join(cli, "self.json"), true],
+    [personTokenFile(home), false],
+    [personSaltFile(home), false],
+    [join(home, "v3"), false],
+  ];
+  for (const [p, single] of checks) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return false;
+    }
+    if (st.isSymbolicLink()) return false;
+    if (single && st.nlink !== 1) return false;
+  }
+  return true;
+}
+
+/** The person token this home's identity derives (undefined: no identity, no salt yet, or keys that can't be read). */
+function derivedToken(home: string): string | undefined {
+  if (!identityHere(home)) return undefined;
+  const salt = readTrim(personSaltFile(home));
+  if (!salt || !TOKEN_RE.test(salt)) return undefined;
+  let spk: unknown;
+  try {
+    spk = (JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as { spk?: unknown }).spk;
+  } catch {
+    return undefined;
+  }
+  return typeof spk === "string" && spk !== "" ? deriveToken(spk, salt) : undefined;
+}
+
+/** Writes `text` to `f` whole: a new 0600 file made exclusively beside it, renamed over it (a planted symlink is replaced, not followed). */
+function writeWhole(f: string, text: string): void {
+  mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+  const tmp = `${f}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, text, { mode: 0o600, flag: "wx" });
+    let cleared = false;
+    for (let tries = 0; ; tries++) {
+      try {
+        renameSync(tmp, f);
+        break;
+      } catch (e) {
+        // Something that isn't a file is in the way (a directory): it goes, then the new file.
+        if (!cleared && isDirectory(f)) {
+          rmSync(f, { recursive: true, force: true });
+          cleared = true;
+          continue;
+        }
+        // Windows: a virus scanner or indexer briefly holding the old file. Retried for about a second.
+        if (process.platform === "win32" && RENAME_BUSY.has((e as NodeJS.ErrnoException).code ?? "") && tries < 20) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          continue;
+        }
+        throw e;
+      }
+    }
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+/**
+ * The person token, made or brought up to date in the CLI's own folder (0600; the mod's guards keep
+ * the model from it). With an identity here: the derived token, written to person.key when the
+ * file holds anything else (a home from before derived tokens, a front end's random first-run
+ * value), never into a home whose files aren't its own (homeFilesOwn: "" then). Without one: the
+ * random first-run token, made once, exclusively.
+ */
 export function personToken(home: string): string {
   const f = personTokenFile(home);
+  if (identityHere(home)) {
+    if (!homeFilesOwn(home)) return "";
+    if (!TOKEN_RE.test(readTrim(personSaltFile(home)) ?? "")) writeWhole(personSaltFile(home), randomBytes(32).toString("base64url"));
+    const want = derivedToken(home);
+    if (!want) return "";
+    if (readTrim(f) !== want) writeWhole(f, want);
+    return want;
+  }
   const read = () => {
-    try {
-      const t = readFileSync(f, "utf8").trim();
-      return TOKEN_RE.test(t) ? t : undefined;
-    } catch {
-      return undefined;
-    }
+    const t = readTrim(f);
+    return t && TOKEN_RE.test(t) ? t : undefined;
   };
   const have = read();
   if (have) return have;
@@ -1131,44 +1249,23 @@ export function personToken(home: string): string {
 
 /**
  * Replaces the person token with a fresh one. Called whenever an identity is first created or
- * restored on a home (init, link join, backup restore; setup and join create through init): a
- * person.key that was already there may have been put there by anything that could write the
- * folder before the identity existed, so it must not keep standing in for the person afterwards.
- * The command that creates the identity checked its token when it started, so a front end's first
- * run still works; the front ends read person.key again when the CLI refuses their old token
- * (`person_token_stale`). Written whole: a new 0600 file made exclusively beside it, then renamed
- * over it (a planted symlink is replaced, never followed).
+ * restored on a home (init, link join, backup restore; setup and join create through init; the new
+ * home a rotation makes), with the new identity's device signing seed (`spk`): a fresh salt, and
+ * the token it derives. A person.key that was already there may have been put there by anything
+ * that could write the folder before the identity existed, so it must not keep standing in for the
+ * person afterwards (it never verifies against the derived token). The command that creates the
+ * identity checked its token when it started, so a front end's first run still works; the front
+ * ends read person.key again when the CLI refuses their old token (`person_token_stale`). Written
+ * whole, before any key is written: if this fails, no identity is made here.
  */
-export function renewPersonToken(home: string): string {
-  const f = personTokenFile(home);
-  mkdirSync(join(home, "cli"), { recursive: true, mode: 0o700 });
-  const t = randomBytes(32).toString("base64url");
-  const tmp = `${f}.${randomBytes(6).toString("hex")}.tmp`;
+export function renewPersonToken(home: string, spk?: string): string {
+  const salt = randomBytes(32).toString("base64url");
+  const t = spk ? deriveToken(spk, salt) : randomBytes(32).toString("base64url");
   try {
-    writeFileSync(tmp, t, { mode: 0o600, flag: "wx" });
-    let cleared = false;
-    for (let tries = 0; ; tries++) {
-      try {
-        renameSync(tmp, f);
-        break;
-      } catch (e) {
-        // Something that isn't a file is in the way (a directory): it goes, then the new token.
-        if (!cleared && isDirectory(f)) {
-          rmSync(f, { recursive: true, force: true });
-          cleared = true;
-          continue;
-        }
-        // Windows: a virus scanner or indexer briefly holding the old file. Retried for about a second.
-        if (process.platform === "win32" && RENAME_BUSY.has((e as NodeJS.ErrnoException).code ?? "") && tries < 20) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-          continue;
-        }
-        throw e;
-      }
-    }
+    writeWhole(personSaltFile(home), salt);
+    writeWhole(personTokenFile(home), t);
   } catch (e) {
-    rmSync(tmp, { force: true });
-    throw new CliError("conflict", `couldn't replace the person token in ${f} (${(e as NodeJS.ErrnoException).code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
+    throw new CliError("conflict", `couldn't replace the person token in ${personTokenFile(home)} (${(e as NodeJS.ErrnoException).code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
   }
   return t;
 }
@@ -1189,19 +1286,42 @@ export function identityHere(home: string): boolean {
   return existsSync(join(home, "cli", "keys.json")) && existsSync(join(home, "cli", "self.json"));
 }
 
-/** Whether P2P_PERSON_TOKEN is this home's person token (read only: a missing file is no match). */
+/**
+ * Whether P2P_PERSON_TOKEN is this home's person token (read only). It must be what person.key
+ * holds (a missing file is no match) and, on a home with an identity, the token that identity
+ * derives (recomputed here: a person.key written by anything else never verifies). Never on a home
+ * whose files aren't its own (homeFilesOwn).
+ */
 export function personTokenOk(env: Record<string, string | undefined> | undefined, home: string | undefined): boolean {
   const given = env?.P2P_PERSON_TOKEN?.trim();
   if (!given || typeof home !== "string" || home === "") return false;
-  let t: string;
-  try {
-    t = readFileSync(personTokenFile(home), "utf8").trim();
-  } catch {
-    return false;
-  }
+  if (!homeFilesOwn(home)) return false;
+  const t = readTrim(personTokenFile(home));
+  if (t === undefined || !same(given, t)) return false;
+  if (!identityHere(home)) return true;
+  const want = derivedToken(home);
+  return want !== undefined && same(given, want);
+}
+
+function same(given: string, t: string): boolean {
   const a = Buffer.from(given);
   const b = Buffer.from(t);
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
+}
+
+/**
+ * After a refused token: brings a person.key that holds something else (a front end's first-run
+ * value on a home that has an identity now, one from before derived tokens) up to the derived token,
+ * so the front end that reads it again gets one that verifies. A missing person.key stays missing
+ * (the next command makes it), and nothing is written into a home whose files aren't its own.
+ */
+export function healPersonToken(home: string): void {
+  if (!identityHere(home) || !existsSync(personTokenFile(home))) return;
+  try {
+    personToken(home);
+  } catch {
+    // the next command tries again
+  }
 }
 
 /**
@@ -1246,6 +1366,14 @@ export async function assertPersonForWidening(
       `\`p2p ${what}\` ${why}, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`,
     );
   }
+  // Fail closed: a process tree that couldn't be read (no /proc, no system `ps`, a process gone
+  // mid-walk) may be an agent's session. The person's token still works (above).
+  if (ancestryUnknown()) {
+    throw new CliError(
+      "refused",
+      `\`p2p ${what}\` ${why}, so only you run it: with /peers in Claude Code, or with your person token (P2P_PERSON_TOKEN). It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session`,
+    );
+  }
   if (!(await confirm(`p2p ${what} ${why}.`))) {
     throw new CliError("refused", `\`p2p ${what}\` ${why}: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
   }
@@ -1269,6 +1397,11 @@ export async function assertSpeaksFor(app: App, sid: string): Promise<void> {
 /** Whether a person-only path (session `tui`) may run here: the person's front end, or no agent in sight (then a terminal "yes" too). */
 export function personHere(app: Pick<App, "env"> & { front?: boolean }): boolean {
   return app.front === true || !agentContext(app.env);
+}
+
+/** personHere for a person-only act: an unreadable process tree counts as an agent's session (fail closed). */
+export function personHereStrict(app: Pick<App, "env"> & { front?: boolean }): boolean {
+  return app.front === true || (!agentContext(app.env) && !ancestryUnknown());
 }
 
 export async function sessionBinding(app: App, sid: string): Promise<SessionBinding | undefined> {

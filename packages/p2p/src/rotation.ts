@@ -752,8 +752,9 @@ async function begin(app: App, opts: RotateOptions): Promise<RotationState> {
   const self: SelfDoc = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   // The new identity's home gets its own person token (projects.ts renewPersonToken), before its keys;
   // front ends read it again.
-  renewPersonToken(home);
-  await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
+  const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
+  renewPersonToken(home, nkeys.spk);
+  await napp.state.put("keys", nkeys);
   await napp.state.put("self", self);
   await napp.load(true);
   await addIdentityVersion(napp.store, doc);

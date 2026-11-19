@@ -14,6 +14,7 @@ import { COLOR, PLAIN, type Style } from "./prompt/picker.js";
 import { cell, clean, displayWidth } from "./tui/sanitize.js";
 import type { CircleSummary } from "./circle-ops.js";
 import type { CodeRow, InviteCodeResult } from "./codes.js";
+import { shortCode } from "./format.js";
 import { DATA_FLOW_HEADING, type DoctorResult } from "./doctor.js";
 import type { PeerRow } from "./sessions.js";
 import type { FriendRow } from "./social.js";
@@ -181,7 +182,7 @@ export function prettyCodes(rows: CodeRow[], p: Pretty): string {
     table(
       ["CODE", "FOR", "JOINS", "STATUS"],
       rows.map((r) => [
-        t(r.status === "open" || r.status === "taken" ? r.code : r.code.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`), 44, st.dim),
+        t((r.status === "open" || r.status === "taken") && !(r as { redacted?: boolean }).redacted ? r.code : shortCode(r.code), 44, st.dim),
         t(r.to ? clean(r.to.address) : (r.label ?? "anyone"), 28),
         t(r.circles.length ? r.circles.map((c) => clean(c.name)).join(", ") : "friend only", 32),
         status(r),
