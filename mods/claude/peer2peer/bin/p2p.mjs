@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 083b08da3c8e76b8
+// @peer2peer/core 0.1.2 836ec15f2676e890
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6954,6 +6954,8 @@ var init_identitydoc = __esm({
       /** Bumped whenever anchoredGenesis or legacyAnchored changes (part of the strays memo's key). */
       anchorRev = 0;
       strayMemo;
+      /** #79: held versions by the hash they name as prev or merge, memoised per mutation. */
+      childMemo;
       /** Revocation denylist carried across jumps (R1). */
       denied = /* @__PURE__ */ new Set();
       /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -7226,6 +7228,11 @@ var init_identitydoc = __esm({
        * `replace: false` turns the L5 replacement off: such a version is reported as a gap too. A refresh places
        * with it off (#79), so a higher branch fetched in the same refresh can't silently drop a version the relays
        * also served before its ancestry (and so what it revoked) is known; the refresh decides at the end.
+       *
+       * While the history is unanchored, a version that a held root names as its parent (prev or merge) is
+       * accepted below it even though its own parent isn't held (#79): it is that root's genuine parent (bound by
+       * hash, and the link rules are checked), so what the root revoked becomes known, and a branch forking off it
+       * connects. Relays keep old versions only for a while, so a walk often can't reach version 1.
        */
       add(jws, opts = {}) {
         const peek = peekIdentityDoc(jws);
@@ -7251,6 +7258,9 @@ var init_identitydoc = __esm({
         }
         const missing = !this.versions.has(peek.prev) ? peek.prev : peek.merge !== void 0 && !this.versions.has(peek.merge) ? peek.merge : void 0;
         if (missing !== void 0) {
+          const below = this.extendDown(peek.hash, jws, opts);
+          if (below)
+            return below;
           if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
@@ -7268,6 +7278,63 @@ var init_identitydoc = __esm({
           this.checkNoReturn(doc, parent);
         this.put(doc);
         return { status: "accepted", doc };
+      }
+      /**
+       * #79: on unanchored history, `jws` (whose own parent isn't held) placed as the parent of the held versions
+       * that name it, when every such link checks out (a merge child whose other parent isn't held either is
+       * bound by hash alone until it is). Undefined when no held version names it, or the history is anchored
+       * (its lowest held versions are pruning's edge, not roots: nothing is gained below them).
+       */
+      extendDown(hash, jws, opts) {
+        const children = this.childrenOf(hash);
+        if (children.length === 0 || this.anchored)
+          return void 0;
+        const doc = verifyIdentityDoc(jws, opts);
+        if (doc.ik !== children[0].ik)
+          fail("issuer-mismatch", "a different ik for this userId");
+        for (const child of children) {
+          if (child.merge === void 0) {
+            checkLink(doc, child, void 0);
+            this.checkNoReturn(child, doc);
+            continue;
+          }
+          const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev);
+          const other = child.merge === doc.hash ? doc : this.versions.get(child.merge);
+          if (prev && other)
+            checkLink(prev, child, other);
+        }
+        this.put(doc);
+        return { status: "accepted", doc, unanchored: true };
+      }
+      /** The held versions naming `hash` as prev or merge. */
+      childrenOf(hash) {
+        let m = this.childMemo;
+        if (!m || m.rev !== this.versions.rev) {
+          const children = /* @__PURE__ */ new Map();
+          for (const v of this.versions.values()) {
+            for (const p of [v.prev, v.merge])
+              if (p)
+                (children.get(p) ?? children.set(p, []).get(p)).push(v);
+          }
+          m = this.childMemo = { rev: this.versions.rev, children };
+        }
+        return m.children.get(hash) ?? [];
+      }
+      /**
+       * #79: replaces the held history with `jws` like jumpTo, carrying the same revocation denylist, without
+       * flagging a history gap: a refresh's L5 replacement of history that was unanchored when the refresh began.
+       */
+      replaceWith(jws, opts = {}) {
+        const doc = verifyIdentityDoc(jws, opts);
+        if (doc.iss !== this.iss)
+          fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
+        const held2 = this.anyHeld();
+        if (held2 && held2.ik !== doc.ik)
+          fail("issuer-mismatch", "a different ik for this userId");
+        if (held2 && doc.ver <= this.view().head.ver)
+          fail("chain-broken", "a replacement must move forward");
+        this.replaceHistory(doc);
+        return doc;
       }
       /**
        * §2.5 gap jump: when no listed relay still holds the missing versions, a
@@ -10608,24 +10675,33 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const rejected = /* @__PURE__ */ new Set();
   let gaps = [];
   const place = (docs) => {
-    const pending2 = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
-    const next = [];
-    for (const d of pending2) {
-      if (overBudget())
-        break;
-      try {
-        const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
-        if (r.status === "gap")
-          next.push({ d, need: r.need });
-        else if (r.status === "accepted")
-          accepted.push(d.jws);
-      } catch (e) {
-        if (!(e instanceof P2PError))
-          throw e;
-        rejected.add(d.hash);
+    let pending2 = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
+    let next = [];
+    for (let progress = true, up = true; progress && pending2.length > 0; up = !up) {
+      progress = false;
+      next = [];
+      for (const d of up ? pending2 : [...pending2].reverse()) {
+        if (overBudget())
+          break;
+        try {
+          const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
+          if (r.status === "gap")
+            next.push({ d, need: r.need });
+          else if (r.status === "accepted") {
+            accepted.push(d.jws);
+            progress = true;
+          }
+        } catch (e) {
+          if (!(e instanceof P2PError))
+            throw e;
+          rejected.add(d.hash);
+        }
       }
+      if (exhausted)
+        break;
+      pending2 = next.map((g) => g.d).sort((a, b) => a.ver - b.ver);
     }
-    gaps = next;
+    gaps = next.sort((a, b) => a.d.ver - b.d.ver);
   };
   const answeredRelays = /* @__PURE__ */ new Set();
   const walkLeft = new Map(relays.map((r) => [r, WALK_ALLOWANCE_PER_RELAY]));
@@ -10725,13 +10801,23 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     }
     return void 0;
   };
+  let anchoredBeforeRoots;
+  const roots = () => {
+    begin2();
+    const r = rootFrontier();
+    overBudget();
+    end();
+    return r;
+  };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     let open3 = frontier();
     let next = pick(open3);
     if (!next) {
-      open3 = rootFrontier();
+      open3 = roots();
       next = pick(open3);
+      if (next && anchoredBeforeRoots === void 0)
+        anchoredBeforeRoots = chain.anchored;
     }
     if (!next)
       break;
@@ -10749,7 +10835,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   const sentByAnyRelay = (h) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
   const settled = (need) => chain.isPrunedGenesis(need) || !sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r));
-  const openGaps = () => [...frontier(), ...rootFrontier()];
+  const openGaps = () => [...frontier(), ...roots()];
   let probeUnanswered = false;
   if (chainOf && !exhausted && gaps.length > 0) {
     wanted = /* @__PURE__ */ new Set();
@@ -10799,15 +10885,23 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
   let replaceTo = false;
-  const incomplete = exhausted || docsCapped;
+  let incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
       broken(`could not fit ${userId}'s newest version (ver ${newest.ver})`);
     if (anchoredBefore) {
       broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
-    jumpTo = newest.jws;
-    replaceTo = !chain.anchored;
+    const n = newest;
+    const served = new Set(tips.map((d) => d.hash));
+    const contradicted = chain.roots().some(({ d: r }) => served.has(r.hash) && r.ver < n.ver && pendingUsable(r, { now, skewSec: opts.skewSec }) && (n.devices.some((x) => !r.devices.includes(x)) || n.keyholders.some((x) => !r.keyholders.includes(x))));
+    if (contradicted) {
+      docsCapped = true;
+      incomplete = true;
+    } else {
+      jumpTo = n.jws;
+      replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
+    }
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
@@ -10850,12 +10944,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     let replaced = false;
     if (jumpTo !== void 0 && !anchoredAtCommit && (c.size === 0 || c.view().head.ver < newest.ver)) {
       if (replaceTo) {
-        try {
-          replaced = c.add(jumpTo, { now, skewSec: opts.skewSec }).status === "accepted";
-        } catch (e) {
-          if (!(e instanceof P2PError))
-            throw e;
-        }
+        c.replaceWith(jumpTo, { now, skewSec: opts.skewSec });
+        replaced = true;
       } else {
         c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
         didJump = true;

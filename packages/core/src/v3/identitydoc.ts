@@ -626,8 +626,8 @@ export const MAX_PENDING_HEADS = 64;
 /** Upper bound on walk anchors kept per identity (#67); the lowest `ver`s are kept, the closest to the held head. */
 export const MAX_WALK_ANCHORS = 16;
 
-/** A pending head counts only while issued (not in the future) and not past its `exp` (#35). */
-function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
+/** A pending head counts only while issued (not in the future) and not past its `exp` (#35); also #79's current root. */
+export function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
   const now = opts.now ?? nowSec();
   return d.iat <= now + (opts.skewSec ?? DEFAULT_SKEW_SEC) && now < d.exp;
 }
@@ -670,6 +670,8 @@ export class IdentityChain {
   /** Bumped whenever anchoredGenesis or legacyAnchored changes (part of the strays memo's key). */
   private anchorRev = 0;
   private strayMemo?: { rev: number; anchorRev: number; strays: Set<string> };
+  /** #79: held versions by the hash they name as prev or merge, memoised per mutation. */
+  private childMemo?: { rev: number; children: Map<string, VerifiedIdentityDoc[]> };
   /** Revocation denylist carried across jumps (R1). */
   private denied = new Set<string>();
   /** Verified newer versions that don't connect yet (#35, see notePending). */
@@ -936,6 +938,11 @@ export class IdentityChain {
    * `replace: false` turns the L5 replacement off: such a version is reported as a gap too. A refresh places
    * with it off (#79), so a higher branch fetched in the same refresh can't silently drop a version the relays
    * also served before its ancestry (and so what it revoked) is known; the refresh decides at the end.
+   *
+   * While the history is unanchored, a version that a held root names as its parent (prev or merge) is
+   * accepted below it even though its own parent isn't held (#79): it is that root's genuine parent (bound by
+   * hash, and the link rules are checked), so what the root revoked becomes known, and a branch forking off it
+   * connects. Relays keep old versions only for a while, so a walk often can't reach version 1.
    */
   add(jws: string, opts: TimeOptions & { replace?: boolean } = {}): ChainAddResult {
     const peek = peekIdentityDoc(jws);
@@ -961,6 +968,8 @@ export class IdentityChain {
     }
     const missing = !this.versions.has(peek.prev) ? peek.prev : peek.merge !== undefined && !this.versions.has(peek.merge) ? peek.merge : undefined;
     if (missing !== undefined) {
+      const below = this.extendDown(peek.hash, jws, opts);
+      if (below) return below;
       if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
@@ -978,6 +987,58 @@ export class IdentityChain {
     if (doc.merge === undefined) this.checkNoReturn(doc, parent);
     this.put(doc);
     return { status: "accepted", doc };
+  }
+
+  /**
+   * #79: on unanchored history, `jws` (whose own parent isn't held) placed as the parent of the held versions
+   * that name it, when every such link checks out (a merge child whose other parent isn't held either is
+   * bound by hash alone until it is). Undefined when no held version names it, or the history is anchored
+   * (its lowest held versions are pruning's edge, not roots: nothing is gained below them).
+   */
+  private extendDown(hash: string, jws: string, opts: TimeOptions): ChainAddResult | undefined {
+    const children = this.childrenOf(hash);
+    if (children.length === 0 || this.anchored) return undefined;
+    const doc = verifyIdentityDoc(jws, opts);
+    if (doc.ik !== children[0].ik) fail("issuer-mismatch", "a different ik for this userId");
+    for (const child of children) {
+      if (child.merge === undefined) {
+        checkLink(doc, child, undefined);
+        this.checkNoReturn(child, doc);
+        continue;
+      }
+      const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev!);
+      const other = child.merge === doc.hash ? doc : this.versions.get(child.merge);
+      if (prev && other) checkLink(prev, child, other);
+    }
+    this.put(doc);
+    return { status: "accepted", doc, unanchored: true };
+  }
+
+  /** The held versions naming `hash` as prev or merge. */
+  private childrenOf(hash: string): VerifiedIdentityDoc[] {
+    let m = this.childMemo;
+    if (!m || m.rev !== this.versions.rev) {
+      const children = new Map<string, VerifiedIdentityDoc[]>();
+      for (const v of this.versions.values()) {
+        for (const p of [v.prev, v.merge]) if (p) (children.get(p) ?? children.set(p, []).get(p)!).push(v);
+      }
+      m = this.childMemo = { rev: this.versions.rev, children };
+    }
+    return m.children.get(hash) ?? [];
+  }
+
+  /**
+   * #79: replaces the held history with `jws` like jumpTo, carrying the same revocation denylist, without
+   * flagging a history gap: a refresh's L5 replacement of history that was unanchored when the refresh began.
+   */
+  replaceWith(jws: string, opts: TimeOptions = {}): VerifiedIdentityDoc {
+    const doc = verifyIdentityDoc(jws, opts);
+    if (doc.iss !== this.iss) fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
+    const held = this.anyHeld();
+    if (held && held.ik !== doc.ik) fail("issuer-mismatch", "a different ik for this userId");
+    if (held && doc.ver <= this.view().head.ver) fail("chain-broken", "a replacement must move forward");
+    this.replaceHistory(doc);
+    return doc;
   }
 
   /**

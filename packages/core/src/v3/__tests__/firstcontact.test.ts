@@ -136,4 +136,98 @@ describe("#79: first contact keeps the owner's revocation", () => {
     expect(w.historyGap).toBe(false);
     expect((await plain.getIdentity(u.userId))!.versions).toEqual([v11.jws]);
   });
+
+  it("relays that pruned old versions (the walk stops short of v1, of v2, or of everything below the root): the revoked device still isn't trusted", async () => {
+    for (const lowest of [2, 3, 4, 5]) {
+      const { u, stolen, own4, head, all, walk } = thief();
+      // Every relay's chain answer leaves out everything below `lowest` (relays keep non-tip versions for a while only).
+      const kept = new Map([...all].filter(([, d]) => d.ver >= lowest));
+      const f: IdentityFetcher = { tips: async () => [head.jws, own4.jws], chain: async (_u, _r, to) => walk(kept, to) };
+      const store = new MemoryTrustStoreV3();
+      for (let i = 0; i < 2; i++) {
+        const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
+        expect([lowest, v.devices.includes(stolen.did), v.keyholders.includes(stolen.did)]).toEqual([lowest, false, false]);
+        if (lowest <= 3) {
+          // v3 is placed below the owner's v4, and the thief's branch connects to it: the fork shows.
+          expect([lowest, v.incomplete, v.forked, v.tips.map((t) => t.ver)]).toEqual([lowest, undefined, true, [8, 4]]);
+        } else {
+          // Nothing connects the two: not replaced, the refresh stays incomplete (no freshness).
+          expect([lowest, v.incomplete]).toEqual([lowest, true]);
+          expect(await lastRefreshed(store, u.userId)).toBeUndefined();
+        }
+        expect((await getIdentityView(store, u.userId, { now: NOW }))?.devices).not.toContain(stolen.did);
+      }
+    }
+  });
+
+  it("the walk extends an unanchored root downward: what the root revoked is known without version 1", () => {
+    const { u, stolen, own4, forged } = thief();
+    const c = new IdentityChain(u.userId);
+    c.add(own4.jws, { now: NOW });
+    expect(c.add(u.docs[2].jws, { now: NOW })).toMatchObject({ status: "accepted", unanchored: true }); // v3 below v4
+    expect([...c.revokedAlong(own4.hash)]).toEqual([stolen.did]);
+    expect(c.add(forged[0].jws, { now: NOW }).status).toBe("accepted"); // the thief's v4' connects to v3
+    expect(c.view().forked).toBe(true);
+    expect(c.view().devices).not.toContain(stolen.did);
+    expect(c.anchored).toBe(false);
+    // A version that isn't the root's parent stays a gap; a forged "parent" can't hash to it.
+    const reloaded = IdentityChain.fromStored(c.toStored(), { now: NOW });
+    expect(reloaded.view().devices).not.toContain(stolen.did);
+  });
+
+  it("an honest newer head over a current root, chain unavailable: replaced when it adds nothing; held back (incomplete, narrowed) when it adds a device; replaced once the root has expired", async () => {
+    const u = makeUser("alice");
+    u.relays = [RELAY, RELAY2];
+    u.addDevice({ keyholder: false }); // dropped at v9
+    for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 900 + i }); // v2..v5 [dev1, extra]
+    const v5 = u.doc;
+    const v9 = (() => {
+      for (let i = 0; i < 3; i++) u.publish({ iat: NOW - 800 + i });
+      return u.publish({ devices: [u.dev.did], iat: NOW - 700 }); // v9 drops extra
+    })();
+    const plain = (tipsFor: Record<string, string[]>): IdentityFetcher => async (_u, rs) => tipsFor[rs[0]] ?? [];
+    // Removes only: L5 replacement as before.
+    const s1 = new MemoryTrustStoreV3();
+    const a = await refreshIdentity(s1, u.userId, plain({ [RELAY]: [v5.jws], [RELAY2]: [v9.jws] }), { now: NOW, relays: [RELAY, RELAY2] });
+    expect([a.incomplete, a.head.hash, a.historyGap]).toEqual([undefined, v9.hash, false]);
+    // Adds a device the stale relay's current tip doesn't list: held back while that tip is current.
+    const added = u.addDevice({ keyholder: false });
+    u.publish({ devices: [u.dev.did, added.did], iat: NOW - 600 }); // v10
+    const v11 = u.publish({ devices: [u.dev.did, added.did], iat: NOW - 590 });
+    const s2 = new MemoryTrustStoreV3();
+    const b = await refreshIdentity(s2, u.userId, plain({ [RELAY]: [v9.jws], [RELAY2]: [v11.jws] }), { now: NOW, relays: [RELAY, RELAY2] });
+    expect(b.incomplete).toBe(true);
+    expect(b.devices).toEqual([u.dev.did]);
+    // Once that tip has expired, the newer head replaces it.
+    const later = v9.exp + 1;
+    const c = await refreshIdentity(s2, u.userId, plain({ [RELAY]: [v9.jws], [RELAY2]: [v11.jws] }), { now: later, relays: [RELAY, RELAY2] });
+    expect([c.incomplete, c.head.hash, c.historyGap]).toEqual([undefined, v11.hash, false]);
+    expect(c.devices).toContain(added.did);
+  });
+
+  it("a relay replaying old versions below an unanchored root doesn't turn an L5 replacement into a history-gap jump", async () => {
+    const u = makeUser("alice");
+    u.relays = [RELAY, RELAY2];
+    for (let i = 0; i < 4; i++) u.publish({ iat: NOW - 900 + i });
+    const v5 = u.doc;
+    for (let i = 0; i < 5; i++) u.publish({ iat: NOW - 800 + i });
+    const v10 = u.doc;
+    const byHash = new Map(u.docs.map((d) => [d.hash, d]));
+    const store = new MemoryTrustStoreV3();
+    await addIdentityVersion(store, v5.jws, { now: NOW });
+    // The honest relay can't connect v10 (its v6..v9 are gone); the other replays v4..v1 below v5.
+    const f = perRelay(
+      { [RELAY]: [v10.jws], [RELAY2]: [v5.jws] },
+      {
+        [RELAY]: () => [],
+        [RELAY2]: (to) => {
+          const out: string[] = [];
+          for (let d = byHash.get(to); d && d.ver <= 4; d = d.prev ? byHash.get(d.prev) : undefined) out.push(d.jws);
+          return out;
+        },
+      },
+    );
+    const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
+    expect([v.incomplete, v.head.hash, v.historyGap]).toEqual([undefined, v10.hash, false]);
+  });
 });

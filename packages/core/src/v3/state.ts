@@ -36,7 +36,7 @@ import {
 } from "./circles.js";
 import { unfriendApplies, verifyFriendshipV3, verifyInviteV3, type VerifiedFriendshipV3, type VerifiedInviteV3 } from "./friends.js";
 import { verifyDeviceCertV3 } from "./device.js";
-import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, MAX_WALK_ANCHORS, peekIdentityDoc, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
+import { assertNotFailClosed, docCertFor, identityFreshness, IdentityChain, MAX_WALK_ANCHORS, peekIdentityDoc, pendingUsable, usablePendingHeads, verifyIdentityDocSignature, type ChainAddResult, type IdentityView, type VerifiedIdentityDoc } from "./identitydoc.js";
 import type { CertResolverV3, IdentityResolver, SignerContext } from "./signers.js";
 import type { StoredCapV3, StoredCircleV3, TrustStoreV3 } from "./store.js";
 
@@ -242,7 +242,12 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    a version that would replace unanchored history waits as a gap, the walk
  *    also asks for the parents of the unanchored roots it would drop, and the
  *    replacement (no history gap while what is held is still unanchored)
- *    happens only at the end, carrying what every held branch revoked.
+ *    happens only at the end, carrying what every held branch revoked. A
+ *    version a held unanchored root names as its parent is placed below it
+ *    (IdentityChain.add), so the walk needn't reach version 1. When the
+ *    root's parent can't be had either, a current root a relay served as its
+ *    tip isn't dropped for a newer version listing a device or key holder it
+ *    doesn't: the refresh ends incomplete, the newer version pending.
  *  - A gap whose missing version is a genesis pruning dropped (a replay of a
  *    long history's pruned versions) is settled, never walked (#81).
  *  - Fails closed if no relay returns anything usable, or if the identity is
@@ -433,23 +438,38 @@ export async function refreshIdentity(
   const rejected = new Set<string>();
   let gaps: { d: VerifiedIdentityDoc; need: string }[] = [];
   /** New documents in ver order, each once, then one pass over the earlier gaps. */
+  /**
+   * New documents and the earlier gaps, each tried once per pass: oldest first (a version connects onto its
+   * parent), then, while a pass placed something, again the other way round (on unanchored history a version
+   * is also placed below the root naming it, #79, so a walk page that stops short of version 1 still extends
+   * the root downward). Each further pass places at least one document, within the chain-work budget.
+   */
   const place = (docs: VerifiedIdentityDoc[]) => {
-    const pending = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
-    const next: typeof gaps = [];
-    for (const d of pending) {
-      if (overBudget()) break; // the rest stays unplaced; what was placed is committed
-      try {
-        // #79: no L5 replacement while placing: a higher version that doesn't chain waits as a gap, so it can't
-        // drop a version this refresh also fetched before that version's ancestry is walked (the end decides).
-        const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
-        if (r.status === "gap") next.push({ d, need: r.need });
-        else if (r.status === "accepted") accepted.push(d.jws);
-      } catch (e) {
-        if (!(e instanceof P2PError)) throw e;
-        rejected.add(d.hash); // never adopted, not even by a jump (N6)
+    let pending = [...docs, ...gaps.map((g) => g.d)].sort((a, b) => a.ver - b.ver);
+    let next: typeof gaps = [];
+    for (let progress = true, up = true; progress && pending.length > 0; up = !up) {
+      progress = false;
+      next = [];
+      for (const d of up ? pending : [...pending].reverse()) {
+        if (overBudget()) break; // the rest stays unplaced; what was placed is committed
+        try {
+          // #79: no L5 replacement while placing: a higher version that doesn't chain waits as a gap, so it can't
+          // drop a version this refresh also fetched before that version's ancestry is walked (the end decides).
+          const r = chain.add(d.jws, { now, skewSec: opts.skewSec, replace: false });
+          if (r.status === "gap") next.push({ d, need: r.need });
+          else if (r.status === "accepted") {
+            accepted.push(d.jws);
+            progress = true;
+          }
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+          rejected.add(d.hash); // never adopted, not even by a jump (N6)
+        }
       }
+      if (exhausted) break;
+      pending = next.map((g) => g.d).sort((a, b) => a.ver - b.ver);
     }
-    gaps = next;
+    gaps = next.sort((a, b) => a.d.ver - b.d.ver);
   };
   const answeredRelays = new Set<string>();
   /** Per-relay document allowance of the chain walk, separate from the tips phase (pre-release review). */
@@ -590,13 +610,24 @@ export async function refreshIdentity(
     }
     return undefined;
   };
+  /** Whether the history was anchored when the walk first asked for a root's parent (#79 review; see replaceTo). */
+  let anchoredBeforeRoots: boolean | undefined;
+  /** rootFrontier, its chain work metered like placement (it reads the view and every held version). */
+  const roots = () => {
+    begin();
+    const r = rootFrontier();
+    overBudget();
+    end();
+    return r;
+  };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
     let open = frontier();
     let next = pick(open);
     if (!next) {
-      open = rootFrontier();
+      open = roots();
       next = pick(open);
+      if (next && anchoredBeforeRoots === undefined) anchoredBeforeRoots = chain.anchored;
     }
     if (!next) break;
     wanted = new Set(open.map((g) => g.need));
@@ -625,7 +656,7 @@ export async function refreshIdentity(
   const sentByAnyRelay = (h: string) => walkUnchecked.has(h) || relays.some((r) => sentBy.get(r)?.has(h));
   const settled = (need: string) => chain.isPrunedGenesis(need) || (!sentByAnyRelay(need) && relays.every((r) => attemptedFor.get(need)?.has(r)));
   /** Every gap the end still depends on: the ordinary frontier, and the unanchored roots a replacement would drop (#79). */
-  const openGaps = () => [...frontier(), ...rootFrontier()];
+  const openGaps = () => [...frontier(), ...roots()];
   let probeUnanswered = false;
   if (chainOf && !exhausted && gaps.length > 0) {
     wanted = new Set();
@@ -693,14 +724,40 @@ export async function refreshIdentity(
    * left it for here, after the walk: the replacement carries what every held branch revoked, the roots' too.
    */
   let replaceTo = false;
-  const incomplete = exhausted || docsCapped;
+  let incomplete = exhausted || docsCapped;
   if (!incomplete && behind()) {
     if (!gaps.some((g) => g.d.hash === newest!.hash)) broken(`could not fit ${userId}'s newest version (ver ${newest!.ver})`);
     if (anchoredBefore) {
       broken(`${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
     }
-    jumpTo = newest!.jws;
-    replaceTo = !chain.anchored;
+    // #79 review: a current version a relay served as its tip in this refresh, held as an unanchored root whose
+    // parent no relay gave (so what it revoked is unknown), isn't dropped for a newer version that doesn't
+    // connect to it and lists a device or key holder it doesn't: that is what a key thief's branch keeping a
+    // device the owner just revoked looks like. The refresh ends incomplete instead (no freshness, approvals
+    // refused), the root stays held and the newer version is a pending head, so only what both list is
+    // trusted, until the chain connects them or the root expires (at most 30 days: an honest replay of an old
+    // version can't hold a refresh back longer, and relays keep a current version's parent). A newer version
+    // listing nothing the root doesn't (honest removals, or nothing changed) still replaces it (L5).
+    const n = newest!;
+    const served = new Set(tips.map((d) => d.hash));
+    const contradicted = chain
+      .roots()
+      .some(
+        ({ d: r }) =>
+          served.has(r.hash) &&
+          r.ver < n.ver &&
+          pendingUsable(r, { now, skewSec: opts.skewSec }) &&
+          (n.devices.some((x) => !r.devices.includes(x)) || n.keyholders.some((x) => !r.keyholders.includes(x))),
+      );
+    if (contradicted) {
+      docsCapped = true;
+      incomplete = true;
+    } else {
+      jumpTo = n.jws;
+      // History anchored only by this refresh's walk below a root (a relay replaying old versions) doesn't turn
+      // an L5 replacement into a jump: decided by what was held before that walk.
+      replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
+    }
   }
   // #35: an incomplete refresh may commit an intermediate version (or none) below the verified tips. Those
   // above the head are recorded as pending heads, so until the stored head reaches them, the view trusts
@@ -764,12 +821,9 @@ export async function refreshIdentity(
     let replaced = false;
     if (jumpTo !== undefined && !anchoredAtCommit && (c.size === 0 || c.view().head.ver < newest!.ver)) {
       if (replaceTo) {
-        // L5 (#79): only while what is stored now is unanchored; otherwise the check below fails closed.
-        try {
-          replaced = c.add(jumpTo, { now, skewSec: opts.skewSec }).status === "accepted";
-        } catch (e) {
-          if (!(e instanceof P2PError)) throw e;
-        }
+        // L5 (#79): no history gap; carries the same denylist as a jump. Only over what was stored unanchored.
+        c.replaceWith(jumpTo, { now, skewSec: opts.skewSec });
+        replaced = true;
       } else {
         c.jumpTo(jumpTo, { now, skewSec: opts.skewSec });
         didJump = true;
