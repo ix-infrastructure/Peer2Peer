@@ -2,6 +2,12 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **The owner can rotate after someone holding the identity key forks it with a version that leaves the owner's devices out.** Such a version connects to the owner's history, so the owner's view forks, the owner's devices fall out of the allowlist, and the relays refuse them. Before, `p2p identity rotate` refused with `device_revoked`, and so did the final version's publish, which merged the fork first. A failed edit also kept that merge, which hid the owner's own branch afterwards; rotation now drops such a merge when no relay serves it. Now rotation runs from the device's own branch: a tip that still lists it as a key holder, chosen by who published the versions on it, never by version number. When that can't tell (someone else's branch also lists the device and was published by one of your devices), the command refuses with `branch_ambiguous`, lists the branches, and you choose one with `--branch <hash>`. The plan lists that branch's devices, and friends this device made are invited. The old identity's final version follows a merge of the tips that lists nobody, with the relays of the newest version this device published plus its configured ones. A relay that refuses the device gets it over a restricted connection with a throwaway device certificate. Friends follow it as usual. A device that no tip lists still can't rotate. The owner's other devices can't be reached through the relays then, so they re-link by hand. ([#75](https://github.com/ix-infrastructure/Peer2Peer/issues/75))
+
 ## 0.1.2
 
 Nothing changes on the wire. 0.1.2 clients interoperate in both directions with 0.1.1 and 0.1.0. The cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks this against the previous two releases, as committed at their tags and as npm installs them.
