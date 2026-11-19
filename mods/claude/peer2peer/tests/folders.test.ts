@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { isMutating, markerExtras, parseMarkerProbe, parsePeersArgs, scratchEnv, sessionShowText, shellPaths, toolPathsAll } from '../hooks/lib'
-import { ran, settle, sidOf, slash, start, world, type World } from './world'
+import { growth, ran, settle, sidOf, slash, start, world, type World } from './world'
 
 const handed = (w: World, verb = 'status') => ran(w, verb).flatMap(r => (r.env?.P2P_PROJECT_DIRS ?? '').split(':').filter(Boolean))
 const JOB = '/home/u/.claude/jobs/j-7f3a'
@@ -218,12 +218,12 @@ describe('shell paths after the #49 review: command position, folders moved to, 
   })
 
   test('linear on hostile input (CodeQL js/polynomial-redos): many newlines, and a brace with many commas', () => {
-    let t = performance.now()
     expect(sp('\n'.repeat(50_000))).toEqual({ paths: [], over: false })
-    expect(performance.now() - t).toBeLessThan(100)
-    t = performance.now()
     expect(sp(`rm -rf {{,${','.repeat(50_000)}`).paths).toEqual([])
-    expect(performance.now() - t).toBeLessThan(100)
+    // Linear: the cost from n to 4n (about 4 when linear, 16 when quadratic), measured against this
+    // machine itself, so a slow runner passes and a polynomial scan doesn't.
+    expect(growth(n => sp('\n'.repeat(n)), 12_500).ratio).toBeLessThan(9)
+    expect(growth(n => sp(`rm -rf {{,${','.repeat(n)}`), 12_500).ratio).toBeLessThan(9)
     // Still read as before: eval after a newline or a keyword, and a brace with a choice.
     expect(sp('\n\n  eval "$x"; cat $HOME/k').over).toBe(true)
     expect(sp('if x; then eval y; fi; cat $HOME/k').over).toBe(true)

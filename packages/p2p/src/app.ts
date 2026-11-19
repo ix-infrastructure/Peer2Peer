@@ -993,6 +993,12 @@ export class App {
     const devices = [...view.devices, ...readd].slice(0, MAX_DEVICES);
     const keyholders = [...view.keyholders, ...unionKeyholders.filter((d) => readd.includes(d) && devices.includes(d))];
     if (!opts.restoring && (!devices.includes(this.did) || !keyholders.includes(this.did))) {
+      // #75: the merges above were never published; kept, they'd leave this device unlisted in its own
+      // view (a fork made by a version that leaves it out), and rotation, the remedy, couldn't find its branch.
+      if (merges.length > 0) {
+        const drop = new Set(merges.map((m) => peekIdentityDoc(m).hash));
+        await this.store.updateIdentity(this.userId, (cur) => (cur ? { next: { ...cur, versions: cur.versions.filter((v) => !drop.has(peekIdentityDoc(v).hash)) }, result: undefined } : { result: undefined }));
+      }
       throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity: it can't publish (only identity rotation, §2.8, replaces a lost key holder's key; run it from a listed key holder)");
     }
     const p: CreateIdentityDocParams = {
