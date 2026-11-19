@@ -63,7 +63,9 @@ describe('peer2peer: footprint overlaps', () => {
     expect(w.submits).toEqual([])
   })
 
-  test('each overlap once per change in its key', async ($, on) => {
+  // The fake clock drives it, but every settle runs the plugin's loops for real: 2-4 s on a fast laptop,
+  // past the 5 s default timeout on a slow shared runner (#55), so a longer one.
+  test('each overlap once per change in its key', { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on)
     w.peers = [{ ...BEN, repo: 'web', state: 'busy' }]
     w.cli['ix overlaps'] = { body: { overlaps: [ov('high', 'same symbol', 'you both change src/a.ts#f')], fallback: [] } }
@@ -119,7 +121,8 @@ describe('peer2peer: footprint overlaps', () => {
     await tick(w)
     expect(ran(w, 'ix', 'overlaps')).toEqual([])
   })
-  test('M1: a peer cycling session or agent ids (new keys each time) gets one line per 10 minutes; 3 in all', async ($, on) => {
+  // Many settles too: a longer timeout for a slow shared runner, as above.
+  test('M1: a peer cycling session or agent ids (new keys each time) gets one line per 10 minutes; 3 in all', { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on)
     w.peers = [{ ...BEN, repo: 'web', state: 'busy' }, { ...ANA, repo: 'web', state: 'busy' }]
     let n = 0

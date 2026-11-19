@@ -32,7 +32,9 @@ async function advance(w: World, ms: number) {
 }
 
 describe('peer2peer: the Ix footprint', () => {
-  test('debounced: 10 s after the last edit, then at most every 30 s', async ($, on) => {
+  // The fake clock drives it, but every settle runs the plugin's loops for real: 2-4 s on a fast laptop,
+  // past the 5 s default timeout on a slow shared runner (#55), so a longer one.
+  test('debounced: 10 s after the last edit, then at most every 30 s', { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on)
     await loaded($, w)
     await postEdit($)
@@ -275,7 +277,8 @@ describe('peer2peer: the Ix footprint', () => {
     expect(ok.deny).toBeUndefined()
   })
 
-  test('no_hmac_key (git slow, a shallow clone) backs off exponentially instead of stopping', async ($, on) => {
+  // Many settles too: a longer timeout for a slow shared runner, as above.
+  test('no_hmac_key (git slow, a shallow clone) backs off exponentially instead of stopping', { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on)
     await loaded($, w)
     w.cli['ix footprint'] = { exitCode: 1, body: { error: 'no_hmac_key', reason: 'shallow clone' } }
