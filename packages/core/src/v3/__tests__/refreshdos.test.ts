@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { createIdentityDoc, mergeFields, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
-import { addIdentityVersion, getIdentityView, jumpIdentity, refreshIdentity, type IdentityFetcher } from "../state.js";
+import { addIdentityVersion, getIdentityView, jumpIdentity, refreshIdentity, REFRESH_BUDGET_MS, type IdentityFetcher } from "../state.js";
 import { b64uEncode } from "../../encoding.js";
 import { randomBytes } from "../../crypto.js";
 import { decodeJws, signJws } from "../../jws.js";
@@ -162,7 +162,10 @@ describe("R2: hostile fetch results can't stall the refresh", () => {
     };
     const budget = linearBudgetMs([...u.docs.map((d) => d.jws), v63.jws, ...junkPage]);
     const t0 = performance.now();
-    await expect(refreshIdentity(store, u.userId, fetcher, { now: NOW })).rejects.toThrow(/chain-broken/);
+    // An explicit chain-work budget: on a slow runner the default (REFRESH_BUDGET_MS) can run out first, and the refresh
+    // then returns `incomplete` (nothing accepted, the head unchanged, approvals refused). This test is about the junk
+    // page ending the walk; the check shares keep their default, and time is checked below.
+    await expect(refreshIdentity(store, u.userId, fetcher, { now: NOW, budgetMs: 60_000, checkMs: REFRESH_BUDGET_MS })).rejects.toThrow(/chain-broken/);
     expect(performance.now() - t0).toBeLessThan(budget);
     expect(requests).toBe(1); // a page with nothing valid ends the walk
     expect((await getIdentityView(store, u.userId))?.head.ver).toBe(61);
