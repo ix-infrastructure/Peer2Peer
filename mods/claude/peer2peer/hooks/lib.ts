@@ -1175,7 +1175,7 @@ export function parsePeersArgs(args: string): PeersCommand {
       if (rest.length === 0) return { verb: 'relays' }
       if ((first === 'add' || first === 'remove') && second && rest.length === 2) return { verb: 'relays-change', change: first, url: second }
 
-      return { verb: 'usage', error: 'relays takes nothing, or add|remove <url>' }
+      return { verb: 'usage', error: 'relays takes nothing, or add|remove <url> (to remove several at once, run `p2p relays remove <url> <url>` in a terminal)' }
     case 'setup':
       if (rest.length > 1) return { verb: 'usage', error: 'setup takes at most one name' }
 

@@ -229,15 +229,32 @@ describe("#78 review: more than one relay, removal, renewal", () => {
     expect((await heldHead(u)).hash).toBe(stale.hash);
   }, 180_000);
 
-  it("two silent relays that sent the same version: removing either goes ahead", async () => {
+  it("two silent relays that sent the same version: removing one is refused naming the other; both at once go ahead", async () => {
     const { u, userId, staleVersions } = await behind("fay", [RA, RB], { three: true });
     network(userId, { silent: [ra.port, rb.port], lagging: [{ port: rc.port, stale: staleVersions }] });
     const edit = await u.run(["profile", "set", "--bio", "x"]);
     expect(edit.code).not.toBe(0);
     expect(edit.json.heldBy).toEqual([RA, RB]);
-    const removed = await u.run(["relays", "remove", RA]);
+    const one = await u.run(["relays", "remove", RA]);
+    expect(one.code).not.toBe(0);
+    expect(one.json.heldBy).toEqual([RB]);
+    const removed = await u.run(["relays", "remove", RA, RB]);
     expect(removed.code, `${removed.out}\n${removed.err}`).toBe(0);
-    expect(removed.json.relays).toEqual([RB, RC]);
+    expect(removed.json.relays).toEqual([RC]);
+  }, 180_000);
+
+  it("a relay that replayed the honest relay's version, then withholds it: removing it alone is refused while the honest one is silent", async () => {
+    // RA (honest) and RB both sent the newest version; RA is silent now, RB answers the stale head.
+    const { u, userId, stale, staleVersions, newest } = await behind("ivy", [RA, RB]);
+    network(userId, { silent: [ra.port], lagging: [{ port: rb.port, stale: staleVersions }] });
+    const r = await u.run(["relays", "remove", RB]);
+    expect(r.code).not.toBe(0);
+    expect(r.json.error).toBe("refresh_failed");
+    expect(r.json.heldBy).toEqual([RA]);
+    vi.restoreAllMocks();
+    // Nothing published on the stale head (no fork against the newest).
+    expect((await heldHead(u)).hash).toBe(stale.hash);
+    for (const port of [ra.port, rb.port]) expect((await realTips(port, userId)).map((t) => t.hash)).toEqual([newest.hash]);
   }, 180_000);
 
   it("two silent relays that sent different versions: one alone is refused, both at once go ahead", async () => {

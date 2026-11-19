@@ -27441,10 +27441,10 @@ var init_app = __esm({
        * version, as a pending head an earlier, incomplete refresh recorded with the relays that sent it. Refuses
        * when a pending head above the confirmed head was sent by a relay that:
        *  - is still listed and isn't set aside by this edit (`setAside.relays`: the relays it removes), so
-       *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head one of the
-       *    removed relays sent holds nothing up at all (#78 review: the user is saying that relay's version isn't
-       *    to be trusted), so two silent relays that sent the same version don't each hold up removing the
-       *    other; `relays remove` takes several relays for those that sent different ones;
+       *    `p2p relays remove` always gets past a relay that holds the owner up. A pending head another relay
+       *    sent too still holds the edit up while that one is silent (#78 re-review: removing a relay that
+       *    replayed an honest relay's version, and now withholds it, mustn't fork against it); silent relays
+       *    that hold each other up are removed together (`relays remove` takes several);
        *  - wasn't named as serving versions that don't connect (a forged chain's, core's unconnectedRelays);
        *  - didn't answer this refresh: a relay that answered gave its current tips, so what it still serves is
        *    already in this refresh (connected, or the refresh failed or was cut short), and what it no longer
@@ -27461,9 +27461,8 @@ var init_app = __esm({
         const skip = /* @__PURE__ */ new Set([...setAside2?.relays ?? [], ...named]);
         const silent = /* @__PURE__ */ new Set();
         let newest = 0;
-        const removing = new Set(setAside2?.relays ?? []);
         for (const p of pendingHeadSenders(stored2)) {
-          if (p.ver <= v.head.ver || p.relays.some((r) => removing.has(r))) continue;
+          if (p.ver <= v.head.ver) continue;
           const by = p.relays.filter((r) => list.includes(r) && !skip.has(r) && !heard.has(r));
           if (by.length === 0) continue;
           for (const r of by) silent.add(r);
