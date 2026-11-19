@@ -32,6 +32,7 @@ import {
   mergePrevTip,
   scheduledWriter,
   refreshIdentity as coreRefreshIdentity,
+  heldBackByOf,
   unconnectedRelaysOf,
   unconnectedVersionsOf,
   type UnconnectedVersion,
@@ -605,7 +606,8 @@ export class App {
       if (!(e instanceof P2PError)) throw e;
       // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
       if (opts.strict) {
-        const unconnected = unconnectedRelaysOf(e);
+        // #79: relays core held the refresh back for count like the ones it names (see the incomplete case below).
+        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? heldBackByOf(e) : [])])];
         const versions = unconnectedVersionsOf(e);
         const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
         if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -624,9 +626,13 @@ export class App {
         if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
         return held;
       }
-      const fb = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-      if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
-      named = v.unconnectedRelays ?? [];
+      // #79: relays core held the refresh back for (they sent a version of our identity that doesn't connect to
+      // a current one we hold and lists more than it) count like the relays it names as serving versions that
+      // don't connect: a rotation sets them aside, any other edit refuses and names them.
+      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? (v.heldBackBy ?? []) : [])])];
+      const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+      if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+      named = unconnected;
       v = fb;
     }
     if (opts.strict && own) await this.ownPendingGuard(userId, list, v, named, opts.setAside);

@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, MAX_SIDE_ROOTS, pendingHeadSenders, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
-import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
+import { addIdentityVersion, getIdentityView, heldBackByOf, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { makeUser, NOW, RELAY, RELAY2 } from "./fixtures.js";
 
@@ -500,5 +500,37 @@ describe("#79 fourth review: dropping only narrows", () => {
     for (let i = 0; i < MAX_SIDE_ROOTS; i++) c.add(sibling(NOW - 100 + i), { now: NOW, replace: false, asRoot: true });
     const later = NOW + 7200; // every side root (and v4) still current? v4 yes; the short-lived siblings no
     expect(c.add(sibling(later - 10), { now: later, replace: false, asRoot: true }).status).toBe("accepted");
+  });
+});
+
+describe("#79 post-merge: the relays a refresh of our own identity was held back for", () => {
+  it("reported (own identity only) on the held-back result, and on chain-broken once the history is anchored", async () => {
+    const u = makeUser("alice");
+    u.relays = [RELAY, RELAY2];
+    const stolen = u.addDevice({ keyholder: false });
+    u.publish({ devices: [u.dev.did], iat: NOW - 900 });
+    const v3 = u.publish({ devices: [u.dev.did], iat: NOW - 890 });
+    const own4 = u.publish({ devices: [u.dev.did], iat: NOW - 700 });
+    let p = v3;
+    for (let v = 4; v <= 8; v++) {
+      p = verifyIdentityDocSignature(createIdentityDoc(u.ik, { ver: v, prev: p.hash, name: u.name, relays: u.relays, devices: [u.dev.did, stolen.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 800 + v }));
+    }
+    const head = p;
+    const owner = new Map(u.docs.map((d) => [d.hash, d]));
+    const walk = (to: string) => {
+      const out: string[] = [];
+      for (let d = owner.get(to); d; d = d.prev ? owner.get(d.prev) : undefined) out.push(d.jws);
+      return out;
+    };
+    const f = perRelay({ [RELAY]: [head.jws], [RELAY2]: [own4.jws] }, { [RELAY]: () => [], [RELAY2]: walk });
+    for (const own of [false, true]) {
+      const store = new MemoryTrustStoreV3();
+      await addIdentityVersion(store, own4.jws, { now: NOW });
+      const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2], own });
+      expect([own, v.incomplete, v.heldBackBy]).toEqual([own, true, own ? [RELAY] : undefined]);
+      // The walk anchored the history: the next refresh fails chain-broken, with the same relay reported.
+      const e = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2], own }).catch((x: unknown) => x);
+      expect([own, (e as { reason?: string }).reason, heldBackByOf(e)]).toEqual([own, "chain-broken", own ? [RELAY] : []]);
+    }
   });
 });

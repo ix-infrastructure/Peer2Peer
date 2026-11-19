@@ -132,6 +132,13 @@ export type RefreshedView = IdentityView & {
    * verified version above the held head left unconnected, with the relays that sent it.
    */
   unconnectedVersions?: UnconnectedVersion[];
+  /**
+   * #79 (own identity only, `opts.own`), on an incomplete result: when the refresh was held back because a current
+   * version it would have left out lists less than the head that doesn't connect to it, the relays that sent that
+   * head but none of the versions it would have left out. Evidence only about what each relay itself sent; the
+   * owner's client may set them aside before a rotation, as it does unconnectedRelays.
+   */
+  heldBackBy?: string[];
 };
 
 /** A verified version a refresh left unconnected above the held head, and the relays that sent it (#67). */
@@ -147,6 +154,12 @@ export function unconnectedVersionsOf(e: unknown): UnconnectedVersion[] {
 }
 
 /** The relays a failed refresh names as having sent versions it couldn't connect (#67); empty when none or not such a failure. */
+/** #79: the relays a `chain-broken` refresh of our own identity was held back for (RefreshedView.heldBackBy). */
+export function heldBackByOf(e: unknown): string[] {
+  const r = (e as { heldBackBy?: unknown } | null)?.heldBackBy;
+  return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
+}
+
 export function unconnectedRelaysOf(e: unknown): string[] {
   const r = (e as { unconnectedRelays?: unknown } | null)?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
@@ -724,11 +737,41 @@ export async function refreshIdentity(
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg: string): never => {
+  const broken = (msg: string, heldBackBy: readonly string[] = []): never => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...(heldBackBy.length > 0 ? { heldBackBy } : {}) });
     throw e;
   };
+  // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
+  // hint (a circle link's bundled document), and those must not make up a majority while the identity's
+  // own relays are silent. Over the relays asked only when nothing is held, or when the caller asked none
+  // the view lists (an explicit override; the CLI and refreshFor always include them).
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  /** How many of the listed relays sent `hash` in this refresh (as a tip or on a walk page). */
+  const servedBy = (hash: string) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
+  /**
+   * #79: of `candidates`, the current versions a result with head `head` would leave out that `head` lists more
+   * than (a device or key holder they don't), where nothing connects them: held back only when such a version has
+   * at least as much relay support as the head, or the head lacks a majority of the listed relays (T1, #79
+   * third review: one relay replaying a genuine current old version can't hold back a head most listed relays
+   * serve, as relays keep at most 128 versions; a thief's relay against the owner's, or a head only a minority
+   * serves, still is).
+   */
+  const leftOutBy = (head: VerifiedIdentityDoc, candidates: Iterable<VerifiedIdentityDoc>) => {
+    const headSupport = servedBy(head.hash);
+    const headMajority = headSupport * 2 > listed.length;
+    return [...candidates].filter(
+      (e) =>
+        e.hash !== head.hash &&
+        !rejected.has(e.hash) &&
+        pendingUsable(e, { now, skewSec: opts.skewSec }) &&
+        (!headMajority || servedBy(e.hash) >= headSupport) &&
+        (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))),
+    );
+  };
+  /** #79, own identity only: the relays that sent `head` and none of `left` (RefreshedView.heldBackBy). */
+  const heldBackOf = (head: VerifiedIdentityDoc, left: readonly VerifiedIdentityDoc[]) =>
+    opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
 
   // The newest version the relays returned that the chain rules didn't reject.
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
@@ -744,7 +787,12 @@ export async function refreshIdentity(
   if (replacing) {
     if (!gaps.some((g) => g.d.hash === newest!.hash)) broken(`could not fit ${userId}'s newest version (ver ${newest!.ver})`);
     if (anchoredBefore) {
-      broken(`${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
+      // On our own identity, the relays that sent it are reported as held back for (and set aside before a
+      // rotation) when it lists more than a current tip we hold, as on unanchored history below.
+      broken(
+        `${userId}'s newest version (ver ${newest!.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`,
+        heldBackOf(newest!, leftOutBy(newest!, chain.tips())),
+      );
     }
   }
   // #79 (and its reviews): a current version that the result would leave out, with nothing connecting it to the
@@ -764,6 +812,8 @@ export async function refreshIdentity(
   // same-ver branch signed with the identity key (which one was placed first is only the order the relays'
   // answers arrived in): kept as another root, so the view shows the fork and trusts only what both list.
   const besideHead: string[] = [];
+  /** #79: see RefreshedView.heldBackBy. */
+  let heldBackBy: string[] = [];
   if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
     begin();
     const headVer = chain.view().head.ver;
@@ -781,37 +831,17 @@ export async function refreshIdentity(
     if (besideHead.length > 0) gaps = gaps.filter((g) => !chain.has(g.d.hash));
     end();
   }
-  // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
-  // hint (a circle link's bundled document), and those must not make up a majority while the identity's
-  // own relays are silent. Over the relays asked only when nothing is held, or when the caller asked none
-  // the view lists (an explicit override; the CLI and refreshFor always include them).
-  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
-  /** How many of the listed relays sent `hash` in this refresh (as a tip or on a walk page). */
-  const servedBy = (hash: string) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
   if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
     const head = replacing ? newest! : chain.view().head;
-    // T1 (#79 third review): held back only when the left-out version has at least as much relay support as the
-    // head, or the head lacks a majority of the listed relays. One relay replaying a genuine current old version
-    // can't hold back a head most listed relays serve (relays keep at most 128 versions, so its ancestry may be
-    // gone), while a thief's relay against the owner's (one against one), or a head only a minority serves
-    // (the owner's relays silent), still is.
-    const headSupport = servedBy(head.hash);
-    const headMajority = headSupport * 2 > listed.length;
     const evidence = new Map<string, VerifiedIdentityDoc>();
     for (const g of gaps) if (servedTip.has(g.d.hash)) evidence.set(g.d.hash, g.d);
     // Strays (#74) aside: a replay of old history below an unanchored head is history, not a branch.
     if (replacing) for (const t of [...chain.tips(), ...chain.roots().map((r) => r.d)]) evidence.set(t.hash, t);
-    evidence.delete(head.hash);
-    const contradicted = [...evidence.values()].some(
-      (e) =>
-        !rejected.has(e.hash) &&
-        pendingUsable(e, { now, skewSec: opts.skewSec }) &&
-        (!headMajority || servedBy(e.hash) >= headSupport) &&
-        (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))),
-    );
-    if (contradicted) {
+    const leftOut = leftOutBy(head, evidence.values());
+    if (leftOut.length > 0) {
       docsCapped = true;
       incomplete = true;
+      heldBackBy = heldBackOf(head, leftOut);
     }
   }
   if (replacing && !incomplete) {
@@ -909,7 +939,16 @@ export async function refreshIdentity(
   }
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
-  if (incomplete) return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() };
+  if (incomplete) {
+    return {
+      ...view,
+      incomplete: true,
+      answeredRelays: answered,
+      unconnectedRelays: unconnectedRelays(),
+      unconnectedVersions: unconnectedVersions(),
+      ...(heldBackBy.length > 0 ? { heldBackBy } : {}),
+    };
+  }
   await store.deleteProvisional(userId);
   // Freshness needs a majority of the listed relays (pre-release review): with an
   // honest relay unreachable, a stale answer from a minority isn't "fresh". Counted over the

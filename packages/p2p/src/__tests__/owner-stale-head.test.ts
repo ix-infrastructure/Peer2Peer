@@ -295,3 +295,47 @@ describe("#78 review: more than one relay, removal, renewal", () => {
     }
   }, 180_000);
 });
+
+describe("#79: a relay a refresh of our own identity was held back for doesn't block rotation", () => {
+  it("unanchored own history; RB serves a key holder's newer, non-connecting head and times out on the walk: edits refuse naming it, rotation goes ahead", async () => {
+    const u = new User("rex", { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3`, [RC]: `ws://127.0.0.1:${rc.port}/v3` });
+    const userId = (await u.ok(["init", "--name", "rex", "--relay", RA, "--yes"])).userId as string;
+    await u.ok(["relays", "add", RB]);
+    for (let i = 0; i < 3; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+    const head = await heldHead(u);
+    // This device holds only its head (unanchored own history, as after a restore from a later version).
+    await storeOwn(u, userId, (cur) => ({ ...cur, versions: [head.jws] }));
+    // Someone holding the identity key built a branch off the head's parent that adds a device of theirs.
+    const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+    const mallory = generateDeviceKeysV3(userId).did;
+    let prev = head.prev!;
+    let top = "";
+    for (let v = head.ver; v <= head.ver + 3; v++) {
+      top = createIdentityDoc(ik, { ver: v, prev, name: head.name, relays: [...head.relays], devices: [...head.devices, mallory], keyholders: [...head.keyholders], by: head.keyholders[0], iat: nowSec() - 5 });
+      prev = jwsHash(top);
+    }
+    // RB serves that branch's head as its tip, then times out on every chain request.
+    const real = globalThis.fetch;
+    const id = `/v3/identity/${encodeURIComponent(userId)}/`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname.startsWith(id) && url.port === String(rb.port)) {
+        if (url.pathname.endsWith("/tips")) return json({ tips: [top] });
+        throw new Error("connect ETIMEDOUT");
+      }
+      return real(input, init);
+    });
+    // A plain edit refuses, naming RB (and saying someone else may hold the key).
+    const edit = await u.run(["profile", "set", "--bio", "blocked?"]);
+    expect(edit.code, `${edit.out}\n${edit.err}`).not.toBe(0);
+    expect(edit.json.error).toBe("refresh_failed");
+    expect(edit.json.reason).toContain(RB);
+    expect(edit.json.reason).toMatch(/someone else holds your identity key/);
+    // Rotation sets RB aside (it is the remedy), without removing it first.
+    const rot = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    vi.restoreAllMocks();
+    expect(rot.code, `${rot.out}\n${rot.err}`).toBe(0);
+    expect(`${rot.out}\n${rot.err}`).toContain(RB);
+    u.cleanup();
+  }, 120_000);
+});

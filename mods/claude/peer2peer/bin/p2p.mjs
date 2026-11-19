@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 0929b765c72ea400
+// @peer2peer/core 0.1.2 0f3dd1701626c868
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -10703,6 +10703,10 @@ function unconnectedVersionsOf(e) {
   const v = e?.unconnectedVersions;
   return Array.isArray(v) ? v : [];
 }
+function heldBackByOf(e) {
+  const r = e?.heldBackBy;
+  return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+}
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
@@ -11041,11 +11045,19 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg) => {
+  const broken = (msg, heldBackBy2 = []) => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...heldBackBy2.length > 0 ? { heldBackBy: heldBackBy2 } : {} });
     throw e;
   };
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  const servedBy = (hash) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
+  const leftOutBy = (head, candidates) => {
+    const headSupport = servedBy(head.hash);
+    const headMajority = headSupport * 2 > listed.length;
+    return [...candidates].filter((e) => e.hash !== head.hash && !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (!headMajority || servedBy(e.hash) >= headSupport) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
+  };
+  const heldBackOf = (head, left) => opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
@@ -11056,10 +11068,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     if (!gaps.some((g) => g.d.hash === newest.hash))
       broken(`could not fit ${userId}'s newest version (ver ${newest.ver})`);
     if (anchoredBefore) {
-      broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`);
+      broken(`${userId}'s newest version (ver ${newest.ver}) doesn't connect to the held history; jumping is the user's call (jumpIdentity)`, heldBackOf(newest, leftOutBy(newest, chain.tips())));
     }
   }
   const besideHead = [];
+  let heldBackBy = [];
   if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
     begin2();
     const headVer = chain.view().head.ver;
@@ -11080,12 +11093,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       gaps = gaps.filter((g) => !chain.has(g.d.hash));
     end();
   }
-  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
-  const servedBy = (hash) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
   if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
     const head = replacing ? newest : chain.view().head;
-    const headSupport = servedBy(head.hash);
-    const headMajority = headSupport * 2 > listed.length;
     const evidence = /* @__PURE__ */ new Map();
     for (const g of gaps)
       if (servedTip.has(g.d.hash))
@@ -11093,11 +11102,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     if (replacing)
       for (const t2 of [...chain.tips(), ...chain.roots().map((r) => r.d)])
         evidence.set(t2.hash, t2);
-    evidence.delete(head.hash);
-    const contradicted = [...evidence.values()].some((e) => !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (!headMajority || servedBy(e.hash) >= headSupport) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
-    if (contradicted) {
+    const leftOut = leftOutBy(head, evidence.values());
+    if (leftOut.length > 0) {
       docsCapped = true;
       incomplete = true;
+      heldBackBy = heldBackOf(head, leftOut);
     }
   }
   if (replacing && !incomplete) {
@@ -11165,8 +11174,16 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   assertNotFailClosed(view.exp, now);
   const answered = [...answeredRelays];
-  if (incomplete)
-    return { ...view, incomplete: true, answeredRelays: answered, unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions() };
+  if (incomplete) {
+    return {
+      ...view,
+      incomplete: true,
+      answeredRelays: answered,
+      unconnectedRelays: unconnectedRelays(),
+      unconnectedVersions: unconnectedVersions(),
+      ...heldBackBy.length > 0 ? { heldBackBy } : {}
+    };
+  }
   await store2.deleteProvisional(userId);
   if (majority)
     await store2.markRefreshed(userId, now);
@@ -27774,7 +27791,7 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = unconnectedRelaysOf(e);
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? heldBackByOf(e) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
             if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -27792,9 +27809,10 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const fb = await this.ownStrictFallback(userId, list, v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(v.unconnectedRelays ?? [], v.unconnectedVersions ?? [], userId)}`);
-          named = v.unconnectedRelays ?? [];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? v.heldBackBy ?? [] : []])];
+          const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
+          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+          named = unconnected;
           v = fb;
         }
         if (opts.strict && own) await this.ownPendingGuard(userId, list, v, named, opts.setAside);
