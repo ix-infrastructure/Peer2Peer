@@ -24,6 +24,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = dirname(here);
 const SH = join(here, "install.sh");
 const PS1 = join(here, "install.ps1");
+/** The version install.sh pins (install.ps1 must pin the same; checked below). The tests follow it, so a pin PR needs no test edits. */
+const PIN = readFileSync(SH, "utf8").match(/^P2P_VERSION="([^"]+)"$/m)?.[1] ?? "";
+const PIN_RE = PIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const strict = process.env.P2P_REQUIRE_INSTALLER_TOOLS === "1";
 const has = (cmd) => spawnSync("sh", ["-c", `command -v ${cmd}`]).status === 0;
 const work = mkdtempSync(join(tmpdir(), "p2p-install-test-"));
@@ -44,7 +47,7 @@ function tool(cmd, t) {
 // anything outside $FAKE_PREFIX. `npm install` "installs" a fake p2p both where
 // npm puts it on macOS/Linux ($prefix/bin/p2p) and on Windows ($prefix/p2p.cmd).
 const FAKE_P2P = `#!/bin/sh
-if [ "$1" = --version ]; then echo "\${FAKE_P2P_VERSION:-0.1.1}"; exit 0; fi
+if [ "$1" = --version ]; then echo "\${FAKE_P2P_VERSION:-${PIN}}"; exit 0; fi
 if [ -t 0 ]; then t=yes; else t=no; fi
 echo "p2p $* (stdin-tty=$t)" >>"$FAKE_LOG"
 exit "\${FAKE_SETUP_EXIT:-0}"
@@ -101,7 +104,7 @@ function sh(args, env = {}, box = sandbox()) {
   return { code: r.status, out: r.stdout, err: r.stderr, all: r.stdout + r.stderr, calls: box.calls(), box };
 }
 
-const INSTALL = "install -g --ignore-scripts --no-fund --no-audit @peer2peer/cli@0.1.1 @peer2peer/ext-ix@0.1.1";
+const INSTALL = `install -g --ignore-scripts --no-fund --no-audit @peer2peer/cli@${PIN} @peer2peer/ext-ix@${PIN}`;
 
 // ---- install.sh -----------------------------------------------------------
 
@@ -151,7 +154,7 @@ test("install.sh --dry-run prints the exact npm command and runs nothing", () =>
   assert.match(r.out, /dry run: nothing will be changed/);
   assert.match(r.out, /detected: os=\S+ node=22\.14\.0 npm=10\.9\.2/);
   assert.ok(r.out.includes(`+ npm ${INSTALL}\n`), r.out);
-  assert.match(r.out, /\/prefix\/bin\/p2p --version {3}\(expect 0\.1\.1\)/);
+  assert.match(r.out, new RegExp(`\\/prefix\\/bin\\/p2p --version {3}\\(expect ${PIN_RE}\\)`));
   assert.match(r.out, /Dry run done: nothing was installed/);
   assert.doesNotMatch(r.calls, /npm install/);
   assert.doesNotMatch(r.calls, /^p2p /m);
@@ -166,7 +169,7 @@ test("install.sh installs the pinned packages with npm, checks p2p --version, th
   const r = sh([], { P2P_DETECT_TTY: "stdin" });
   assert.equal(r.code, 0, r.all);
   assert.ok(r.calls.includes(`npm ${INSTALL}\n`), r.calls);
-  assert.match(r.out, /Installed: p2p 0\.1\.1 \(\S+\/prefix\/bin\/p2p\)/);
+  assert.match(r.out, new RegExp(`Installed: p2p ${PIN_RE} \\(\\S+\\/prefix\\/bin\\/p2p\\)`));
   // Each command is printed before it runs.
   assert.ok(r.out.indexOf(`+ npm ${INSTALL}`) < r.out.indexOf("Installed:"), r.out);
   assert.match(r.out, /\+ \S+\/prefix\/bin\/p2p setup\n/);
@@ -252,9 +255,9 @@ test("install.sh never uses sudo: a read-only npm prefix gets the options and ex
 
 test("install.sh --version takes only an exact version", () => {
   const r = sh(["--version", "0.2.0", "--no-setup"]);
-  assert.equal(r.code, 1, r.all); // the fake p2p reports 0.1.1
+  assert.equal(r.code, 1, r.all); // the fake p2p reports the pin
   assert.ok(r.calls.includes("npm install -g --ignore-scripts --no-fund --no-audit @peer2peer/cli@0.2.0 @peer2peer/ext-ix@0.2.0\n"), r.calls);
-  assert.match(r.err, /--version printed '0\.1\.1', expected 0\.2\.0/);
+  assert.match(r.err, new RegExp(`--version printed '${PIN_RE}', expected 0\\.2\\.0`));
   const ok = sh(["--version=0.2.0", "--no-setup"], { FAKE_P2P_VERSION: "0.2.0" });
   assert.equal(ok.code, 0, ok.all);
   const env = sh(["--dry-run"], { P2P_INSTALL_VERSION: "0.3.0-rc.1" });
@@ -277,7 +280,7 @@ test("install.sh refuses a prefix npm masked as ***, before installing anything,
     const r = sh(args, { FAKE_PREFIX_SHOWN: shown }, box);
     assert.equal(r.code, 1, r.all);
     assert.match(r.err, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\)\. Nothing was installed\./);
-    assert.match(r.err, /npm config set prefix .*or install directly: npm install -g @peer2peer\/cli@0\.1\.1 @peer2peer\/ext-ix@0\.1\.1/);
+    assert.match(r.err, new RegExp(`npm config set prefix .*or install directly: npm install -g @peer2peer\\/cli@${PIN_RE} @peer2peer\\/ext-ix@${PIN_RE}`));
     assert.doesNotMatch(r.calls, /npm install|npm exec/);
     assert.doesNotMatch(r.out, /^\+ /m);
   }
@@ -353,7 +356,7 @@ test("install.ps1 -DryRun prints the exact npm command and runs nothing", (t) =>
   assert.match(r.out, /detected: os=Windows node=v22\.14\.0 npm=10\.9\.2/);
   assert.match(r.out, new RegExp(`^\\+ \\S*npm ${INSTALL.replace(/[.^$*+?()[\]{}|\\/]/g, "\\$&")}$`, "m"));
   // The CLI runs as <node> <bin script> by absolute path, never through the p2p.cmd shim.
-  assert.match(r.out, /^\+ \S*node \S+@peer2peer.cli.dist.bin\.js --version {3}\(expect 0\.1\.1\)$/m);
+  assert.match(r.out, new RegExp(`^\\+ \\S*node \\S+@peer2peer.cli.dist.bin\\.js --version {3}\\(expect ${PIN_RE}\\)$`, "m"));
   assert.match(r.out, /dry run: not checking that/);
   assert.doesNotMatch(r.out, /\+ \S*p2p\.cmd/);
   assert.match(r.out, /Dry run done: nothing was installed/);
@@ -366,11 +369,11 @@ test("install.ps1 installs the pinned packages, checks p2p --version, then hands
   const r = pwsh(ps(), { P2P_DETECT_TTY: "yes" });
   assert.equal(r.code, 0, r.all);
   assert.ok(r.calls.includes(`npm ${INSTALL}\n`), r.calls);
-  assert.match(r.out, /Installed: p2p 0\.1\.1 \(\S+p2p\.cmd\)/);
+  assert.match(r.out, new RegExp(`Installed: p2p ${PIN_RE} \\(\\S+p2p\\.cmd\\)`));
   assert.match(r.calls, /^p2p setup /m);
   assert.match(r.out, /^\+ \S*node \S+@peer2peer.cli.dist.bin\.js setup$/m);
   // Every "+ <command>" echo ends its line: the next output starts on a line of its own.
-  assert.match(r.out, /\(expect 0\.1\.1\)\r?\nInstalled: p2p 0\.1\.1/);
+  assert.match(r.out, new RegExp(`\\(expect ${PIN_RE}\\)\\r?\\nInstalled: p2p ${PIN_RE}`));
   for (const l of r.out.split(/\r?\n/).filter((x) => x.startsWith("+ "))) assert.doesNotMatch(l, /\(expect [^)]*\)\S|bin\.js setup\S/, l);
   assert.match(r.out, /Already use Peer2Peer on another device\? Choose to link this device in setup \(and run `p2p link start` on that device\)/);
   const none = pwsh(ps(), { P2P_DETECT_TTY: "no" });
@@ -386,7 +389,7 @@ test("install.ps1 installs the pinned packages, checks p2p --version, then hands
   assert.match(noSetup.out, /run `p2p link start` on that device/);
   const mismatch = pwsh(ps("-NoSetup"), { FAKE_P2P_VERSION: "0.0.9" });
   assert.notEqual(mismatch.code, 0, mismatch.all);
-  assert.match(mismatch.all, /printed '0\.0\.9', expected 0\.1\.1/);
+  assert.match(mismatch.all, new RegExp(`printed '0\\.0\\.9', expected ${PIN_RE}`));
 });
 
 test("install.ps1 works through `| iex` with settings from the environment, and doesn't exit the host", (t) => {
@@ -462,7 +465,7 @@ test("install.ps1 refuses a prefix npm masked as ***, before installing anything
     const r = pwsh(ps(args), { FAKE_PREFIX_SHOWN: shown }, box);
     assert.notEqual(r.code, 0, r.all);
     assert.match(r.all, /isn't a usable path \(npm hides folder names that look like IDs as \*\*\*\)\. Nothing was installed\./);
-    assert.match(r.all, /or install directly: npm install -g @peer2peer\/cli@0\.1\.1 @peer2peer\/ext-ix@0\.1\.1/);
+    assert.match(r.all, new RegExp(`or install directly: npm install -g @peer2peer\\/cli@${PIN_RE} @peer2peer\\/ext-ix@${PIN_RE}`));
     assert.doesNotMatch(r.calls, /npm install|npm exec/);
     assert.doesNotMatch(r.out, /^\+ /m);
   }
