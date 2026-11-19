@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.2 c9b435ea50f534df
+// @peer2peer/core 0.1.2 7cf6a1f58ae788b2
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -6901,7 +6901,7 @@ function docCertFor(doc, did) {
   }
   return void 0;
 }
-var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, VersionMap, IdentityChain;
+var PROFILE_BIO_MAX, PROFILE_LINKS_MAX, PROFILE_URL_MAX, PROFILE_AVATAR_DATA_MAX, DATA_AVATAR_RE, CLIENT_VERSION_RE, DINFO_CAP_RE, DINFO_CAPS_MAX, DOC_FIELDS, strongIks, REPUBLISH_WINDOW_SEC, MERGE_TAKEOVER_SEC, MAX_CHAIN_VERSIONS, MAX_PENDING_HEADS, MAX_WALK_ANCHORS, MAX_SIDE_ROOTS, VersionMap, IdentityChain;
 var init_identitydoc = __esm({
   "packages/core/dist/v3/identitydoc.js"() {
     "use strict";
@@ -6928,6 +6928,7 @@ var init_identitydoc = __esm({
     MAX_CHAIN_VERSIONS = 1024;
     MAX_PENDING_HEADS = 64;
     MAX_WALK_ANCHORS = 16;
+    MAX_SIDE_ROOTS = 8;
     VersionMap = class extends Map {
       rev = 0;
       set(k, v) {
@@ -6994,15 +6995,27 @@ var init_identitydoc = __esm({
           if (Array.isArray(from))
             c.anchorFrom.set(a.hash, from.filter((r) => typeof r === "string").slice(0, 16));
         }
+        const dropped = /* @__PURE__ */ new Set();
         for (const d of docs) {
           if (d.iss !== s2.iss)
             fail("issuer-mismatch", "stored version of another identity");
+          if (d.prev !== null && dropped.has(d.prev) || d.merge !== void 0 && dropped.has(d.merge)) {
+            dropped.add(d.hash);
+            continue;
+          }
           const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === void 0 || c.versions.has(d.merge));
           if (parentsHeld && d.ver > 1) {
             const parent = c.versions.get(d.prev);
-            checkLink(parent, d, d.merge !== void 0 ? c.versions.get(d.merge) : void 0);
-            if (d.merge === void 0)
-              c.checkNoReturn(d, parent);
+            try {
+              checkLink(parent, d, d.merge !== void 0 ? c.versions.get(d.merge) : void 0);
+              if (d.merge === void 0)
+                c.checkNoReturn(d, parent);
+            } catch (e) {
+              if (!(e instanceof P2PError))
+                throw e;
+              dropped.add(d.hash);
+              continue;
+            }
             c.versions.set(d.hash, d);
           } else
             c.versions.set(d.hash, d);
@@ -7248,7 +7261,7 @@ var init_identitydoc = __esm({
             fail("issuer-mismatch", "a different ik for this userId");
           if (this.anchoredGenesis.has(doc2.hash))
             return { status: "duplicate", doc: doc2 };
-          this.put(doc2);
+          this.placeOver(doc2);
           return { status: "accepted", doc: doc2 };
         }
         if (!held2) {
@@ -7261,12 +7274,14 @@ var init_identitydoc = __esm({
           const below = this.extendDown(peek.hash, jws, opts);
           if (below)
             return below;
-          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver) {
+          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.rawTips().length < MAX_SIDE_ROOTS) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
               fail("issuer-mismatch", "a different ik for this userId");
-            this.put(doc2);
-            return { status: "accepted", doc: doc2, unanchored: true };
+            if (pendingUsable(doc2, opts)) {
+              this.placeOver(doc2);
+              return { status: "accepted", doc: doc2, unanchored: true };
+            }
           }
           if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
@@ -7283,7 +7298,7 @@ var init_identitydoc = __esm({
         checkLink(parent, doc, other);
         if (doc.merge === void 0)
           this.checkNoReturn(doc, parent);
-        this.put(doc);
+        this.placeOver(doc);
         return { status: "accepted", doc };
       }
       /**
@@ -7301,8 +7316,19 @@ var init_identitydoc = __esm({
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== children[0].ik)
           fail("issuer-mismatch", "a different ik for this userId");
+        this.placeOver(doc);
+        return { status: "accepted", doc, unanchored: true };
+      }
+      /**
+       * Stores `doc` (#79 re-reviews), checking first the held versions that name it as prev or merge (placed
+       * before it: below a root, or an older version arriving after a newer one that named it). Whatever add()
+       * would refuse had `doc` come first is dropped with what was placed on it, never `doc`: a child whose link
+       * to it fails the chain rules (a merge once both its parents are held), and a version re-listing a device
+       * revoked on its ancestry now that the ancestry is known. A reload, which re-checks every link, then agrees.
+       */
+      placeOver(doc) {
         const bad = [];
-        for (const child of children) {
+        for (const child of this.childrenOf(doc.hash)) {
           const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev);
           const other = child.merge === void 0 ? void 0 : child.merge === doc.hash ? doc : this.versions.get(child.merge);
           if (!prev || child.merge !== void 0 && !other)
@@ -7318,8 +7344,10 @@ var init_identitydoc = __esm({
         if (bad.length > 0)
           this.dropWithDescendants(bad);
         this.put(doc);
+        if (this.childrenOf(doc.hash).length === 0)
+          return;
         const violators = [];
-        const revokedAt = /* @__PURE__ */ new Map([[doc.hash, /* @__PURE__ */ new Set()]]);
+        const revokedAt = /* @__PURE__ */ new Map([[doc.hash, this.revokedAlong(doc.hash)]]);
         const queue = [doc];
         for (let i = 0; i < queue.length; i++) {
           const p = queue[i];
@@ -7345,7 +7373,6 @@ var init_identitydoc = __esm({
         }
         if (violators.length > 0)
           this.dropWithDescendants(violators);
-        return { status: "accepted", doc, unanchored: true };
       }
       /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
       dropWithDescendants(docs) {
@@ -10972,8 +10999,12 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       gaps = gaps.filter((g) => !chain.has(g.d.hash));
     end();
   }
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  const servedBy = (hash) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
   if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
     const head = replacing ? newest : chain.view().head;
+    const headSupport = servedBy(head.hash);
+    const headMajority = headSupport * 2 > listed.length;
     const evidence = /* @__PURE__ */ new Map();
     for (const g of gaps)
       if (servedTip.has(g.d.hash))
@@ -10982,7 +11013,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       for (const t2 of [...chain.tips(), ...chain.roots().map((r) => r.d)])
         evidence.set(t2.hash, t2);
     evidence.delete(head.hash);
-    const contradicted = [...evidence.values()].some((e) => !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
+    const contradicted = [...evidence.values()].some((e) => !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (!headMajority || servedBy(e.hash) >= headSupport) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
     if (contradicted) {
       docsCapped = true;
       incomplete = true;
@@ -10993,7 +11024,6 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     replaceTo = !(anchoredBeforeRoots ?? chain.anchored);
   }
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false;
   const tipHashes = new Set(tips.map((d) => d.hash));

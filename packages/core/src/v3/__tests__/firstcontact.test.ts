@@ -5,7 +5,7 @@
 // so a device the owner revoked never ends up trusted.
 
 import { describe, expect, it } from "vitest";
-import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
+import { createIdentityDoc, IdentityChain, MAX_CHAIN_VERSIONS, MAX_SIDE_ROOTS, verifyIdentityDocSignature, type VerifiedIdentityDoc } from "../identitydoc.js";
 import { addIdentityVersion, getIdentityView, lastRefreshed, refreshIdentity, type IdentityFetcher } from "../state.js";
 import { MemoryTrustStoreV3 } from "../store.js";
 import { makeUser, NOW, RELAY, RELAY2 } from "./fixtures.js";
@@ -353,4 +353,103 @@ describe("#79 re-review: versions left out of the result, links checked below a 
     expect([v.incomplete, v.head.hash]).toEqual([undefined, top.hash]);
     expect(await lastRefreshed(store, u.userId)).toBe(NOW);
   }, 60_000);
+});
+
+describe("#79 third review: relay support, versions placed before their parent, side roots", () => {
+  const R3 = "wss://third.example/v3";
+  const chainOf = (docs: readonly VerifiedIdentityDoc[]) => {
+    const m = new Map(docs.map((d) => [d.hash, d]));
+    return (to: string) => {
+      const out: string[] = [];
+      for (let d = m.get(to); d; d = d.prev ? m.get(d.prev) : undefined) out.push(d.jws);
+      return out.slice(0, 64);
+    };
+  };
+
+  it("T1: one relay replaying a genuine current old version can't hold back a head most listed relays serve", async () => {
+    const u = makeUser("alice");
+    u.relays = [RELAY, RELAY2, R3];
+    for (let i = 0; i < 3; i++) u.publish({ iat: NOW - 900 + i });
+    const v4 = u.doc;
+    for (let i = 0; i < 5; i++) u.publish({ iat: NOW - 800 + i });
+    const added = u.addDevice({ keyholder: false });
+    u.publish({ iat: NOW - 700 }); // v9 adds a device
+    const v10 = u.publish({ iat: NOW - 690 });
+    // The honest relays kept only their last versions (v8..v10); the replaying relay serves v4 and its ancestry.
+    const recent = chainOf(u.docs.filter((d) => d.ver >= 8));
+    const old = chainOf(u.docs.filter((d) => d.ver <= 4));
+    const f = perRelay({ [RELAY]: [v4.jws], [RELAY2]: [v10.jws], [R3]: [v10.jws] }, { [RELAY]: old, [RELAY2]: recent, [R3]: recent });
+    const store = new MemoryTrustStoreV3();
+    const first = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2, R3] });
+    expect([first.incomplete, first.head.hash, first.devices.includes(added.did)]).toEqual([undefined, v10.hash, true]);
+    // With v10 stored: complete and fresh.
+    const again = await refreshIdentity(store, u.userId, f, { now: NOW + 60 });
+    expect([again.incomplete, again.head.hash]).toEqual([undefined, v10.hash]);
+    expect(await lastRefreshed(store, u.userId)).toBe(NOW + 60);
+  });
+
+  it("a forged version placed before its genuine parent is dropped when the parent arrives (not stored to break every load)", async () => {
+    const { u, stolen, own4 } = (() => {
+      const u = makeUser("alice");
+      u.relays = [RELAY, RELAY2];
+      const stolen = u.addDevice({ keyholder: false });
+      u.publish({ iat: NOW - 900 });
+      u.publish({ iat: NOW - 890 });
+      const own4 = u.publish({ devices: [u.dev.did], iat: NOW - 700 });
+      return { u, stolen, own4 };
+    })();
+    const v2 = u.docs[1];
+    const x = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 4, prev: v2.hash, name: u.name, relays: u.relays, devices: [u.dev.did, stolen.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 650 }),
+    );
+    const walk = chainOf(u.docs);
+    const f = perRelay({ [RELAY]: [x.jws, own4.jws], [RELAY2]: [x.jws, own4.jws] }, { [RELAY]: walk, [RELAY2]: walk });
+    const store = new MemoryTrustStoreV3();
+    const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2] });
+    expect([v.head.hash, v.devices.includes(stolen.did)]).toEqual([own4.hash, false]);
+    const stored = (await store.getIdentity(u.userId))!;
+    expect(stored.versions).not.toContain(x.jws);
+    expect(() => IdentityChain.fromStored(stored, { now: NOW })).not.toThrow();
+    // And the next refresh works.
+    expect((await refreshIdentity(store, u.userId, f, { now: NOW })).head.hash).toBe(own4.hash);
+    // add() itself, in that order: the child is checked when its parent arrives.
+    const c = new IdentityChain(u.userId);
+    c.add(x.jws, { now: NOW });
+    for (const d of u.docs.slice(0, 2)) c.add(d.jws, { now: NOW });
+    expect(c.has(x.hash)).toBe(false);
+    expect(c.has(v2.hash)).toBe(true);
+  });
+
+  it("a store already poisoned that way loads, without the bad version and what was placed on it", async () => {
+    const u = makeUser("alice");
+    u.publish({ iat: NOW - 900 });
+    u.publish({ iat: NOW - 890 });
+    const v2 = u.docs[1];
+    const x = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 4, prev: v2.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 650 }),
+    );
+    const x5 = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 5, prev: x.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 640 }),
+    );
+    const store = new MemoryTrustStoreV3();
+    await store.putIdentity({ iss: u.userId, versions: [...u.docs.map((d) => d.jws), x.jws, x5.jws] });
+    const view = await getIdentityView(store, u.userId, { now: NOW });
+    expect(view?.head.hash).toBe(u.doc.hash);
+    expect(view?.tips.map((t) => t.hash)).toEqual([u.doc.hash]);
+  });
+
+  it("side roots: only current versions, and only while fewer than MAX_SIDE_ROOTS tips are held", () => {
+    const u = makeUser("alice");
+    u.publish({ iat: NOW - 900 });
+    const v3 = u.publish({ iat: NOW - 890 });
+    const c = new IdentityChain(u.userId);
+    const v4 = u.publish({ iat: NOW - 880 });
+    c.add(v4.jws, { now: NOW });
+    const sibling = (iat: number) =>
+      createIdentityDoc(u.ik, { ver: 4, prev: v3.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat });
+    // Expired: not kept.
+    expect(c.add(sibling(NOW - 40 * 86_400), { now: NOW, replace: false, asRoot: true }).status).toBe("gap");
+    for (let i = 0; i < MAX_SIDE_ROOTS + 4; i++) c.add(sibling(NOW - 100 + i), { now: NOW, replace: false, asRoot: true });
+    expect(c.allTips().length).toBeLessThanOrEqual(MAX_SIDE_ROOTS);
+  });
 });

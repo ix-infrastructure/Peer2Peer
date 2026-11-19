@@ -772,8 +772,22 @@ export async function refreshIdentity(
     if (besideHead.length > 0) gaps = gaps.filter((g) => !chain.has(g.d.hash));
     end();
   }
+  // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
+  // hint (a circle link's bundled document), and those must not make up a majority while the identity's
+  // own relays are silent. Over the relays asked only when nothing is held, or when the caller asked none
+  // the view lists (an explicit override; the CLI and refreshFor always include them).
+  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
+  /** How many of the listed relays sent `hash` in this refresh (as a tip or on a walk page). */
+  const servedBy = (hash: string) => listed.filter((r) => sentBy.get(r)?.has(hash)).length;
   if (!incomplete && chain.size > 0 && (replacing || !chain.anchored)) {
     const head = replacing ? newest! : chain.view().head;
+    // T1 (#79 third review): held back only when the left-out version has at least as much relay support as the
+    // head, or the head lacks a majority of the listed relays. One relay replaying a genuine current old version
+    // can't hold back a head most listed relays serve (relays keep at most 128 versions, so its ancestry may be
+    // gone), while a thief's relay against the owner's (one against one), or a head only a minority serves
+    // (the owner's relays silent), still is.
+    const headSupport = servedBy(head.hash);
+    const headMajority = headSupport * 2 > listed.length;
     const evidence = new Map<string, VerifiedIdentityDoc>();
     for (const g of gaps) if (servedTip.has(g.d.hash)) evidence.set(g.d.hash, g.d);
     // Strays (#74) aside: a replay of old history below an unanchored head is history, not a branch.
@@ -783,6 +797,7 @@ export async function refreshIdentity(
       (e) =>
         !rejected.has(e.hash) &&
         pendingUsable(e, { now, skewSec: opts.skewSec }) &&
+        (!headMajority || servedBy(e.hash) >= headSupport) &&
         (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))),
     );
     if (contradicted) {
@@ -803,11 +818,6 @@ export async function refreshIdentity(
   // relay serves any more can't narrow for good); one answered by a minority only drops those its head
   // reached (re-review N2: like freshness, a stale minority answer mustn't lift a revocation).
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
-  // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
-  // hint (a circle link's bundled document), and those must not make up a majority while the identity's
-  // own relays are silent. Over the relays asked only when nothing is held, or when the caller asked none
-  // the view lists (an explicit override; the CLI and refreshFor always include them).
-  const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const pendingChange = (c: IdentityChain) => (incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }) : majority ? c.clearPending() : false);
   // #67: on an incomplete refresh, where the walk stopped, for the next one: the frontier gaps left (where

@@ -625,6 +625,8 @@ export const MAX_CHAIN_VERSIONS = 1024;
 export const MAX_PENDING_HEADS = 64;
 /** Upper bound on walk anchors kept per identity (#67); the lowest `ver`s are kept, the closest to the held head. */
 export const MAX_WALK_ANCHORS = 16;
+/** #79 re-review: a refresh keeps an unconnected same-ver tip beside the head only while fewer tips than this are held. */
+export const MAX_SIDE_ROOTS = 8;
 
 /** A pending head counts only while issued (not in the future) and not past its `exp` (#35); also #79's current root. */
 export function pendingUsable(d: { iat: number; exp: number }, opts: TimeOptions): boolean {
@@ -708,14 +710,28 @@ export class IdentityChain {
       if (Array.isArray(from)) c.anchorFrom.set(a.hash, from.filter((r): r is string => typeof r === "string").slice(0, 16));
     }
     // Roots (versions whose parents aren't stored, after a gap jump or pruning) are trusted as stored.
+    // #79 re-review: a stored version whose link to its stored parent breaks the chain rules (a store written
+    // before add() checked versions placed ahead of their parent) is dropped with what was placed on it, as
+    // add() now does, instead of making every load fail.
+    const dropped = new Set<string>();
     for (const d of docs) {
       if (d.iss !== s.iss) fail("issuer-mismatch", "stored version of another identity");
+      if ((d.prev !== null && dropped.has(d.prev)) || (d.merge !== undefined && dropped.has(d.merge))) {
+        dropped.add(d.hash);
+        continue;
+      }
       const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === undefined || c.versions.has(d.merge));
       if (parentsHeld && d.ver > 1) {
         // Signatures were checked above: only the link rules run here.
         const parent = c.versions.get(d.prev!)!;
-        checkLink(parent, d, d.merge !== undefined ? c.versions.get(d.merge) : undefined);
-        if (d.merge === undefined) c.checkNoReturn(d, parent);
+        try {
+          checkLink(parent, d, d.merge !== undefined ? c.versions.get(d.merge) : undefined);
+          if (d.merge === undefined) c.checkNoReturn(d, parent);
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+          dropped.add(d.hash);
+          continue;
+        }
         c.versions.set(d.hash, d);
       } else c.versions.set(d.hash, d);
     }
@@ -958,7 +974,7 @@ export class IdentityChain {
       if (this.anchoredGenesis.has(doc.hash)) return { status: "duplicate", doc };
       // A second genesis is a fork at ver 1: keep it. Below unanchored history it is kept but not counted
       // until it connects (strays, #74): anyone can replay the public ver 1.
-      this.put(doc);
+      this.placeOver(doc);
       return { status: "accepted", doc };
     }
     if (!held) {
@@ -972,11 +988,14 @@ export class IdentityChain {
       if (below) return below;
       // #79 re-review (refresh only): on unanchored history, a version at the head's own `ver` that doesn't connect
       // is kept as another unanchored root, a tip beside the head (a fork: only the identity key signs one).
-      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver) {
+      // Only a current version, and at most MAX_SIDE_ROOTS tips held: a key holder can't grow the chain this way.
+      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.rawTips().length < MAX_SIDE_ROOTS) {
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
-        this.put(doc);
-        return { status: "accepted", doc, unanchored: true };
+        if (pendingUsable(doc, opts)) {
+          this.placeOver(doc);
+          return { status: "accepted", doc, unanchored: true };
+        }
       }
       if (opts.replace !== false && !this.anchored && peek.ver > this.view().head.ver) {
         const doc = verifyIdentityDoc(jws, opts);
@@ -993,7 +1012,7 @@ export class IdentityChain {
     const doc = verifyIdentityDoc(jws, opts);
     checkLink(parent, doc, other);
     if (doc.merge === undefined) this.checkNoReturn(doc, parent);
-    this.put(doc);
+    this.placeOver(doc);
     return { status: "accepted", doc };
   }
 
@@ -1010,11 +1029,23 @@ export class IdentityChain {
     if (children.length === 0 || this.anchored) return undefined;
     const doc = verifyIdentityDoc(jws, opts);
     if (doc.ik !== children[0].ik) fail("issuer-mismatch", "a different ik for this userId");
-    // The parent is the genuine one (bound by hash). A held child whose link to it fails the rules (signed with
-    // the identity key, but not a valid next version of its own parent) is what add() would have refused had
-    // the parent come first: it is dropped, with what was placed on it, never the parent (#79 re-review).
+    this.placeOver(doc);
+    return { status: "accepted", doc, unanchored: true };
+  }
+
+  /**
+   * Stores `doc` (#79 re-reviews), checking first the held versions that name it as prev or merge (placed
+   * before it: below a root, or an older version arriving after a newer one that named it). Whatever add()
+   * would refuse had `doc` come first is dropped with what was placed on it, never `doc`: a child whose link
+   * to it fails the chain rules (a merge once both its parents are held), and a version re-listing a device
+   * revoked on its ancestry now that the ancestry is known. A reload, which re-checks every link, then agrees.
+   */
+  private placeOver(doc: VerifiedIdentityDoc): void {
+    // `doc` is the genuine parent of every held version naming it (bound by hash). A held child whose link to
+    // it fails the rules (signed with the identity key, but not a valid next version of its parent) is what
+    // add() would have refused had the parent come first: dropped, with what was placed on it, never `doc`.
     const bad: VerifiedIdentityDoc[] = [];
-    for (const child of children) {
+    for (const child of this.childrenOf(doc.hash)) {
       const prev = child.prev === doc.hash ? doc : this.versions.get(child.prev!);
       const other = child.merge === undefined ? undefined : child.merge === doc.hash ? doc : this.versions.get(child.merge);
       if (!prev || (child.merge !== undefined && !other)) continue; // a merge's other parent isn't held yet
@@ -1031,8 +1062,9 @@ export class IdentityChain {
     // ancestry, now that the ancestry reaches further down, is what add() would refuse in the other order. It
     // is dropped with what was placed on it (so a reload, which re-checks every link, agrees), never the parent.
     // One pass down from the new version, carrying what each path revoked.
+    if (this.childrenOf(doc.hash).length === 0) return;
     const violators: VerifiedIdentityDoc[] = [];
-    const revokedAt = new Map<string, Set<string>>([[doc.hash, new Set()]]);
+    const revokedAt = new Map<string, Set<string>>([[doc.hash, this.revokedAlong(doc.hash)]]);
     const queue = [doc];
     for (let i = 0; i < queue.length; i++) {
       const p = queue[i];
@@ -1053,7 +1085,6 @@ export class IdentityChain {
       }
     }
     if (violators.length > 0) this.dropWithDescendants(violators);
-    return { status: "accepted", doc, unanchored: true };
   }
 
   /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
