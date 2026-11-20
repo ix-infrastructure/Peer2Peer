@@ -35,6 +35,7 @@
 //   projects  project policies (projects.ts): shared with circles and people, or private (the default)
 //   sessionProjects  the projects each session worked in (projects.ts), by sid
 //   ixNotice  when the one-time "Ix on by default" notice was shown (ix-local.ts)
+//   sandboxNotice  when a front end showed the one-time "deny P2P_HOME to your agent's sandbox" notice (sandbox.ts)
 //   graphMemory  graph memory (graph-memory.ts): what was recorded of each own session, the bounded queue, counters
 //   history, history-<n>  message history (history.ts): sealed with the key in history.key, never plaintext
 
@@ -401,6 +402,8 @@ type Docs = {
   sessionProjects: SessionProjectsDoc;
   /** When this device showed the one-time notice that new installs turn the Ix extension on (ix-local.ts). */
   ixNotice: { at: number };
+  /** When a front end showed the one-time notice to deny P2P_HOME to its agent's sandbox (sandbox.ts), per front end. */
+  sandboxNotice: { claude?: number; codex?: number };
   /** Graph memory (graph-memory.ts): this device's sessions' context waiting for the local Ix graph, and counters. */
   graphMemory: GraphMemoryDoc;
 };

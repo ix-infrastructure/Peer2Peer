@@ -11,7 +11,8 @@ export { Bridge, type BridgeDeps, type HookReport, type InboxItem } from "./brid
 export { makeTools, refuseMutating, serverInstructions } from "./tools.js";
 export { runMcpServer, resolveHome, BRIDGE_VERSION, type McpOptions } from "./server.js";
 export { runHook, guard, commandOf } from "./hook.js";
-export { effectiveEnv, bridgeHome, readTomlTable, GUARDED_KNOBS } from "./knobs.js";
+export { effectiveEnv, bridgeHome, readTomlTable, scanTomlLines, userHome, GUARDED_KNOBS, type TomlLine } from "./knobs.js";
+export * from "./sandbox.js";
 export { ask, findEntry, readEntries, registryDir, type Entry } from "./ipc.js";
 export * from "./install.js";
 export { installCommand, sessionsCommand, heldCommand, resolveCommand, requirePerson, CodexCommandError, type Output, type PersonIo } from "./commands.js";

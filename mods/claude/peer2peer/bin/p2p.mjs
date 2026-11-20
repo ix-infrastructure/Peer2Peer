@@ -1725,18 +1725,18 @@ function validateTableBytes(numPoints, fpBytes) {
   if (bytes2 > TABLE_BYTES_MAX)
     throw new Error("invalid window size: table would need ~" + Math.ceil(bytes2 / 2 ** 20) + " MiB, max " + TABLE_BYTES_MAX / 2 ** 20 + " MiB");
 }
-function probeRandomBytes(randomBytes15, length) {
-  if (randomBytes15 === void 0)
+function probeRandomBytes(randomBytes16, length) {
+  if (randomBytes16 === void 0)
     return void 0;
-  afunction(randomBytes15, "randomBytes");
+  afunction(randomBytes16, "randomBytes");
   try {
-    const probe = randomBytes15(length);
+    const probe = randomBytes16(length);
     if (!isBytes2(probe) || probe.length !== length)
       return void 0;
   } catch {
     return void 0;
   }
-  return randomBytes15;
+  return randomBytes16;
 }
 function validateMSMPoints(points, c) {
   aarray(points, "points");
@@ -1892,9 +1892,9 @@ var init_curve = __esm({
       baseCanBeBlinded;
       bits;
       // Parametrized with a given Point class (not individual point)
-      constructor(Point, randomBytes15) {
+      constructor(Point, randomBytes16) {
         validatePointCons(Point);
-        this.randomBytes = probeRandomBytes(randomBytes15, BLIND_BYTES);
+        this.randomBytes = probeRandomBytes(randomBytes16, BLIND_BYTES);
         this.Point = Point;
         this.BASE = Point.BASE;
         this.ZERO = Point.ZERO;
@@ -2111,7 +2111,7 @@ function edwards(params, extraOpts = {}) {
   if (FpLegendre(Fp2, CURVE.d) !== -1)
     throw new Error("edwards: CURVE.d must be a non-square in Fp for complete addition formulas");
   validateObject(opts, {}, { uvRatio: "function", randomBytes: "function" });
-  const randomBytes15 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes16 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const MASK = _2n2 << BigInt(Fp2.BYTES * 8) - _1n4;
   function isOdd(n) {
     if (!Fp2.isOdd)
@@ -2298,8 +2298,8 @@ function edwards(params, extraOpts = {}) {
     multiply(scalar) {
       if (!Fn.isValidNot0(scalar))
         throw new RangeError("invalid scalar: expected 1 <= sc < curve.n");
-      const { p, f } = wnaf.mulSecret(this, scalar, cofactor, normalize2);
-      return normalize2([p, f])[0];
+      const { p, f } = wnaf.mulSecret(this, scalar, cofactor, normalize4);
+      return normalize4([p, f])[0];
     }
     // Non-constant-time multiplication. Uses double-and-add algorithm.
     // It's faster, but should only be used when you don't care about
@@ -2313,7 +2313,7 @@ function edwards(params, extraOpts = {}) {
         return Point.ZERO;
       if (this.is0() || scalar === _1n4)
         return this;
-      return wnaf.mulUnsafe(this, scalar, normalize2);
+      return wnaf.mulUnsafe(this, scalar, normalize4);
     }
     // Checks if point is of small order.
     // If you add something to small order point, you will have "dirty"
@@ -2371,8 +2371,8 @@ function edwards(params, extraOpts = {}) {
       return `<Point ${this.is0() ? "ZERO" : this.toHex()}>`;
     }
   }
-  const normalize2 = (points) => normalizeZ(Point, points);
-  const wnaf = new ScalarMultiplier(Point, randomBytes15);
+  const normalize4 = (points) => normalizeZ(Point, points);
+  const wnaf = new ScalarMultiplier(Point, randomBytes16);
   if (wnaf.bits >= 6)
     Point.BASE.precompute(6);
   Object.freeze(Point.prototype);
@@ -2404,7 +2404,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     if (outputLen !== expectedLen)
       throw new Error(`hash.outputLen must be ${expectedLen}, got ${outputLen}`);
   }
-  const randomBytes15 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes16 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const toMontgomery2 = opts.toMontgomery;
   const toMontgomerySecret2 = opts.toMontgomerySecret;
   const adjustScalarBytes2 = opts.adjustScalarBytes === void 0 ? (bytes2) => bytes2 : opts.adjustScalarBytes;
@@ -2494,7 +2494,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     seed: _size
   };
   function randomSecretKey(seed) {
-    seed = seed === void 0 ? randomBytes15(lengths.seed) : seed;
+    seed = seed === void 0 ? randomBytes16(lengths.seed) : seed;
     return abytes2(seed, lengths.seed, "seed");
   }
   function isValidSecretKey(key) {
@@ -3654,7 +3654,7 @@ var init_hmac = __esm({
 });
 
 // packages/core/node_modules/@noble/hashes/hkdf.js
-function expand(hash, prk, info, length = 32, _recycled) {
+function expand2(hash, prk, info, length = 32, _recycled) {
   ahash(hash);
   anumber(length, "length");
   abytes(prk, void 0, "prk");
@@ -3716,7 +3716,7 @@ var init_hkdf = __esm({
       if (salt === void 0)
         salt = new Uint8Array(hash.outputLen);
       const HMAC = hmac.create(hash, salt).update(ikm);
-      return expand(hash, HMAC.digest(), info, length, HMAC);
+      return expand2(hash, HMAC.digest(), info, length, HMAC);
     };
   }
 });
@@ -4228,9 +4228,9 @@ function redactUserinfo(text2) {
 function redactSecrets(text2) {
   let out = redactUserinfo(text2);
   out = out.replace(BEARER, (m) => `${m.slice(0, 6)} [redacted]`);
-  out = out.replace(KEYWORD_SECRET, (_m, key, sep4, value) => {
+  out = out.replace(KEYWORD_SECRET, (_m, key, sep6, value) => {
     const q = value[0] === '"' || value[0] === "'" ? value[0] : "";
-    return `${key}${sep4}${q}[redacted]${q}`;
+    return `${key}${sep6}${q}[redacted]${q}`;
   });
   for (const re of SECRET_PATTERNS)
     out = out.replace(re, "[redacted]");
@@ -4403,7 +4403,7 @@ function nfkd(str4) {
     throw new TypeError("expected well-formed Unicode string");
   return str4.normalize("NFKD");
 }
-function normalize(str4) {
+function normalize2(str4) {
   const norm = nfkd(str4);
   const words = norm.split(" ");
   if (![12, 15, 18, 21, 24].includes(words.length))
@@ -4471,7 +4471,7 @@ function decodeWords(words, wordlist2) {
   return Uint8Array.from(entropy);
 }
 function mnemonicToEntropy(mnemonic, wordlist2) {
-  const { words } = normalize(mnemonic);
+  const { words } = normalize2(mnemonic);
   const entropy = decodeWords(words, wordlist2);
   aentropy(entropy);
   return entropy;
@@ -9168,31 +9168,31 @@ function parseCircleInviteLink(link) {
   parseCircleVersion(jws);
   return jws;
 }
-function decideOpenJoin(chain, join25, book, limiter, opts) {
+function decideOpenJoin(chain, join27, book, limiter, opts) {
   const now = opts.now ?? nowSec();
   const head = chain.head;
-  if (join25.cid !== chain.cid)
+  if (join27.cid !== chain.cid)
     return { decision: "ignore", reason: "other-circle" };
-  if (opts.isBlocked?.(join25.iss))
+  if (opts.isBlocked?.(join27.iss))
     return { decision: "ignore", reason: "blocked" };
-  if (join25.op !== "join" || join25.at === void 0)
+  if (join27.op !== "join" || join27.at === void 0)
     return { decision: "ignore", reason: "not-a-join" };
-  const cur = book[join25.iss];
-  if (cur && cur.hash !== join25.hash && compareMembership(join25, cur) >= 0)
+  const cur = book[join27.iss];
+  if (cur && cur.hash !== join27.hash && compareMembership(join27, cur) >= 0)
     return { decision: "ignore", reason: "not-current" };
-  if (!chain.hasAncestor(join25.at))
+  if (!chain.hasAncestor(join27.at))
     return { decision: "ignore", reason: "unknown-version" };
-  if (head.members.includes(join25.iss))
+  if (head.members.includes(join27.iss))
     return { decision: "ignore", reason: "already-member" };
   if (circlePolicy(head) !== "open")
     return { decision: "hold", reason: "not-open" };
-  if (!joinCapFitsPolicy(join25.joinCap, "open"))
+  if (!joinCapFitsPolicy(join27.joinCap, "open"))
     return { decision: "ignore", reason: "cap-too-long" };
   const removed = opts.removed instanceof Set ? opts.removed : new Set(opts.removed);
-  if (removed.has(join25.iss))
+  if (removed.has(join27.iss))
     return { decision: "hold", reason: "previously-removed" };
-  const wasMember = chain.versions.some((v) => v.members.includes(join25.iss));
-  const prior = cur && cur.hash !== join25.hash ? cur : void 0;
+  const wasMember = chain.versions.some((v) => v.members.includes(join27.iss));
+  const prior = cur && cur.hash !== join27.hash ? cur : void 0;
   if (wasMember && (!prior || prior.op === "join"))
     return { decision: "hold", reason: "previously-removed" };
   const recent = limiter.acceptedAt.filter((t2) => now - t2 < HOUR);
@@ -10850,8 +10850,8 @@ function forRelay(result, relay) {
 }
 async function withTimeout(p, ms) {
   let timer;
-  const timeout = new Promise((resolve5) => {
-    timer = setTimeout(() => resolve5(void 0), ms);
+  const timeout = new Promise((resolve7) => {
+    timer = setTimeout(() => resolve7(void 0), ms);
   });
   try {
     return await Promise.race([p.catch(() => void 0), timeout]);
@@ -11529,20 +11529,20 @@ async function storeOfferedCircle(store2, versions, opts = {}) {
   await store2.updateCircle(chain.cid, (cur) => cur ? { result: void 0 } : { next: { cid: chain.cid, chain: chain.toStored(), statements: {}, joinedByMe: false }, result: void 0 });
   return chain;
 }
-async function recordOwnJoin(store2, self, join25) {
-  if (join25.iss !== self)
-    fail("cert-mismatch", `the join is ${join25.iss}'s, not this user's`);
-  if (join25.op !== "join" || join25.at === void 0)
+async function recordOwnJoin(store2, self, join27) {
+  if (join27.iss !== self)
+    fail("cert-mismatch", `the join is ${join27.iss}'s, not this user's`);
+  if (join27.op !== "join" || join27.at === void 0)
     fail("malformed", "not a join statement");
-  await store2.updateCircle(join25.cid, (cur) => {
+  await store2.updateCircle(join27.cid, (cur) => {
     if (!cur)
-      return fail("circle-gap", `circle ${join25.cid} is not held`);
+      return fail("circle-gap", `circle ${join27.cid} is not held`);
     const chain = CircleChain.fromStored(cur.chain);
-    if (!chain.hasAncestor(join25.at))
+    if (!chain.hasAncestor(join27.at))
       fail("circle-invalid", "join names a version not on the held chain");
     const statements = { ...cur.statements };
-    applyMembership(statements, membershipFact(join25));
-    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join25.n) }, result: void 0 };
+    applyMembership(statements, membershipFact(join27));
+    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join27.n) }, result: void 0 };
   });
 }
 async function recordOwnLeave(store2, self, leave) {
@@ -11740,13 +11740,13 @@ function circleOwners(versions) {
   }
   return [...out];
 }
-async function decideOpenJoinFor(store2, join25, opts = {}) {
-  const blocked = await store2.isBlocked(join25.iss);
-  return store2.updateCircle(join25.cid, (cur) => {
+async function decideOpenJoinFor(store2, join27, opts = {}) {
+  const blocked = await store2.isBlocked(join27.iss);
+  return store2.updateCircle(join27.cid, (cur) => {
     if (!cur)
       return { result: { decision: "ignore", reason: "other-circle" } };
     const limiter = { acceptedAt: [...cur.openJoins?.acceptedAt ?? []] };
-    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join25, cur.statements, limiter, {
+    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join27, cur.statements, limiter, {
       now: opts.now,
       maxPerHour: opts.maxPerHour,
       isBlocked: () => blocked,
@@ -12390,7 +12390,7 @@ function refusePrivateRelays(relays, what, allow, opts = {}) {
     }
   }
 }
-async function refusePrivateResolved(relays, what, opts = {}, resolve5 = dnsLookup) {
+async function refusePrivateResolved(relays, what, opts = {}, resolve7 = dnsLookup) {
   for (const { relay, dial } of relays) {
     let host;
     try {
@@ -12399,17 +12399,17 @@ async function refusePrivateResolved(relays, what, opts = {}, resolve5 = dnsLook
       continue;
     }
     if (host.startsWith("[") || parseV4(host) || parseV6(host)) continue;
-    const addrs = await new Promise((r) => resolve5(host, { all: true }, (err, a) => r(err ? [] : a)));
+    const addrs = await new Promise((r) => resolve7(host, { all: true }, (err, a) => r(err ? [] : a)));
     const bad = addrs.find((a) => isPrivateAddress(a.address));
     if (bad) {
       throw new CliError("private_relay", privateRelayMessage(`${what}'s relay`, new URL(relay).hostname, { ...opts, detail: `it resolves to ${bad.address}` }));
     }
   }
 }
-function privateGuardLookup(resolve5 = dnsLookup) {
+function privateGuardLookup(resolve7 = dnsLookup) {
   return (hostname4, options, callback) => {
     const family = typeof options === "object" && options !== null && typeof options.family === "number" ? options.family : void 0;
-    resolve5(hostname4, { all: true, ...family ? { family } : {} }, (err, addrs) => {
+    resolve7(hostname4, { all: true, ...family ? { family } : {} }, (err, addrs) => {
       if (err) return callback(err, "", 0);
       const bad = addrs.find((a) => isPrivateAddress(a.address));
       if (bad || addrs.length === 0) {
@@ -12602,9 +12602,9 @@ var init_procstart = __esm({
 // packages/p2p/src/running.ts
 import { readFileSync as readFileSync10 } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 async function markRunning(app, sid) {
-  await mkdir(join10(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir(join11(app.home, "cursors"), { recursive: true, mode: 448 });
   await writeFile(markerPath(app, sid), JSON.stringify({ pid: process.pid, started: STARTED }), { mode: 384 });
 }
 async function unmarkRunning(app, sid) {
@@ -12649,7 +12649,7 @@ var init_running = __esm({
     START_SLACK_MS = 2500;
     markerPath = (app, sid) => {
       if (!SID_RE.test(sid) || sid === "." || sid === "..") throw new Error(`not a session id: ${JSON.stringify(sid.slice(0, 40))}`);
-      return join10(app.home, "cursors", `${sid}.watch`);
+      return join11(app.home, "cursors", `${sid}.watch`);
     };
   }
 });
@@ -12657,9 +12657,9 @@ var init_running = __esm({
 // packages/core/dist/filebackend.js
 import { constants as fsConstants2, promises as fs2 } from "node:fs";
 import { homedir as homedir2, hostname } from "node:os";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 function defaultTrustDir() {
-  return join11(homedir2(), ".ix", "p2p");
+  return join12(homedir2(), ".ix", "p2p");
 }
 async function statRead(path2) {
   try {
@@ -12714,7 +12714,7 @@ var init_filebackend = __esm({
       async read(name2) {
         let text2;
         try {
-          text2 = await fs2.readFile(join11(this.dir, `${name2}.json`), "utf8");
+          text2 = await fs2.readFile(join12(this.dir, `${name2}.json`), "utf8");
         } catch (e) {
           if (e.code === "ENOENT")
             return void 0;
@@ -12723,12 +12723,12 @@ var init_filebackend = __esm({
         return JSON.parse(text2);
       }
       async remove(name2) {
-        await fs2.rm(join11(this.dir, `${name2}.json`), { force: true });
+        await fs2.rm(join12(this.dir, `${name2}.json`), { force: true });
       }
       async write(name2, value) {
         await this.ensureDir();
-        const target = join11(this.dir, `${name2}.json`);
-        const tmp = join11(this.dir, `.${name2}.json.${process.pid}.${b64uEncode(randomBytes8(6))}.tmp`);
+        const target = join12(this.dir, `${name2}.json`);
+        const tmp = join12(this.dir, `.${name2}.json.${process.pid}.${b64uEncode(randomBytes8(6))}.tmp`);
         const fh = await fs2.open(tmp, "wx", FILE_MODE);
         try {
           await fh.writeFile(JSON.stringify(value));
@@ -12781,7 +12781,7 @@ var init_filebackend = __esm({
        */
       async withLock(fn) {
         await this.ensureDir();
-        const lock = join11(this.dir, ".lock");
+        const lock = join12(this.dir, ".lock");
         const token = b64uEncode(randomBytes8(16));
         const body = JSON.stringify({ pid: process.pid, host: hostname(), token });
         const t0 = Date.now();
@@ -12931,9 +12931,9 @@ var init_filebackend = __esm({
 
 // packages/core/dist/v3/node.js
 import { homedir as homedir3 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function defaultTrustDirV3() {
-  return join12(homedir3(), ".p2p", "v3");
+  return join13(homedir3(), ".p2p", "v3");
 }
 var FileTrustStoreV3;
 var init_node = __esm({
@@ -13013,7 +13013,7 @@ var init_progress = __esm({
 });
 
 // packages/p2p/src/state.ts
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 var sessKey, EVENT_RETENTION_MS, EVENT_MAX, STATE_BURST, STATE_YIELD_MS, CliState;
 var init_state2 = __esm({
   "packages/p2p/src/state.ts"() {
@@ -13029,7 +13029,7 @@ var init_state2 = __esm({
       constructor(dir, progress, backend, lockOpts = {}) {
         this.dir = dir;
         this.progress = progress;
-        this.backend = backend ?? new FileDocBackend(join13(dir, "cli"), lockOpts);
+        this.backend = backend ?? new FileDocBackend(join14(dir, "cli"), lockOpts);
       }
       dir;
       progress;
@@ -13437,7 +13437,7 @@ var init_outbox = __esm({
 
 // packages/p2p/src/extensions.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute7, join as join14, relative, resolve as resolvePath, sep as sep2 } from "node:path";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute8, join as join15, relative, resolve as resolvePath, sep as sep3 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 function extensionPackageName(ns) {
   return `@peer2peer/ext-${ns}`;
@@ -13493,9 +13493,9 @@ function enabledNamespaces(env, config) {
   return { enabled, ignored };
 }
 function siblingNodeModules(selfFile) {
-  const parts = resolvePath(selfFile).split(sep2);
+  const parts = resolvePath(selfFile).split(sep3);
   for (let i = parts.length - 3; i >= 0; i--) {
-    if (parts[i] === "node_modules" && parts[i + 1] === "@peer2peer" && parts[i + 2] === "cli") return parts.slice(0, i + 1).join(sep2) || sep2;
+    if (parts[i] === "node_modules" && parts[i + 1] === "@peer2peer" && parts[i + 2] === "cli") return parts.slice(0, i + 1).join(sep3) || sep3;
   }
   return void 0;
 }
@@ -13504,30 +13504,30 @@ function realish2(p) {
     return realpathSync4(p);
   } catch {
     const parent = dirname4(p);
-    return parent === p ? p : join14(realish2(parent), basename3(p));
+    return parent === p ? p : join15(realish2(parent), basename3(p));
   }
 }
 function isInside2(p, dir) {
   const r = realish2(resolvePath(p));
   const d = realish2(resolvePath(dir));
   const rel = relative(d, r);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute7(rel);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute8(rel);
 }
 function extensionDirs(env, selfUrl) {
-  const excluded = (env.P2P_EXTENSION_EXCLUDE ?? "").split(delimiter2).map((d) => d.trim()).filter((d) => d !== "" && isAbsolute7(d));
-  const dirs = (env.P2P_EXTENSION_PATH ?? "").split(delimiter2).map((d) => d.trim()).filter(Boolean).filter((d) => !excluded.some((x) => isInside2(d, x))).map((d) => basename3(d) === "node_modules" ? d : join14(d, "node_modules"));
+  const excluded = (env.P2P_EXTENSION_EXCLUDE ?? "").split(delimiter2).map((d) => d.trim()).filter((d) => d !== "" && isAbsolute8(d));
+  const dirs = (env.P2P_EXTENSION_PATH ?? "").split(delimiter2).map((d) => d.trim()).filter(Boolean).filter((d) => !excluded.some((x) => isInside2(d, x))).map((d) => basename3(d) === "node_modules" ? d : join15(d, "node_modules"));
   const self = selfUrl.startsWith("file:") ? fileURLToPath(selfUrl) : selfUrl;
   const sib = siblingNodeModules(self);
   return [.../* @__PURE__ */ new Set([...dirs, ...sib ? [sib] : []])];
 }
 function resolveIn(nodeModules, name2) {
-  const pkgDir = join14(nodeModules, ...name2.split("/"));
-  if (!existsSync3(join14(pkgDir, "package.json"))) return void 0;
+  const pkgDir = join15(nodeModules, ...name2.split("/"));
+  if (!existsSync3(join15(pkgDir, "package.json"))) return void 0;
   let pkg;
   try {
-    pkg = JSON.parse(readFileSync11(join14(pkgDir, "package.json"), "utf8"));
+    pkg = JSON.parse(readFileSync11(join15(pkgDir, "package.json"), "utf8"));
   } catch {
-    throw new ExtResolveError(`${join14(pkgDir, "package.json")} is not valid JSON`);
+    throw new ExtResolveError(`${join15(pkgDir, "package.json")} is not valid JSON`);
   }
   if (pkg?.name !== name2) throw new ExtResolveError(`${pkgDir} is not ${name2}`);
   const dot = typeof pkg.exports === "string" ? pkg.exports : pkg.exports?.["."];
@@ -13541,12 +13541,12 @@ function resolveIn(nodeModules, name2) {
   } catch {
     throw new ExtResolveError(`${name2}'s entry ${sanitizePeerText(entry, 120)} doesn't exist`);
   }
-  if (!real2.startsWith(realPkg + sep2)) throw new ExtResolveError(`${name2}'s entry points outside the package`);
+  if (!real2.startsWith(realPkg + sep3)) throw new ExtResolveError(`${name2}'s entry points outside the package`);
   return real2;
 }
 function firstFromHere(home, ns, file) {
   if (!home) return true;
-  const p = join14(home, SEEN_FILE);
+  const p = join15(home, SEEN_FILE);
   let seen = {};
   try {
     seen = JSON.parse(readFileSync11(p, "utf8"));
@@ -13608,7 +13608,7 @@ async function loadExtensions(opts) {
 }
 function setExtensionEnabled(home, ns, on) {
   if (!KNOWN_EXTENSIONS.includes(ns)) throw new Error(`${ns} is not a registered extension namespace (${KNOWN_EXTENSIONS.join(", ")})`);
-  const p = join14(home, "config.json");
+  const p = join15(home, "config.json");
   let cfg = {};
   if (existsSync3(p)) {
     const v = JSON.parse(readFileSync11(p, "utf8"));
@@ -13702,7 +13702,7 @@ var init_extensions = __esm({
 // packages/p2p/src/config.ts
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function graphMemoryEnabled(env, home) {
   const v = env.P2P_IX_MEMORY?.trim().toLowerCase();
@@ -13767,12 +13767,12 @@ function statusCapsEnabled(env, home) {
 }
 function resolveHome2(env) {
   const h = env.P2P_HOME?.trim();
-  return h ? h : join15(homedir4(), ".p2p");
+  return h ? h : join16(homedir4(), ".p2p");
 }
 function readFileConfig(home) {
   let raw;
   try {
-    raw = readFileSync12(join15(home, "config.json"), "utf8");
+    raw = readFileSync12(join16(home, "config.json"), "utf8");
   } catch {
     return {};
   }
@@ -13780,7 +13780,7 @@ function readFileConfig(home) {
   try {
     v = JSON.parse(raw);
   } catch {
-    throw new CliError("config", `${join15(home, "config.json")} is not valid JSON`);
+    throw new CliError("config", `${join16(home, "config.json")} is not valid JSON`);
   }
   if (typeof v !== "object" || v === null || Array.isArray(v)) throw new CliError("config", "config.json must hold a JSON object");
   return v;
@@ -13793,7 +13793,7 @@ async function updateFileConfigField(app, key, fn) {
   });
 }
 function setFileConfigField(home, key, value) {
-  const p = join15(home, "config.json");
+  const p = join16(home, "config.json");
   const cfg = readFileConfig(home);
   mkdirSync8(home, { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
@@ -14131,7 +14131,7 @@ var init_receipts = __esm({
 // packages/p2p/src/history.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash4, hkdfSync as hkdfSync2, randomBytes as randomBytes10 } from "node:crypto";
 import { mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync7, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 function historySettings(app) {
   let cfg = {};
   try {
@@ -14149,7 +14149,7 @@ function historySettings(app) {
   };
 }
 function historyKeyFile(home) {
-  return join16(home, "cli", "history.key");
+  return join17(home, "cli", "history.key");
 }
 function readKey2(home) {
   try {
@@ -14162,7 +14162,7 @@ function readKey2(home) {
 function historyKey(home, create) {
   const have = readKey2(home);
   if (have || !create) return have;
-  mkdirSync9(join16(home, "cli"), { recursive: true, mode: 448 });
+  mkdirSync9(join17(home, "cli"), { recursive: true, mode: 448 });
   try {
     writeFileSync9(historyKeyFile(home), b64uEncode(new Uint8Array(randomBytes10(32))), { mode: 384, flag: "wx" });
   } catch {
@@ -14195,30 +14195,30 @@ function open2(key, name2, doc) {
 }
 function segmentNames(app) {
   try {
-    return readdirSync2(join16(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
+    return readdirSync2(join17(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
   } catch {
     return [];
   }
 }
 function quarantine(app, name2, why2) {
   setAside++;
-  const dir = join16(app.state.dir, "cli");
+  const dir = join17(app.state.dir, "cli");
   const to = `history.bad-${Date.now()}-${name2}.json`;
   try {
-    renameSync7(join16(dir, `${name2}.json`), join16(dir, to));
+    renameSync7(join17(dir, `${name2}.json`), join17(dir, to));
     app.io.err(`p2p: message history: ${name2} couldn't be opened (${why2}); set aside as ${to}`);
   } catch {
   }
 }
 function pruneQuarantine(app, cutoff) {
-  const dir = join16(app.state.dir, "cli");
+  const dir = join17(app.state.dir, "cli");
   let files;
   try {
     files = readdirSync2(dir).map((f) => ({ f, m: QUARANTINE_RE.exec(f) })).filter((x) => x.m).map((x) => ({ f: x.f, at: Number(x.m[1]) })).sort((a, b) => a.at - b.at);
   } catch {
     return;
   }
-  for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync3(join16(dir, x.f), { force: true });
+  for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync3(join17(dir, x.f), { force: true });
 }
 async function readSealed(app, key, name2, hash) {
   let doc;
@@ -15711,7 +15711,7 @@ function overOf(v) {
   const out = v === true ? ["front"] : overWhys(Array.isArray(v) ? v.flatMap((x) => String(x).split(",")) : []);
   return out.length > 0 ? out : ["front"];
 }
-function within(c, b) {
+function within2(c, b) {
   if (c.kind === "private") return true;
   if (c.kind === "none" || b === "private") return false;
   return c.circles.every((x) => b.circles.includes(x)) && c.people.every((x) => b.people.includes(x));
@@ -15721,7 +15721,7 @@ async function sessionsWithin(app, b, now = Date.now()) {
   const out = /* @__PURE__ */ new Set([PERSON_SESSION]);
   for (const p of Object.values(peers)) {
     if (p.own !== app.userId || p.did !== app.did || !isLive(p.ts, now) || out.has(p.sid)) continue;
-    if (within(await sessionCeiling(app, p.sid), b)) out.add(p.sid);
+    if (within2(await sessionCeiling(app, p.sid), b)) out.add(p.sid);
   }
   return [...out].sort();
 }
@@ -18143,7 +18143,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes15, createHash: createHash10 } = __require("crypto");
+    var { randomBytes: randomBytes16, createHash: createHash10 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -18694,7 +18694,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes15(16).toString("base64");
+      const key = randomBytes16(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -19648,8 +19648,8 @@ async function inviteGet(conn, lid) {
 }
 async function inviteList(conn) {
   const r = await conn.request({ t: "invite-list" });
-  const strs2 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
-  if (r.t === "invites" && Array.isArray(r.lids)) return { lids: strs2(r.lids), evicted: strs2(r.evicted) };
+  const strs3 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  if (r.t === "invites" && Array.isArray(r.lids)) return { lids: strs3(r.lids), evicted: strs3(r.evicted) };
   throw new CliError("network", `${conn.relay}: invite-list failed (${relayCode(r.code ?? r.t)})`);
 }
 async function inviteDel(conn, lid) {
@@ -19685,7 +19685,7 @@ async function getJson(url, timeoutMs, progress, what = "identity documents", lo
 }
 function getJsonGuarded(url, timeoutMs, lookup2) {
   const get = url.startsWith("https:") ? httpsGet : httpGet;
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     let done = false;
     const deadline = setTimeout(() => {
       req.destroy();
@@ -19705,7 +19705,7 @@ function getJsonGuarded(url, timeoutMs, lookup2) {
       if (res.statusCode === 404) {
         res.resume();
         settle();
-        return resolve5(void 0);
+        return resolve7(void 0);
       }
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
         res.resume();
@@ -19725,7 +19725,7 @@ function getJsonGuarded(url, timeoutMs, lookup2) {
         try {
           const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           settle();
-          resolve5(v);
+          resolve7(v);
         } catch (e) {
           fail2(e);
         }
@@ -19884,8 +19884,8 @@ var init_relay_client = __esm({
         let dialTimer;
         try {
           await Promise.race([
-            new Promise((resolve5, reject) => {
-              ws.once("open", () => resolve5());
+            new Promise((resolve7, reject) => {
+              ws.once("open", () => resolve7());
               ws.once("error", (e) => {
                 const code2 = e.code ?? "";
                 if (code2 === "ECONNREFUSED") reject(unreachable(`connection refused on port ${port}`));
@@ -19940,14 +19940,14 @@ var init_relay_client = __esm({
       }
       requestInner(frame, timeoutMs) {
         const id2 = `c${this.nextId++}`;
-        return new Promise((resolve5, reject) => {
+        return new Promise((resolve7, reject) => {
           if (!this.isOpen) return reject(new CliError("network", `relay ${this.relay} is not connected`));
           const timer = setTimeout(() => {
             this.pending.delete(id2);
             reject(new CliError("timeout", `${this.relay}: no reply to ${frame.t} after ${Math.round(timeoutMs / 1e3)}s`));
           }, timeoutMs);
           timer.unref();
-          this.pending.set(id2, { resolve: resolve5, reject, timer });
+          this.pending.set(id2, { resolve: resolve7, reject, timer });
           this.ws.send(JSON.stringify({ ...frame, id: id2 }));
         });
       }
@@ -20207,11 +20207,11 @@ var init_relay_client = __esm({
       }
       /** Resolves after `ms`, or sooner when a handler finishes or a relay says `caught-up`. */
       nap(ms) {
-        return new Promise((resolve5) => {
+        return new Promise((resolve7) => {
           const done = () => {
             clearTimeout(t2);
             this.wakers.delete(done);
-            resolve5();
+            resolve7();
           };
           const t2 = setTimeout(done, ms);
           this.wakers.add(done);
@@ -21155,7 +21155,7 @@ var init_codes = __esm({
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
 import { accessSync, constants, statSync as statSync4 } from "node:fs";
-import { delimiter as delimiter3, isAbsolute as isAbsolute8, join as join17 } from "node:path";
+import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join18 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
   if (platform === "darwin" && arch === "x64") return ["brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix", "brew install ix"];
@@ -21189,18 +21189,18 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
       return false;
     }
   };
-  if (isAbsolute8(name2)) return runnable(name2) ? name2 : void 0;
+  if (isAbsolute9(name2)) return runnable(name2) ? name2 : void 0;
   if (/[\\/]/.test(name2)) return void 0;
   const win = platform === "win32";
-  const sep4 = win ? ";" : delimiter3;
+  const sep6 = win ? ";" : delimiter3;
   const path2 = env.PATH ?? env.Path ?? "";
   const exts = win ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
   const hasExt = win && exts.some((e) => name2.toLowerCase().endsWith(e.toLowerCase()));
-  for (const dir of path2.split(sep4)) {
+  for (const dir of path2.split(sep6)) {
     const d = dir.trim().replace(/^"|"$/g, "");
-    if (d === "" || !isAbsolute8(d)) continue;
+    if (d === "" || !isAbsolute9(d)) continue;
     for (const ext of hasExt ? [""] : exts) {
-      const p = join17(d, name2 + ext);
+      const p = join18(d, name2 + ext);
       if (runnable(p)) return p;
     }
   }
@@ -21220,17 +21220,17 @@ function ixChildEnv(env, target) {
   return out;
 }
 function absolutePath(v, platform = process.platform) {
-  const sep4 = platform === "win32" ? ";" : delimiter3;
-  return v.split(sep4).filter((d) => {
+  const sep6 = platform === "win32" ? ";" : delimiter3;
+  return v.split(sep6).filter((d) => {
     const x = d.trim().replace(/^"|"$/g, "");
-    return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute8(x));
-  }).join(sep4);
+    return x !== "" && (platform === "win32" ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(x) : isAbsolute9(x));
+  }).join(sep6);
 }
 function runIx(bin, argv, o) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve7) => {
     execFile4(bin, [...argv], { cwd: o.cwd, env: ixChildEnv(o.env, o.target), timeout: o.timeoutMs, killSignal: "SIGKILL", maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
       const e = err;
-      resolve5({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
+      resolve7({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
     });
   });
 }
@@ -21348,7 +21348,7 @@ __export(identity_exports, {
   whoami: () => whoami
 });
 import { chmod, readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 function p2pCommand(platform = process.platform) {
   return platform === "win32" ? "p2p.cmd" : "p2p";
@@ -21410,7 +21410,7 @@ async function setup(app, opts) {
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
   }
   if (backupMode === "file") {
-    const path2 = opts.backupFile ?? join18(app.home, BACKUP_FILE_NAME);
+    const path2 = opts.backupFile ?? join19(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
       await writeFile2(path2, `${phrase}
@@ -21773,8 +21773,8 @@ async function backupRestore(app, phrase, opts) {
         { home: app.home, cause: e instanceof CliError ? e.code : "error" }
       );
     }
-    await rm(join18(app.home, "cli"), { recursive: true, force: true });
-    await rm(join18(app.home, "v3"), { recursive: true, force: true });
+    await rm(join19(app.home, "cli"), { recursive: true, force: true });
+    await rm(join19(app.home, "v3"), { recursive: true, force: true });
     throw e;
   }
 }
@@ -21962,7 +21962,7 @@ ${proof}` };
 }
 async function addProof(app, proof, kind, claim) {
   await app.connect({ allowNone: true });
-  const same2 = (j) => {
+  const same3 = (j) => {
     try {
       const p = decodeTyped(j, TYP3.proof).payload;
       return p.kind === kind && p.claim === claim;
@@ -21971,7 +21971,7 @@ async function addProof(app, proof, kind, claim) {
     }
   };
   const pub = await app.publishNext((p) => {
-    p.proofs = [...(p.proofs ?? []).filter((j) => !same2(j)), proof];
+    p.proofs = [...(p.proofs ?? []).filter((j) => !same3(j)), proof];
   });
   return pub.ver;
 }
@@ -22070,7 +22070,7 @@ __export(rotation_exports, {
   untrustedImportSigner: () => untrustedImportSigner
 });
 import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 function stateBackend(home) {
   return new FileDocBackend(rotationDir(home));
 }
@@ -22082,7 +22082,7 @@ async function saveState(home, s2) {
   await b.withLock(() => b.write("state", s2));
 }
 async function dropState(home) {
-  await rm2(join19(rotationDir(home), "state.json"), { force: true });
+  await rm2(join20(rotationDir(home), "state.json"), { force: true });
   await rm2(newHomeOf(home), { recursive: true, force: true });
 }
 async function isLink(p) {
@@ -22102,24 +22102,24 @@ async function exists(p) {
 }
 async function appAt(app, home) {
   await mkdir2(home, { recursive: true, mode: 448 });
-  if (await exists(join19(app.home, "config.json"))) await copyFile(join19(app.home, "config.json"), join19(home, "config.json"));
+  if (await exists(join20(app.home, "config.json"))) await copyFile(join20(app.home, "config.json"), join20(home, "config.json"));
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
-  for (const p of [src, join19(src, "cli"), join19(src, "v3"), join19(src, "cursors")]) {
+  for (const p of [src, join20(src, "cli"), join20(src, "v3"), join20(src, "cursors")]) {
     if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
   }
-  const archive = join19(home, "rotated", tag);
+  const archive = join20(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
-  const srcHasState = await exists(join19(src, "cli"));
+  const srcHasState = await exists(join20(src, "cli"));
   for (const d of ["cli", "v3", "cursors"]) {
-    if (srcHasState && await exists(join19(home, d)) && !await exists(join19(archive, d))) await rename(join19(home, d), join19(archive, d));
+    if (srcHasState && await exists(join20(home, d)) && !await exists(join20(archive, d))) await rename(join20(home, d), join20(archive, d));
   }
   for (const d of ["cli", "v3"]) {
-    if (await exists(join19(src, d)) && !await exists(join19(home, d))) await rename(join19(src, d), join19(home, d));
+    if (await exists(join20(src, d)) && !await exists(join20(home, d))) await rename(join20(src, d), join20(home, d));
   }
   await rm2(src, { recursive: true, force: true });
-  for (const d of ["cli", "v3"]) await rm2(join19(archive, d, ".lock"), { force: true });
+  for (const d of ["cli", "v3"]) await rm2(join20(archive, d, ".lock"), { force: true });
   return archive;
 }
 function assertAdopted(app, userId) {
@@ -22131,7 +22131,7 @@ async function adoptHome(app, src, tag) {
   app.identityMadeHere = true;
   await app.close();
   const home = app.home;
-  if (await exists(join19(home, "cli"))) await app.state.backend.withLock(async () => {
+  if (await exists(join20(home, "cli"))) await app.state.backend.withLock(async () => {
   });
   if (await exists(app.store.dir)) await new FileDocBackend(app.store.dir).withLock(async () => {
   });
@@ -22445,7 +22445,7 @@ async function rotate(app, opts = {}) {
   return finish(app, st);
 }
 async function writeBackup(app, ik, opts) {
-  const file = opts.backupFile ?? (opts.backupFileDefault ? join19(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
+  const file = opts.backupFile ?? (opts.backupFileDefault ? join20(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
   if (!file) return void 0;
   try {
     await writeFile3(file, `${backupPhraseFromSeed(ik.secretKey)}
@@ -22980,14 +22980,14 @@ async function rejoin(app, napp, cid, statement) {
   let nc = await loadCircle(napp.store, cid);
   if (nc.book[to]?.op !== "join") await signOwnJoin(napp, cid, nc.chain.head.hash);
   nc = await loadCircle(napp.store, cid);
-  const join25 = nc.book[to].jws;
+  const join27 = nc.book[to].jws;
   const c = await loadCircle(app.store, cid);
   const leave = await leaveAsOld(app, cid).catch((e) => {
     if (e instanceof P2PError) return void 0;
     throw e;
   });
   const owner = c.chain.head.owner;
-  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join25, leave] : [join25], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
+  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join27, leave] : [join27], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
   if (d.relays.length === 0) throw new CliError("undelivered", "the owner couldn't be reached");
   if (!leave) return;
   for (const m of c.chain.head.members) {
@@ -23002,7 +23002,7 @@ async function finish(app, st) {
     await saveState(app.home, st);
     await reload(app);
   } else if (st.step === "done" && st.archive === void 0) {
-    st.archive = join19(app.home, "rotated");
+    st.archive = join20(app.home, "rotated");
     await saveState(app.home, st);
   }
   return rotateReport(app, st);
@@ -23451,9 +23451,9 @@ async function swapMember(app, rot, cid, withAdmin) {
   await recordApproval(app, rot.from, { to: rot.to, kind: "circle", cid });
   return ownerPublish(app, cid, { members, admins }, { alsoTo: [rot.from] });
 }
-async function holdRotationJoin(app, env, at, from, rot, cid, join25, reason) {
+async function holdRotationJoin(app, env, at, from, rot, cid, join27, reason) {
   const c = await loadCircle(app.store, cid);
-  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join25, rotation: rot.statement, old: rot.from, reason });
+  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join27, rotation: rot.statement, old: rot.from, reason });
   await hold(app, item);
   return makeEvent(
     env,
@@ -23461,7 +23461,7 @@ async function holdRotationJoin(app, env, at, from, rot, cid, join25, reason) {
     at,
     { from, held: { id: item.id, type: item.type, cid, reason, old: { userId: rot.from, address: await app.addressOf(rot.from) }, ...reason === "conflict" ? { conflict: true } : {} } },
     {},
-    `${join25}|${reason}`
+    `${join27}|${reason}`
   );
 }
 async function onRotationJoin(app, env, at, from, statement, sender, joins) {
@@ -23612,7 +23612,7 @@ async function followHeld(app, idOrItem) {
     if (res.userId !== r.to) throw new CliError("wrong_identity", `the link joined ${res.userId}, not ${r.to}`);
     const old = app.userId;
     const tag = `${old.slice(4, 20)}-${Date.now()}`;
-    await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
+    await writeFile3(join20(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
     assertAdopted(app, res.userId);
@@ -23620,7 +23620,7 @@ async function followHeld(app, idOrItem) {
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
   } catch (e) {
-    if (!await exists(join19(tmp, "linked.json"))) await rm2(tmp, { recursive: true, force: true }).catch(() => void 0);
+    if (!await exists(join20(tmp, "linked.json"))) await rm2(tmp, { recursive: true, force: true }).catch(() => void 0);
     if (e instanceof CliError && (e.code === "wrong_identity" || e.code === "keyholder")) throw e;
     throw new CliError(
       "follow_failed",
@@ -23638,14 +23638,14 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile4(join19(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile4(join20(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
-  for (const p of [rotationDir(home), tmp, join19(tmp, "linked.json"), join19(tmp, "cli"), join19(tmp, "v3"), join19(tmp, "cursors")]) {
+  for (const p of [rotationDir(home), tmp, join20(tmp, "linked.json"), join20(tmp, "cli"), join20(tmp, "v3"), join20(tmp, "cursors")]) {
     if (await isLink(p)) return false;
   }
-  if (!await exists(join19(tmp, "cli")) && await exists(join19(home, "cli"))) {
+  if (!await exists(join20(tmp, "cli")) && await exists(join20(home, "cli"))) {
     await rm2(tmp, { recursive: true, force: true });
     return false;
   }
@@ -23685,7 +23685,7 @@ async function relinkRotated(app, code2, opts = {}) {
         throw new CliError("wrong_identity", `that code links to ${res.userId}, which isn't where your identity moved (${[...targets].join(", ")})`);
       }
       const tag = `${old.slice(4, 20)}-${Date.now()}`;
-      await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
+      await writeFile3(join20(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
       assertAdopted(app, res.userId);
@@ -23709,9 +23709,9 @@ var init_rotation = __esm({
     init_projects();
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
-    rotationDir = (home) => join19(home, "rotation");
-    newHomeOf = (home) => join19(rotationDir(home), "new");
-    followHomeOf = (home) => join19(rotationDir(home), "follow");
+    rotationDir = (home) => join20(home, "rotation");
+    newHomeOf = (home) => join20(rotationDir(home), "new");
+    followHomeOf = (home) => join20(rotationDir(home), "follow");
     after = (s2, step2) => STEPS.indexOf(s2.step) >= STEPS.indexOf(step2);
     DEVICE_SEEN_WINDOW_SEC = 30 * 86400;
     RESEND_PER_HOUR = 50;
@@ -24272,16 +24272,16 @@ function inviteRelays(jws) {
       return {};
     }
   };
-  const strs2 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  const strs3 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
   const p = payload(jws);
-  const out = strs2(p.relays);
+  const out = strs3(p.relays);
   if (typeof p.doc === "string") {
     try {
       out.push(...peekIdentityDoc(p.doc).relays);
     } catch {
     }
   }
-  if (typeof p.cap === "string") out.push(...strs2(payload(p.cap).relays));
+  if (typeof p.cap === "string") out.push(...strs3(payload(p.cap).relays));
   return out;
 }
 async function guardInviteLink(app, input, opts = {}) {
@@ -24848,8 +24848,8 @@ function parseCircleLink(link) {
 async function ownerHint(app, c) {
   const owner = c.chain.head.owner;
   const v = await app.view(owner);
-  const join25 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
-  return { ...v ? { doc: v.head.jws } : {}, ...join25 ? { join: join25 } : {} };
+  const join27 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
+  return { ...v ? { doc: v.head.jws } : {}, ...join27 ? { join: join27 } : {} };
 }
 async function circleLink(app, cidOrName) {
   const c = await resolveCircle(app, cidOrName);
@@ -26161,10 +26161,10 @@ __export(projects_exports, {
 import { createHash as createHash8, createHmac, randomBytes as randomBytes14, timingSafeEqual } from "node:crypto";
 import { existsSync as existsSync4, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
-import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute9, join as join20, resolve as resolve3, sep as sep3 } from "node:path";
+import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join21, resolve as resolve4, sep as sep4 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
-  if (w && isAbsolute9(w)) {
+  if (w && isAbsolute10(w)) {
     try {
       if (statSync5(w).isDirectory()) return w;
     } catch {
@@ -26173,7 +26173,7 @@ function sessionWorkdir(env) {
   return process.cwd();
 }
 function sessionDirs(env) {
-  const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter4).filter((x) => x.trim() !== "" && isAbsolute9(x.trim()));
+  const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter4).filter((x) => x.trim() !== "" && isAbsolute10(x.trim()));
   const why2 = extra.length > MAX_SESSION_DIRS ? ["folders"] : [];
   const said = env.P2P_PROJECT_DIRS_OVER?.trim() ?? "";
   if (said !== "" && said !== "0") why2.push(...overWhys(said));
@@ -26200,8 +26200,8 @@ function hasDotDot(p) {
   return p.split(/[\\/]/).includes("..");
 }
 function physicalPath(p) {
-  const abs = isAbsolute9(p) ? p : `${process.cwd()}${sep3}${p}`;
-  if (process.platform === "win32") return resolve3(abs);
+  const abs = isAbsolute10(p) ? p : `${process.cwd()}${sep4}${p}`;
+  if (process.platform === "win32") return resolve4(abs);
   let cur = "/";
   for (const c of abs.split("/")) {
     if (c === "" || c === ".") continue;
@@ -26234,8 +26234,8 @@ function existingDir(p) {
   return cur;
 }
 function pseudoPath(p) {
-  if (process.platform === "win32" || typeof p !== "string" || !isAbsolute9(p)) return false;
-  const at = resolve3(p);
+  if (process.platform === "win32" || typeof p !== "string" || !isAbsolute10(p)) return false;
+  const at = resolve4(p);
   if (!PSEUDO_ROOTS.some((root) => at === root || at.startsWith(`${root}/`))) return false;
   let st;
   try {
@@ -26269,13 +26269,13 @@ function namedStop(p) {
   for (let i = 1; i < parts.length; i++) {
     const c = parts[i];
     const glob = (c.startsWith(".") || c.startsWith("[")) && /[*?[]/.test(c) || braceChoice2(c);
-    if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep3) || sep3;
+    if (c === ".git" || c === PRIVATE_MARKER || glob) return parts.slice(0, i).join(sep4) || sep4;
   }
   return void 0;
 }
-function within2(p, dir) {
+function within3(p, dir) {
   if (p === dir) return true;
-  const d = dir.endsWith(sep3) ? dir : `${dir}${sep3}`;
+  const d = dir.endsWith(sep4) ? dir : `${dir}${sep4}`;
   return p.startsWith(d);
 }
 function dirProjectId(root) {
@@ -26347,15 +26347,15 @@ function isBareRepo2(d) {
       return void 0;
     }
   };
-  if (st(join20(d, "HEAD"))?.isFile() && st(join20(d, "objects"))?.isDirectory() && st(join20(d, "refs"))?.isDirectory()) return true;
-  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join20(d, "config")) ?? "");
+  if (st(join21(d, "HEAD"))?.isFile() && st(join21(d, "objects"))?.isDirectory() && st(join21(d, "refs"))?.isDirectory()) return true;
+  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join21(d, "config")) ?? "");
 }
 function gitRef(gitDir, root) {
   let common = gitDir;
-  const cd = readSmall(join20(gitDir, "commondir"))?.trim();
-  if (cd) common = resolve3(gitDir, cd);
+  const cd = readSmall(join21(gitDir, "commondir"))?.trim();
+  if (cd) common = resolve4(gitDir, cd);
   common = real(common);
-  const urls = remotesOf(readSmall(join20(common, "config")) ?? "");
+  const urls = remotesOf(readSmall(join21(common, "config")) ?? "");
   const remote = urls.map(normalizeRemote).find((x) => x !== void 0);
   const main2 = basename5(common) === ".git" ? dirname6(common) : common;
   const name2 = clean3(remote ? remote.split("/").pop() ?? "" : basename5(main2)) || clean3(basename5(root)) || "project";
@@ -26367,11 +26367,11 @@ ${common}`).slice(0, 24)}`,
     kind: "git",
     root,
     ...remote ? { remote } : {},
-    ...existsSync4(join20(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+    ...existsSync4(join21(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
   };
 }
 function present(p) {
-  let q = resolve3(p);
+  let q = resolve4(p);
   while (/[*?[\]{}]/.test(basename5(q)) && dirname6(q) !== q) q = dirname6(q);
   try {
     statSync5(q);
@@ -26385,7 +26385,7 @@ function projectOf(dir, doc) {
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
-    const dotgit = join20(cur, ".git");
+    const dotgit = join21(cur, ".git");
     let isThere;
     try {
       lstatSync6(dotgit);
@@ -26404,7 +26404,7 @@ function projectOf(dir, doc) {
       if (st?.isDirectory()) gitDir = dotgit;
       else if (st?.isFile()) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
-        if (m) gitDir = resolve3(cur, m[1]);
+        if (m) gitDir = resolve4(cur, m[1]);
       }
       if (!gitDir || !existsSync4(gitDir)) {
         return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
@@ -26419,7 +26419,7 @@ function projectOf(dir, doc) {
   const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename5(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
   let marked = false;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (existsSync4(join20(c, PRIVATE_MARKER))) {
+    if (existsSync4(join21(c, PRIVATE_MARKER))) {
       marked = true;
       break;
     }
@@ -26430,7 +26430,7 @@ function projectOf(dir, doc) {
   if (!doc || marked) return dirRef(start, marked);
   const named = namedStop(given);
   const ns = named === void 0 ? void 0 : existingDir(named);
-  const stop = !present(given) ? start : ns === void 0 ? void 0 : within2(start, ns) ? ns : start;
+  const stop = !present(given) ? start : ns === void 0 ? void 0 : within3(start, ns) ? ns : start;
   for (let c = start, i = 0; i < 4096; i++) {
     const rec = doc.projects[dirProjectId(c)];
     if (rec) return c === start || rec.covers === true ? dirRef(c, false) : dirRef(start, false);
@@ -26484,12 +26484,12 @@ async function projectView(app, ref, doc) {
 }
 function broadRoot(root, env = {}) {
   const norm = (p) => {
-    const r = resolve3(p);
+    const r = resolve4(p);
     return process.platform === "win32" ? r.toLowerCase() : r;
   };
   const forms = (p) => [.../* @__PURE__ */ new Set([norm(p), norm(real(p))])];
   const at = forms(root);
-  const isOrAbove = (dir) => !!dir && isAbsolute9(dir) && forms(dir).some((d) => at.some((r) => within2(d, r)));
+  const isOrAbove = (dir) => !!dir && isAbsolute10(dir) && forms(dir).some((d) => at.some((r) => within3(d, r)));
   if (at.some((r) => dirname6(r) === r)) return "the file system's root";
   const homes = [homedir5(), env.HOME, env.USERPROFILE].filter((x) => typeof x === "string" && x !== "");
   if (homes.some(isOrAbove)) return "a home folder (or a folder that holds one)";
@@ -26533,13 +26533,13 @@ function nestedBoundaries(root) {
           break;
         }
         if (!e.isDirectory() || e.isSymbolicLink()) continue;
-        const p = join20(d, e.name);
+        const p = join21(d, e.name);
         if (e.name === ".git") continue;
-        if (existsSync4(join20(p, ".git")) || isBareRepo2(p)) {
+        if (existsSync4(join21(p, ".git")) || isBareRepo2(p)) {
           repos.push(p);
           continue;
         }
-        if (existsSync4(join20(p, PRIVATE_MARKER))) priv.push(p);
+        if (existsSync4(join21(p, PRIVATE_MARKER))) priv.push(p);
         next.push(p);
       }
       if (capped) break;
@@ -26614,7 +26614,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync4(join20(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync4(join21(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -26623,7 +26623,7 @@ async function showProject(app, dir) {
   return projectView(app, projectOf(dir, doc), doc);
 }
 function ownDir(p) {
-  if (!isAbsolute9(p)) return void 0;
+  if (!isAbsolute10(p)) return void 0;
   try {
     const st = lstatSync6(p);
     if (!st.isDirectory() || st.isSymbolicLink()) return void 0;
@@ -26647,22 +26647,22 @@ function sessionScratch(raw) {
   }
   const sid = o.sid;
   if (typeof sid !== "string" || !SCRATCH_SID_RE.test(sid)) return void 0;
-  const path2 = (v) => typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute9(v) ? resolve3(v) : void 0;
+  const path2 = (v) => typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute10(v) ? resolve4(v) : void 0;
   const bases = /* @__PURE__ */ new Set();
   const jobs = /* @__PURE__ */ new Set();
   const tmpName = `claude-${process.getuid?.() ?? 0}`;
   for (const t2 of Array.isArray(o.tmp) ? o.tmp.slice(0, 4) : []) {
     const at = path2(t2);
-    const b = at === void 0 ? void 0 : ownDir(join20(at, tmpName));
+    const b = at === void 0 ? void 0 : ownDir(join21(at, tmpName));
     if (b) bases.add(b);
   }
   const config = path2(o.config);
   if (config !== void 0) {
-    const projects = ownDir(join20(config, "projects"));
+    const projects = ownDir(join21(config, "projects"));
     if (projects) bases.add(projects);
     const job = path2(o.job);
-    const jobsDir = ownDir(join20(config, "jobs"));
-    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join20(config, "jobs")) {
+    const jobsDir = ownDir(join21(config, "jobs"));
+    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join21(config, "jobs")) {
       const id2 = basename5(job);
       const r = JOB_ID_RE.test(id2) && sid.startsWith(id2) ? ownDir(job) : void 0;
       if (r && dirname6(r) === jobsDir) jobs.add(r);
@@ -26671,11 +26671,11 @@ function sessionScratch(raw) {
   return bases.size + jobs.size > 0 ? { sid, bases: [...bases], jobs: [...jobs] } : void 0;
 }
 function scratchRoot(dir, s2) {
-  for (const j of s2.jobs) if (within2(dir, j)) return j;
+  for (const j of s2.jobs) if (within3(dir, j)) return j;
   for (const b of s2.bases) {
-    if (dir === b || !within2(dir, b)) continue;
-    const parts = dir.slice(b.endsWith(sep3) ? b.length : b.length + 1).split(sep3);
-    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join20(b, parts[0], parts[1]);
+    if (dir === b || !within3(dir, b)) continue;
+    const parts = dir.slice(b.endsWith(sep4) ? b.length : b.length + 1).split(sep4);
+    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join21(b, parts[0], parts[1]);
   }
   return void 0;
 }
@@ -26693,13 +26693,13 @@ function scratchLinks(root) {
     }
     for (const e of ents) {
       if (++seen > SCRATCH_SCAN_ENTRIES) return void 0;
-      const p = join20(d, e.name);
+      const p = join21(d, e.name);
       if (e.isSymbolicLink()) {
         try {
           out.push(realpathSync5(p));
         } catch {
           try {
-            out.push(resolve3(d, readlinkSync2(p)));
+            out.push(resolve4(d, readlinkSync2(p)));
           } catch {
             return void 0;
           }
@@ -26720,7 +26720,7 @@ async function bindSession(app, sid, dirs, o = {}) {
     const one = refs.get(r.id) ?? { ref: r, under: /* @__PURE__ */ new Set() };
     if (r.kind === "dir") {
       const at = existingDir(d);
-      if (at !== r.root && within2(at, r.root)) one.under.add(at);
+      if (at !== r.root && within3(at, r.root)) one.under.add(at);
     }
     refs.set(r.id, one);
   };
@@ -26820,10 +26820,10 @@ function agentContext(env) {
   return agentEnv(env) || agentAncestor();
 }
 function personTokenFile(home) {
-  return join20(home, "cli", "person.key");
+  return join21(home, "cli", "person.key");
 }
 function personSaltFile(home) {
-  return join20(home, "cli", "person.salt");
+  return join21(home, "cli", "person.salt");
 }
 function deriveToken(spk, salt) {
   return createHmac("sha256", Buffer.from(spk, "base64url")).update(TOKEN_LABEL).update(salt).digest("base64url");
@@ -26836,7 +26836,7 @@ function readTrim(f) {
   }
 }
 function homeFilesOwn(home) {
-  const cli = join20(home, "cli");
+  const cli = join21(home, "cli");
   try {
     const d = lstatSync6(cli);
     if (d.isSymbolicLink() || !d.isDirectory()) return false;
@@ -26844,11 +26844,11 @@ function homeFilesOwn(home) {
     return e.code === "ENOENT";
   }
   const checks = [
-    [join20(cli, "keys.json"), true],
-    [join20(cli, "self.json"), true],
+    [join21(cli, "keys.json"), true],
+    [join21(cli, "self.json"), true],
     [personTokenFile(home), false],
     [personSaltFile(home), false],
-    [join20(home, "v3"), false]
+    [join21(home, "v3"), false]
   ];
   for (const [p, single] of checks) {
     let st;
@@ -26869,7 +26869,7 @@ function derivedToken(home) {
   if (!salt || !TOKEN_RE.test(salt)) return void 0;
   let spk;
   try {
-    spk = JSON.parse(readFileSync14(join20(home, "cli", "keys.json"), "utf8")).spk;
+    spk = JSON.parse(readFileSync14(join21(home, "cli", "keys.json"), "utf8")).spk;
   } catch {
     return void 0;
   }
@@ -26920,7 +26920,7 @@ function personTokenMatchesKeys(home, spk, token) {
   if (!homeFilesOwn(home)) return false;
   const salt = readTrim(personSaltFile(home));
   if (!salt || !TOKEN_RE.test(salt)) return false;
-  return same(token, deriveToken(spk, salt));
+  return same2(token, deriveToken(spk, salt));
 }
 function personToken(home) {
   const f = personTokenFile(home);
@@ -26938,7 +26938,7 @@ function personToken(home) {
   };
   const have = read2();
   if (have) return have;
-  mkdirSync10(join20(home, "cli"), { recursive: true, mode: 448 });
+  mkdirSync10(join21(home, "cli"), { recursive: true, mode: 448 });
   const t2 = randomBytes14(32).toString("base64url");
   try {
     writeFileSync10(f, t2, { mode: 384, flag: "wx" });
@@ -26968,19 +26968,19 @@ function isDirectory(p) {
   }
 }
 function identityHere(home) {
-  return existsSync4(join20(home, "cli", "keys.json")) && existsSync4(join20(home, "cli", "self.json"));
+  return existsSync4(join21(home, "cli", "keys.json")) && existsSync4(join21(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
   if (!given || typeof home !== "string" || home === "") return false;
   if (!homeFilesOwn(home)) return false;
   const t2 = readTrim(personTokenFile(home));
-  if (t2 === void 0 || !same(given, t2)) return false;
+  if (t2 === void 0 || !same2(given, t2)) return false;
   if (!identityHere(home)) return true;
   const want = derivedToken(home);
-  return want !== void 0 && same(given, want);
+  return want !== void 0 && same2(given, want);
 }
-function same(given, t2) {
+function same2(given, t2) {
   const a = Buffer.from(given);
   const b = Buffer.from(t2);
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
@@ -27048,12 +27048,12 @@ function boundShares(doc, id2, p) {
   };
   if ((p.underOver || (p.under?.length ?? 0) > 0) && doc.projects[id2]?.covers !== true) out.push({ share: "private", mapped: true, name: p.name });
   if (p.underOver) {
-    for (const [pid, r] of Object.entries(doc.projects)) if (typeof r?.root === "string" && r.root !== root && within2(r.root, root) && pid === dirProjectId(r.root)) add2(pid);
+    for (const [pid, r] of Object.entries(doc.projects)) if (typeof r?.root === "string" && r.root !== root && within3(r.root, root) && pid === dirProjectId(r.root)) add2(pid);
     return out;
   }
   for (const f of p.under ?? []) {
     if (typeof f !== "string") continue;
-    for (let c = f, i = 0; i < 4096 && c !== root && within2(c, root); i++) {
+    for (let c = f, i = 0; i < 4096 && c !== root && within3(c, root); i++) {
       add2(dirProjectId(c));
       const up = dirname6(c);
       if (up === c) break;
@@ -27291,7 +27291,7 @@ async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
   if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
   const paths = o.paths ?? [];
   if (paths.length > MAX_GRAPH_PATHS) return local(`a call named more than ${MAX_GRAPH_PATHS} paths`);
-  if (paths.some((p) => typeof p !== "string" || !isAbsolute9(p))) return local("a call named a path that isn't absolute");
+  if (paths.some((p) => typeof p !== "string" || !isAbsolute10(p))) return local("a call named a path that isn't absolute");
   const doc = await projectsDoc(app);
   const inputs = [];
   let registered = false;
@@ -27538,7 +27538,7 @@ var init_version = __esm({
 
 // packages/p2p/src/app.ts
 import { hostname as hostname3, userInfo as userInfo2 } from "node:os";
-import { basename as basename6, join as join21 } from "node:path";
+import { basename as basename6, join as join22 } from "node:path";
 function branchesCovered(chain, tips) {
   if (tips.length < 2) return true;
   const ancestry2 = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
@@ -27747,8 +27747,8 @@ var init_app = __esm({
         this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
         this.readOnly = opts.readOnly === true;
         const lockOpts = this.progress.debug ? { onLock: lockLogger(this.progress), onLockWait: ({ dir, waitedMs, holderPid }) => debug(this.progress, `lock ${basename6(dir)}: still waiting after ${waitedMs}ms (held by pid ${holderPid ?? "?"})`) } : {};
-        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join21(this.home, "cli"))) : void 0, lockOpts);
-        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join21(this.home, "v3")) : new FileTrustStoreV3(join21(this.home, "v3"), lockOpts);
+        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join22(this.home, "cli"))) : void 0, lockOpts);
+        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join22(this.home, "v3")) : new FileTrustStoreV3(join22(this.home, "v3"), lockOpts);
         this.file = readFileConfig(this.home);
         this.transport = transportResolver(opts.env, this.file);
         this.tun = tunables(opts.env);
@@ -28698,8 +28698,8 @@ var init_app = __esm({
 import { createInterface } from "node:readline/promises";
 
 // packages/p2p/src/cli.ts
-import { realpathSync as realpathSync6 } from "node:fs";
-import { resolve as resolve4 } from "node:path";
+import { realpathSync as realpathSync7 } from "node:fs";
+import { resolve as resolve6 } from "node:path";
 
 // packages/codex-bridge/dist/lib.js
 var P2P_PREFIX = "p2p:";
@@ -29815,11 +29815,11 @@ function resolveLike(cwd, p) {
   const unc = (s2) => s2.startsWith("\\\\");
   const abs = p.startsWith("/") || drive(p) || unc(p);
   const win = drive(p) || unc(p) || !p.startsWith("/") && (drive(cwd) || unc(cwd));
-  const sep4 = win ? "\\" : "/";
+  const sep6 = win ? "\\" : "/";
   let base = cwd;
   while (base.length > 1 && isSep(base[base.length - 1]))
     base = base.slice(0, -1);
-  const full = abs ? p : `${base}${sep4}${p}`;
+  const full = abs ? p : `${base}${sep6}${p}`;
   let prefix = "";
   let rest = full;
   if (drive(full)) {
@@ -29853,7 +29853,7 @@ function resolveLike(cwd, p) {
       seg += c;
   }
   flush();
-  return `${prefix}${sep4}${out.join(sep4)}`;
+  return `${prefix}${sep6}${out.join(sep6)}`;
 }
 var MAX_COMMAND_PATHS = 256;
 var SUBST = "";
@@ -30182,7 +30182,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
       continue;
     known2.set(name2, val);
   }
-  const expand2 = (word) => {
+  const expand3 = (word) => {
     let t2 = word;
     if (changesDir) {
       for (const v of ["${PWD}", "$PWD"])
@@ -30208,7 +30208,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
   const bases = [cwd];
   const moved = [];
   const moveTo = (word) => {
-    let t2 = expand2(word);
+    let t2 = expand3(word);
     if (/[$`]/.test(t2) || t2.includes(SUBST))
       return false;
     t2 = t2.split(LITERAL).join("$");
@@ -30295,7 +30295,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
   };
   const take2 = (word, mode) => {
     const inner = mode !== "path";
-    let t2 = expand2(word);
+    let t2 = expand3(word);
     const pathLike = t2.startsWith("~") || t2.startsWith(".") || t2.includes("/") || t2.includes("\\");
     if (!pathLike)
       return true;
@@ -30519,13 +30519,13 @@ var McpServer = class {
   }
   request(method, params, timeoutMs = 6e4) {
     const id2 = this.nextId++;
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve7, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id2);
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(id2, { resolve: resolve5, reject, timer });
+      this.pending.set(id2, { resolve: resolve7, reject, timer });
       this.send({ id: id2, method, params });
     });
   }
@@ -30659,7 +30659,7 @@ import { spawn } from "node:child_process";
 var TIMEOUT_MS = 3e4;
 function nodeExec(env = process.env) {
   return {
-    run: (argv, init2) => new Promise((resolve5, reject) => {
+    run: (argv, init2) => new Promise((resolve7, reject) => {
       const child = spawn(argv[0], argv.slice(1), { env: typeof env === "function" ? env() : env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       let stdout = "";
       let stderr = "";
@@ -30672,7 +30672,7 @@ function nodeExec(env = process.env) {
       });
       child.on("close", (code2) => {
         clearTimeout(timer);
-        resolve5({ exitCode: code2 ?? 1, stdout, stderr });
+        resolve7({ exitCode: code2 ?? 1, stdout, stderr });
       });
       child.stdin.on("error", () => {
       });
@@ -31063,6 +31063,96 @@ function readTomlTable(text2, table3, touched) {
     return null;
   return out;
 }
+function readStringList(sc) {
+  if (sc.s[sc.i] !== "[")
+    return void 0;
+  sc.i++;
+  const out = [];
+  for (; ; ) {
+    skipWs(sc);
+    if (sc.s[sc.i] === "]") {
+      sc.i++;
+      return out;
+    }
+    const c = sc.s[sc.i];
+    if (c !== '"' && c !== "'")
+      return void 0;
+    if (sc.s.startsWith('"""', sc.i) || sc.s.startsWith("'''", sc.i))
+      return void 0;
+    const v = readString(sc);
+    if (v === null)
+      return void 0;
+    out.push(v);
+    skipWs(sc);
+    if (sc.s[sc.i] === ",")
+      sc.i++;
+    else if (sc.s[sc.i] !== "]")
+      return void 0;
+  }
+}
+function scanTomlLines(text2) {
+  const out = [];
+  let current = [];
+  let tail = { depth: 0, quote: null, bad: false };
+  for (const raw of text2.split(/\r?\n/)) {
+    if (isOpen(tail)) {
+      tail = scanTail(raw, tail);
+      if (tail.bad || tail.depth < 0)
+        return null;
+      out.push({ kind: "cont" });
+      continue;
+    }
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) {
+      out.push({ kind: "blank" });
+      continue;
+    }
+    if (line.startsWith("[")) {
+      const isArray = line.startsWith("[[");
+      const hsc = { s: line, i: isArray ? 2 : 1 };
+      const key2 = readKey(hsc);
+      if (!key2 || !line.slice(hsc.i).startsWith(isArray ? "]]" : "]"))
+        return null;
+      const after2 = scanTail(line.slice(hsc.i + (isArray ? 2 : 1)), tail);
+      if (after2.bad || after2.depth !== 0 || after2.quote !== null)
+        return null;
+      current = key2;
+      out.push({ kind: "header", table: key2, array: isArray });
+      continue;
+    }
+    const sc = { s: raw, i: 0 };
+    const key = readKey(sc);
+    if (!key)
+      return null;
+    skipWs(sc);
+    if (sc.s[sc.i] !== "=")
+      return null;
+    sc.i++;
+    skipWs(sc);
+    const valueAt = sc.i;
+    const rest = scanTail(sc.s.slice(valueAt), tail);
+    if (rest.bad || rest.depth < 0)
+      return null;
+    if (isOpen(rest)) {
+      tail = rest;
+      out.push({ kind: "kv", table: current, key, value: null });
+      continue;
+    }
+    if (sc.s.startsWith('"""', valueAt) || sc.s.startsWith("'''", valueAt) || sc.s[valueAt] === "{") {
+      out.push({ kind: "kv", table: current, key, value: null });
+      continue;
+    }
+    if (sc.s[valueAt] === "[") {
+      const list = readStringList(sc);
+      out.push({ kind: "kv", table: current, key, value: null, ...list ? { list } : {} });
+      continue;
+    }
+    out.push({ kind: "kv", table: current, key, value: readScalar(sc) });
+  }
+  if (isOpen(tail))
+    return null;
+  return out;
+}
 function touchesTable(text2, table3) {
   let hit = false;
   const r = readTomlTable(text2, table3, () => hit = true);
@@ -31078,7 +31168,7 @@ async function parentEnvValue(name2, ppid = process.ppid) {
       return null;
     }
     if (process.platform === "darwin") {
-      const ps = (args) => new Promise((resolve5, reject) => execFile("/bin/ps", [...args, "-ww", "-o", "command=", "-p", String(ppid)], { timeout: 3e3, maxBuffer: 4e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve5(String(so))));
+      const ps = (args) => new Promise((resolve7, reject) => execFile("/bin/ps", [...args, "-ww", "-o", "command=", "-p", String(ppid)], { timeout: 3e3, maxBuffer: 4e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve7(String(so))));
       const [withEnv, command] = await Promise.all([ps(["-E"]), ps([])]);
       return envFromPs(withEnv, command, name2);
     }
@@ -31091,7 +31181,7 @@ async function parentCwd(ppid = process.ppid) {
     if (process.platform === "linux")
       return await readlink(`/proc/${ppid}/cwd`);
     if (process.platform === "darwin") {
-      const out = await new Promise((resolve5, reject) => execFile("/usr/sbin/lsof", ["-a", "-p", String(ppid), "-d", "cwd", "-Fn"], { timeout: 3e3, maxBuffer: 1e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve5(String(so))));
+      const out = await new Promise((resolve7, reject) => execFile("/usr/sbin/lsof", ["-a", "-p", String(ppid), "-d", "cwd", "-Fn"], { timeout: 3e3, maxBuffer: 1e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve7(String(so))));
       const line = out.split("\n").find((l) => l.startsWith("n/"));
       return line ? line.slice(1) : void 0;
     }
@@ -31500,14 +31590,14 @@ function isHomeFolder(dir, home = userHome()) {
   return samePath(dir, home) || samePath(realish(dir), realish(home));
 }
 function cwdPolicy(o) {
-  const same2 = (a, b) => samePath(a, b) || samePath(realish(a), realish(b));
+  const same3 = (a, b) => samePath(a, b) || samePath(realish(a), realish(b));
   if (o.codexCwd === void 0) {
     const releaseRefusal = "Codex's own working folder can't be read here, so the project this session works in can't be confirmed";
     return { releaseRefusal, warning: `refusing releases: ${releaseRefusal}` };
   }
-  if (same2(o.serverCwd, o.codexCwd))
+  if (same3(o.serverCwd, o.codexCwd))
     return {};
-  if (o.configuredCwd && same2(o.serverCwd, o.configuredCwd))
+  if (o.configuredCwd && same3(o.serverCwd, o.configuredCwd))
     return {};
   const refusal = `this server runs in ${o.serverCwd}, not in Codex's working folder ${o.codexCwd}, and the user-level config doesn't set that cwd (a project config may have moved it)`;
   return { refusal, warning: `holding every message and refusing every release: ${refusal}` };
@@ -31588,11 +31678,11 @@ var realClock = {
     t2.unref?.();
     return { cancel: () => clearTimeout(t2) };
   },
-  sleep: (ms, signal) => new Promise((resolve5) => {
-    const t2 = setTimeout(resolve5, ms);
+  sleep: (ms, signal) => new Promise((resolve7) => {
+    const t2 = setTimeout(resolve7, ms);
     signal?.addEventListener("abort", () => {
       clearTimeout(t2);
-      resolve5();
+      resolve7();
     }, { once: true });
   })
 };
@@ -33266,7 +33356,7 @@ function serve(sock, handle) {
       handle(req, conn).then((res) => conn.end(JSON.stringify(res) + "\n")).catch((e) => conn.end(JSON.stringify({ ok: false, reason: String(e?.message ?? e) }) + "\n"));
     });
   });
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     server.once("error", reject);
     server.listen(sock, () => {
       if (process.platform !== "win32") {
@@ -33276,12 +33366,12 @@ function serve(sock, handle) {
         }
       }
       server.unref();
-      resolve5(server);
+      resolve7(server);
     });
   });
 }
 function ask(sock, req, timeoutMs = 5e3) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     const conn = createConnection(sock);
     let buf = "";
     const timer = setTimeout(() => {
@@ -33298,7 +33388,7 @@ function ask(sock, req, timeoutMs = 5e3) {
     conn.on("close", () => {
       clearTimeout(timer);
       try {
-        resolve5(JSON.parse(buf.trim()));
+        resolve7(JSON.parse(buf.trim()));
       } catch {
         reject(new Error("no answer"));
       }
@@ -33306,10 +33396,10 @@ function ask(sock, req, timeoutMs = 5e3) {
   });
 }
 function parentOf(pid) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve7) => {
     execFile2("/bin/ps", ["-o", "ppid=", "-p", String(pid)], { timeout: 2e3, env: safeExecEnv() }, (err, stdout) => {
       const n = Number(String(stdout).trim());
-      resolve5(err || !Number.isInteger(n) || n <= 1 ? void 0 : n);
+      resolve7(err || !Number.isInteger(n) || n <= 1 ? void 0 : n);
     });
   });
 }
@@ -33392,11 +33482,11 @@ function parseSsPeer(out, inode) {
   return void 0;
 }
 function runOut(cmd, args) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     const bin = cmd.startsWith("/") ? cmd : safeBinary(cmd);
     if (!bin)
       return reject(new Error(`${cmd} not found in the system folders`));
-    execFile2(bin, args, { timeout: 5e3, maxBuffer: 2e7, env: safeExecEnv() }, (err, stdout) => err ? reject(err) : resolve5(String(stdout)));
+    execFile2(bin, args, { timeout: 5e3, maxBuffer: 2e7, env: safeExecEnv() }, (err, stdout) => err ? reject(err) : resolve7(String(stdout)));
   });
 }
 function commOf(pid) {
@@ -33599,7 +33689,7 @@ var RolloutReader = class {
 // packages/codex-bridge/dist/server.js
 var BRIDGE_VERSION = "0.1.3";
 function childWatch(env, extra = {}) {
-  return (argv, onLine, signal) => new Promise((resolve5, reject) => {
+  return (argv, onLine, signal) => new Promise((resolve7, reject) => {
     const child = spawn2(argv[0], argv.slice(1), { env: childEnv(env, extra), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let buf = "";
     let stderr = "";
@@ -33621,15 +33711,15 @@ function childWatch(env, extra = {}) {
     });
     child.on("close", (code2) => {
       signal.removeEventListener("abort", kill);
-      resolve5({ code: code2, stderr });
+      resolve7({ code: code2, stderr });
     });
   });
 }
 function gitIn(git = gitBinary()) {
-  return (cwd, args) => new Promise((resolve5) => {
+  return (cwd, args) => new Promise((resolve7) => {
     if (!git)
-      return resolve5(void 0);
-    execFile3(git, ["-c", "core.fsmonitor=false", ...args], { cwd, env: safeExecEnv(), timeout: 5e3 }, (err, stdout) => resolve5(err ? void 0 : String(stdout).trim() || void 0));
+      return resolve7(void 0);
+    execFile3(git, ["-c", "core.fsmonitor=false", ...args], { cwd, env: safeExecEnv(), timeout: 5e3 }, (err, stdout) => resolve7(err ? void 0 : String(stdout).trim() || void 0));
   });
 }
 function codexQueue(env, log) {
@@ -33641,8 +33731,8 @@ function codexQueue(env, log) {
     return void 0;
   }
   const queueEnv = childEnv(env, { CODEX_HOME: env.CODEX_HOME });
-  return (threadId, text2) => new Promise((resolve5) => {
-    execFile3(bin, ["queue", "--thread", threadId, "--message", text2], { env: queueEnv, timeout: 3e4 }, (err) => resolve5(!err));
+  return (threadId, text2) => new Promise((resolve7) => {
+    execFile3(bin, ["queue", "--thread", threadId, "--message", text2], { env: queueEnv, timeout: 3e4 }, (err) => resolve7(!err));
   });
 }
 function personTokenOf(home) {
@@ -33798,12 +33888,12 @@ async function runMcpServer(o) {
 `), refuseMutating);
   void bridge.start().catch((e) => log(`start failed: ${String(e?.message ?? e)}`));
   const feeder = lineFeeder((line) => server.onLine(line));
-  await new Promise((resolve5) => {
+  await new Promise((resolve7) => {
     o.stdin.setEncoding?.("utf8");
     o.stdin.on("data", (chunk) => feeder.push(String(chunk)));
-    o.stdin.on("end", resolve5);
-    o.stdin.on("close", resolve5);
-    o.stdin.on("error", () => resolve5());
+    o.stdin.on("end", resolve7);
+    o.stdin.on("close", resolve7);
+    o.stdin.on("error", () => resolve7());
   });
   await feeder.end();
   server.close();
@@ -34000,9 +34090,293 @@ async function runHook(event, stdin, deps) {
   }
 }
 
+// packages/codex-bridge/dist/sandbox.js
+import { isAbsolute as isAbsolute5, join as join8, normalize, resolve as resolve2, sep as sep2 } from "node:path";
+var SANDBOX_PROFILE = "peer2peer";
+var SANDBOX_BEGIN = "# >>> peer2peer sandbox (added by `p2p sandbox enable`: Codex's sandbox denies P2P_HOME) >>>";
+var SANDBOX_END = "# <<< peer2peer sandbox <<<";
+var SANDBOX_MARK = "# p2p sandbox";
+var BUILT_INS = /* @__PURE__ */ new Set([":workspace", ":read-only", ":danger-full-access"]);
+var toml = (s2) => JSON.stringify(s2);
+function codexDenyPaths(p2pHome, userHome2, realHome) {
+  const out = [];
+  for (const p of [p2pHome, realHome]) {
+    if (!p)
+      continue;
+    const abs = normalize(resolve2(p));
+    const home = normalize(resolve2(userHome2));
+    const form = abs.startsWith(home + sep2) ? `~/${abs.slice(home.length + 1).split(sep2).join("/")}` : abs;
+    if (!out.includes(form))
+      out.push(form);
+  }
+  return out;
+}
+function expand(key, userHome2) {
+  if (key === "~")
+    return normalize(userHome2);
+  if (key.startsWith("~/") || key.startsWith("~\\"))
+    return normalize(join8(userHome2, key.slice(2)));
+  if (isAbsolute5(key))
+    return normalize(key);
+  return void 0;
+}
+function within(path2, root) {
+  const caseless = process.platform === "darwin" || process.platform === "win32";
+  const a = caseless ? path2.toLowerCase() : path2;
+  const b = caseless ? root.toLowerCase() : root;
+  const r = b.endsWith(sep2) ? b : b + sep2;
+  return a === b || a.startsWith(r);
+}
+function topLevel(lines) {
+  const out = /* @__PURE__ */ new Map();
+  lines.forEach((l, at) => {
+    if (l.kind === "kv" && l.table.length === 0 && l.key.length === 1)
+      out.set(l.key[0], { value: l.value, at });
+  });
+  return out;
+}
+var startsWith = (a, b) => a.length >= b.length && b.every((x, i) => a[i] === x);
+var same = (a, b) => a.length === b.length && startsWith(a, b);
+function profileEntries(text2, name2) {
+  const entries = {};
+  const chain = [];
+  let cur = name2;
+  let base;
+  while (cur !== void 0) {
+    if (BUILT_INS.has(cur)) {
+      base = cur;
+      break;
+    }
+    if (chain.includes(cur) || chain.length > 8)
+      return null;
+    chain.push(cur);
+    const t2 = readTomlTable(text2, ["permissions", cur]);
+    if (t2 === null)
+      return null;
+    cur = t2.extends;
+  }
+  for (const p of chain.reverse()) {
+    const fs3 = readTomlTable(text2, ["permissions", p, "filesystem"]);
+    if (fs3 === null)
+      return null;
+    Object.assign(entries, fs3);
+  }
+  return { entries, ...base ? { base } : {} };
+}
+function denyGap(entries, denyPaths, userHome2) {
+  for (const want of denyPaths) {
+    const target = expand(want, userHome2);
+    if (!target)
+      return `${want} isn't a path Codex reads`;
+    let best;
+    for (const [k, v] of Object.entries(entries)) {
+      if (v !== "deny" && v !== "read" && v !== "write")
+        continue;
+      const p = expand(k, userHome2);
+      if (!p || !within(target, p))
+        continue;
+      if (!best || p.length > best.len || p.length === best.len && v === "deny")
+        best = { len: p.length, access: v };
+    }
+    if (best?.access !== "deny")
+      return `it doesn't deny ${want}`;
+    for (const [k, v] of Object.entries(entries)) {
+      const p = expand(k, userHome2);
+      if (p && (v === "read" || v === "write") && within(p, target) && p.length > target.length)
+        return `"${k}" = "${v}" opens part of ${want} again`;
+    }
+  }
+  return void 0;
+}
+function sandboxModeProfiles(lines) {
+  const out = /* @__PURE__ */ new Set();
+  for (const l of lines) {
+    if (l.kind !== "kv")
+      continue;
+    const full = [...l.table, ...l.key];
+    if (full.length === 3 && full[0] === "profiles" && full[2] === "sandbox_mode")
+      out.add(full[1]);
+  }
+  return [...out];
+}
+function codexSandboxStatus(text2, denyPaths, userHome2) {
+  if (text2 === null)
+    return { state: "off", detail: "config.toml has no permissions profile: Codex's sandbox lets its commands read everywhere, P2P_HOME included", notes: [] };
+  const lines = scanTomlLines(text2);
+  if (lines === null)
+    return { state: "unknown", detail: "config.toml couldn't be read with confidence", notes: [] };
+  const top = topLevel(lines);
+  const notes = sandboxModeProfiles(lines).map((p2) => `the config profile "${p2}" sets sandbox_mode: \`codex --profile ${p2}\` runs without this deny`);
+  const mode = top.get("sandbox_mode")?.value;
+  if (mode) {
+    return {
+      state: "off",
+      detail: mode === "danger-full-access" ? `sandbox_mode = "danger-full-access": Codex runs its commands without a sandbox` : `sandbox_mode = "${mode}" is set: Codex uses it instead of a permissions profile, and it can't deny reads`,
+      notes
+    };
+  }
+  const dp = top.get("default_permissions")?.value;
+  if (!dp)
+    return { state: "off", detail: "no permissions profile (default_permissions): Codex's sandbox lets its commands read everywhere, P2P_HOME included", notes };
+  if (dp === ":danger-full-access")
+    return { state: "off", profile: dp, detail: `default_permissions = ":danger-full-access": Codex runs its commands without a sandbox`, notes };
+  if (BUILT_INS.has(dp))
+    return { state: "off", profile: dp, detail: `the built-in profile ${dp} lets Codex's commands read P2P_HOME`, notes };
+  const p = profileEntries(text2, dp);
+  if (p === null)
+    return { state: "unknown", profile: dp, detail: `the permissions profile "${dp}" couldn't be read with confidence`, notes };
+  if (p.base === ":danger-full-access")
+    return { state: "off", profile: dp, detail: `the permissions profile "${dp}" extends :danger-full-access`, notes };
+  const gap = denyGap(p.entries, denyPaths, userHome2);
+  if (gap)
+    return { state: "off", profile: dp, detail: `the permissions profile "${dp}" is active, but ${gap}`, notes };
+  return { state: "on", profile: dp, detail: `the permissions profile "${dp}" denies Codex's commands ${denyPaths.join(" and ")} (read and write)`, notes };
+}
+function codexManualSnippet(denyPaths, base) {
+  return [
+    `default_permissions = ${toml(SANDBOX_PROFILE)}   # at the top, before any [table]; remove any sandbox_mode line`,
+    "",
+    `[permissions.${SANDBOX_PROFILE}]`,
+    base ? `extends = ${toml(base)}` : `extends = ":read-only"   # or ":workspace", if Codex may write in your workspace without asking`,
+    "",
+    `[permissions.${SANDBOX_PROFILE}.filesystem]`,
+    ...denyPaths.map((p) => `${toml(p)} = "deny"`)
+  ].join("\n");
+}
+function definedOutside(lines, prefix) {
+  return lines.some((l) => l.kind === "kv" && startsWith([...l.table, ...l.key], prefix) && !startsWith(l.table, prefix));
+}
+function planCodexSandbox(text2, denyPaths, userHome2, o = {}) {
+  const src = text2 ?? "";
+  const status = codexSandboxStatus(text2, denyPaths, userHome2);
+  if (status.state === "on" && status.profile)
+    return { kind: "already", profile: status.profile };
+  const lines = scanTomlLines(src);
+  const manual = (reason, base2) => ({ kind: "manual", reason, snippet: codexManualSnippet(denyPaths, base2) });
+  if (lines === null)
+    return manual("config.toml couldn't be read with confidence, so it wasn't edited");
+  const eol = src.includes("\r\n") ? "\r\n" : "\n";
+  const raw = src === "" ? [] : src.split(/\r?\n/);
+  const hadFinalEol = raw.length > 0 && raw[raw.length - 1] === "";
+  if (hadFinalEol)
+    raw.pop();
+  const scanned = lines.slice(0, raw.length);
+  const edits = [];
+  const top = topLevel(scanned);
+  const mode = top.get("sandbox_mode");
+  const dp = top.get("default_permissions");
+  if (mode?.value === "danger-full-access" || dp?.value === ":danger-full-access") {
+    return manual("Codex runs its commands without a sandbox here (danger-full-access): choose a sandbox first (a permissions profile that extends :workspace), then deny P2P_HOME in it");
+  }
+  if (mode && mode.value === null)
+    return manual("sandbox_mode isn't a plain value");
+  const own = dp?.value && !BUILT_INS.has(dp.value) && !mode ? dp.value : void 0;
+  const target = own ?? SANDBOX_PROFILE;
+  const fsTable = ["permissions", target, "filesystem"];
+  if (definedOutside(scanned, fsTable))
+    return manual(`[permissions.${target}.filesystem] is written as an inline table or dotted keys, so it wasn't edited`);
+  const ours = target === SANDBOX_PROFILE;
+  const oursDefined = ours && scanned.some((l) => l.kind === "header" && startsWith(l.table, ["permissions", SANDBOX_PROFILE]) || l.kind === "kv" && startsWith([...l.table, ...l.key], ["permissions", SANDBOX_PROFILE]));
+  let base = ":read-only";
+  let assumed = false;
+  const carried = [];
+  let network = false;
+  if (ours && oursDefined && mode)
+    return manual("sandbox_mode is set and a [permissions.peer2peer] profile exists already: remove one of them first");
+  if (ours && !oursDefined) {
+    if (mode) {
+      if (mode.value === "read-only")
+        base = ":read-only";
+      else if (mode.value === "workspace-write")
+        base = ":workspace";
+      else
+        return manual(`sandbox_mode = "${mode.value}" isn't one this edit knows`);
+    } else if (dp?.value === ":read-only" || dp?.value === ":workspace")
+      base = dp.value;
+    else {
+      base = o.baseWhenUnset ?? ":read-only";
+      assumed = true;
+    }
+    if (mode?.value === "workspace-write") {
+      const sww = scanned.filter((l) => l.kind === "kv" && startsWith([...l.table, ...l.key], ["sandbox_workspace_write"]));
+      for (const l of sww) {
+        const k = [...l.table, ...l.key].slice(1).join(".");
+        if (k === "writable_roots") {
+          if (!l.list)
+            return manual("[sandbox_workspace_write] writable_roots isn't a one-line list of strings, so its folders couldn't be carried over", base);
+          carried.push(...l.list);
+        } else if (k === "network_access")
+          network = l.value === "true";
+        else if ((k === "exclude_tmpdir_env_var" || k === "exclude_slash_tmp") && l.value === "true") {
+          return manual(`[sandbox_workspace_write] sets ${k}, which a profile extending :workspace can't express`, base);
+        }
+      }
+    }
+  }
+  const setLine = `default_permissions = ${toml(target)} ${SANDBOX_MARK}`;
+  let insertTopAt;
+  if (dp && dp.value !== target) {
+    const before = raw[dp.at];
+    const after3 = `default_permissions = ${toml(target)} ${SANDBOX_MARK} (was ${toml(dp.value ?? "")})`;
+    raw[dp.at] = after3;
+    edits.push({ before, after: after3 });
+  } else if (!dp) {
+    const firstHeader = scanned.findIndex((l) => l.kind === "header");
+    const end = firstHeader < 0 ? raw.length : firstHeader;
+    let lastTop = -1;
+    for (let i = 0; i < end; i++)
+      if (scanned[i]?.kind === "kv" || scanned[i]?.kind === "cont" && lastTop === i - 1)
+        lastTop = i;
+    insertTopAt = lastTop >= 0 ? lastTop + 1 : end;
+  }
+  if (mode) {
+    const before = raw[mode.at];
+    const after3 = `# ${before.trim()} ${SANDBOX_MARK}: replaced by default_permissions = ${toml(target)} (profiles don't combine with sandbox_mode)`;
+    raw[mode.at] = after3;
+    edits.push({ before, after: after3 });
+  }
+  const status2 = profileEntries(src, target);
+  const have = status2?.entries ?? {};
+  const missing = denyPaths.filter((p) => denyGap(have, [p], userHome2) !== void 0);
+  const denyLines = missing.map((p) => `${toml(p)} = "deny"`);
+  const header = scanned.findIndex((l) => l.kind === "header" && same(l.table, fsTable));
+  const appended = [];
+  if (header >= 0) {
+    raw.splice(header + 1, 0, ...denyLines);
+    for (const a of denyLines)
+      edits.push({ add: a });
+    if (insertTopAt !== void 0 && insertTopAt > header)
+      insertTopAt += denyLines.length;
+  } else if (ours && !oursDefined) {
+    appended.push(SANDBOX_BEGIN, `[permissions.${SANDBOX_PROFILE}]`, `description = "Codex's sandbox, with Peer2Peer's keys (P2P_HOME) denied to its commands"`, `extends = ${toml(base)}`, "", `[permissions.${SANDBOX_PROFILE}.filesystem]`, ...denyLines, ...carried.map((p) => `${toml(p)} = "write"`), ...network ? ["", `[permissions.${SANDBOX_PROFILE}.network]`, "enabled = true"] : [], SANDBOX_END);
+  } else {
+    appended.push(`[permissions.${target}.filesystem] ${SANDBOX_MARK}`, ...denyLines);
+  }
+  if (insertTopAt !== void 0) {
+    const nextIsHeader = insertTopAt < raw.length && raw[insertTopAt]?.trim().startsWith("[") === true;
+    const add2 = nextIsHeader ? [setLine, ""] : [setLine];
+    raw.splice(insertTopAt, 0, ...add2);
+    edits.unshift({ add: setLine });
+  }
+  if (appended.length > 0) {
+    while (raw.length > 0 && raw[raw.length - 1]?.trim() === "")
+      raw.pop();
+    if (raw.length > 0)
+      raw.push("");
+    raw.push(...appended);
+    for (const a of appended)
+      edits.push({ add: a });
+  }
+  const after2 = raw.join(eol) + eol;
+  const check = codexSandboxStatus(after2, denyPaths, userHome2);
+  if (check.state !== "on")
+    return manual(`the edit wouldn't make the sandbox deny P2P_HOME (${check.detail}), so nothing was changed`, base);
+  return { kind: "edit", after: after2, edits, profile: target, ...ours && !oursDefined ? { base } : {}, ...assumed ? { assumed: true } : {} };
+}
+
 // packages/codex-bridge/dist/install.js
 import { copyFileSync, existsSync, lstatSync as lstatSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync7, readlinkSync, realpathSync as realpathSync3, renameSync as renameSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname3, isAbsolute as isAbsolute5, join as join8 } from "node:path";
+import { dirname as dirname3, isAbsolute as isAbsolute6, join as join9 } from "node:path";
 var BEGIN = "# >>> peer2peer (managed by `p2p codex install`; edit with care) >>>";
 var END = "# <<< peer2peer <<<";
 var MD_BEGIN = "<!-- >>> peer2peer (managed by `p2p codex install`) >>> -->";
@@ -34016,22 +34390,22 @@ var HOOK_EVENTS = [
   { event: "Stop", timeout: 10 }
 ];
 var HOOK_MARKER = "--managed-by=p2p-codex-install";
-var toml = (s2) => JSON.stringify(s2);
+var toml2 = (s2) => JSON.stringify(s2);
 var shellQuote = (s2) => /^[A-Za-z0-9_./:@%+-]+$/.test(s2) ? s2 : `'${s2.replace(/'/g, `'\\''`)}'`;
 function codexHomeOf(env) {
-  return env.CODEX_HOME?.trim() || join8(userHome(), ".codex");
+  return env.CODEX_HOME?.trim() || join9(userHome(), ".codex");
 }
 function configBlock(plan) {
   const env = Object.entries(plan.env ?? {}).filter(([k]) => /^[A-Z0-9_]+$/.test(k)).sort(([a], [b]) => a < b ? -1 : 1);
   return [
     BEGIN,
     "[mcp_servers.peer2peer]",
-    `command = ${toml(plan.node)}`,
-    `args = [${toml(plan.script)}, "codex", "mcp"]`,
-    `env_vars = [${FORWARDED_ENV.map(toml).join(", ")}]`,
+    `command = ${toml2(plan.node)}`,
+    `args = [${toml2(plan.script)}, "codex", "mcp"]`,
+    `env_vars = [${FORWARDED_ENV.map(toml2).join(", ")}]`,
     "startup_timeout_sec = 20",
     "tool_timeout_sec = 60",
-    ...env.length > 0 ? ["", "# Settings the bridge takes only from here (P2P_HOME, P2P_AUTO_DELIVER, ...): a repo's .codex/config.toml can't override them.", "[mcp_servers.peer2peer.env]", ...env.map(([k, v]) => `${k} = ${toml(v)}`)] : [],
+    ...env.length > 0 ? ["", "# Settings the bridge takes only from here (P2P_HOME, P2P_AUTO_DELIVER, ...): a repo's .codex/config.toml can't override them.", "[mcp_servers.peer2peer.env]", ...env.map(([k, v]) => `${k} = ${toml2(v)}`)] : [],
     END
   ].join("\n");
 }
@@ -34143,9 +34517,9 @@ function read(path2) {
   }
 }
 function planChanges(plan, o = {}) {
-  const configPath = join8(plan.codexHome, "config.toml");
-  const hooksPath = join8(plan.codexHome, "hooks.json");
-  const agentsPath = join8(plan.codexHome, "AGENTS.md");
+  const configPath = join9(plan.codexHome, "config.toml");
+  const hooksPath = join9(plan.codexHome, "hooks.json");
+  const agentsPath = join9(plan.codexHome, "AGENTS.md");
   const config = read(configPath);
   const conflict = config ? configConflict(config) : null;
   if (conflict && !o.remove)
@@ -34205,19 +34579,19 @@ function resolveLink(path2) {
     return realpathSync3(path2);
   } catch {
     const link = readlinkSync(path2);
-    return isAbsolute5(link) ? link : join8(dirname3(path2), link);
+    return isAbsolute6(link) ? link : join9(dirname3(path2), link);
   }
 }
 function printedInstructions(plan) {
   const hooksJson = JSON.stringify(mergeHooks({}, plan), null, 2);
   return [
-    `# 1. ${join8(plan.codexHome, "config.toml")}: the MCP server (Codex forwards only the env vars listed)`,
+    `# 1. ${join9(plan.codexHome, "config.toml")}: the MCP server (Codex forwards only the env vars listed)`,
     configBlock(plan),
     "",
-    `# 2. ${join8(plan.codexHome, "hooks.json")}: merge these into your hooks (then trust them once with /hooks in Codex)`,
+    `# 2. ${join9(plan.codexHome, "hooks.json")}: merge these into your hooks (then trust them once with /hooks in Codex)`,
     hooksJson,
     "",
-    `# 3. ${join8(plan.codexHome, "AGENTS.md")}: add`,
+    `# 3. ${join9(plan.codexHome, "AGENTS.md")}: add`,
     agentsBlock(),
     "",
     "# Or let p2p do all three (backs up each file first; safe to run again):",
@@ -34226,7 +34600,7 @@ function printedInstructions(plan) {
 }
 
 // packages/codex-bridge/dist/commands.js
-import { isAbsolute as isAbsolute6, join as join9, resolve as resolve2 } from "node:path";
+import { isAbsolute as isAbsolute7, join as join10, resolve as resolve3 } from "node:path";
 var CodexCommandError = class extends Error {
   code;
   constructor(code2, message) {
@@ -34241,7 +34615,7 @@ function requirePerson(env, what) {
 }
 function installCommand(o) {
   const env = installEnv(o.env);
-  const node = o.node && isAbsolute6(o.node) ? o.node : process.execPath;
+  const node = o.node && isAbsolute7(o.node) ? o.node : process.execPath;
   const plan = { codexHome: o.codexHome ?? codexHomeOf(o.env), node, script: o.script, ...Object.keys(env).length > 0 ? { env } : {} };
   if (!o.write) {
     if (o.remove)
@@ -34254,8 +34628,8 @@ function installCommand(o) {
     throw new CodexCommandError("conflict", error);
   const stamp = (o.now ?? /* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const done = applyChanges(changes, stamp);
-  const codexHome = resolve2(plan.codexHome);
-  const isDefault = codexHome === join9(userHome(), ".codex");
+  const codexHome = resolve3(plan.codexHome);
+  const isDefault = codexHome === join10(userHome(), ".codex");
   const pin = o.pinFile ?? pinFile();
   const pinned = !isDefault || o.remove ? writePin(codexHome, { file: pin, remove: o.remove === true }) : false;
   const temp = unsafeLocation(codexHome, { projectDirs: [], temp: tempRoots([o.env.TMPDIR]) });
@@ -37713,8 +38087,8 @@ var FP_ADDRESS = /^[^\s@]+@[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}$/;
 var TRUST_MAX = 256;
 function parseStored(t2) {
   const o = typeof t2 === "object" && t2 !== null ? t2 : {};
-  const strs2 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
-  return { users: strs2(o.users).filter(isUserId), circles: strs2(o.circles).filter((c) => isCircleId(c)) };
+  const strs3 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  return { users: strs3(o.users).filter(isUserId), circles: strs3(o.circles).filter((c) => isCircleId(c)) };
 }
 function stored(app) {
   return parseStored(readFileConfig(app.home).trust);
@@ -38704,7 +39078,7 @@ init_state2();
 init_xstate();
 import { createHash as createHash9, createHmac as createHmac2 } from "node:crypto";
 import { mkdirSync as mkdirSync11, readFileSync as readFileSync15, renameSync as renameSync9, writeFileSync as writeFileSync11 } from "node:fs";
-import { join as join22 } from "node:path";
+import { join as join23 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
   if (!secret) throw new CliError("no_identity", "no identity here yet: run `p2p init`");
@@ -38825,8 +39199,8 @@ async function mayShareSessionContext(app, ofSid, fromSid) {
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
-  const dir = join22(home, "ext");
-  const file = join22(dir, `${ns}.json`);
+  const dir = join23(home, "ext");
+  const file = join23(dir, `${ns}.json`);
   const read2 = () => {
     try {
       const v = JSON.parse(readFileSync15(file, "utf8"));
@@ -38945,6 +39319,552 @@ init_sessions();
 init_projects();
 init_v3();
 init_ix_local();
+
+// packages/p2p/src/sandbox.ts
+import { randomBytes as randomBytes15 } from "node:crypto";
+import { closeSync as closeSync4, constants as constants2, existsSync as existsSync5, fstatSync as fstatSync2, mkdirSync as mkdirSync12, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync6, renameSync as renameSync10, rmSync as rmSync5, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname7, isAbsolute as isAbsolute11, join as join24, normalize as normalize3, resolve as resolve5, sep as sep5 } from "node:path";
+init_ancestry();
+init_config();
+init_errors2();
+init_projects();
+function userHomeOf(env) {
+  return env.HOME?.trim() || env.USERPROFILE?.trim() || homedir6();
+}
+function p2pHomePaths(env) {
+  const home = normalize3(resolve5(resolveHome2(env)));
+  try {
+    const real2 = realpathSync6(home);
+    return real2 !== home ? { home, real: real2 } : { home };
+  } catch {
+    return { home };
+  }
+}
+function within4(path2, root) {
+  const caseless = process.platform === "darwin" || process.platform === "win32";
+  const a = caseless ? path2.toLowerCase() : path2;
+  const b = caseless ? root.toLowerCase() : root;
+  const r = b.endsWith(sep5) ? b : b + sep5;
+  return a === b || a.startsWith(r);
+}
+function tildeForm(abs, userHome2) {
+  const h = normalize3(resolve5(userHome2));
+  return abs.startsWith(h + sep5) ? `~/${abs.slice(h.length + 1).split(sep5).join("/")}` : abs;
+}
+function claudeSettingsPath(env) {
+  const dir = env.CLAUDE_CONFIG_DIR?.trim();
+  return join24(dir ? resolve5(dir) : join24(userHomeOf(env), ".claude"), "settings.json");
+}
+function claudeManagedPath(platform = process.platform) {
+  if (platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
+  if (platform === "linux") return "/etc/claude-code/managed-settings.json";
+  return void 0;
+}
+function claudeWanted(paths, userHome2) {
+  const homes = [paths.home, ...paths.real ? [paths.real] : []];
+  const sandbox = homes.map((h) => tildeForm(h, userHome2));
+  const rule = (h) => {
+    const t2 = tildeForm(h, userHome2);
+    return t2.startsWith("~/") ? `${t2}/**` : `/${h.split(sep5).join("/")}/**`;
+  };
+  return { sandbox, read: homes.map((h) => `Read(${rule(h)})`), edit: homes.map((h) => `Edit(${rule(h)})`) };
+}
+function trimSlashes2(s2) {
+  let end = s2.length;
+  while (end > 1 && (s2[end - 1] === "/" || s2[end - 1] === "\\")) end--;
+  return s2.slice(0, end);
+}
+function sandboxPath(entry, userHome2, base) {
+  const e = trimSlashes2(entry.trim());
+  if (e === "~") return normalize3(userHome2);
+  if (e.startsWith("~/")) return normalize3(join24(userHome2, e.slice(2)));
+  if (e.startsWith("//")) return normalize3(e.slice(1));
+  if (isAbsolute11(e)) return normalize3(e);
+  return base && e !== "" ? normalize3(resolve5(base, e)) : void 0;
+}
+function ruleFolder(rule, tool, userHome2) {
+  if (!rule.startsWith(`${tool}(`) || !rule.endsWith(")")) return void 0;
+  let p = rule.slice(tool.length + 1, -1).trim();
+  if (p.endsWith("/**")) p = p.slice(0, -3);
+  if (p === "" || /[*?[\]{}]/.test(p)) return void 0;
+  if (p === "~") return normalize3(userHome2);
+  if (p.startsWith("~/")) return normalize3(join24(userHome2, p.slice(2)));
+  if (p.startsWith("//")) return normalize3(p.slice(1));
+  return void 0;
+}
+var obj = (v) => typeof v === "object" && v !== null && !Array.isArray(v) ? v : void 0;
+var strs2 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+var MAX_CONFIG_BYTES = 1024 * 1024;
+function readConfigFile(path2) {
+  let fd;
+  try {
+    fd = openSync4(path2, constants2.O_RDONLY | (constants2.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
+  }
+  try {
+    const st = fstatSync2(fd);
+    if (!st.isFile()) throw new CliError("config", `${path2} isn't a regular file, so it wasn't read`);
+    if (st.size > MAX_CONFIG_BYTES) throw new CliError("config", `${path2} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    const buf = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    let n = 0;
+    for (; ; ) {
+      const r = readSync2(fd, buf, n, buf.length - n, null);
+      if (r === 0) break;
+      n += r;
+      if (n > MAX_CONFIG_BYTES) throw new CliError("config", `${path2} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    }
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    closeSync4(fd);
+  }
+}
+function readJson(path2) {
+  if (!path2) return void 0;
+  let text2;
+  try {
+    const t2 = readConfigFile(path2);
+    if (t2 === null) return void 0;
+    text2 = t2;
+  } catch {
+    return "bad";
+  }
+  if (text2.trim() === "") return {};
+  try {
+    return obj(JSON.parse(text2)) ?? "bad";
+  } catch {
+    return "bad";
+  }
+}
+function projectRoots(workdir) {
+  const out = [normalize3(workdir)];
+  let d = normalize3(workdir);
+  for (let i = 0; i < 64; i++) {
+    if (existsSync5(join24(d, ".git"))) {
+      if (!out.includes(d)) out.push(d);
+      break;
+    }
+    const up = dirname7(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+function onPath(name2, env) {
+  for (const dir of (env.PATH ?? "").split(":")) {
+    if (!dir || !isAbsolute11(dir)) continue;
+    try {
+      if (statSync6(join24(dir, name2)).isFile()) return true;
+    } catch {
+    }
+  }
+  return false;
+}
+function claudeSandboxStatus(env, o = {}) {
+  const settings = claudeSettingsPath(env);
+  const platform = o.platform ?? process.platform;
+  const base = { settings, missing: [], notes: [] };
+  if (platform === "win32") return { ...base, state: "unavailable", detail: "Claude Code has no sandbox on native Windows (it runs commands unsandboxed); use WSL2" };
+  const problem = p2pHomeProblem(env);
+  if (problem) return { ...base, state: "unknown", detail: problem };
+  const user = readJson(settings);
+  if (user === "bad") return { ...base, state: "unknown", detail: `${settings} isn't a JSON object, so it couldn't be read` };
+  const managedFile = o.managedPath === null ? void 0 : o.managedPath ?? claudeManagedPath(platform);
+  const managed = readJson(managedFile);
+  const project = [];
+  const unreadable = [];
+  for (const root of projectRoots(o.workdir ?? sessionWorkdir(env))) {
+    for (const name2 of ["settings.local.json", "settings.json"]) {
+      const file = join24(root, ".claude", name2);
+      if (file === settings) continue;
+      const doc = readJson(file);
+      if (doc === "bad") unreadable.push(file);
+      else if (doc) project.push({ file, root, doc });
+    }
+  }
+  const managedDoc = managed && managed !== "bad" ? managed : void 0;
+  const userHome2 = userHomeOf(env);
+  const want = claudeWanted(p2pHomePaths(env), userHome2);
+  const homes = want.sandbox.map((s2) => sandboxPath(s2, userHome2));
+  const sb = (s2) => obj(s2.sandbox) ?? {};
+  const fs3 = (s2) => obj(sb(s2).filesystem) ?? {};
+  const sources2 = [
+    ...managedDoc ? [{ doc: managedDoc }] : [],
+    ...project.map((p) => ({ doc: p.doc, base: p.root, file: p.file })),
+    ...user ? [{ doc: user, base: dirname7(settings) }] : []
+  ];
+  const flag = (k) => {
+    for (const src of sources2) if (typeof sb(src.doc)[k] === "boolean") return { value: sb(src.doc)[k], ...src.file ? { file: src.file } : {} };
+    return { value: void 0 };
+  };
+  const deny = sources2.flatMap((src) => strs2(obj(src.doc.permissions)?.deny));
+  const ruleCovers = (tool) => (h) => deny.some((r) => {
+    const p = ruleFolder(r, tool, userHome2);
+    return p !== void 0 && within4(h, p);
+  });
+  const covered = (key, tool) => (h) => sources2.some(
+    (src) => strs2(fs3(src.doc)[key]).some((e) => {
+      const p = sandboxPath(e, userHome2, src.base);
+      return p !== void 0 && within4(h, p);
+    })
+  ) || ruleCovers(tool)(h);
+  const missing = [];
+  const enabled = flag("enabled");
+  if (enabled.value !== true) missing.push(enabled.file ? `sandbox.enabled (${enabled.file} turns it off in this project)` : "sandbox.enabled");
+  const retry = flag("allowUnsandboxedCommands");
+  if (retry.value !== false) missing.push(retry.file ? `sandbox.allowUnsandboxedCommands = false (${retry.file} allows the retry in this project)` : "sandbox.allowUnsandboxedCommands = false");
+  if (!homes.every(covered("denyRead", "Read"))) missing.push(`sandbox.filesystem.denyRead ${want.sandbox.join(", ")}`);
+  if (!homes.every(covered("denyWrite", "Edit"))) missing.push(`sandbox.filesystem.denyWrite ${want.sandbox.join(", ")}`);
+  if (!homes.every(ruleCovers("Read"))) missing.push(`permissions.deny ${want.read.join(", ")}`);
+  if (!homes.every(ruleCovers("Edit"))) missing.push(`permissions.deny ${want.edit.join(", ")}`);
+  const notes = [];
+  for (const k of ["allowRead", "allowWrite"]) {
+    for (const src of sources2) {
+      for (const e of strs2(fs3(src.doc)[k])) {
+        const p = sandboxPath(e, userHome2, src.base);
+        if (p && homes.some((h) => within4(p, h))) missing.push(`no sandbox.filesystem.${k} inside P2P_HOME (${e}${src.file ? ` in ${src.file}` : ""})`);
+      }
+    }
+  }
+  if (platform === "linux" && (!onPath("bwrap", env) || !onPath("socat", env))) {
+    missing.push("bubblewrap and socat (Claude Code's sandbox needs both on Linux; without them it runs commands unsandboxed unless sandbox.failIfUnavailable is set)");
+  }
+  const excluded = sources2.flatMap((src) => strs2(sb(src.doc).excludedCommands));
+  if (excluded.length > 0) notes.push(`sandbox.excludedCommands lists ${excluded.length} command pattern${excluded.length === 1 ? "" : "s"}: those run outside the sandbox, P2P_HOME included`);
+  if (managed === "bad") notes.push(`${managedFile} couldn't be read`);
+  for (const f of unreadable) notes.push(`${f} couldn't be read, so what it sets isn't known`);
+  if (missing.length === 0 && unreadable.length > 0) {
+    return { settings, missing, notes, state: "unknown", detail: `the user settings deny ${want.sandbox.join(" and ")}, but a project settings file here couldn't be read` };
+  }
+  if (missing.length === 0) return { settings, missing, notes, state: "on", detail: `Claude Code's sandbox denies its commands ${want.sandbox.join(" and ")}, and its file tools have deny rules for it` };
+  return { settings, missing, notes, state: "off", detail: `Claude Code's sandbox doesn't keep its commands out of ${want.sandbox.join(" and ")}: missing ${missing.join("; ")}` };
+}
+function indentOf(text2) {
+  for (const line of text2.split("\n")) {
+    let i = 0;
+    while (i < line.length && (line[i] === " " || line[i] === "	")) i++;
+    if (i > 0 && (line[i] === '"' || line[i] === "}" || line[i] === "]")) return line.slice(0, i);
+  }
+  return "  ";
+}
+function planClaudeSandbox(text2, env) {
+  let doc = {};
+  if (text2 !== null && text2.trim() !== "") {
+    let v;
+    try {
+      v = JSON.parse(text2);
+    } catch {
+      return { kind: "manual", reason: "settings.json isn't valid JSON (Claude Code reads it as strict JSON): fix it first" };
+    }
+    const o = obj(v);
+    if (!o) return { kind: "manual", reason: "settings.json doesn't hold a JSON object" };
+    doc = o;
+  }
+  for (const [k, parent] of [["sandbox", doc], ["permissions", doc]]) {
+    if (parent[k] !== void 0 && !obj(parent[k])) return { kind: "manual", reason: `"${k}" in settings.json isn't an object` };
+  }
+  const sandbox = doc.sandbox ?? {};
+  if (sandbox.filesystem !== void 0 && !obj(sandbox.filesystem)) return { kind: "manual", reason: `"sandbox.filesystem" in settings.json isn't an object` };
+  const fs3 = sandbox.filesystem ?? {};
+  const permissions = doc.permissions ?? {};
+  for (const [k, v] of [["sandbox.filesystem.denyRead", fs3.denyRead], ["sandbox.filesystem.denyWrite", fs3.denyWrite], ["permissions.deny", permissions.deny]]) {
+    if (v !== void 0 && !Array.isArray(v)) return { kind: "manual", reason: `"${k}" in settings.json isn't a list` };
+  }
+  const userHome2 = userHomeOf(env);
+  const want = claudeWanted(p2pHomePaths(env), userHome2);
+  const edits = [];
+  if (sandbox.enabled !== true) {
+    edits.push({ key: "sandbox.enabled", value: true, ...sandbox.enabled !== void 0 ? { was: sandbox.enabled } : {} });
+    sandbox.enabled = true;
+  }
+  if (sandbox.autoAllowBashIfSandboxed === void 0) {
+    edits.push({ key: "sandbox.autoAllowBashIfSandboxed", value: false });
+    sandbox.autoAllowBashIfSandboxed = false;
+  }
+  if (sandbox.allowUnsandboxedCommands !== false) {
+    edits.push({ key: "sandbox.allowUnsandboxedCommands", value: false, ...sandbox.allowUnsandboxedCommands !== void 0 ? { was: sandbox.allowUnsandboxedCommands } : {} });
+    sandbox.allowUnsandboxedCommands = false;
+  }
+  const addPaths = (key) => {
+    const list = strs2(fs3[key]);
+    const cur = Array.isArray(fs3[key]) ? fs3[key] : [];
+    for (const p of want.sandbox) {
+      const abs = sandboxPath(p, userHome2);
+      if (list.some((e) => {
+        const q = sandboxPath(e, userHome2);
+        return q !== void 0 && within4(abs, q);
+      })) continue;
+      cur.push(p);
+      edits.push({ key: `sandbox.filesystem.${key}`, value: p, append: true });
+    }
+    if (cur.length > 0) fs3[key] = cur;
+  };
+  addPaths("denyRead");
+  addPaths("denyWrite");
+  const deny = Array.isArray(permissions.deny) ? permissions.deny : [];
+  for (const [tool, rules] of [["Read", want.read], ["Edit", want.edit]]) {
+    rules.forEach((r, i) => {
+      const abs = sandboxPath(want.sandbox[i], userHome2);
+      if (strs2(deny).some((e) => {
+        const q = ruleFolder(e, tool, userHome2);
+        return q !== void 0 && within4(abs, q);
+      })) return;
+      deny.push(r);
+      edits.push({ key: "permissions.deny", value: r, append: true });
+    });
+  }
+  if (edits.length === 0) return { kind: "already" };
+  if (Object.keys(fs3).length > 0) sandbox.filesystem = fs3;
+  doc.sandbox = sandbox;
+  if (deny.length > 0) doc.permissions = { ...permissions, deny };
+  const after2 = `${JSON.stringify(doc, null, text2 ? indentOf(text2) : 2)}
+`;
+  return { kind: "edit", after: after2, edits };
+}
+function readText(path2) {
+  return readConfigFile(path2);
+}
+var isDir = (p) => {
+  try {
+    return statSync6(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+function codexConfigPath(env) {
+  const h = env.CODEX_HOME?.trim();
+  return join24(h ? resolve5(h) : join24(userHomeOf(env), ".codex"), "config.toml");
+}
+function codexDenyPathsOf(env) {
+  const p = p2pHomePaths(env);
+  return codexDenyPaths(p.home, userHomeOf(env), p.real);
+}
+var RULE_CHARS = /* @__PURE__ */ new Set(["[", "]", "{", "}", "*", "?", "(", ")"]);
+function p2pHomeProblem(env) {
+  const paths = p2pHomePaths(env);
+  const userHome2 = normalize3(resolve5(userHomeOf(env)));
+  for (const h of [paths.home, ...paths.real ? [paths.real] : []]) {
+    if ([...h].some((c) => RULE_CHARS.has(c))) return `P2P_HOME (${h}) has a character that means something in a sandbox rule ([ ] { } * ? ( )): move it to a plain path, then run this again`;
+    if (h === sep5 || within4(userHome2, h)) return `P2P_HOME (${h}) is your home folder or a folder above it: denying it would shut your agents out of everything. Point P2P_HOME at its own folder`;
+  }
+  return void 0;
+}
+function codexProjectConfigs(workdir) {
+  const roots = projectRoots(workdir);
+  const top = roots[roots.length - 1];
+  const out = [];
+  let d = normalize3(workdir);
+  for (let i = 0; i < 64; i++) {
+    const f = join24(d, ".codex", "config.toml");
+    if (existsSync5(f)) out.push(f);
+    if (d === top) break;
+    const up = dirname7(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+function codexStatus(env, o = {}) {
+  const path2 = codexConfigPath(env);
+  const problem = p2pHomeProblem(env);
+  if (problem) return { state: "unknown", detail: problem, notes: [], settings: path2 };
+  let text2;
+  try {
+    text2 = readText(path2);
+  } catch {
+    return { state: "unknown", detail: `${path2} couldn't be read`, notes: [], settings: path2 };
+  }
+  const st = { ...codexSandboxStatus(text2, codexDenyPathsOf(env), userHomeOf(env)), settings: path2 };
+  const overriding = [];
+  for (const f of codexProjectConfigs(o.workdir ?? sessionWorkdir(env))) {
+    if (f === path2) continue;
+    let t2;
+    try {
+      t2 = readText(f);
+    } catch {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    const lines = t2 === null ? [] : scanTomlLines(t2);
+    if (lines === null) {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    if (lines.some((l) => l.kind === "kv" && ["sandbox_mode", "default_permissions", "permissions"].includes([...l.table, ...l.key][0]))) overriding.push(f);
+    else if (lines.some((l) => l.kind === "header" && l.table[0] === "permissions")) overriding.push(f);
+  }
+  if (overriding.length === 0) return st;
+  const note2 = `${overriding.join(", ")} sets its own sandbox or permissions: when Codex trusts this project, that applies here instead`;
+  return st.state === "on" ? { ...st, state: "unknown", detail: `${st.detail}, but a project config may override it here`, notes: [...st.notes, note2] } : { ...st, notes: [...st.notes, note2] };
+}
+var show = (v) => JSON.stringify(v);
+function planFront(front, env, o = {}) {
+  const path2 = front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env);
+  const present2 = isDir(dirname7(path2));
+  const problem = p2pHomeProblem(env);
+  if (front === "claude") {
+    const status2 = claudeSandboxStatus(env, o);
+    if (status2.state === "unavailable") return { front, path: path2, present: present2, status: status2, plan: { kind: "unavailable" } };
+    if (problem) return { front, path: path2, present: present2, status: status2, plan: { kind: "manual", reason: problem } };
+    let before2;
+    try {
+      before2 = readText(path2);
+    } catch (e) {
+      return { front, path: path2, present: present2, status: status2, plan: { kind: "manual", reason: e.message } };
+    }
+    const p2 = planClaudeSandbox(before2, env);
+    if (p2.kind !== "edit") return { front, path: path2, present: present2, status: status2, plan: p2 };
+    const preview2 = p2.edits.map((e) => e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== void 0 ? `   (was ${show(e.was)})` : ""}`);
+    return { front, path: path2, present: present2, status: status2, plan: { kind: "edit", before: before2, after: p2.after, preview: preview2 } };
+  }
+  const status = codexStatus(env, o);
+  if (problem) return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: problem } };
+  let before;
+  try {
+    before = readText(path2);
+  } catch (e) {
+    return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: e.message } };
+  }
+  const p = planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env), o.codexBase ? { baseWhenUnset: o.codexBase } : {});
+  if (p.kind === "already") return { front, path: path2, present: present2, status, plan: { kind: "already" } };
+  if (p.kind === "manual") return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: p.reason, snippet: p.snippet } };
+  const preview = p.edits.map((e) => "add" in e ? `  + ${e.add}` : `  - ${e.before}
+  + ${e.after}`);
+  return { front, path: path2, present: present2, status, plan: { kind: "edit", before, after: p.after, preview, ...p.base ? { base: p.base } : {}, ...p.assumed ? { assumed: true } : {} } };
+}
+var AGENT_NAME = { claude: "Claude Code", codex: "Codex" };
+function frontPreview(f, p2pHome, userHome2) {
+  if (f.plan.kind !== "edit") return "";
+  const home = tildeForm(p2pHome, userHome2);
+  const why2 = f.front === "claude" ? [
+    `Your agents run as you, so Claude Code can read ${home} (your identity key and person token) unless its`,
+    "sandbox denies it. This adds that deny to your Claude Code user settings, and changes, in every project:",
+    "  - Claude's shell commands run in Claude Code's sandbox: they write only inside the project (and folders",
+    "    you add to sandbox.filesystem.allowWrite) and reach only network hosts you allow (Claude Code asks for",
+    "    a new host). A build or tool that writes elsewhere (a global cache, say) may fail or ask.",
+    "  - No retry outside the sandbox (allowUnsandboxedCommands: false): a command the sandbox blocks just fails.",
+    "  - Your permission prompts stay as they are (autoAllowBashIfSandboxed: false, unless you set it already).",
+    `  - Claude's shell and its Read/Edit tools can't open ${home}, so they can't run p2p any more either; Claude`,
+    "    uses ListAgents, SendMessage and /peers. The Peer2Peer mod isn't affected (what a mod starts runs outside",
+    "    the sandbox).",
+    `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the keys below.`
+  ] : [
+    `Your agents run as you, so Codex can read ${home} (your identity key and person token) unless its sandbox`,
+    "denies it. This has Codex's commands run under a permissions profile that denies it:",
+    ...f.plan.assumed ? [
+      "  - Your config sets no sandbox, and Codex then picks one per folder (workspace-write in a version-controlled",
+      `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? `: Codex's commands can't write (it asks first under an on-request approval policy; under "never", a write just fails)` : ": Codex's commands write in the workspace, in every folder, including ones Codex hasn't trusted"}.`,
+      `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets them write in the workspace instead (in folders Codex hasn't trusted too)." : "`--codex-base read-only` keeps them read-only instead."}`
+    ] : ["  - It extends the sandbox you use now, so writes and network stay as they were."],
+    "  - Codex's shell can't open it, so it can't run p2p any more either; Codex uses the bridge's p2p_* tools.",
+    "    The bridge isn't affected (Codex doesn't sandbox MCP servers or hooks). Restart open Codex sessions.",
+    `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the lines marked p2p sandbox.`
+  ];
+  return [`${AGENT_NAME[f.front]}: ${f.path}`, ...why2, "", "Exactly what is written (the file is backed up first; everything else in it stays):", ...f.plan.preview].join("\n");
+}
+function frontQuestion(f) {
+  return f.front === "claude" ? "Turn on Claude Code's sandbox with this deny?" : "Add this to Codex's config?";
+}
+function applyPlans(plans, now = /* @__PURE__ */ new Date()) {
+  const changes = plans.flatMap((f) => f.plan.kind === "edit" ? [{ path: f.path, before: f.plan.before, after: f.plan.after }] : []);
+  for (const c of changes) {
+    if (readText(c.path) !== c.before) throw new CliError("changed", `${c.path} changed after it was shown: nothing was written. Run the command again to see the changes`);
+  }
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const done = [];
+  for (const c of changes) {
+    const target = resolveLink(c.path);
+    mkdirSync12(dirname7(target), { recursive: true });
+    let backup;
+    if (c.before !== null) {
+      backup = `${c.path}.p2p-backup-${stamp}`;
+      writeFileSync12(backup, c.before, { mode: 384, flag: "wx" });
+    }
+    let mode = 384;
+    try {
+      mode = statSync6(target).mode & 511;
+    } catch {
+    }
+    const tmp = `${target}.p2p-tmp-${randomBytes15(8).toString("hex")}`;
+    rmSync5(tmp, { force: true });
+    writeFileSync12(tmp, c.after, { mode, flag: "wx" });
+    renameSync10(tmp, target);
+    done.push({ path: c.path, ...backup ? { backup } : {} });
+  }
+  return done;
+}
+function assertPersonOutsideAgents(app, what) {
+  const why2 = `\`p2p ${what}\` changes your agents' sandbox, so only you run it, in your own terminal (not inside Claude Code or Codex)`;
+  if (app.front === true) throw new CliError("refused", `${why2}. A front end (the Claude Code mod, the Codex bridge) never changes its own agent's sandbox`);
+  if (agentContext(app.env)) throw new CliError("refused", `${why2}. It was refused here because it runs inside an agent's session`);
+  if (ancestryUnknown()) throw new CliError("refused", `${why2}. It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session${ancestryWhy() ? ` (${ancestryWhy()})` : ""}`);
+}
+function sandboxDeclined(file, front) {
+  const v = file.sandboxDeclined;
+  if (v === true) return true;
+  if (!Array.isArray(v)) return false;
+  return front ? v.includes(front) : v.length > 0;
+}
+function setSandboxDeclined(home, front, declined) {
+  let cur = [];
+  try {
+    const v = readFileConfig(home).sandboxDeclined;
+    cur = v === true ? ["claude", "codex"] : Array.isArray(v) ? v.filter((x) => x === "claude" || x === "codex") : [];
+  } catch {
+  }
+  const next = declined ? [.../* @__PURE__ */ new Set([...cur, front])] : cur.filter((f) => f !== front);
+  setFileConfigField(home, "sandboxDeclined", next);
+}
+function offerablePlans(env, only, o = {}) {
+  const fronts = only ?? ["claude", "codex"];
+  return fronts.map((f) => planFront(f, env, o)).filter((f) => (only ? true : f.present) && f.plan.kind === "edit");
+}
+function declinedHere(env, front) {
+  try {
+    return sandboxDeclined(readFileConfig(resolveHome2(env)), front);
+  } catch {
+    return false;
+  }
+}
+function frontPresent(front, env) {
+  return existsSync5(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
+}
+async function sandboxNotice(app, front) {
+  if (app.front !== true && agentContext(app.env)) return void 0;
+  if (declinedHere(app.env, front)) return void 0;
+  const st = front === "claude" ? claudeSandboxStatus(app.env) : codexStatus(app.env);
+  if (st.state !== "off") return void 0;
+  const shown = await app.state.update("sandboxNotice", (cur) => cur?.[front] !== void 0 ? { result: false } : { next: { ...cur ?? {}, [front]: Date.now() }, result: true });
+  if (!shown) return void 0;
+  const agent2 = front === "claude" ? "Claude Code" : "Codex";
+  return `${agent2}'s sandbox doesn't keep its commands out of ${tildeForm(p2pHomePaths(app.env).home, userHomeOf(app.env))}, where your identity key and person token live. In your own terminal (not inside ${agent2}), run \`p2p sandbox enable\`: it shows what it adds to your ${agent2} config and asks first. \`p2p doctor\` shows the details.`;
+}
+function sandboxReport(env, o = {}) {
+  return {
+    p2pHome: p2pHomePaths(env).home,
+    declined: declinedHere(env),
+    claude: { ...claudeSandboxStatus(env, o), present: frontPresent("claude", env) },
+    codex: { ...codexStatus(env, o), present: frontPresent("codex", env) }
+  };
+}
+function sandboxFix(person) {
+  return person ? "run `p2p sandbox enable` in your own terminal (not inside Claude Code or Codex): it shows what it adds and asks first" : "`p2p sandbox enable`, run by the person in their own terminal (outside Claude Code and Codex): an agent never changes its own sandbox, so ask your user";
+}
+function sandboxHuman(r, person) {
+  const row2 = (name2, s2, present2, path2) => {
+    if (!present2 && s2.state !== "on") return [`${name2}: not set up here (${path2})`];
+    const mark = s2.state === "on" ? "✓" : s2.state === "off" ? "✗" : "?";
+    return [`${mark} ${name2}: ${s2.detail}`, ...s2.notes.map((n) => `    note: ${n}`)];
+  };
+  const lines = [`P2P_HOME is ${r.p2pHome}.`, ...row2("Claude Code", r.claude, r.claude.present, r.claude.settings), ...row2("Codex", r.codex, r.codex.present, r.codex.settings)];
+  const off = r.claude.present && r.claude.state === "off" || r.codex.present && r.codex.state === "off";
+  if (off) lines.push("", `Fix: ${sandboxFix(person)}.${r.declined ? " (You said no when `p2p setup` offered it.)" : ""}`);
+  return lines.join("\n");
+}
+
+// packages/p2p/src/cli.ts
 init_history();
 init_tty_confirm();
 init_social();
@@ -38958,7 +39878,7 @@ init_sessions();
 init_errors2();
 import { watch as watchDir } from "node:fs";
 import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join23 } from "node:path";
+import { join as join25 } from "node:path";
 init_rotation();
 init_outbox();
 init_running();
@@ -39109,7 +40029,7 @@ async function release(app, sids) {
     return { next: d, result: void 0 };
   });
 }
-var within3 = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), ms).unref())]);
+var within5 = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), ms).unref())]);
 async function drainGraphMemory(app, ext, mem, deps = {}) {
   const batch = await take(app);
   if (batch.length === 0) return { written: 0, dropped: 0 };
@@ -39152,10 +40072,10 @@ async function drainBatch(app, ext, mem, batch, deps, abandoned2) {
     }
     const stop = new AbortController();
     const writing = Promise.resolve().then(() => mem.write(ctx, { sid, items, signal: stop.signal })).catch(() => void 0);
-    let r = await within3(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
+    let r = await within5(writing, deps.deadlineMs ?? GRAPH_MEMORY_DRAIN_MS);
     if (r === "timeout") {
       stop.abort();
-      const late = await within3(writing, deps.settleMs ?? GRAPH_MEMORY_SETTLE_MS);
+      const late = await within5(writing, deps.settleMs ?? GRAPH_MEMORY_SETTLE_MS);
       if (late === "timeout") {
         abandoned2.add(sid);
         await countDropped(app, "timeout", items.length);
@@ -39216,7 +40136,7 @@ function graphMemoryLoop(app, deps = {}) {
         if (now >= okUntil) {
           const ctx = extContext(app, ext, { out: () => {
           }, err: (s2) => deps.log?.(s2) }, true, async () => false);
-          const a = await within3(
+          const a = await within5(
             mem.available(ctx).catch((e) => ({ ok: false, reason: "ext_failed", message: String(e?.message ?? e) })),
             GRAPH_MEMORY_DRAIN_MS
           );
@@ -39249,7 +40169,7 @@ async function graphMemoryReport(app) {
 
 // packages/p2p/src/watch.ts
 function cursorPath(app, sid) {
-  return join23(app.home, "cursors", `${sid}.cursor`);
+  return join25(app.home, "cursors", `${sid}.cursor`);
 }
 async function readCursor(app, sid) {
   try {
@@ -39261,7 +40181,7 @@ async function readCursor(app, sid) {
 }
 async function writeCursor(app, sid, c) {
   const p = cursorPath(app, sid);
-  await mkdir3(join23(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir3(join25(app.home, "cursors"), { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
   await writeFile4(tmp, JSON.stringify(c), { mode: 384 });
   await rename2(tmp, p);
@@ -39285,27 +40205,27 @@ function untilAborted(p, signal) {
     p.catch(() => void 0);
     return Promise.resolve(void 0);
   }
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     const off = () => signal.removeEventListener("abort", onAbort);
     const onAbort = () => {
       off();
-      resolve5(void 0);
+      resolve7(void 0);
     };
     signal.addEventListener("abort", onAbort);
     p.then(
       (v) => {
         off();
-        resolve5(v);
+        resolve7(v);
       },
       (e) => {
         off();
-        if (signal.aborted) resolve5(void 0);
+        if (signal.aborted) resolve7(void 0);
         else reject(e);
       }
     );
   });
 }
-function within4(p, ms) {
+function within6(p, ms) {
   return Promise.race([p.catch(() => void 0), new Promise((r) => setTimeout(r, ms).unref())]);
 }
 async function watch(app, opts) {
@@ -39373,7 +40293,7 @@ async function watch(app, opts) {
   const offEvents = app.state.onEventsAdded(wake);
   let logWatcher;
   try {
-    logWatcher = watchDir(join23(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
+    logWatcher = watchDir(join25(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
       if (name2 === null || String(name2) === "events.json") wake();
     });
     logWatcher.on("error", () => {
@@ -39432,8 +40352,8 @@ async function watch(app, opts) {
     for (const t2 of timers) clearInterval(t2);
     opts.signal.removeEventListener("abort", onAbort);
     const deadline = Date.now() + WATCH_EXIT_MS;
-    await within4(unmarkRunning(app, sid), CLOSE_GRACE_MS);
-    await within4(app.close(), Math.max(0, deadline - Date.now()));
+    await within6(unmarkRunning(app, sid), CLOSE_GRACE_MS);
+    await within6(app.close(), Math.max(0, deadline - Date.now()));
   }
   if (fatal) {
     opts.log(`p2p watch: ${fatal}`);
@@ -39522,9 +40442,9 @@ init_state2();
 init_extensions();
 init_ix_local();
 init_projects();
-import { readdirSync as readdirSync4, statSync as statSync6 } from "node:fs";
+import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
 import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
-import { dirname as dirname7, join as join24 } from "node:path";
+import { dirname as dirname8, join as join26 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
 init_history();
@@ -39660,9 +40580,9 @@ function ownStatuses(app, peers) {
 function watchCursor(home) {
   let best;
   try {
-    for (const name2 of readdirSync4(join24(home, "cursors"))) {
+    for (const name2 of readdirSync4(join26(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
-      const at = statSync6(join24(home, "cursors", name2)).mtimeMs;
+      const at = statSync7(join26(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
     }
   } catch {
@@ -39674,9 +40594,9 @@ function findModRoot(app, given) {
   const fromEnv = given ?? app.env.P2P_MOD_ROOT?.trim();
   if (fromEnv) return fromEnv;
   try {
-    const here = dirname7(fileURLToPath3(import.meta.url));
-    const root = dirname7(here);
-    statSync6(join24(root, ".claude-plugin", "plugin.json"));
+    const here = dirname8(fileURLToPath3(import.meta.url));
+    const root = dirname8(here);
+    statSync7(join26(root, ".claude-plugin", "plugin.json"));
     return root;
   } catch {
     return void 0;
@@ -39690,12 +40610,12 @@ async function readSmall2(path2) {
 async function modVersions(root) {
   const out = {};
   try {
-    const v = JSON.parse(await readSmall2(join24(root, ".claude-plugin", "plugin.json"))).version;
+    const v = JSON.parse(await readSmall2(join26(root, ".claude-plugin", "plugin.json"))).version;
     if (typeof v === "string") out.plugin = peer(v, 32);
   } catch {
   }
   try {
-    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join24(root, "bin", "p2p.mjs")));
+    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join26(root, "bin", "p2p.mjs")));
     if (m) out.bundled = peer(m[1], 32);
   } catch {
   }
@@ -39956,6 +40876,7 @@ async function deviceChecks(c, app, o, ms, reports) {
       "if messages from someone seem missing, ask them to send again; P2P_DEBUG=1 on `p2p ls` shows why one fails"
     );
   }
+  sandboxChecks(c, app);
   const ix = await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
   return dataFlowOf(app, ix);
@@ -39968,6 +40889,26 @@ function dataFlowOf(app, ix) {
     anyShared: ix.graphs.some((g) => g.target.kind === "shared"),
     doc: ENCRYPTION_DOC
   };
+}
+function sandboxChecks(c, app) {
+  let r;
+  try {
+    r = sandboxReport(app.env);
+  } catch {
+    return;
+  }
+  const fix = sandboxFix(personHere(app));
+  const rows = [
+    ["sandbox-claude", "Claude Code sandbox", r.claude],
+    ["sandbox-codex", "Codex sandbox", r.codex]
+  ];
+  for (const [id2, title, s2] of rows) {
+    if (!s2.present && s2.state !== "on") continue;
+    const notes = s2.notes.length > 0 ? ` (${s2.notes.join("; ")})` : "";
+    if (s2.state === "on") c.add(id2, s2.notes.length > 0 ? "unknown" : "ok", title, `${s2.detail}${notes}`, s2.notes.length > 0 ? "see the note: it lets some commands past the deny" : void 0);
+    else if (s2.state === "off") c.add(id2, "fail", title, `${s2.detail}${notes}`, `${fix}${r.declined ? " (you said no when `p2p setup` offered it)" : ""}`);
+    else c.add(id2, "unknown", title, `${s2.detail}${notes}`, s2.state === "unavailable" ? "run your agent where its sandbox works (macOS, Linux, WSL2)" : `check ${s2.settings}, then \`p2p sandbox\``);
+  }
 }
 var MAX_GRAPH_ROWS = 10;
 async function ixChecks(c, app, ms) {
@@ -40236,6 +41177,7 @@ async function doctor(app, o) {
     if (relays.length === 0) c.add("relays", "unknown", "relays", "no relays configured yet", "`p2p setup --relay <wss://…>` picks one");
     else relayChecks(c, app, await probeRelays(app, relays, ms, false), void 0);
     await versionCheck(c, app, o, ms);
+    if (scope === "device") sandboxChecks(c, app);
     return { scope, version: o.version, ...o.user !== void 0 ? { user: { input: o.user } } : {}, checks: c.list, summary: summarize2(c.list) };
   }
   const reports = await probeRelays(app, app.relays, ms, true, app.userId);
@@ -41559,9 +42501,9 @@ var Tui = class {
         if (!received.some((m) => m.id === r.id)) received.push(historyRow(r, this.data.session));
         continue;
       }
-      const same2 = out.find((m) => m.userId === r.peer.userId && Math.abs(m.at - r.at) < 6e4 && (m.text === r.text || m.text.startsWith("(")));
-      if (same2) {
-        if (same2.text.startsWith("(")) same2.text = clean4(r.text);
+      const same3 = out.find((m) => m.userId === r.peer.userId && Math.abs(m.at - r.at) < 6e4 && (m.text === r.text || m.text.startsWith("(")));
+      if (same3) {
+        if (same3.text.startsWith("(")) same3.text = clean4(r.text);
         continue;
       }
       out.push(historyRow(r, this.data.session));
@@ -41668,7 +42610,7 @@ var Tui = class {
     this.promptAnswer?.(void 0);
     this.ui = { ...this.ui, modal: { kind: "prompt", title, lines, text: "" } };
     this.draw();
-    return new Promise((resolve5) => this.promptAnswer = resolve5);
+    return new Promise((resolve7) => this.promptAnswer = resolve7);
   }
   async effect(e) {
     switch (e.kind) {
@@ -42117,14 +43059,14 @@ function daysLeft(exp, now) {
 function prettyInvite(r, p) {
   const st = styleOf(p);
   const now = nowOf(p);
-  const join25 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
+  const join27 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
   const what = r.circles.length ? `It makes them your friend and joins them to ${r.circles.map((c) => st.bold(`"${cell(c.name, 40)}"`)).join(", ")}.` : "It makes them your friend.";
   return [
     st.bold(`Your invite${r.label ? ` for ${cell(r.label, 40)}` : ""}`) + st.dim(`  (works once, for ${daysLeft(r.expiresAt, now)}${r.to ? `, only for ${cell(r.to.address, 48)}` : ""})`),
     "",
     `  ${st.cyan(st.bold(cell(r.web, 400)))}`,
     "",
-    st.dim(`  or the code: ${cell(r.code, 200)}   (${join25})`),
+    st.dim(`  or the code: ${cell(r.code, 200)}   (${join27})`),
     "",
     what,
     st.yellow("Send it over a channel you trust: ") + "anyone who sees it first can use it. They see who it's from and say yes before anything happens.",
@@ -42377,11 +43319,11 @@ function buildProgram(deps) {
             (o) => ({ o }),
             (e) => ({ e })
           ),
-          new Promise((resolve5) => {
+          new Promise((resolve7) => {
             const t2 = setInterval(() => {
               if (Date.now() - start - (waitingOnUser - user0) < limitMs) return;
               clearInterval(t2);
-              resolve5("expired");
+              resolve7("expired");
             }, 200);
             t2.unref?.();
             stop = () => clearInterval(t2);
@@ -42432,6 +43374,10 @@ function buildProgram(deps) {
     if (!io2.prompt) return false;
     const a = (await io2.prompt(`${q} [y/N] `)).trim().toLowerCase();
     return a === "y" || a === "yes";
+  };
+  const offerSandbox = async (env, home, reoffer = false) => {
+    const plans = offerablePlans(env).filter((f) => reoffer || !declinedHere(env, f.front));
+    return (await askEachAgent(io2, env, home, plans, { from: "setup" })).lines;
   };
   const cmdOf = (o) => ({ opts: () => o });
   const canAsk = (cmd) => Boolean(io2.select) && !cmd.opts().json && !cmd.opts().yes;
@@ -42590,7 +43536,7 @@ ${backup2}
       { requireIdentity: false }
     )
   );
-  program2.command("setup").description("Get started: link this device to your identity, join with an invite, or create a new identity (safe to run again)").option("--name <name>", "Your display name (default: your OS user name)").option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS, config.json, or the relays shipped with the CLI", collect).option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)").option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)").option("--no-backup", "Don't save or print the backup phrase now").option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension").option("--allow-private-relay", "Linking or joining: accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
+  program2.command("setup").description("Get started: link this device to your identity, join with an invite, or create a new identity (safe to run again)").option("--name <name>", "Your display name (default: your OS user name)").option("--relay <url>", "A relay to use (repeat for up to 5); default: P2P_DEFAULT_RELAYS, config.json, or the relays shipped with the CLI", collect).option("--backup-file [path]", "Save the 24-word backup phrase to a 0600 file (default <home>/backup-phrase.txt)").option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)").option("--no-backup", "Don't save or print the backup phrase now").option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension").option("--sandbox", "Offer again to deny P2P_HOME to your agents' sandboxes (Claude Code, Codex) after an earlier no").option("--allow-private-relay", "Linking or joining: accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
     run(
       async (app, o) => {
         let mode = o.backupFile !== void 0 ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : void 0;
@@ -42701,11 +43647,82 @@ ${r.backup.phrase}
             lines.push("  ix      not installing Ix. You won't be asked again; `p2p setup --ix` offers it again");
           }
         }
+        const sandboxHere = (() => {
+          try {
+            assertPersonOutsideAgents(app, "setup");
+            return true;
+          } catch {
+            return false;
+          }
+        })();
+        if (!o.json && Boolean(io2.prompt || io2.select) && !ciEnv(app.env) && sandboxHere) {
+          io2.out(lines.join("\n"));
+          lines.length = 0;
+          lines.push(...await offerSandbox(app.env, app.home, o.sandbox === true));
+        }
         lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
         return { json: r, human: lines.join("\n") };
       },
       // review L1: never cut short half-way through creating an identity (each step is still bounded).
       { requireIdentity: false, noDeadline: true }
+    )
+  );
+  const sb = program2.command("sandbox").description("Whether your agents' sandboxes (Claude Code, Codex) keep them out of P2P_HOME; `sandbox enable` adds the deny to their config").option("--json", "JSON output").action(
+    run(
+      async (app) => {
+        const r = sandboxReport(app.env);
+        return { json: r, human: sandboxHuman(r, personHere(app)) };
+      },
+      { requireIdentity: false, readOnly: true }
+    )
+  );
+  sb.command("enable").description("Add the deny on P2P_HOME to your Claude Code settings and Codex config.toml (shows the changes and asks first; backs each file up)").option("--claude", "Only Claude Code (~/.claude/settings.json, or $CLAUDE_CONFIG_DIR), even if it isn't set up yet").option("--codex", "Only Codex (config.toml in CODEX_HOME, else ~/.codex), even if it isn't set up yet").option("--yes", "Don't ask (in your own terminal or a script of yours; never inside an agent's session)").option("--json", "JSON output (needs --yes)").action(
+    run(
+      async (app, o) => {
+        assertPersonOutsideAgents(app, "sandbox enable");
+        const only = o.claude || o.codex ? [...o.claude ? ["claude"] : [], ...o.codex ? ["codex"] : []] : void 0;
+        const planOpts = o.codexBase ? { codexBase: o.codexBase === "workspace" ? ":workspace" : ":read-only" } : {};
+        const fronts = (only ?? ["claude", "codex"]).map((f) => planFront(f, app.env, planOpts)).filter((f) => only !== void 0 || f.present);
+        const name2 = (f) => f.front === "claude" ? "Claude Code" : "Codex";
+        const lines = [];
+        if (fronts.length === 0) {
+          lines.push(`Neither Claude Code (${claudeSettingsPath(app.env)}) nor Codex (${codexConfigPath(app.env)}) is set up here: nothing to change. --claude or --codex writes the config anyway.`);
+        }
+        for (const f of fronts) {
+          if (f.plan.kind === "already") lines.push(`${name2(f)}: already denies P2P_HOME (${f.path})`);
+          else if (f.plan.kind === "unavailable") lines.push(`${name2(f)}: ${f.status.detail}`);
+          else if (f.plan.kind === "manual") lines.push(`${name2(f)}: not changed: ${f.plan.reason}.${f.plan.snippet ? ` Add this to ${f.path} yourself:
+
+${f.plan.snippet}
+` : ""}`);
+        }
+        const edits = fronts.filter((f) => f.plan.kind === "edit");
+        let written = [];
+        if (edits.length > 0) {
+          if (o.yes && process.platform === "win32") throw new CliError("usage", "nothing was changed: on Windows, run `p2p sandbox enable` at your terminal without --yes and answer the question");
+          if (!o.yes && (o.json || !(io2.prompt || io2.select))) {
+            throw new CliError("usage", "nothing was changed: run `p2p sandbox enable` at your terminal to see the changes and be asked, or add --yes");
+          }
+          const res = await askEachAgent(io2, app.env, app.home, edits, { yes: o.yes === true, from: "enable" });
+          written = res.written;
+          lines.push(...res.lines);
+        }
+        return {
+          json: { written, fronts: fronts.map((f) => ({ front: f.front, path: f.path, plan: f.plan.kind, ...f.plan.kind === "manual" ? { reason: f.plan.reason } : {} })) },
+          human: lines.join("\n")
+        };
+      },
+      { requireIdentity: false, noDeadline: true }
+    )
+  );
+  sb.commands.find((c) => c.name() === "enable")?.addOption(new Option("--codex-base <base>", "When your Codex config sets no sandbox: what the new profile extends (read-only, the default, or workspace)").choices(["read-only", "workspace"]));
+  sb.command("notice").description("For a front end: the one-time notice for its person when its agent's sandbox doesn't deny P2P_HOME").option("--front <name>", "claude or codex", "claude").option("--json", "JSON output").action(
+    run(
+      async (app, o) => {
+        const notice = await sandboxNotice(app, o.front === "codex" ? "codex" : "claude").catch(() => void 0);
+        return { json: notice ? { notice } : {}, human: notice ?? "" };
+      },
+      { requireIdentity: false }
     )
   );
   program2.command("whoami").description("Your address, fingerprint, devices, relays and document expiry").option("--json", "JSON output").action(
@@ -43709,12 +44726,50 @@ ${projectView2(r.project)}` };
   codexCommands(program2, deps, io2);
   return program2;
 }
+async function askEachAgent(io2, env, home, plans, o) {
+  const lines = [];
+  const written = [];
+  const pre = o.from === "setup" ? "  sandbox " : "";
+  for (const f of plans) {
+    if (f.plan.kind !== "edit") continue;
+    if (!o.yes) io2.out(`
+${frontPreview(f, home, userHomeOf(env))}`);
+    const yes = o.yes === true || await askDefaultYes(io2, frontQuestion(f));
+    if (!yes) {
+      setSandboxDeclined(home, f.front, true);
+      lines.push(`${pre}${AGENT_NAME[f.front]}: not changed. ${o.from === "enable" ? "`p2p setup` won't offer it again" : "You won't be asked again"}; \`p2p sandbox enable\` adds it any time`);
+      continue;
+    }
+    try {
+      for (const w of applyPlans([f])) {
+        written.push(w);
+        lines.push(`${pre}Wrote ${w.path}${w.backup ? ` (backup: ${w.backup})` : ""}`);
+      }
+    } catch (e) {
+      lines.push(`${pre}${AGENT_NAME[f.front]}: not changed: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    if (declinedHere(env, f.front)) setSandboxDeclined(home, f.front, false);
+    lines.push(f.front === "codex" ? `${pre}Codex reads config.toml when it starts: restart open Codex sessions.` : `${pre}Claude Code applies settings changes to open sessions at their next command.`);
+  }
+  return { lines, written };
+}
+async function askDefaultYes(io2, q) {
+  if (io2.select) {
+    const lines = q.split("\n");
+    const r = await io2.select({ intro: lines.slice(0, -1), message: lines[lines.length - 1] || "Continue?", choices: [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }], initial: "yes" });
+    return r?.[0] === "yes";
+  }
+  if (!io2.prompt) return false;
+  const a = (await io2.prompt(`${q} [Y/n] `)).trim().toLowerCase();
+  return a === "" || a === "y" || a === "yes";
+}
 function selfScript(deps) {
   const p = deps.scriptPath ?? process.argv[1] ?? "";
   try {
-    return realpathSync6(p);
+    return realpathSync7(p);
   } catch {
-    return resolve4(p);
+    return resolve6(p);
   }
 }
 function codexCommands(program2, deps, io2) {
@@ -43733,7 +44788,21 @@ function codexCommands(program2, deps, io2) {
   c.command("install").description("Print the Codex config (MCP server, hooks, AGENTS.md lines); --write applies it (backs up first, idempotent)").option("--write", "Edit config.toml, hooks.json and AGENTS.md in the Codex home").option("--remove", "Remove the peer2peer entries instead (with --write)").option("--codex-home <dir>", "The Codex home (default: CODEX_HOME, else ~/.codex)").option("--json", "JSON output").action(async (o) => {
     try {
       const script = selfScript(deps);
-      out(Boolean(o.json), installCommand({ env: deps.env, node: deps.nodeCommand ?? process.execPath, script, ...o.codexHome ? { codexHome: resolve4(o.codexHome) } : {}, write: o.write, remove: o.remove }));
+      out(Boolean(o.json), installCommand({ env: deps.env, node: deps.nodeCommand ?? process.execPath, script, ...o.codexHome ? { codexHome: resolve6(o.codexHome) } : {}, write: o.write, remove: o.remove }));
+      if (o.write && !o.remove && !o.json && (io2.prompt || io2.select) && !ciEnv(deps.env)) {
+        const env = o.codexHome ? { ...deps.env, CODEX_HOME: resolve6(o.codexHome) } : deps.env;
+        let here = true;
+        try {
+          assertPersonOutsideAgents({ env }, "codex install --write");
+        } catch {
+          here = false;
+        }
+        const plans = here && !declinedHere(env, "codex") ? offerablePlans(env, ["codex"]) : [];
+        if (plans.length > 0) {
+          const r = await askEachAgent(io2, env, resolveHome2(env), plans, { from: "codex install" });
+          for (const l of r.lines) io2.out(l.trim());
+        }
+      }
     } catch (e) {
       fail2(Boolean(o.json), e);
     }
@@ -43791,12 +44860,12 @@ function stdoutWriter(ctl) {
     gone = true;
     ctl.abort();
   });
-  return (line) => new Promise((resolve5) => {
-    if (gone || ctl.signal.aborted) return resolve5(false);
+  return (line) => new Promise((resolve7) => {
+    if (gone || ctl.signal.aborted) return resolve7(false);
     try {
-      process.stdout.write(line + "\n", (err) => resolve5(!err && !gone));
+      process.stdout.write(line + "\n", (err) => resolve7(!err && !gone));
     } catch {
-      resolve5(false);
+      resolve7(false);
     }
   });
 }
@@ -43860,7 +44929,7 @@ var STDIN_IDLE_MS = 3e3;
 var END_OF_INPUT_HINT = "reading from stdin… (end the input with Ctrl-D, or Ctrl-Z then Enter on Windows)";
 function readAll2(stream, opts = {}) {
   if (stream.isTTY) return Promise.resolve("");
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve7, reject) => {
     const chunks = [];
     let got = false;
     const finish2 = (v) => {
@@ -43869,7 +44938,7 @@ function readAll2(stream, opts = {}) {
       stream.removeAllListeners("end");
       stream.removeAllListeners("error");
       stream.pause();
-      resolve5(v);
+      resolve7(v);
     };
     const timer = setTimeout(
       () => {
@@ -43920,7 +44989,7 @@ function runPicker(spec, input, output, o) {
     output.write(lines.join("\r\n"));
     drawn = lines.length;
   };
-  return new Promise((resolve5) => {
+  return new Promise((resolve7) => {
     let finished = false;
     const restore = () => {
       try {
@@ -43945,7 +45014,7 @@ function runPicker(spec, input, output, o) {
 `);
       restore();
       input.pause();
-      resolve5(state.done ? state.done : void 0);
+      resolve7(state.done ? state.done : void 0);
     };
     const onSignals = HOOKED.map((sig) => {
       const fn = () => {
@@ -43955,7 +45024,7 @@ function runPicker(spec, input, output, o) {
         output.write("\r\n");
         restore();
         input.pause();
-        resolve5(void 0);
+        resolve7(void 0);
         signals.raise(sig);
       };
       return [sig, fn];

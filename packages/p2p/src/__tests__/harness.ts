@@ -93,6 +93,8 @@ export class User {
 
   get env(): Env {
     return {
+      // The suite's throwaway home folder (setup.ts), also for the CLIs a test spawns.
+      ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
       P2P_HOME: this.home,
       P2P_PERSON_TOKEN: this.personToken,
       P2P_RELAY_TRANSPORT: JSON.stringify(this.transport),
