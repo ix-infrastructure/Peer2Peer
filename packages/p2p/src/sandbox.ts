@@ -31,7 +31,8 @@
 //     (codex-bridge sandbox.ts). MCP servers and hooks aren't sandboxed by it, so the bridge keeps
 //     working.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import * as codex from "@peer2peer/codex-bridge";
@@ -146,14 +147,51 @@ export interface ClaudeSandboxStatus {
   settings: string;
 }
 
-/** Reads a JSON settings file: undefined when it doesn't exist, "bad" when it isn't a JSON object. */
+/** The most a config file read here may hold: anything bigger is treated as unreadable. */
+export const MAX_CONFIG_BYTES = 1024 * 1024;
+
+/**
+ * Reads a config file safely, whoever put it there (a cloned repository's `.claude` or `.codex`):
+ * opened non-blocking (a FIFO can't hang the read), it must be a regular file once a symbolic link
+ * is followed (not a FIFO, a device such as /dev/zero, or a folder), and at most MAX_CONFIG_BYTES.
+ * null when it doesn't exist; throws a CliError when it can't be read that way.
+ */
+export function readConfigFile(path: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new CliError("config", `${path} couldn't be read: ${(e as Error).message}`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new CliError("config", `${path} isn't a regular file, so it wasn't read`);
+    if (st.size > MAX_CONFIG_BYTES) throw new CliError("config", `${path} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    const buf = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    let n = 0;
+    for (;;) {
+      const r = readSync(fd, buf, n, buf.length - n, null);
+      if (r === 0) break;
+      n += r;
+      if (n > MAX_CONFIG_BYTES) throw new CliError("config", `${path} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    }
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Reads a JSON settings file: undefined when it doesn't exist, "bad" when it isn't a readable JSON object. */
 function readJson(path: string | undefined): Json | undefined | "bad" {
   if (!path) return undefined;
   let text: string;
   try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ENOENT" ? undefined : "bad";
+    const t = readConfigFile(path);
+    if (t === null) return undefined;
+    text = t;
+  } catch {
+    return "bad";
   }
   if (text.trim() === "") return {};
   try {
@@ -397,12 +435,7 @@ export interface FrontPlan {
 }
 
 function readText(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new CliError("config", `${path} couldn't be read: ${(e as Error).message}`);
-  }
+  return readConfigFile(path);
 }
 
 const isDir = (p: string) => {
@@ -515,7 +548,12 @@ export function planFront(front: "claude" | "codex", env: Env, o: PlanOptions = 
     const status = claudeSandboxStatus(env, o);
     if (status.state === "unavailable") return { front, path, present, status, plan: { kind: "unavailable" } };
     if (problem) return { front, path, present, status, plan: { kind: "manual", reason: problem } };
-    const before = readText(path);
+    let before: string | null;
+    try {
+      before = readText(path);
+    } catch (e) {
+      return { front, path, present, status, plan: { kind: "manual", reason: (e as Error).message } };
+    }
     const p = planClaudeSandbox(before, env);
     if (p.kind !== "edit") return { front, path, present, status, plan: p };
     const preview = p.edits.map((e) => (e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== undefined ? `   (was ${show(e.was)})` : ""}`));
@@ -523,7 +561,12 @@ export function planFront(front: "claude" | "codex", env: Env, o: PlanOptions = 
   }
   const status = codexStatus(env, o);
   if (problem) return { front, path, present, status, plan: { kind: "manual", reason: problem } };
-  const before = readText(path);
+  let before: string | null;
+  try {
+    before = readText(path);
+  } catch (e) {
+    return { front, path, present, status, plan: { kind: "manual", reason: (e as Error).message } };
+  }
   const p = codex.planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env), o.codexBase ? { baseWhenUnset: o.codexBase } : {});
   if (p.kind === "already") return { front, path, present, status, plan: { kind: "already" } };
   if (p.kind === "manual") return { front, path, present, status, plan: { kind: "manual", reason: p.reason, snippet: p.snippet } };
@@ -559,8 +602,8 @@ export function frontPreview(f: FrontPlan, p2pHome: string, userHome: string): s
           ...(f.plan.assumed
             ? [
                 "  - Your config sets no sandbox, and Codex then picks one per folder (workspace-write in a version-controlled",
-                `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? ": Codex asks before it writes" : ": Codex writes in the workspace without asking"}.`,
-                `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets it write in the workspace instead." : "`--codex-base read-only` keeps it read-only instead."}`,
+                `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? ": Codex's commands can't write (it asks first under an on-request approval policy; under \"never\", a write just fails)" : ": Codex's commands write in the workspace, in every folder, including ones Codex hasn't trusted"}.`,
+                `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets them write in the workspace instead (in folders Codex hasn't trusted too)." : "`--codex-base read-only` keeps them read-only instead."}`,
               ]
             : ["  - It extends the sandbox you use now, so writes and network stay as they were."]),
           "  - Codex's shell can't open it, so it can't run p2p any more either; Codex uses the bridge's p2p_* tools.",
@@ -602,7 +645,8 @@ export function applyPlans(plans: readonly FrontPlan[], now: Date = new Date()):
     } catch {
       // a new file: 0600
     }
-    const tmp = `${target}.p2p-tmp-${process.pid}`;
+    const tmp = `${target}.p2p-tmp-${randomBytes(8).toString("hex")}`;
+    rmSync(tmp, { force: true });
     writeFileSync(tmp, c.after, { mode, flag: "wx" });
     renameSync(tmp, target);
     done.push({ path: c.path, ...(backup ? { backup } : {}) });

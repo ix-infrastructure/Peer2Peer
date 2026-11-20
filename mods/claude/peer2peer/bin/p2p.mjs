@@ -1725,18 +1725,18 @@ function validateTableBytes(numPoints, fpBytes) {
   if (bytes2 > TABLE_BYTES_MAX)
     throw new Error("invalid window size: table would need ~" + Math.ceil(bytes2 / 2 ** 20) + " MiB, max " + TABLE_BYTES_MAX / 2 ** 20 + " MiB");
 }
-function probeRandomBytes(randomBytes15, length) {
-  if (randomBytes15 === void 0)
+function probeRandomBytes(randomBytes16, length) {
+  if (randomBytes16 === void 0)
     return void 0;
-  afunction(randomBytes15, "randomBytes");
+  afunction(randomBytes16, "randomBytes");
   try {
-    const probe = randomBytes15(length);
+    const probe = randomBytes16(length);
     if (!isBytes2(probe) || probe.length !== length)
       return void 0;
   } catch {
     return void 0;
   }
-  return randomBytes15;
+  return randomBytes16;
 }
 function validateMSMPoints(points, c) {
   aarray(points, "points");
@@ -1892,9 +1892,9 @@ var init_curve = __esm({
       baseCanBeBlinded;
       bits;
       // Parametrized with a given Point class (not individual point)
-      constructor(Point, randomBytes15) {
+      constructor(Point, randomBytes16) {
         validatePointCons(Point);
-        this.randomBytes = probeRandomBytes(randomBytes15, BLIND_BYTES);
+        this.randomBytes = probeRandomBytes(randomBytes16, BLIND_BYTES);
         this.Point = Point;
         this.BASE = Point.BASE;
         this.ZERO = Point.ZERO;
@@ -2111,7 +2111,7 @@ function edwards(params, extraOpts = {}) {
   if (FpLegendre(Fp2, CURVE.d) !== -1)
     throw new Error("edwards: CURVE.d must be a non-square in Fp for complete addition formulas");
   validateObject(opts, {}, { uvRatio: "function", randomBytes: "function" });
-  const randomBytes15 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes16 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const MASK = _2n2 << BigInt(Fp2.BYTES * 8) - _1n4;
   function isOdd(n) {
     if (!Fp2.isOdd)
@@ -2372,7 +2372,7 @@ function edwards(params, extraOpts = {}) {
     }
   }
   const normalize4 = (points) => normalizeZ(Point, points);
-  const wnaf = new ScalarMultiplier(Point, randomBytes15);
+  const wnaf = new ScalarMultiplier(Point, randomBytes16);
   if (wnaf.bits >= 6)
     Point.BASE.precompute(6);
   Object.freeze(Point.prototype);
@@ -2404,7 +2404,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     if (outputLen !== expectedLen)
       throw new Error(`hash.outputLen must be ${expectedLen}, got ${outputLen}`);
   }
-  const randomBytes15 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes16 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const toMontgomery2 = opts.toMontgomery;
   const toMontgomerySecret2 = opts.toMontgomerySecret;
   const adjustScalarBytes2 = opts.adjustScalarBytes === void 0 ? (bytes2) => bytes2 : opts.adjustScalarBytes;
@@ -2494,7 +2494,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     seed: _size
   };
   function randomSecretKey(seed) {
-    seed = seed === void 0 ? randomBytes15(lengths.seed) : seed;
+    seed = seed === void 0 ? randomBytes16(lengths.seed) : seed;
     return abytes2(seed, lengths.seed, "seed");
   }
   function isValidSecretKey(key) {
@@ -18143,7 +18143,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes15, createHash: createHash10 } = __require("crypto");
+    var { randomBytes: randomBytes16, createHash: createHash10 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -18694,7 +18694,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes15(16).toString("base64");
+      const key = randomBytes16(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -39321,7 +39321,8 @@ init_v3();
 init_ix_local();
 
 // packages/p2p/src/sandbox.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync12, readFileSync as readFileSync16, realpathSync as realpathSync6, renameSync as renameSync10, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
+import { randomBytes as randomBytes15 } from "node:crypto";
+import { closeSync as closeSync4, constants as constants2, existsSync as existsSync5, fstatSync as fstatSync2, mkdirSync as mkdirSync12, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync6, renameSync as renameSync10, rmSync as rmSync5, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname7, isAbsolute as isAbsolute11, join as join24, normalize as normalize3, resolve as resolve5, sep as sep5 } from "node:path";
 init_ancestry();
@@ -39394,13 +39395,41 @@ function ruleFolder(rule, tool, userHome2) {
 }
 var obj = (v) => typeof v === "object" && v !== null && !Array.isArray(v) ? v : void 0;
 var strs2 = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+var MAX_CONFIG_BYTES = 1024 * 1024;
+function readConfigFile(path2) {
+  let fd;
+  try {
+    fd = openSync4(path2, constants2.O_RDONLY | (constants2.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
+  }
+  try {
+    const st = fstatSync2(fd);
+    if (!st.isFile()) throw new CliError("config", `${path2} isn't a regular file, so it wasn't read`);
+    if (st.size > MAX_CONFIG_BYTES) throw new CliError("config", `${path2} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    const buf = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    let n = 0;
+    for (; ; ) {
+      const r = readSync2(fd, buf, n, buf.length - n, null);
+      if (r === 0) break;
+      n += r;
+      if (n > MAX_CONFIG_BYTES) throw new CliError("config", `${path2} is larger than ${MAX_CONFIG_BYTES} bytes, so it wasn't read`);
+    }
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    closeSync4(fd);
+  }
+}
 function readJson(path2) {
   if (!path2) return void 0;
   let text2;
   try {
-    text2 = readFileSync16(path2, "utf8");
-  } catch (e) {
-    return e.code === "ENOENT" ? void 0 : "bad";
+    const t2 = readConfigFile(path2);
+    if (t2 === null) return void 0;
+    text2 = t2;
+  } catch {
+    return "bad";
   }
   if (text2.trim() === "") return {};
   try {
@@ -39595,12 +39624,7 @@ function planClaudeSandbox(text2, env) {
   return { kind: "edit", after: after2, edits };
 }
 function readText(path2) {
-  try {
-    return readFileSync16(path2, "utf8");
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
-  }
+  return readConfigFile(path2);
 }
 var isDir = (p) => {
   try {
@@ -39684,7 +39708,12 @@ function planFront(front, env, o = {}) {
     const status2 = claudeSandboxStatus(env, o);
     if (status2.state === "unavailable") return { front, path: path2, present: present2, status: status2, plan: { kind: "unavailable" } };
     if (problem) return { front, path: path2, present: present2, status: status2, plan: { kind: "manual", reason: problem } };
-    const before2 = readText(path2);
+    let before2;
+    try {
+      before2 = readText(path2);
+    } catch (e) {
+      return { front, path: path2, present: present2, status: status2, plan: { kind: "manual", reason: e.message } };
+    }
     const p2 = planClaudeSandbox(before2, env);
     if (p2.kind !== "edit") return { front, path: path2, present: present2, status: status2, plan: p2 };
     const preview2 = p2.edits.map((e) => e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== void 0 ? `   (was ${show(e.was)})` : ""}`);
@@ -39692,7 +39721,12 @@ function planFront(front, env, o = {}) {
   }
   const status = codexStatus(env, o);
   if (problem) return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: problem } };
-  const before = readText(path2);
+  let before;
+  try {
+    before = readText(path2);
+  } catch (e) {
+    return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: e.message } };
+  }
   const p = planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env), o.codexBase ? { baseWhenUnset: o.codexBase } : {});
   if (p.kind === "already") return { front, path: path2, present: present2, status, plan: { kind: "already" } };
   if (p.kind === "manual") return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: p.reason, snippet: p.snippet } };
@@ -39721,8 +39755,8 @@ function frontPreview(f, p2pHome, userHome2) {
     "denies it. This has Codex's commands run under a permissions profile that denies it:",
     ...f.plan.assumed ? [
       "  - Your config sets no sandbox, and Codex then picks one per folder (workspace-write in a version-controlled",
-      `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? ": Codex asks before it writes" : ": Codex writes in the workspace without asking"}.`,
-      `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets it write in the workspace instead." : "`--codex-base read-only` keeps it read-only instead."}`
+      `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? `: Codex's commands can't write (it asks first under an on-request approval policy; under "never", a write just fails)` : ": Codex's commands write in the workspace, in every folder, including ones Codex hasn't trusted"}.`,
+      `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets them write in the workspace instead (in folders Codex hasn't trusted too)." : "`--codex-base read-only` keeps them read-only instead."}`
     ] : ["  - It extends the sandbox you use now, so writes and network stay as they were."],
     "  - Codex's shell can't open it, so it can't run p2p any more either; Codex uses the bridge's p2p_* tools.",
     "    The bridge isn't affected (Codex doesn't sandbox MCP servers or hooks). Restart open Codex sessions.",
@@ -39753,7 +39787,8 @@ function applyPlans(plans, now = /* @__PURE__ */ new Date()) {
       mode = statSync6(target).mode & 511;
     } catch {
     }
-    const tmp = `${target}.p2p-tmp-${process.pid}`;
+    const tmp = `${target}.p2p-tmp-${randomBytes15(8).toString("hex")}`;
+    rmSync5(tmp, { force: true });
     writeFileSync12(tmp, c.after, { mode, flag: "wx" });
     renameSync10(tmp, target);
     done.push({ path: c.path, ...backup ? { backup } : {} });

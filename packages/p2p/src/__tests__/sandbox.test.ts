@@ -10,7 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../cli.js";
-import { applyPlans, claudeSandboxStatus, offerablePlans, p2pHomeProblem, planClaudeSandbox, planFront, sandboxReport } from "../sandbox.js";
+import { execFileSync } from "node:child_process";
+import { applyPlans, claudeSandboxStatus, MAX_CONFIG_BYTES, offerablePlans, p2pHomeProblem, planClaudeSandbox, planFront, readConfigFile, sandboxReport } from "../sandbox.js";
 
 const edited = (p: ReturnType<typeof planClaudeSandbox>): string => {
   if (p.kind !== "edit") throw new Error(`expected an edit, got ${p.kind}`);
@@ -236,6 +237,64 @@ describe("what else decides it here (doctor)", () => {
   });
 });
 
+describe("config files a repository planted", () => {
+  const fifo = (path: string) => execFileSync("/usr/bin/mkfifo", [path]);
+
+  it("a FIFO, a device or an oversize file is never read: status is ?, nothing hangs", () => {
+    const p = person();
+    writeFileSync(p.settings, edited(planClaudeSandbox(null, p.env)));
+    const codexPlan = planFront("codex", p.env);
+    if (codexPlan.plan.kind !== "edit") throw new Error("expected an edit");
+    writeFileSync(p.config, codexPlan.plan.after);
+    const proj = join(p.home, "repo");
+    mkdirSync(join(proj, ".git"), { recursive: true });
+    mkdirSync(join(proj, ".claude"));
+    mkdirSync(join(proj, ".codex"));
+    fifo(join(proj, ".claude", "settings.json"));
+    fifo(join(proj, ".codex", "config.toml"));
+    const r1 = sandboxReport(p.env, { ...NO_MANAGED, workdir: proj });
+    expect(r1.claude.state).toBe("unknown");
+    expect(r1.claude.notes.join()).toMatch(/couldn't be read/);
+    expect(r1.codex.state).toBe("unknown");
+    rmSync(join(proj, ".claude", "settings.json"));
+    symlinkSync("/dev/zero", join(proj, ".claude", "settings.json"));
+    expect(sandboxReport(p.env, { ...NO_MANAGED, workdir: proj }).claude.state).toBe("unknown");
+    rmSync(join(proj, ".claude", "settings.json"));
+    writeFileSync(join(proj, ".claude", "settings.json"), `{"x": "${"a".repeat(MAX_CONFIG_BYTES)}"}`);
+    expect(sandboxReport(p.env, { ...NO_MANAGED, workdir: proj }).claude.state).toBe("unknown");
+  });
+
+  it("readConfigFile refuses what isn't a small regular file", () => {
+    const p = person();
+    const f = join(p.home, "f.json");
+    fifo(f);
+    expect(() => readConfigFile(f)).toThrow(/isn't a regular file/);
+    expect(() => readConfigFile(join(p.home, ".claude"))).toThrow(/isn't a regular file/);
+    expect(() => readConfigFile("/dev/zero")).toThrow(/isn't a regular file/);
+    const big = join(p.home, "big.json");
+    writeFileSync(big, "x".repeat(MAX_CONFIG_BYTES + 1));
+    expect(() => readConfigFile(big)).toThrow(/larger than/);
+    expect(readConfigFile(join(p.home, "missing.json"))).toBeNull();
+  });
+
+  it("a user settings file that is a FIFO is left alone by enable", async () => {
+    const p = person({ codex: false });
+    fifo(p.settings);
+    const r = await run(["sandbox", "enable", "--yes"], p.env);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Claude Code: not changed: .*isn't a regular file/);
+  });
+
+  it("a stale temp file from a crash doesn't stop the write", () => {
+    const p = person({ codex: false });
+    writeFileSync(p.settings, "{}\n");
+    writeFileSync(`${p.settings}.p2p-tmp-${process.pid}`, "stale");
+    const done = applyPlans(offerablePlans(p.env));
+    expect(done.length).toBe(1);
+    expect(claudeSandboxStatus(p.env, NO_MANAGED).state).toBe("on");
+  });
+});
+
 describe("p2p sandbox enable", () => {
   it("shows the changes, asks (Enter is yes), backs up, writes both, and is idempotent", async () => {
     const p = person();
@@ -249,7 +308,7 @@ describe("p2p sandbox enable", () => {
     expect(r.out).toMatch(/autoAllowBashIfSandboxed: false/);
     expect(r.out).toMatch(/can't run p2p any more/);
     expect(r.out).toMatch(/To undo: put the backup back/);
-    expect(r.out).toMatch(/This one extends :read-only: Codex asks before it writes/);
+    expect(r.out).toMatch(/This one extends :read-only: Codex's commands can't write \(it asks first under an on-request approval policy; under "never", a write just fails\)/);
     expect(r.out).toMatch(/sandbox\.filesystem\.denyRead \+= "~\/\.p2p"/);
     expect(r.out).toMatch(/\+ "~\/\.p2p" = "deny"/);
     expect(r.out).toMatch(/Wrote .*settings\.json \(backup: .*settings\.json\.p2p-backup-/);
