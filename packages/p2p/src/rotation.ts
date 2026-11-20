@@ -54,7 +54,7 @@
 //  - rotation can't recover a compromised owner's circles: those need a new
 //    circle (§3.3); this hands over only what the old key still controls.
 
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile, chmod } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, rename, rm, stat, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import {
   addIdentityVersion,
@@ -214,6 +214,15 @@ async function dropState(home: string): Promise<void> {
 
 const after = (s: RotationState, step: RotationStep) => STEPS.indexOf(s.step) >= STEPS.indexOf(step);
 
+/** Whether `p` is a symbolic link (a missing path isn't). */
+async function isLink(p: string): Promise<boolean> {
+  try {
+    return (await lstat(p)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 async function exists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -236,6 +245,10 @@ async function appAt(app: App, home: string): Promise<App> {
  * `<home>/rotated/<tag>/`, `src`'s take their place.
  */
 async function moveHomes(home: string, src: string, tag: string): Promise<string> {
+  // Only folders a follow or rotation made: a link (to another home's state) is never moved into this one.
+  for (const p of [src, join(src, "cli"), join(src, "v3"), join(src, "cursors")]) {
+    if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
+  }
   const archive = join(home, "rotated", tag);
   await mkdir(archive, { recursive: true, mode: 0o700 });
   const srcHasState = await exists(join(src, "cli"));
@@ -252,10 +265,22 @@ async function moveHomes(home: string, src: string, tag: string): Promise<string
 }
 
 /**
+ * After a swap: the home must now hold the identity the link joined. Anything else (files changed
+ * under the swap) keeps no person token and stops the command.
+ */
+export function assertAdopted(app: App, userId: string): void {
+  if (app.userId === userId) return;
+  app.front = false;
+  throw new CliError("wrong_identity", `after the move this home holds ${app.userId}, not ${userId}: it stopped here`);
+}
+
+/**
  * Makes `src` (a home holding the new identity) this home's identity, after
  * the old identity's work here has stopped (moveHomes).
  */
 export async function adoptHome(app: App, src: string, tag: string): Promise<string> {
+  // The identity swapped in is this command's own (the person's token was for the one it replaces).
+  app.identityMadeHere = true;
   // Nothing of the old identity may still be writing: an envelope handled mid-swap would take its
   // lock into the archive (or write the old identity's state into the new home).
   await app.close();
@@ -880,8 +905,9 @@ async function begin(app: App, opts: RotateOptions): Promise<RotationState> {
   const self: SelfDoc = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   // The new identity's home gets its own person token (projects.ts renewPersonToken), before its keys;
   // front ends read it again.
-  renewPersonToken(home);
-  await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
+  const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
+  renewPersonToken(home, nkeys.spk);
+  await napp.state.put("keys", nkeys);
   await napp.state.put("self", self);
   await napp.load(true);
   await addIdentityVersion(napp.store, doc);
@@ -2325,6 +2351,7 @@ export async function followHeld(app: App, idOrItem: string | HeldItem): Promise
     await writeFile(join(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 0o600 });
     await adoptHome(app, tmp, tag);
     await reload(app);
+    assertAdopted(app, res.userId);
     app.io.err(`this device moved with your identity: it is now ${res.address} (${res.did})`);
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
@@ -2358,6 +2385,10 @@ export async function recoverInterruptedFollow(home: string): Promise<boolean> {
     marker = JSON.parse(await readFile(join(tmp, "linked.json"), "utf8")) as { to?: string; tag?: string };
   } catch {
     return false;
+  }
+  // Only the folders a follow made here: a link (to another home's state) is never moved into this one.
+  for (const p of [rotationDir(home), tmp, join(tmp, "linked.json"), join(tmp, "cli"), join(tmp, "v3"), join(tmp, "cursors")]) {
+    if (await isLink(p)) return false;
   }
   if (!(await exists(join(tmp, "cli"))) && (await exists(join(home, "cli")))) {
     // The new identity is already in place (the swap finished but the marker stayed).
@@ -2411,6 +2442,7 @@ export async function relinkRotated(app: App, code: string, opts: { label?: stri
       await writeFile(join(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 0o600 });
       await adoptHome(app, tmp, tag);
       await reload(app);
+      assertAdopted(app, res.userId);
       return { ...res, from: old };
     },
   };

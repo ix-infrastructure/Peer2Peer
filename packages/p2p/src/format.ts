@@ -55,10 +55,15 @@ export function formatCodes(rows: CodeRow[]): string {
         default:
           st = r.status;
       }
-      const shown = r.status === "open" || r.status === "taken" ? r.code : r.code.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
+      const shown = (r.status === "open" || r.status === "taken") && !(r as { redacted?: boolean }).redacted ? r.code : shortCode(r.code);
       return `${shown}${who}${circle}${to}: ${st}`;
     })
     .join("\n");
+}
+
+/** A code cut to its first four characters (after any link prefix): what the listing shows of a code that no longer lets anyone in. */
+export function shortCode(code: string): string {
+  return code.endsWith("…") ? code : code.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
 }
 
 /** "delivered via 2 relays (1 device)". */

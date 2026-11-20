@@ -52,6 +52,7 @@ var __toESM = (mod2, isNodeMode, target) => (target = mod2 != null ? __create(__
 
 // packages/p2p/src/ancestry.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
+import { existsSync as existsSync2, readFileSync as readFileSync8, statSync as statSync3 } from "node:fs";
 function isAgentProcess(executable) {
   const base = (executable.trim().split(/[\\/]/).pop() ?? "").toLowerCase();
   return base === "claude" || base === "codex" || base === "claude.exe" || base === "codex.exe";
@@ -60,46 +61,174 @@ function isScriptHost(comm) {
   const base = (comm.trim().split(/[\\/]/).pop() ?? "").toLowerCase();
   return base === "node" || base === "nodejs" || base === "bun" || base === "node.exe";
 }
-function argsOf(pid) {
-  try {
-    return execFileSync2("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "";
-  }
-}
 function isAgentScript(args) {
   const words = args.split(/\s+/).filter(Boolean);
   const script = words.slice(1).find((w) => !w.startsWith("-")) ?? "";
   const p = script.replace(/\\/g, "/");
   return p.includes("/@anthropic-ai/claude-code/") || p.includes("/@openai/codex/");
 }
-function agentAncestor() {
-  if (cached !== void 0) return cached;
-  cached = false;
-  if (process.platform === "win32") return cached;
+function systemPs() {
+  return PS_PATHS.find((p) => existsSync2(p));
+}
+function procHidesOthers() {
   try {
-    let pid = process.ppid;
-    for (let i = 0; i < 64 && pid > 1; i++) {
-      const line = execFileSync2("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"] }).trim();
-      const sp = line.search(/\s/);
-      if (sp < 0) break;
-      const ppid = Number(line.slice(0, sp));
-      const comm = line.slice(sp + 1);
-      if (isAgentProcess(comm) || isScriptHost(comm) && isAgentScript(argsOf(pid))) {
-        cached = true;
-        break;
-      }
-      if (!Number.isSafeInteger(ppid)) break;
-      pid = ppid;
-    }
+    return readFileSync8("/proc/mounts", "utf8").split("\n").some((l) => {
+      const f = l.split(" ");
+      return f[1] === "/proc" && (f[3] ?? "").split(",").some((o) => o.startsWith("hidepid=") && o !== "hidepid=0" && o !== "hidepid=off");
+    });
   } catch {
+    return false;
   }
+}
+function procRead(pid) {
+  let stat3;
+  try {
+    stat3 = readFileSync8(`/proc/${pid}/stat`, "utf8");
+  } catch (e) {
+    const code2 = e.code;
+    if (code2 === "EACCES" || code2 === "EPERM" || code2 === "ENOENT") {
+      try {
+        if (statSync3(`/proc/${pid}`).uid !== process.getuid?.()) throw new OtherUsersProcess();
+      } catch (s2) {
+        if (s2 instanceof OtherUsersProcess) throw s2;
+        if (s2.code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess(true);
+      }
+    }
+    throw e;
+  }
+  const close = stat3.lastIndexOf(")");
+  if (close < 0) throw new Error("unreadable stat");
+  const ppid = Number(stat3.slice(close + 2).split(" ")[1]);
+  if (!Number.isSafeInteger(ppid)) throw new Error("unreadable stat");
+  const comm = stat3.slice(stat3.indexOf("(") + 1, close);
+  return {
+    ppid,
+    comm,
+    args: () => {
+      try {
+        return readFileSync8(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").trim();
+      } catch {
+        return "";
+      }
+    }
+  };
+}
+function psRead(ps, pid) {
+  const line = execFileSync2(ps, ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C" } }).trim();
+  const sp = line.search(/\s/);
+  if (sp < 0) throw new Error("unreadable ps line");
+  const ppid = Number(line.slice(0, sp));
+  if (!Number.isSafeInteger(ppid)) throw new Error("unreadable ps line");
+  return {
+    ppid,
+    comm: line.slice(sp + 1),
+    args: () => {
+      try {
+        return execFileSync2(ps, ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C" } }).trim();
+      } catch {
+        return "";
+      }
+    }
+  };
+}
+function walkAncestry(start, read2, self = process.pid) {
+  let pid = start;
+  let child = self;
+  for (let i = 0; i < 64; i++) {
+    if (pid <= 1) return "none";
+    let p;
+    try {
+      p = read2(pid);
+    } catch (e) {
+      if (e instanceof OtherUsersProcess) {
+        if (!e.hidden) return "none";
+        let still;
+        try {
+          still = read2(child).ppid === pid;
+        } catch {
+          still = false;
+        }
+        if (still) return "none";
+        why = "a process in it exited while it was read: run the command again";
+        return "unknown";
+      }
+      why = e.code === "ETIMEDOUT" || /timed? ?out/i.test(String(e.message)) ? "reading it timed out: run the command again" : "a process in it couldn't be read: run the command again";
+      return "unknown";
+    }
+    if (isAgentProcess(p.comm) || isScriptHost(p.comm) && isAgentScript(p.args())) return "agent";
+    if (p.ppid === pid) {
+      why = "it loops";
+      return "unknown";
+    }
+    child = pid;
+    pid = p.ppid;
+  }
+  why = "it is deeper than 64 processes";
+  return "unknown";
+}
+function initialUserNamespace(uidMap) {
+  const lines = uidMap.split("\n").map((l) => l.trim().split(/\s+/).join(" ")).filter((l) => l !== "");
+  return lines.length === 1 && lines[0] === "0 0 4294967295";
+}
+function nestedPidNamespace(status) {
+  const line = status.split("\n").find((l) => l.startsWith("NSpid:"));
+  return line !== void 0 && line.slice(6).trim().split(/\s+/).filter(Boolean).length > 1;
+}
+function ancestry() {
+  if (cached !== void 0) return cached;
+  if (process.platform === "win32") return cached = "none";
+  if (process.platform === "linux" && existsSync2("/proc/self/stat")) {
+    let status = "";
+    try {
+      status = readFileSync8("/proc/self/status", "utf8");
+    } catch {
+    }
+    let uidMap = "";
+    try {
+      uidMap = readFileSync8("/proc/self/uid_map", "utf8");
+    } catch {
+    }
+    if (!initialUserNamespace(uidMap)) {
+      why = "it runs in a user namespace (a sandbox or rootless container), where the process tree can't be trusted: pass your person token there";
+      return cached = "unknown";
+    }
+    if (nestedPidNamespace(status)) {
+      why = "it runs in a container or sandbox with its own process namespace, where an agent outside can't be seen: pass your person token there";
+      return cached = "unknown";
+    }
+    return cached = walkAncestry(process.ppid, procRead);
+  }
+  const ps = systemPs();
+  if (!ps) {
+    why = "there is no system ps (/bin/ps or /usr/bin/ps)";
+    return cached = "unknown";
+  }
+  cached = walkAncestry(process.ppid, (pid) => psRead(ps, pid));
   return cached;
 }
-var cached;
+function ancestryWhy() {
+  return ancestry() === "unknown" ? why : "";
+}
+function agentAncestor() {
+  return ancestry() === "agent";
+}
+function ancestryUnknown() {
+  return ancestry() === "unknown";
+}
+var cached, why, OtherUsersProcess, PS_PATHS;
 var init_ancestry = __esm({
   "packages/p2p/src/ancestry.ts"() {
     "use strict";
+    why = "";
+    OtherUsersProcess = class extends Error {
+      /** Not visible at all (/proc's `hidepid`): it may also have just exited, so the walk checks that it didn't. */
+      constructor(hidden = false) {
+        super(hidden ? "hidden process" : "another user's process");
+        this.hidden = hidden;
+      }
+      hidden;
+    };
+    PS_PATHS = ["/bin/ps", "/usr/bin/ps"];
   }
 });
 
@@ -9962,9 +10091,9 @@ function statusBody(v) {
     b.caps = [...o.caps];
   }
   if (o.agents !== void 0) {
-    const why = statusAgentsError(o.agents, { lenient: true });
-    if (why !== void 0)
-      fail("malformed", `status.agents ${why}`);
+    const why2 = statusAgentsError(o.agents, { lenient: true });
+    if (why2 !== void 0)
+      fail("malformed", `status.agents ${why2}`);
     b.agents = copyAgents(o.agents);
   }
   return b;
@@ -10459,8 +10588,8 @@ var init_store = __esm({
               ...Object.keys(claims).length > 0 ? { claims } : {},
               ...Object.keys(tries).length > 0 ? { tries } : {}
             };
-            const why = attempt > maxAttempts ? `${maxAttempts} attempts` : `${abandons} attempts cut off by their process exiting`;
-            return { next: { ...cur, [fdid]: entry2 }, result: { verdict: { reason: "gave-up", message: `gave up on seq ${p.seq} from ${fdid} after ${why}` } } };
+            const why2 = attempt > maxAttempts ? `${maxAttempts} attempts` : `${abandons} attempts cut off by their process exiting`;
+            return { next: { ...cur, [fdid]: entry2 }, result: { verdict: { reason: "gave-up", message: `gave up on seq ${p.seq} from ${fdid} after ${why2}` } } };
           }
           claims[k] = { ...me, at: nowMs };
           tries[k] = { n: attempt, at: nowMs, ...abandons > 0 ? { a: abandons } : {} };
@@ -12135,7 +12264,7 @@ function codeFromWebLink(input) {
   if (/[\s\u0000-\u001f\u007f]/.test(t2)) throw new CliError("usage", "that link has spaces or control characters in it: copy it again, whole");
   if (/^(?:https:\/\/(?:ix-infra\.com\/p2p|peer2peer\.dev)\/i#|p2p:\/\/invite\/)/i.test(t2)) throw new CliError("usage", "that is a long invite link: use `p2p accept <link>`");
   if (/^(?:https:\/\/(?:ix-infra\.com\/p2p|peer2peer\.dev)\/c#|p2p:\/\/circle\/)/i.test(t2)) throw new CliError("usage", "that is a circle link: use `p2p circle join <link>`");
-  const refuse = (why) => new CliError("usage", `that is not a Peer2Peer invite link (${why}): it looks like ${CODE_WEB_PREFIX}relay.example/K7QM-3XPD-9TWA-HF2N-6RJC`);
+  const refuse = (why2) => new CliError("usage", `that is not a Peer2Peer invite link (${why2}): it looks like ${CODE_WEB_PREFIX}relay.example/K7QM-3XPD-9TWA-HF2N-6RJC`);
   let u;
   try {
     u = new URL(t2);
@@ -12423,14 +12552,14 @@ var init_transient = __esm({
 
 // packages/p2p/src/procstart.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync8 } from "node:fs";
+import { readFileSync as readFileSync9 } from "node:fs";
 function linuxStartMs(pid) {
-  const stat3 = readFileSync8(`/proc/${pid}/stat`, "utf8");
+  const stat3 = readFileSync9(`/proc/${pid}/stat`, "utf8");
   const fields = stat3.slice(stat3.lastIndexOf(")") + 2).split(" ");
   const ticks = Number(fields[19]);
   if (!Number.isFinite(ticks)) return void 0;
   if (bootMs === void 0) {
-    const m = /^btime (\d+)$/m.exec(readFileSync8("/proc/stat", "utf8"));
+    const m = /^btime (\d+)$/m.exec(readFileSync9("/proc/stat", "utf8"));
     if (!m) return void 0;
     bootMs = Number(m[1]) * 1e3;
   }
@@ -12471,7 +12600,7 @@ var init_procstart = __esm({
 });
 
 // packages/p2p/src/running.ts
-import { readFileSync as readFileSync9 } from "node:fs";
+import { readFileSync as readFileSync10 } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join as join10 } from "node:path";
 async function markRunning(app, sid) {
@@ -12480,7 +12609,7 @@ async function markRunning(app, sid) {
 }
 async function unmarkRunning(app, sid) {
   try {
-    const m = JSON.parse(readFileSync9(markerPath(app, sid), "utf8"));
+    const m = JSON.parse(readFileSync10(markerPath(app, sid), "utf8"));
     if (m.pid === process.pid) await writeFile(markerPath(app, sid), JSON.stringify({ ...m, ended: Date.now() }), { mode: 384 });
   } catch {
   }
@@ -12498,7 +12627,7 @@ function sessionEnded(app, sid) {
   if (app.watching === sid) return false;
   let m;
   try {
-    m = JSON.parse(readFileSync9(markerPath(app, sid), "utf8"));
+    m = JSON.parse(readFileSync10(markerPath(app, sid), "utf8"));
   } catch {
     return false;
   }
@@ -13307,7 +13436,7 @@ var init_outbox = __esm({
 });
 
 // packages/p2p/src/extensions.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync7, readFileSync as readFileSync10, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute7, join as join14, relative, resolve as resolvePath, sep as sep2 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 function extensionPackageName(ns) {
@@ -13393,10 +13522,10 @@ function extensionDirs(env, selfUrl) {
 }
 function resolveIn(nodeModules, name2) {
   const pkgDir = join14(nodeModules, ...name2.split("/"));
-  if (!existsSync2(join14(pkgDir, "package.json"))) return void 0;
+  if (!existsSync3(join14(pkgDir, "package.json"))) return void 0;
   let pkg;
   try {
-    pkg = JSON.parse(readFileSync10(join14(pkgDir, "package.json"), "utf8"));
+    pkg = JSON.parse(readFileSync11(join14(pkgDir, "package.json"), "utf8"));
   } catch {
     throw new ExtResolveError(`${join14(pkgDir, "package.json")} is not valid JSON`);
   }
@@ -13420,12 +13549,12 @@ function firstFromHere(home, ns, file) {
   const p = join14(home, SEEN_FILE);
   let seen = {};
   try {
-    seen = JSON.parse(readFileSync10(p, "utf8"));
+    seen = JSON.parse(readFileSync11(p, "utf8"));
   } catch {
   }
   if (seen[ns] === file) return false;
   try {
-    if (existsSync2(home)) {
+    if (existsSync3(home)) {
       const tmp = `${p}.${process.pid}.tmp`;
       writeFileSync7(tmp, JSON.stringify({ ...seen, [ns]: file }), { mode: 384 });
       renameSync5(tmp, p);
@@ -13463,9 +13592,9 @@ async function loadExtensions(opts) {
     try {
       const href = pathToFileURL(file).href;
       const mod2 = await import(href);
-      const { ext, why } = checkExtension(mod2, ns);
+      const { ext, why: why2 } = checkExtension(mod2, ns);
       if (!ext) {
-        warn(`p2p: extension ${name2} skipped: ${why}`);
+        warn(`p2p: extension ${name2} skipped: ${why2}`);
         continue;
       }
       if (firstFromHere(opts.home, ns, file)) warn(`p2p: loading extension ${name2} ${sanitizePeerText(ext.version, 32)} from ${file} (it runs with your p2p identity: only enable extensions you trust)`);
@@ -13481,8 +13610,8 @@ function setExtensionEnabled(home, ns, on) {
   if (!KNOWN_EXTENSIONS.includes(ns)) throw new Error(`${ns} is not a registered extension namespace (${KNOWN_EXTENSIONS.join(", ")})`);
   const p = join14(home, "config.json");
   let cfg = {};
-  if (existsSync2(p)) {
-    const v = JSON.parse(readFileSync10(p, "utf8"));
+  if (existsSync3(p)) {
+    const v = JSON.parse(readFileSync11(p, "utf8"));
     if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("config.json must hold a JSON object");
     cfg = v;
   }
@@ -13571,7 +13700,7 @@ var init_extensions = __esm({
 });
 
 // packages/p2p/src/config.ts
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync11, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join15 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -13643,7 +13772,7 @@ function resolveHome2(env) {
 function readFileConfig(home) {
   let raw;
   try {
-    raw = readFileSync11(join15(home, "config.json"), "utf8");
+    raw = readFileSync12(join15(home, "config.json"), "utf8");
   } catch {
     return {};
   }
@@ -13694,7 +13823,7 @@ function shippedDefaultRelays(env) {
   }
   let raw;
   try {
-    raw = readFileSync11(path2, "utf8");
+    raw = readFileSync12(path2, "utf8");
   } catch {
     return [];
   }
@@ -14001,7 +14130,7 @@ var init_receipts = __esm({
 
 // packages/p2p/src/history.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash4, hkdfSync as hkdfSync2, randomBytes as randomBytes10 } from "node:crypto";
-import { mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync12, renameSync as renameSync7, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync7, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
 import { join as join16 } from "node:path";
 function historySettings(app) {
   let cfg = {};
@@ -14024,7 +14153,7 @@ function historyKeyFile(home) {
 }
 function readKey2(home) {
   try {
-    const t2 = readFileSync12(historyKeyFile(home), "utf8").trim();
+    const t2 = readFileSync13(historyKeyFile(home), "utf8").trim();
     return KEY_RE.test(t2) ? Buffer.from(hkdfSync2("sha256", b64uDecode(t2, 32), new Uint8Array(0), new TextEncoder().encode(KEY_INFO), 32)) : void 0;
   } catch {
     return void 0;
@@ -14071,13 +14200,13 @@ function segmentNames(app) {
     return [];
   }
 }
-function quarantine(app, name2, why) {
+function quarantine(app, name2, why2) {
   setAside++;
   const dir = join16(app.state.dir, "cli");
   const to = `history.bad-${Date.now()}-${name2}.json`;
   try {
     renameSync7(join16(dir, `${name2}.json`), join16(dir, to));
-    app.io.err(`p2p: message history: ${name2} couldn't be opened (${why}); set aside as ${to}`);
+    app.io.err(`p2p: message history: ${name2} couldn't be opened (${why2}); set aside as ${to}`);
   } catch {
   }
 }
@@ -14583,8 +14712,8 @@ function keepFor(reg, kind, v, body, fallback, from, session, ttl) {
 }
 async function onStateEnvelope(app, r, pt, from, now = Date.now()) {
   const e = r.envelope;
-  const debug2 = (why) => {
-    if (app.env.P2P_DEBUG === "1") app.io.err(`p2p: dropped ${sanitizePeerText(pt.kind, 60)} from ${sanitizePeerText(from.address, 80)}: ${why}`);
+  const debug2 = (why2) => {
+    if (app.env.P2P_DEBUG === "1") app.io.err(`p2p: dropped ${sanitizePeerText(pt.kind, 60)} from ${sanitizePeerText(from.address, 80)}: ${why2}`);
   };
   if (e.from !== e.own) {
     debug2("only a session's owner publishes its state");
@@ -15572,8 +15701,8 @@ async function onSessionEnvelope(app, env, r) {
   }
 }
 async function bindFromEnv(app, sid, extra = [], o = {}) {
-  const { dirs, why } = sessionDirs(app.env);
-  const over = /* @__PURE__ */ new Set([...why, ...o.over ?? []]);
+  const { dirs, why: why2 } = sessionDirs(app.env);
+  const over = /* @__PURE__ */ new Set([...why2, ...o.over ?? []]);
   if (extra.length > MAX_SESSION_DIRS) over.add("folders");
   const scratch = app.front === true ? sessionScratch(app.env[SCRATCH_ENV]) : void 0;
   await bindSession(app, sid, [...dirs, ...extra.slice(0, MAX_SESSION_DIRS)], { ...o.person ? { person: true } : {}, ...over.size > 0 ? { over: [...over] } : {}, ...scratch ? { scratch } : {} });
@@ -19747,8 +19876,8 @@ var init_relay_client = __esm({
         ]);
         const { key, port } = hostKey(this.transport.ws);
         let dialed = false;
-        const unreachable = (why) => {
-          const e = new CliError("unreachable", `can't reach ${this.relay} (${why}: check your network or firewall)`);
+        const unreachable = (why2) => {
+          const e = new CliError("unreachable", `can't reach ${this.relay} (${why2}: check your network or firewall)`);
           if (!dialed && this.opts.rememberUnreachable !== false) this.opts.progress?.unreachable?.set(key, e);
           return e;
         };
@@ -20316,9 +20445,9 @@ async function circlesForCode(app, opts) {
       app.warn(`your default circle ${want} isn't held here: the code is a friend invite only`);
       return [];
     }
-    const why = canAdd(app, c);
-    if (why) {
-      app.warn(`the code doesn't include your default circle "${circleDisplayName(c.chain.head)}": ${why}`);
+    const why2 = canAdd(app, c);
+    if (why2) {
+      app.warn(`the code doesn't include your default circle "${circleDisplayName(c.chain.head)}": ${why2}`);
       return [];
     }
     return [c];
@@ -20334,8 +20463,8 @@ async function circlesForCode(app, opts) {
       continue;
     }
     if (out.some((x) => x.record.cid === c.record.cid)) continue;
-    const why = canAdd(app, c);
-    if (why) refused.push(`"${circleDisplayName(c.chain.head)}" (${c.record.cid}): ${why}`);
+    const why2 = canAdd(app, c);
+    if (why2) refused.push(`"${circleDisplayName(c.chain.head)}" (${c.record.cid}): ${why2}`);
     else out.push(c);
   }
   if (refused.length > 0) throw new CliError("not_admin", `the code can't join ${refused.length === 1 ? "this circle" : "these circles"}, so no code was made: ${refused.join("; ")}`);
@@ -21025,7 +21154,7 @@ var init_codes = __esm({
 
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
-import { accessSync, constants, statSync as statSync3 } from "node:fs";
+import { accessSync, constants, statSync as statSync4 } from "node:fs";
 import { delimiter as delimiter3, isAbsolute as isAbsolute8, join as join17 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
@@ -21053,7 +21182,7 @@ function ixAdvice(env, file, o = {}) {
 function whichAbsolute(name2, env = process.env, platform = process.platform) {
   const runnable = (p) => {
     try {
-      if (!statSync3(p).isFile()) return false;
+      if (!statSync4(p).isFile()) return false;
       if (platform !== "win32") accessSync(p, constants.X_OK);
       return true;
     } catch {
@@ -21240,7 +21369,8 @@ async function init(app, opts) {
   const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
   const keys = newKeysDoc(ik.userId, device, cert, ik);
   const self = { name: name2, relays, createdAt: Date.now() };
-  renewPersonToken(app.home);
+  renewPersonToken(app.home, keys.spk);
+  app.identityMadeHere = true;
   await app.state.put("keys", keys);
   await app.state.put("self", self);
   app.setKeys(keys, self);
@@ -21608,7 +21738,8 @@ async function linkJoin(app, code2, opts = {}) {
       }
       const keys = newKeysDoc(userId, { ...device, userId }, opened.cert.jws, opened.ik);
       const self = { name: opened.doc.name, relays: opened.doc.relays, createdAt: Date.now() };
-      renewPersonToken(app.home);
+      renewPersonToken(app.home, keys.spk);
+      app.identityMadeHere = true;
       await app.state.put("keys", keys);
       await app.state.put("self", self);
       app.setKeys(keys, self);
@@ -21635,10 +21766,10 @@ async function backupRestore(app, phrase, opts) {
     await app.close().catch(() => {
     });
     if (app.publishMaybeStored) {
-      const why = e instanceof Error ? e.message : String(e);
+      const why2 = e instanceof Error ? e.message : String(e);
       throw new CliError(
         "restore_interrupted",
-        `${why}. A relay may already hold the restored document, so this device's state in ${app.home} was kept: run \`p2p identity republish\` to finish, or move ${app.home} aside and run \`p2p backup restore\` again (that revokes this half-restored device)`,
+        `${why2}. A relay may already hold the restored document, so this device's state in ${app.home} was kept: run \`p2p identity republish\` to finish, or move ${app.home} aside and run \`p2p backup restore\` again (that revokes this half-restored device)`,
         { home: app.home, cause: e instanceof CliError ? e.code : "error" }
       );
     }
@@ -21682,7 +21813,8 @@ async function restoreInto(app, phrase, opts) {
   if (found === 0) {
     const name2 = opts.name ?? defaultName();
     const doc = createIdentityDoc(ik, { ver: 1, prev: null, name: name2, relays, devices: [device.did], keyholders: [device.did], by: device.did, certs: [cert] });
-    renewPersonToken(app.home);
+    renewPersonToken(app.home, keys.spk);
+    app.identityMadeHere = true;
     await app.state.put("keys", keys);
     await app.state.put("self", { ...self, name: name2 });
     app.setKeys(keys, { ...self, name: name2 });
@@ -21699,7 +21831,8 @@ async function restoreInto(app, phrase, opts) {
   }
   const existing = await app.refreshIdentity(ik.userId, relays, { force: true, strict: true });
   if (!existing) throw new CliError("refresh_failed", "couldn't fit the relays' identity document");
-  renewPersonToken(app.home);
+  renewPersonToken(app.home, keys.spk);
+  app.identityMadeHere = true;
   await app.state.put("keys", keys);
   await app.store.putDeviceCert({ userId: ik.userId, did: device.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
   await app.state.put("self", { ...self, name: existing.head.name, relays: existing.head.relays });
@@ -21829,7 +21962,7 @@ ${proof}` };
 }
 async function addProof(app, proof, kind, claim) {
   await app.connect({ allowNone: true });
-  const same = (j) => {
+  const same2 = (j) => {
     try {
       const p = decodeTyped(j, TYP3.proof).payload;
       return p.kind === kind && p.claim === claim;
@@ -21838,7 +21971,7 @@ async function addProof(app, proof, kind, claim) {
     }
   };
   const pub = await app.publishNext((p) => {
-    p.proofs = [...(p.proofs ?? []).filter((j) => !same(j)), proof];
+    p.proofs = [...(p.proofs ?? []).filter((j) => !same2(j)), proof];
   });
   return pub.ver;
 }
@@ -21909,6 +22042,7 @@ __export(rotation_exports, {
   alertForeignRotations: () => alertForeignRotations,
   approveRotation: () => approveRotation,
   approveRotationJoin: () => approveRotationJoin,
+  assertAdopted: () => assertAdopted,
   circleHeld: () => circleHeld,
   followHeld: () => followHeld,
   friendVerdict: () => friendVerdict,
@@ -21935,7 +22069,7 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
+import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
 import { join as join19 } from "node:path";
 function stateBackend(home) {
   return new FileDocBackend(rotationDir(home));
@@ -21951,6 +22085,13 @@ async function dropState(home) {
   await rm2(join19(rotationDir(home), "state.json"), { force: true });
   await rm2(newHomeOf(home), { recursive: true, force: true });
 }
+async function isLink(p) {
+  try {
+    return (await lstat(p)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
 async function exists(p) {
   try {
     await stat(p);
@@ -21965,6 +22106,9 @@ async function appAt(app, home) {
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
+  for (const p of [src, join19(src, "cli"), join19(src, "v3"), join19(src, "cursors")]) {
+    if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
+  }
   const archive = join19(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
   const srcHasState = await exists(join19(src, "cli"));
@@ -21978,7 +22122,13 @@ async function moveHomes(home, src, tag) {
   for (const d of ["cli", "v3"]) await rm2(join19(archive, d, ".lock"), { force: true });
   return archive;
 }
+function assertAdopted(app, userId) {
+  if (app.userId === userId) return;
+  app.front = false;
+  throw new CliError("wrong_identity", `after the move this home holds ${app.userId}, not ${userId}: it stopped here`);
+}
 async function adoptHome(app, src, tag) {
+  app.identityMadeHere = true;
   await app.close();
   const home = app.home;
   if (await exists(join19(home, "cli"))) await app.state.backend.withLock(async () => {
@@ -22121,8 +22271,8 @@ function friendVerdict(st, peer2) {
   const trusted = (did) => did === st.selfDid || st.devices[did] !== void 0 && st.devices[did].status !== "excluded" && st.devices[did].status !== "aborted";
   if (entries.some((e) => trusted(e.did) && (st.contest || st.ownBranch || e.live))) return { invite: true };
   const dropped = entries.map((e) => st.devices[e.did]).find((d) => d?.status === "excluded");
-  const why = entries.some((e) => trusted(e.did)) ? "the friendship doesn't verify now" : dropped ? `made by a device the plan drops (${dropped.why ?? "you dropped it"})` : "made by a device your identity no longer lists";
-  return { invite: (st.inviteOptIn ?? []).includes(peer2), why };
+  const why2 = entries.some((e) => trusted(e.did)) ? "the friendship doesn't verify now" : dropped ? `made by a device the plan drops (${dropped.why ?? "you dropped it"})` : "made by a device your identity no longer lists";
+  return { invite: (st.inviteOptIn ?? []).includes(peer2), why: why2 };
 }
 function invitedFriends(st) {
   return Object.keys(st.friendSigners ?? {}).filter((p) => friendVerdict(st, p).invite);
@@ -22397,8 +22547,9 @@ async function begin(app, opts) {
   await rm2(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
-  renewPersonToken(home);
-  await napp.state.put("keys", newKeysDoc(newIk.userId, device, cert, newIk));
+  const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
+  renewPersonToken(home, nkeys.spk);
+  await napp.state.put("keys", nkeys);
   await napp.state.put("self", self);
   await napp.load(true);
   await addIdentityVersion(napp.store, doc);
@@ -22419,9 +22570,9 @@ async function begin(app, opts) {
     devices: Object.fromEntries(
       others.map((d) => {
         const t2 = trust.get(d);
-        const why = whyOf(d);
+        const why2 = whyOf(d);
         const kept = (opts.keep ?? []).includes(d);
-        const dropped = exclude.includes(d) || why !== void 0 && !kept;
+        const dropped = exclude.includes(d) || why2 !== void 0 && !kept;
         return [
           d,
           {
@@ -22429,7 +22580,7 @@ async function begin(app, opts) {
             keyholder: baseKeyholders.includes(d),
             status: dropped ? "excluded" : "pending",
             labelTrusted: t2.labelTrusted,
-            ...why !== void 0 && !kept && !exclude.includes(d) ? { why } : {}
+            ...why2 !== void 0 && !kept && !exclude.includes(d) ? { why: why2 } : {}
           }
         ];
       })
@@ -22472,8 +22623,8 @@ async function deviceTrust(app, dids, base) {
     }
     const lastAt = Math.max(0, ...Object.values(replay[d]?.lastAt ?? {})) / 1e3;
     const seen = now - Math.max(lastAt, certIat) <= DEVICE_SEEN_WINDOW_SEC;
-    const why = !listed.has(d) ? "added by a version you didn't publish" : !seen ? "not seen in the last 30 days" : void 0;
-    out.set(d, { ...why ? { why } : {}, labelTrusted: cert !== void 0 && ownCerts.has(cert) });
+    const why2 = !listed.has(d) ? "added by a version you didn't publish" : !seen ? "not seen in the last 30 days" : void 0;
+    out.set(d, { ...why2 ? { why: why2 } : {}, labelTrusted: cert !== void 0 && ownCerts.has(cert) });
   }
   return out;
 }
@@ -23464,6 +23615,7 @@ async function followHeld(app, idOrItem) {
     await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
+    assertAdopted(app, res.userId);
     app.io.err(`this device moved with your identity: it is now ${res.address} (${res.did})`);
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
@@ -23489,6 +23641,9 @@ async function recoverInterruptedFollow(home) {
     marker = JSON.parse(await readFile4(join19(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
+  }
+  for (const p of [rotationDir(home), tmp, join19(tmp, "linked.json"), join19(tmp, "cli"), join19(tmp, "v3"), join19(tmp, "cursors")]) {
+    if (await isLink(p)) return false;
   }
   if (!await exists(join19(tmp, "cli")) && await exists(join19(home, "cli"))) {
     await rm2(tmp, { recursive: true, force: true });
@@ -23533,6 +23688,7 @@ async function relinkRotated(app, code2, opts = {}) {
       await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
+      assertAdopted(app, res.userId);
       return { ...res, from: old };
     }
   };
@@ -23709,9 +23865,9 @@ async function importSync(app, raw, meta = {}) {
   for (const proof of body.friendships ?? []) {
     try {
       const f = await reverifyFriendshipForApproval(app.store, proof, app.fetcher(), { self: app.userId });
-      const why = await untrustedImportSigner(app, f.inviter === app.userId ? f.invite.did : f.accept.did);
-      if (why) {
-        syncLog?.(`sync: not taking a friendship made by another device while your identity is rotating (${why})`);
+      const why2 = await untrustedImportSigner(app, f.inviter === app.userId ? f.invite.did : f.accept.did);
+      if (why2) {
+        syncLog?.(`sync: not taking a friendship made by another device while your identity is rotating (${why2})`);
         continue;
       }
       await recordFriendshipV3(app.store, f);
@@ -25810,8 +25966,8 @@ async function answerWant(app, from, fdid, want, authorizedBy, relay, capJws, po
     }
   }
   const who2 = async () => app.addressOf(from);
-  const refuse = async (why) => {
-    app.io.err(`not answering ${await who2()}'s request for circle ${want.cid}: ${why}`);
+  const refuse = async (why2) => {
+    app.io.err(`not answering ${await who2()}'s request for circle ${want.cid}: ${why2}`);
     await noteRefused(app, from, want.cid);
   };
   let pool = member ? "member" : powId !== void 0 ? "reserve" : "open";
@@ -25958,6 +26114,8 @@ __export(projects_exports, {
   graphTargetLine: () => graphTargetLine,
   graphTargetOf: () => graphTargetOf,
   hasDotDot: () => hasDotDot,
+  healPersonToken: () => healPersonToken,
+  homeFilesOwn: () => homeFilesOwn,
   identityHere: () => identityHere,
   isAgentProcess: () => isAgentProcess,
   isLoopbackEndpoint: () => isLoopbackEndpoint,
@@ -25970,8 +26128,11 @@ __export(projects_exports, {
   normalizeSharedEndpoint: () => normalizeSharedEndpoint,
   overWhys: () => overWhys,
   personHere: () => personHere,
+  personHereStrict: () => personHereStrict,
+  personSaltFile: () => personSaltFile,
   personToken: () => personToken,
   personTokenFile: () => personTokenFile,
+  personTokenMatchesKeys: () => personTokenMatchesKeys,
   personTokenOk: () => personTokenOk,
   physicalPath: () => physicalPath,
   privateReasons: () => privateReasons,
@@ -25997,15 +26158,15 @@ __export(projects_exports, {
   stickyPrivate: () => stickyPrivate,
   takePersonToken: () => takePersonToken
 });
-import { createHash as createHash8, randomBytes as randomBytes14, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync3, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync13, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { createHash as createHash8, createHmac, randomBytes as randomBytes14, timingSafeEqual } from "node:crypto";
+import { existsSync as existsSync4, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
 import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute9, join as join20, resolve as resolve3, sep as sep3 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
   if (w && isAbsolute9(w)) {
     try {
-      if (statSync4(w).isDirectory()) return w;
+      if (statSync5(w).isDirectory()) return w;
     } catch {
     }
   }
@@ -26013,10 +26174,10 @@ function sessionWorkdir(env) {
 }
 function sessionDirs(env) {
   const extra = (env.P2P_PROJECT_DIRS ?? "").split(delimiter4).filter((x) => x.trim() !== "" && isAbsolute9(x.trim()));
-  const why = extra.length > MAX_SESSION_DIRS ? ["folders"] : [];
+  const why2 = extra.length > MAX_SESSION_DIRS ? ["folders"] : [];
   const said = env.P2P_PROJECT_DIRS_OVER?.trim() ?? "";
-  if (said !== "" && said !== "0") why.push(...overWhys(said));
-  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over: why.length > 0, why: [...new Set(why)] };
+  if (said !== "" && said !== "0") why2.push(...overWhys(said));
+  return { dirs: [sessionWorkdir(env), ...extra.slice(0, MAX_SESSION_DIRS)], over: why2.length > 0, why: [...new Set(why2)] };
 }
 function overWhys(v) {
   const words = Array.isArray(v) ? v.map(String) : typeof v === "string" ? v.split(/[\s,]+/) : v === true ? ["front"] : [];
@@ -26062,7 +26223,7 @@ function existingDir(p) {
   let cur = physicalPath(p);
   for (let i = 0; i < 4096; i++) {
     try {
-      const st = statSync4(cur);
+      const st = statSync5(cur);
       return real(st.isDirectory() ? cur : dirname6(cur));
     } catch {
       const up = dirname6(cur);
@@ -26078,7 +26239,7 @@ function pseudoPath(p) {
   if (!PSEUDO_ROOTS.some((root) => at === root || at.startsWith(`${root}/`))) return false;
   let st;
   try {
-    st = statSync4(p);
+    st = statSync5(p);
   } catch {
     return false;
   }
@@ -26170,9 +26331,9 @@ function remotesOf(config) {
 }
 function readSmall(file) {
   try {
-    const st = statSync4(file);
+    const st = statSync5(file);
     if (!st.isFile() || st.size > 256 * 1024) return void 0;
-    return readFileSync13(file, "utf8");
+    return readFileSync14(file, "utf8");
   } catch {
     return void 0;
   }
@@ -26181,7 +26342,7 @@ function isBareRepo2(d) {
   if (basename5(d) === ".git") return false;
   const st = (p) => {
     try {
-      return statSync4(p);
+      return statSync5(p);
     } catch {
       return void 0;
     }
@@ -26206,14 +26367,14 @@ ${common}`).slice(0, 24)}`,
     kind: "git",
     root,
     ...remote ? { remote } : {},
-    ...existsSync3(join20(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+    ...existsSync4(join20(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
   };
 }
 function present(p) {
   let q = resolve3(p);
   while (/[*?[\]{}]/.test(basename5(q)) && dirname6(q) !== q) q = dirname6(q);
   try {
-    statSync4(q);
+    statSync5(q);
     return true;
   } catch {
     return false;
@@ -26235,7 +26396,7 @@ function projectOf(dir, doc) {
     if (isThere) {
       let st;
       try {
-        st = statSync4(dotgit);
+        st = statSync5(dotgit);
       } catch {
         st = void 0;
       }
@@ -26245,7 +26406,7 @@ function projectOf(dir, doc) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
         if (m) gitDir = resolve3(cur, m[1]);
       }
-      if (!gitDir || !existsSync3(gitDir)) {
+      if (!gitDir || !existsSync4(gitDir)) {
         return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
@@ -26258,7 +26419,7 @@ function projectOf(dir, doc) {
   const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename5(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
   let marked = false;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (existsSync3(join20(c, PRIVATE_MARKER))) {
+    if (existsSync4(join20(c, PRIVATE_MARKER))) {
       marked = true;
       break;
     }
@@ -26305,7 +26466,7 @@ async function projectView(app, ref, doc) {
     for (const u of share.people) people2.push({ userId: u, address: await app.addressOf(u) });
   }
   const policy = share === "private" || ref.repoPrivate ? "private" : "shared";
-  const why = ref.repoPrivate ? `the repository asks to stay private (${PRIVATE_MARKER} at its top level)` : !d.projects[ref.id] ? "unmapped" : void 0;
+  const why2 = ref.repoPrivate ? `the repository asks to stay private (${PRIVATE_MARKER} at its top level)` : !d.projects[ref.id] ? "unmapped" : void 0;
   return {
     id: ref.id,
     name: ref.name,
@@ -26315,7 +26476,7 @@ async function projectView(app, ref, doc) {
     policy,
     circles,
     people: people2,
-    ...why ? { why } : {},
+    ...why2 ? { why: why2 } : {},
     ...ref.repoPrivate ? { repoPrivate: true } : {},
     ...d.projects[ref.id]?.covers === true && ref.kind === "dir" ? { covers: true } : {},
     graph: projectGraphTarget(app, ref, d)
@@ -26374,11 +26535,11 @@ function nestedBoundaries(root) {
         if (!e.isDirectory() || e.isSymbolicLink()) continue;
         const p = join20(d, e.name);
         if (e.name === ".git") continue;
-        if (existsSync3(join20(p, ".git")) || isBareRepo2(p)) {
+        if (existsSync4(join20(p, ".git")) || isBareRepo2(p)) {
           repos.push(p);
           continue;
         }
-        if (existsSync3(join20(p, PRIVATE_MARKER))) priv.push(p);
+        if (existsSync4(join20(p, PRIVATE_MARKER))) priv.push(p);
         next.push(p);
       }
       if (capped) break;
@@ -26453,7 +26614,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync3(join20(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync4(join20(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -26608,15 +26769,15 @@ async function bindSession(app, sid, dirs, o = {}) {
       throw new CliError("refused", `session ${sid} belongs to a front end of yours (the Claude mod or the Codex bridge): only it speaks for that session`);
     }
     const projects = { ...have?.projects ?? {} };
-    const why = new Set(have?.overWhy ?? []);
-    if (o.over === true) why.add("front");
-    else if (Array.isArray(o.over)) for (const w of overWhys(o.over)) why.add(w);
-    let over = have?.over === true || why.size > 0;
+    const why2 = new Set(have?.overWhy ?? []);
+    if (o.over === true) why2.add("front");
+    else if (Array.isArray(o.over)) for (const w of overWhys(o.over)) why2.add(w);
+    let over = have?.over === true || why2.size > 0;
     for (const { ref: r, under } of refs.values()) {
       const prev = projects[r.id];
       if (!prev && Object.keys(projects).length >= MAX_SESSION_PROJECTS) {
         over = true;
-        why.add("projects");
+        why2.add("projects");
         continue;
       }
       const all2 = /* @__PURE__ */ new Set([...prev?.under ?? [], ...under]);
@@ -26633,7 +26794,7 @@ async function bindSession(app, sid, dirs, o = {}) {
     if (o.constraint !== void 0 && !constraints.some((c) => JSON.stringify(c) === JSON.stringify(o.constraint))) {
       if (constraints.length >= MAX_SESSION_CONSTRAINTS) {
         over = true;
-        why.add("constraints");
+        why2.add("constraints");
       } else constraints.push(o.constraint);
     }
     const registered = front || have?.registered === true;
@@ -26641,7 +26802,7 @@ async function bindSession(app, sid, dirs, o = {}) {
     const next = {
       projects,
       ...over ? { over: true } : {},
-      ...why.size > 0 ? { overWhy: [...why] } : {},
+      ...why2.size > 0 ? { overWhy: [...why2] } : {},
       ...constraints.length ? { constraints } : {},
       ...unregistered ? { unregistered: true } : {},
       ...registered ? { registered: true } : {},
@@ -26661,36 +26822,64 @@ function agentContext(env) {
 function personTokenFile(home) {
   return join20(home, "cli", "person.key");
 }
-function personToken(home) {
-  const f = personTokenFile(home);
-  const read2 = () => {
-    try {
-      const t3 = readFileSync13(f, "utf8").trim();
-      return TOKEN_RE.test(t3) ? t3 : void 0;
-    } catch {
-      return void 0;
-    }
-  };
-  const have = read2();
-  if (have) return have;
-  mkdirSync10(join20(home, "cli"), { recursive: true, mode: 448 });
-  const t2 = randomBytes14(32).toString("base64url");
+function personSaltFile(home) {
+  return join20(home, "cli", "person.salt");
+}
+function deriveToken(spk, salt) {
+  return createHmac("sha256", Buffer.from(spk, "base64url")).update(TOKEN_LABEL).update(salt).digest("base64url");
+}
+function readTrim(f) {
   try {
-    writeFileSync10(f, t2, { mode: 384, flag: "wx" });
-    return t2;
+    return readFileSync14(f, "utf8").trim();
   } catch {
-    const again = read2();
-    if (again) return again;
-    throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
+    return void 0;
   }
 }
-function renewPersonToken(home) {
-  const f = personTokenFile(home);
-  mkdirSync10(join20(home, "cli"), { recursive: true, mode: 448 });
-  const t2 = randomBytes14(32).toString("base64url");
+function homeFilesOwn(home) {
+  const cli = join20(home, "cli");
+  try {
+    const d = lstatSync6(cli);
+    if (d.isSymbolicLink() || !d.isDirectory()) return false;
+  } catch (e) {
+    return e.code === "ENOENT";
+  }
+  const checks = [
+    [join20(cli, "keys.json"), true],
+    [join20(cli, "self.json"), true],
+    [personTokenFile(home), false],
+    [personSaltFile(home), false],
+    [join20(home, "v3"), false]
+  ];
+  for (const [p, single] of checks) {
+    let st;
+    try {
+      st = lstatSync6(p);
+    } catch (e) {
+      if (e.code === "ENOENT") continue;
+      return false;
+    }
+    if (st.isSymbolicLink()) return false;
+    if (single && st.nlink !== 1) return false;
+  }
+  return true;
+}
+function derivedToken(home) {
+  if (!identityHere(home)) return void 0;
+  const salt = readTrim(personSaltFile(home));
+  if (!salt || !TOKEN_RE.test(salt)) return void 0;
+  let spk;
+  try {
+    spk = JSON.parse(readFileSync14(join20(home, "cli", "keys.json"), "utf8")).spk;
+  } catch {
+    return void 0;
+  }
+  return typeof spk === "string" && spk !== "" ? deriveToken(spk, salt) : void 0;
+}
+function writeWhole(f, text2) {
+  mkdirSync10(dirname6(f), { recursive: true, mode: 448 });
   const tmp = `${f}.${randomBytes14(6).toString("hex")}.tmp`;
   try {
-    writeFileSync10(tmp, t2, { mode: 384, flag: "wx" });
+    writeFileSync10(tmp, text2, { mode: 384, flag: "wx" });
     let cleared = false;
     for (let tries = 0; ; tries++) {
       try {
@@ -26711,7 +26900,63 @@ function renewPersonToken(home) {
     }
   } catch (e) {
     rmSync4(tmp, { force: true });
-    throw new CliError("conflict", `couldn't replace the person token in ${f} (${e.code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
+    throw e;
+  }
+}
+function ensureSalt(home) {
+  const f = personSaltFile(home);
+  if (TOKEN_RE.test(readTrim(f) ?? "")) return;
+  if (!existsSync4(f)) {
+    try {
+      writeFileSync10(f, randomBytes14(32).toString("base64url"), { mode: 384, flag: "wx" });
+      return;
+    } catch {
+      if (TOKEN_RE.test(readTrim(f) ?? "")) return;
+    }
+  }
+  writeWhole(f, randomBytes14(32).toString("base64url"));
+}
+function personTokenMatchesKeys(home, spk, token) {
+  if (!homeFilesOwn(home)) return false;
+  const salt = readTrim(personSaltFile(home));
+  if (!salt || !TOKEN_RE.test(salt)) return false;
+  return same(token, deriveToken(spk, salt));
+}
+function personToken(home) {
+  const f = personTokenFile(home);
+  if (identityHere(home)) {
+    if (!homeFilesOwn(home)) return "";
+    ensureSalt(home);
+    const want = derivedToken(home);
+    if (!want) return "";
+    if (readTrim(f) !== want) writeWhole(f, want);
+    return want;
+  }
+  const read2 = () => {
+    const t3 = readTrim(f);
+    return t3 && TOKEN_RE.test(t3) ? t3 : void 0;
+  };
+  const have = read2();
+  if (have) return have;
+  mkdirSync10(join20(home, "cli"), { recursive: true, mode: 448 });
+  const t2 = randomBytes14(32).toString("base64url");
+  try {
+    writeFileSync10(f, t2, { mode: 384, flag: "wx" });
+    return t2;
+  } catch {
+    const again = read2();
+    if (again) return again;
+    throw new CliError("conflict", `${f} isn't a person token: remove it and run the command again`);
+  }
+}
+function renewPersonToken(home, spk) {
+  const salt = randomBytes14(32).toString("base64url");
+  const t2 = spk ? deriveToken(spk, salt) : randomBytes14(32).toString("base64url");
+  try {
+    writeWhole(personSaltFile(home), salt);
+    writeWhole(personTokenFile(home), t2);
+  } catch (e) {
+    throw new CliError("conflict", `couldn't replace the person token in ${personTokenFile(home)} (${e.code ?? "error"}): nothing was set up here. Remove that file and run the command again`);
   }
   return t2;
 }
@@ -26723,20 +26968,29 @@ function isDirectory(p) {
   }
 }
 function identityHere(home) {
-  return existsSync3(join20(home, "cli", "keys.json")) && existsSync3(join20(home, "cli", "self.json"));
+  return existsSync4(join20(home, "cli", "keys.json")) && existsSync4(join20(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
   if (!given || typeof home !== "string" || home === "") return false;
-  let t2;
-  try {
-    t2 = readFileSync13(personTokenFile(home), "utf8").trim();
-  } catch {
-    return false;
-  }
+  if (!homeFilesOwn(home)) return false;
+  const t2 = readTrim(personTokenFile(home));
+  if (t2 === void 0 || !same(given, t2)) return false;
+  if (!identityHere(home)) return true;
+  const want = derivedToken(home);
+  return want !== void 0 && same(given, want);
+}
+function same(given, t2) {
   const a = Buffer.from(given);
   const b = Buffer.from(t2);
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
+}
+function healPersonToken(home) {
+  if (!identityHere(home) || !existsSync4(personTokenFile(home))) return;
+  try {
+    personToken(home);
+  } catch {
+  }
 }
 function takePersonToken(env, home) {
   const ok = personTokenOk(env, home);
@@ -26744,17 +26998,23 @@ function takePersonToken(env, home) {
   delete process.env.P2P_PERSON_TOKEN;
   return ok;
 }
-async function assertPersonForWidening(app, what, confirm, why = "changes who reaches you", opts = {}) {
+async function assertPersonForWidening(app, what, confirm, why2 = "changes who reaches you", opts = {}) {
   const tokenCounts = !opts.noTokenBeforeIdentity || typeof app.home === "string" && identityHere(app.home);
   if (app.front === true && tokenCounts) return;
   if (agentContext(app.env)) {
     throw new CliError(
       "refused",
-      `\`p2p ${what}\` ${why}, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`
+      `\`p2p ${what}\` ${why2}, so only you run it: in your own terminal (not inside Claude Code or Codex), or with /peers in Claude Code. It was refused here because it runs inside an agent's session`
     );
   }
-  if (!await confirm(`p2p ${what} ${why}.`)) {
-    throw new CliError("refused", `\`p2p ${what}\` ${why}: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
+  if (ancestryUnknown()) {
+    throw new CliError(
+      "refused",
+      `\`p2p ${what}\` ${why2}, so only you run it: with /peers in Claude Code, or with your person token (P2P_PERSON_TOKEN). It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session${ancestryWhy() ? ` (${ancestryWhy()})` : ""}`
+    );
+  }
+  if (!await confirm(`p2p ${what} ${why2}.`)) {
+    throw new CliError("refused", `\`p2p ${what}\` ${why2}: confirm it with "yes" on your own terminal (it is read from the terminal itself, so a script or a process without one can't)`);
   }
 }
 async function assertSpeaksFor(app, sid) {
@@ -26768,6 +27028,9 @@ async function assertSpeaksFor(app, sid) {
 }
 function personHere(app) {
   return app.front === true || !agentContext(app.env);
+}
+function personHereStrict(app) {
+  return app.front === true || !agentContext(app.env) && !ancestryUnknown();
 }
 async function sessionBinding(app, sid) {
   return (await app.state.get("sessionProjects"))?.[sid];
@@ -26898,9 +27161,9 @@ async function assertMayReach(app, sid, userId, o = {}) {
   const b = await sessionBinding(app, sid);
   const names = Object.values(b?.projects ?? {}).map((p) => p.name);
   const who2 = o.address ?? await app.addressOf(userId);
-  const why = c.kind === "private" ? c.why : `${who2} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
+  const why2 = c.kind === "private" ? c.why : `${who2} isn't in the circles or people ${names.length > 1 ? "all its projects share" : "its project shares"}`;
   const remedy = c.kind === "private" ? privateRemedy(c.causes, c.blocking?.length ? c.blocking : names) : shareHint(names);
-  throw new CliError("not_shared", `session ${sid} works in ${nameList(names) || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
+  throw new CliError("not_shared", `session ${sid} works in ${nameList(names) || "a project"}, and Peer2Peer won't carry anything from it to ${who2}: ${why2}. ${remedy.charAt(0).toUpperCase()}${remedy.slice(1)}`, {
     delivered: false,
     project: { names, policy: c.kind, ...c.kind === "private" ? { causes: c.causes, ...stickyPrivate(c) ? { sticky: true } : {} } : {} }
   });
@@ -26992,7 +27255,7 @@ function localGraphEndpoint(_env, file) {
   return normalizeLoopbackEndpoint(typeof file?.ixEndpoint === "string" ? file.ixEndpoint.trim() : void 0) ?? DEFAULT_IX_ENDPOINT;
 }
 function graphTargetOf(inputs, o) {
-  const local = (why) => ({ kind: "local", endpoint: o.local, why });
+  const local = (why2) => ({ kind: "local", endpoint: o.local, why: why2 });
   if (inputs.length === 0) return local("no project: nothing is shared");
   let circles;
   for (const i of inputs) {
@@ -27024,7 +27287,7 @@ function normalizeSharedEndpoint(url) {
 }
 async function graphTarget(app, o = {}, sharedGraphs = SHARED_GRAPHS) {
   const lo = localGraphEndpoint(app.env, app.file);
-  const local = (why) => ({ kind: "local", endpoint: lo, why });
+  const local = (why2) => ({ kind: "local", endpoint: lo, why: why2 });
   if (o.over) return local(`it works in more than ${MAX_SESSION_DIRS} folders`);
   const paths = o.paths ?? [];
   if (paths.length > MAX_GRAPH_PATHS) return local(`a call named more than ${MAX_GRAPH_PATHS} paths`);
@@ -27075,7 +27338,7 @@ function graphPinnedEnv(env, target, base = process.env) {
   out.IX_NO_UPDATE_CHECK = "1";
   return out;
 }
-var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, RENAME_BUSY, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
+var PERSON_SESSION, PRIVATE_MARKER, OVER_WHYS, MAX_SESSION_DIRS, MAX_SESSION_PROJECTS, SESSION_BINDING_TTL_MS, MAX_PROJECT_SHARES, MAX_SESSION_CONSTRAINTS, MAX_UNDER, STICKY, sha, PSEUDO_ROOTS, clean3, NESTED_SCAN_DEPTH, NESTED_SCAN_ENTRIES, SCRATCH_ENV, SCRATCH_SCAN_ENTRIES, SCRATCH_SID_RE, JOB_ID_RE, AGENT_ENV_VARS, TOKEN_RE, TOKEN_LABEL, RENAME_BUSY, OVER_TEXT, MESSAGE_NAMES, PROJECT_NOTICE_PREFIX, GRAPH_LOCAL_ONLY, DEFAULT_IX_ENDPOINT, SHARED_GRAPHS, MAX_GRAPH_PATHS, IX_CLOUD_ENV, IX_KEEP;
 var init_projects = __esm({
   "packages/p2p/src/projects.ts"() {
     "use strict";
@@ -27115,6 +27378,7 @@ var init_projects = __esm({
       "CODEX_SESSION_ID"
     ];
     TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+    TOKEN_LABEL = "peer2peer/person-token/v1\0";
     RENAME_BUSY = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
     OVER_TEXT = {
       projects: `it worked in more than ${MAX_SESSION_PROJECTS} projects`,
@@ -27277,10 +27541,10 @@ import { hostname as hostname3, userInfo as userInfo2 } from "node:os";
 import { basename as basename6, join as join21 } from "node:path";
 function branchesCovered(chain, tips) {
   if (tips.length < 2) return true;
-  const ancestry = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
-  const common = ancestry.reduce((a, b) => new Set([...a].filter((x) => b.has(x))));
+  const ancestry2 = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
+  const common = ancestry2.reduce((a, b) => new Set([...a].filter((x) => b.has(x))));
   if (common.size === 0) return false;
-  for (const anc of ancestry) {
+  for (const anc of ancestry2) {
     for (const h of anc) {
       if (common.has(h)) continue;
       const v = chain.get(h);
@@ -27414,6 +27678,16 @@ var init_app = __esm({
     App = class {
       /** The person's front end vouched for this command (P2P_PERSON_TOKEN, checked once and removed: projects.ts). */
       front = false;
+      /**
+       * The token `front` rests on, kept in memory (never in the environment), so the keys this command
+       * loads are checked against it (load): a home whose files change after the start never lends the
+       * token to other keys. Undefined for an embedder that vouches without one.
+       */
+      frontToken;
+      /** The home held no identity when the token was checked (a front end's first run). */
+      frontFresh = false;
+      /** This command made, restored or swapped in the identity it holds (init, link join, restore, a rotation's swap). */
+      identityMadeHere = false;
       /** The person's "yes" on their controlling terminal (tty-confirm.ts); cli.ts may stand another in (tests). */
       confirmTty = confirmOnTty;
       env;
@@ -27466,6 +27740,10 @@ var init_app = __esm({
         this.io = opts.io;
         this.home = resolveHome2(opts.env);
         this.front = personTokenOk(this.env, this.home);
+        if (this.front) {
+          this.frontToken = this.env.P2P_PERSON_TOKEN?.trim();
+          this.frontFresh = !identityHere(this.home);
+        }
         this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
         this.readOnly = opts.readOnly === true;
         const lockOpts = this.progress.debug ? { onLock: lockLogger(this.progress), onLockWait: ({ dir, waitedMs, holderPid }) => debug(this.progress, `lock ${basename6(dir)}: still waiting after ${waitedMs}ms (held by pid ${holderPid ?? "?"})`) } : {};
@@ -27483,8 +27761,21 @@ var init_app = __esm({
           if (require2) throw new CliError("no_identity", "no identity here yet: run `p2p init` (or `p2p link join` / `p2p backup restore`)");
           return false;
         }
+        this.checkFrontKeys(keys);
         this.setKeys(keys, self);
         return true;
+      }
+      /**
+       * The person token this command was given must be the one these keys derive (projects.ts
+       * personTokenMatchesKeys), unless this command made the identity itself. A home that had no
+       * identity when the token was checked, and has one now that this command didn't make, never
+       * keeps it. Otherwise the command stops: the home changed under it.
+       */
+      checkFrontKeys(keys) {
+        if (!this.front || this.frontToken === void 0 || this.identityMadeHere) return;
+        if (!this.frontFresh && personTokenMatchesKeys(this.home, keys.spk, this.frontToken)) return;
+        this.front = false;
+        throw new CliError("refused", `the person token doesn't belong to the identity ${this.home} holds now (its files changed while the command ran): it stopped here. Run it again`);
       }
       setKeys(keys, self) {
         this.keys = keys;
@@ -29868,13 +30159,13 @@ var DOTDOT = /(^|[\\/])\.\.([\\/]|$)/;
 function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
   const out = /* @__PURE__ */ new Set();
   const maybe = /* @__PURE__ */ new Set();
-  const why = /* @__PURE__ */ new Set();
+  const why2 = /* @__PURE__ */ new Set();
   const isSep = (c) => c === "/" || c === "\\";
   const isAbs = (t2) => t2.startsWith("/") || /^[A-Za-z]:[\\/]/.test(t2) || t2.startsWith("\\\\");
   const sticky = ENV_FILES.test(command);
-  const done = () => ({ paths: [...out], over: why.size > 0, ...why.size > 0 ? { why: [...why] } : {}, ...sticky ? { sticky: true } : {}, ...maybe.size > 0 ? { maybe: [...maybe] } : {} });
+  const done = () => ({ paths: [...out], over: why2.size > 0, ...why2.size > 0 ? { why: [...why2] } : {}, ...sticky ? { sticky: true } : {}, ...maybe.size > 0 ? { maybe: [...maybe] } : {} });
   if (depth > 8) {
-    why.add("unresolved");
+    why2.add("unresolved");
     return done();
   }
   const substs = [];
@@ -29987,12 +30278,12 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
       }
     }
     if (unknown)
-      why.add("unresolved");
+      why2.add("unresolved");
     for (const t2 of targets)
       if (!moveTo(t2))
-        why.add("unresolved");
+        why2.add("unresolved");
     if (bases.length > 32) {
-      why.add("folders");
+      why2.add("folders");
       break;
     }
   }
@@ -30022,7 +30313,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
           lastSep = k;
       if (lastSep <= 0) {
         if (!inner)
-          why.add("unresolved");
+          why2.add("unresolved");
         return true;
       }
       t2 = t2.slice(0, lastSep);
@@ -30032,13 +30323,13 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
     if (t2 === "~" || t2.startsWith("~/") || t2.startsWith("~\\")) {
       if (!home) {
         if (!inner)
-          why.add("unresolved");
+          why2.add("unresolved");
         return true;
       }
       ps = [resolveLike(home, t2.slice(2) || ".")];
     } else if (t2.startsWith("~")) {
       if (!inner)
-        why.add("unresolved");
+        why2.add("unresolved");
       return true;
     } else if (isAbs(t2))
       ps = [resolveLike(cwd, t2)];
@@ -30104,7 +30395,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
     for (const p of r.maybe ?? [])
       maybe.add(p);
     for (const w of r.why ?? [])
-      why.add(w);
+      why2.add(w);
   }
   if (mayUnmark) {
     for (const p of [...out, ...bases]) {
@@ -30117,7 +30408,7 @@ function shellPaths(command, cwd, home, ctx = {}, depth = 0) {
   }
   return done();
   function capped() {
-    why.add("folders");
+    why2.add("folders");
     return { ...done(), paths: [...out].slice(0, MAX_COMMAND_PATHS), ...maybe.size > 0 ? { maybe: [...maybe].slice(0, MAX_COMMAND_PATHS) } : {} };
   }
 }
@@ -30495,8 +30786,8 @@ var P2P = class {
   }
 };
 function overFlag(v) {
-  const why = v === true ? [] : v.filter((w) => /^[a-z]{1,16}$/.test(w));
-  return why.length ? `--project-dirs-over=${why.join(",")}` : "--project-dirs-over";
+  const why2 = v === true ? [] : v.filter((w) => /^[a-z]{1,16}$/.test(w));
+  return why2.length ? `--project-dirs-over=${why2.join(",")}` : "--project-dirs-over";
 }
 
 // packages/codex-bridge/dist/bridge.js
@@ -31100,7 +31391,7 @@ async function effectiveEnv(o) {
   const given = o.env.CODEX_HOME?.trim();
   let codexHome = defaultCodexHome;
   if (given && given !== defaultCodexHome) {
-    const ignore2 = (why) => warnings.push(`ignored CODEX_HOME=${given}: ${why}; using ${defaultCodexHome}`);
+    const ignore2 = (why2) => warnings.push(`ignored CODEX_HOME=${given}: ${why2}; using ${defaultCodexHome}`);
     const refused = !isAbsolute(given) ? "not an absolute path" : (() => {
       const where = { projectDirs: o.projectDirs, temp: o.temp ?? tempRoots([o.env.TMPDIR]), granted: codexGranted([given], home), home };
       return unsafeLocation(given, where) ?? (o.privacy ?? ((d, w) => notPrivate(d, w ? { where: w } : {})))(given, where);
@@ -31209,14 +31500,14 @@ function isHomeFolder(dir, home = userHome()) {
   return samePath(dir, home) || samePath(realish(dir), realish(home));
 }
 function cwdPolicy(o) {
-  const same = (a, b) => samePath(a, b) || samePath(realish(a), realish(b));
+  const same2 = (a, b) => samePath(a, b) || samePath(realish(a), realish(b));
   if (o.codexCwd === void 0) {
     const releaseRefusal = "Codex's own working folder can't be read here, so the project this session works in can't be confirmed";
     return { releaseRefusal, warning: `refusing releases: ${releaseRefusal}` };
   }
-  if (same(o.serverCwd, o.codexCwd))
+  if (same2(o.serverCwd, o.codexCwd))
     return {};
-  if (o.configuredCwd && same(o.serverCwd, o.configuredCwd))
+  if (o.configuredCwd && same2(o.serverCwd, o.configuredCwd))
     return {};
   const refusal = `this server runs in ${o.serverCwd}, not in Codex's working folder ${o.codexCwd}, and the user-level config doesn't set that cwd (a project config may have moved it)`;
   return { refusal, warning: `holding every message and refusing every release: ${refusal}` };
@@ -31230,9 +31521,9 @@ async function locationPolicy(o) {
     ["the Codex home", o.codexHome],
     ["P2P_HOME", o.p2pHome]
   ]) {
-    const why = unsafeLocation(dir, where) ?? o.privacy(dir, where);
-    if (why)
-      return `${name2} isn't safe: ${why}`;
+    const why2 = unsafeLocation(dir, where) ?? o.privacy(dir, where);
+    if (why2)
+      return `${name2} isn't safe: ${why2}`;
   }
   return projectOverride(o.projectConfigDirs, o.codexHome, o.readConfig);
 }
@@ -31329,14 +31620,14 @@ function loadThread(home, threadId) {
     return { dirs: [], over: true, why: ["front"] };
   }
 }
-function saveThreadDirs(home, threadId, dirs, over = false, why = []) {
+function saveThreadDirs(home, threadId, dirs, over = false, why2 = []) {
   const f = threadDirsFile(home, threadId);
   if (!f)
     return;
   try {
     mkdirSync2(join2(home, "codex-threads"), { recursive: true, mode: 448 });
     const isOver = over || dirs.length > 512;
-    writeFileSync2(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: isOver, ...isOver ? { why: [.../* @__PURE__ */ new Set([...why, ...dirs.length > 512 ? ["folders"] : []])] } : {}, at: Date.now() }), { mode: 384 });
+    writeFileSync2(f, JSON.stringify({ dirs: dirs.slice(0, 512), over: isOver, ...isOver ? { why: [.../* @__PURE__ */ new Set([...why2, ...dirs.length > 512 ? ["folders"] : []])] } : {}, at: Date.now() }), { mode: 384 });
   } catch {
   }
 }
@@ -31478,9 +31769,9 @@ var Bridge = class {
     return all.slice(0, 512);
   }
   /** Private from now on, and why. */
-  markOver(why) {
+  markOver(why2) {
     this.isDirsOver = true;
-    this.dirsOverWhy.add(why);
+    this.dirsOverWhy.add(why2);
   }
   /** What `--project-dirs-over` says: false, or why (an over set without a reason is `front`). */
   dirsOver() {
@@ -32113,13 +32404,13 @@ var Bridge = class {
     if (!verdict.deliver)
       this.hold(item, verdict.why, verdict.reason);
   }
-  hold(item, why, holdKind) {
+  hold(item, why2, holdKind) {
     const now = this.clock.now();
     const existing = this.inbox.find((one) => one.id === item.id);
     if (existing)
-      Object.assign(existing, { state: "held", why, holdKind, heldAt: existing.state === "held" ? existing.heldAt ?? now : now });
+      Object.assign(existing, { state: "held", why: why2, holdKind, heldAt: existing.state === "held" ? existing.heldAt ?? now : now });
     else
-      this.inbox.push({ ...item, state: "held", why, holdKind, heldAt: now });
+      this.inbox.push({ ...item, state: "held", why: why2, holdKind, heldAt: now });
     const held2 = this.inbox.filter((one) => one.state === "held");
     const kept = new Set(capHeld(held2).map((one) => one.id));
     for (const one of held2)
@@ -32189,10 +32480,10 @@ var Bridge = class {
       const own = out.filter((one) => one.fromSelf && one.state !== "released");
       if (own.length > 0) {
         const used = (local) => this.selfTurns.filter((one) => one.local === local).length;
-        const why = this.ownSinceTyped >= OWN_TURNS_UNATTENDED ? `your own sessions already started ${OWN_TURNS_UNATTENDED} turns here since your user last typed` : own.some((one) => !one.local) && used(false) >= SELF_TURNS ? `your other devices already started ${SELF_TURNS} turns here in 10 minutes` : own.some((one) => one.local) && used(true) >= LOCAL_SELF_TURNS ? `your other sessions here already started ${LOCAL_SELF_TURNS} turns in 10 minutes` : void 0;
-        if (why !== void 0) {
+        const why2 = this.ownSinceTyped >= OWN_TURNS_UNATTENDED ? `your own sessions already started ${OWN_TURNS_UNATTENDED} turns here since your user last typed` : own.some((one) => !one.local) && used(false) >= SELF_TURNS ? `your other devices already started ${SELF_TURNS} turns here in 10 minutes` : own.some((one) => one.local) && used(true) >= LOCAL_SELF_TURNS ? `your other sessions here already started ${LOCAL_SELF_TURNS} turns in 10 minutes` : void 0;
+        if (why2 !== void 0) {
           for (const one of own)
-            this.hold(one, why, "cap");
+            this.hold(one, why2, "cap");
           out = out.filter((one) => !own.includes(one));
         } else {
           for (const local of new Set(own.map((one) => one.local === true)))
@@ -33197,8 +33488,8 @@ var RolloutReader = class {
     this.threadId = threadId;
     this.now = now;
   }
-  distrust(why) {
-    this.untrusted ??= why;
+  distrust(why2) {
+    this.untrusted ??= why2;
     this.last = { mode: {}, seq: this.seq, untrusted: this.untrusted };
     return this.last;
   }
@@ -33631,29 +33922,29 @@ function markerPaths(paths, maybe = []) {
 function touchedPaths(toolName, input, cwd, home) {
   const out = [];
   const maybe = [];
-  const why = /* @__PURE__ */ new Set();
+  const why2 = /* @__PURE__ */ new Set();
   if (SHELL_TOOLS.test(toolName)) {
     if (!cwd)
-      why.add("unresolved");
+      why2.add("unresolved");
     else {
       const r = shellPaths(commandOf(input), cwd, home);
       out.push(...r.paths);
       maybe.push(...r.maybe ?? []);
       for (const w of r.why ?? [])
-        why.add(w);
+        why2.add(w);
     }
   }
   for (const f of editedFiles(toolName, input)) {
     if (cwd || isAbsolute4(f))
       out.push(resolveLike(cwd ?? "/", f));
     else
-      why.add("unresolved");
+      why2.add("unresolved");
   }
   const extras2 = out.length + maybe.length > 0 ? markerPaths([...cwd && isAbsolute4(cwd) ? [cwd] : [], ...out], maybe) : [];
   const all = [.../* @__PURE__ */ new Set([...out, ...extras2])];
   if (all.length > MAX_COMMAND_PATHS)
-    why.add("folders");
-  return { paths: all.slice(0, MAX_COMMAND_PATHS), over: why.size > 0, ...why.size > 0 ? { why: [...why] } : {} };
+    why2.add("folders");
+  return { paths: all.slice(0, MAX_COMMAND_PATHS), over: why2.size > 0, ...why2.size > 0 ? { why: [...why2] } : {} };
 }
 async function runHook(event, stdin, deps) {
   let payload;
@@ -38239,9 +38530,12 @@ function formatCodes(rows) {
       default:
         st = r.status;
     }
-    const shown = r.status === "open" || r.status === "taken" ? r.code : r.code.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
+    const shown = (r.status === "open" || r.status === "taken") && !r.redacted ? r.code : shortCode(r.code);
     return `${shown}${who2}${circle}${to}: ${st}`;
   }).join("\n");
+}
+function shortCode(code2) {
+  return code2.endsWith("…") ? code2 : code2.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
 }
 function formatDelivery(d) {
   return `delivered via ${plural(d.relays.length, "relay")} (${plural(d.devices, "device")})`;
@@ -38408,14 +38702,14 @@ init_projects();
 init_sessions();
 init_state2();
 init_xstate();
-import { createHash as createHash9, createHmac } from "node:crypto";
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync14, renameSync as renameSync9, writeFileSync as writeFileSync11 } from "node:fs";
+import { createHash as createHash9, createHmac as createHmac2 } from "node:crypto";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync15, renameSync as renameSync9, writeFileSync as writeFileSync11 } from "node:fs";
 import { join as join22 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
   if (!secret) throw new CliError("no_identity", "no identity here yet: run `p2p init`");
   const key = createHash9("sha256").update("p2p/ext-local-mac/v1|").update(ns).update("|").update(secret).digest();
-  return createHmac("sha256", key).update(data, "utf8").digest("base64url");
+  return createHmac2("sha256", key).update(data, "utf8").digest("base64url");
 }
 var IX_INSTALL_HINT = "https://github.com/ix-infrastructure/Ix";
 function stateValue(r) {
@@ -38535,7 +38829,7 @@ function extStore(home, ns) {
   const file = join22(dir, `${ns}.json`);
   const read2 = () => {
     try {
-      const v = JSON.parse(readFileSync14(file, "utf8"));
+      const v = JSON.parse(readFileSync15(file, "utf8"));
       return v && typeof v === "object" && !Array.isArray(v) ? v : {};
     } catch {
       return {};
@@ -39034,8 +39328,8 @@ async function watch(app, opts) {
   }
   await app.connect({
     reconnect: true,
-    onFatal: (why) => {
-      fatal = why;
+    onFatal: (why2) => {
+      fatal = why2;
       stop.abort();
     }
   });
@@ -39228,7 +39522,7 @@ init_state2();
 init_extensions();
 init_ix_local();
 init_projects();
-import { readdirSync as readdirSync4, statSync as statSync5 } from "node:fs";
+import { readdirSync as readdirSync4, statSync as statSync6 } from "node:fs";
 import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname7, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -39368,7 +39662,7 @@ function watchCursor(home) {
   try {
     for (const name2 of readdirSync4(join24(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
-      const at = statSync5(join24(home, "cursors", name2)).mtimeMs;
+      const at = statSync6(join24(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
     }
   } catch {
@@ -39382,7 +39676,7 @@ function findModRoot(app, given) {
   try {
     const here = dirname7(fileURLToPath3(import.meta.url));
     const root = dirname7(here);
-    statSync5(join24(root, ".claude-plugin", "plugin.json"));
+    statSync6(join24(root, ".claude-plugin", "plugin.json"));
     return root;
   } catch {
     return void 0;
@@ -39432,13 +39726,13 @@ function relayChecks(c, app, reports, head) {
   for (const r of reports) {
     const id2 = `relay:${r.relay}`;
     if (r.ws.connectMs === void 0) {
-      const why = r.ws.error ?? r.http.error ?? "no answer";
+      const why2 = r.ws.error ?? r.http.error ?? "no answer";
       const refused = r.ws.code === "auth_failed";
       c.add(
         id2,
         "fail",
         `relay ${r.relay}`,
-        refused ? `reachable, but it refused this device (${why})` : r.ws.code === "relay_mismatch" ? "it introduced itself as another relay" : `unreachable: ${why}`,
+        refused ? `reachable, but it refused this device (${why2})` : r.ws.code === "relay_mismatch" ? "it introduced itself as another relay" : `unreachable: ${why2}`,
         refused ? "this device may have been revoked: run `p2p whoami` on another of your devices, or re-link this one (`p2p link start` there, `p2p link join <code>` here)" : r.ws.code === "relay_mismatch" ? "check the URL and any transport override (P2P_RELAY_TRANSPORT, config.json `transport`)" : "check your network, VPN or firewall (WebSocket over port 443); if it stays down, add another relay: `p2p relays add <wss://…>` (or `/peers relays add <wss://…>`)"
       );
     } else if (app.keys && r.ws.restricted) {
@@ -41265,9 +41559,9 @@ var Tui = class {
         if (!received.some((m) => m.id === r.id)) received.push(historyRow(r, this.data.session));
         continue;
       }
-      const same = out.find((m) => m.userId === r.peer.userId && Math.abs(m.at - r.at) < 6e4 && (m.text === r.text || m.text.startsWith("(")));
-      if (same) {
-        if (same.text.startsWith("(")) same.text = clean4(r.text);
+      const same2 = out.find((m) => m.userId === r.peer.userId && Math.abs(m.at - r.at) < 6e4 && (m.text === r.text || m.text.startsWith("(")));
+      if (same2) {
+        if (same2.text.startsWith("(")) same2.text = clean4(r.text);
         continue;
       }
       out.push(historyRow(r, this.data.session));
@@ -41805,7 +42099,7 @@ Make one: ${st.cyan("p2p invite")}`;
     table2(
       ["CODE", "FOR", "JOINS", "STATUS"],
       rows.map((r) => [
-        t(r.status === "open" || r.status === "taken" ? r.code : r.code.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`), 44, st.dim),
+        t((r.status === "open" || r.status === "taken") && !r.redacted ? r.code : shortCode(r.code), 44, st.dim),
         t(r.to ? clean4(r.to.address) : r.label ?? "anyone", 28),
         t(r.circles.length ? r.circles.map((c) => clean4(c.name)).join(", ") : "friend only", 32),
         status(r)
@@ -41935,6 +42229,64 @@ function wideningOf(cmd) {
   }
   return void 0;
 }
+var PERSON_ONLY = /* @__PURE__ */ new Map([
+  ["backup show", "shows your identity key (its backup phrase)"],
+  ["backup restore", "replaces this device's identity key"],
+  ["identity rotate", "moves your identity to a new key"],
+  ["identity republish", "publishes your identity document"],
+  ["identity dispute", "decides which identity a friend of yours is"],
+  ["devices revoke", "changes the devices your identity lists"],
+  ["relays add", "changes the relays your identity lists"],
+  ["relays remove", "changes the relays your identity lists"],
+  ["trust remove", "changes who you trust"],
+  ["invites revoke", "changes your invites"],
+  ["remove", "changes your friendships and circles"],
+  ["unfriend", "changes your friendships"],
+  ["circle propose", "changes a circle's members"],
+  ["circle transfer", "changes who owns a circle"],
+  ["circle hold", "changes how your circle takes changes"],
+  ["extensions disable", "changes which extensions run with your identity"],
+  ["ix import", "writes into your Ix graph"],
+  ["ix resolve", "runs your Ix for a peer's reference"],
+  ["ix config", "changes how your Ix footprints name files"],
+  ["receipts", "changes whether you send delivery receipts"],
+  ["profile set", "publishes a new version of your identity document"],
+  ["proof add", "publishes a new version of your identity document"],
+  ["block", "changes who reaches you"],
+  ["petname", "changes the names you know people by"],
+  ["circle leave", "changes your circles"],
+  ["held decline", "decides a held request for you"]
+]);
+var ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes", "branch"];
+function personOnlyOf(cmd) {
+  const path2 = [];
+  for (let c = cmd; c && c.parent; c = c.parent) path2.unshift(c.name());
+  const p = path2.join(" ");
+  const why2 = PERSON_ONLY.get(p);
+  if (why2 === void 0) return void 0;
+  const args = cmd.args ?? [];
+  switch (p) {
+    case "receipts":
+      return args.length > 0 ? { what: args[0] === "on" || args[0] === "off" ? `receipts ${args[0]}` : "receipts", why: why2 } : void 0;
+    case "circle hold":
+      return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why: why2 } : void 0;
+    case "ix config":
+      return args.length > 0 ? { what: "ix config", why: why2 } : void 0;
+    // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
+    // person's proof outside an agent's session (a fresh home has no person token yet, and a
+    // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
+    case "backup restore":
+      return { what: p, why: why2, agentOnly: true };
+    case "identity rotate": {
+      const o = cmd.opts();
+      const acts = ROTATE_ACTS.filter((k) => o[k] !== void 0 && o[k] !== false && !(Array.isArray(o[k]) && o[k].length === 0));
+      if (o.plan && acts.length === 0) return void 0;
+      return { what: o.cancel ? "identity rotate --cancel" : o.plan ? "identity rotate --plan" : "identity rotate", why: why2 };
+    }
+    default:
+      return { what: p, why: why2 };
+  }
+}
 var posInt = (name2) => (v) => {
   const n = Number(v);
   if (!Number.isSafeInteger(n) || n < 0) throw new CliError("usage", `${name2} must be a non-negative integer`);
@@ -41971,6 +42323,10 @@ function buildProgram(deps) {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
     app.front = deps.front === true;
+    if (app.front && deps.frontToken !== void 0) {
+      app.frontToken = deps.frontToken;
+      app.frontFresh = deps.frontFresh === true;
+    }
     app.confirmTty = confirmTty;
     return app;
   };
@@ -41982,6 +42338,12 @@ function buildProgram(deps) {
     let stop = () => {
     };
     try {
+      if (deps.personTokenLinked) {
+        throw new CliError(
+          "refused",
+          `the person token is never taken in ${app.home}: its cli folder, keys, self document, token, salt or v3 store is a symbolic link (or a hard-linked copy). A home kept by a dotfile manager or linked from elsewhere can't use the token: point P2P_HOME at the real folder. Nothing was done`
+        );
+      }
       if (deps.personTokenStale) {
         throw new CliError(
           "person_token_stale",
@@ -41989,8 +42351,14 @@ function buildProgram(deps) {
         );
       }
       if (typeof app.home === "string" && !opts.readOnly) await recoverInterruptedFollow(app.home).catch(() => false);
+      if (app.front && app.frontToken !== void 0) {
+        const still = personTokenOk({ P2P_PERSON_TOKEN: app.frontToken }, app.home);
+        if (!still || app.frontFresh && identityHere(app.home)) app.front = false;
+      }
       const widening = wideningOf(cmd);
       if (widening) await assertPersonForWidening(app, widening, confirmTty, void 0, { noTokenBeforeIdentity: widening === "link join" });
+      const personOnly = personOnlyOf(cmd);
+      if (personOnly && !(personOnly.agentOnly && personHereStrict(app))) await assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
       if (opts.requireIdentity !== false) await app.load(true);
       if (app.keys && !opts.readOnly && typeof app.home === "string") personToken(app.home);
       if (app.keys) receiving(app);
@@ -42227,6 +42595,9 @@ ${backup2}
       async (app, o) => {
         let mode = o.backupFile !== void 0 ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : void 0;
         const existed = await app.load(false);
+        if (existed && (o.printBackup || o.backupFile !== void 0)) {
+          await assertPersonForWidening(app, o.printBackup ? "setup --print-backup" : "setup --backup-file", confirmTty, PERSON_ONLY.get("backup show"));
+        }
         const p2p = p2pCommand();
         const askBackup = async () => {
           io2.out(`
@@ -42676,8 +43047,10 @@ To join: p2p join --confirmed ${ops.shownCode(code2)}` };
   );
   const invites = program2.command("invites").description("Your invite codes and what became of them; `invites revoke <code>` cancels one").option("--json", "JSON output").action(
     run(async (app) => {
-      const r = await ops.listCodes(app);
-      return { json: { invites: r }, human: formatCodes(r), pretty: (p) => prettyCodes(r, p) };
+      const all = await ops.listCodes(app);
+      const redacted = !personHereStrict(app);
+      const r = redacted ? all.map((c) => ({ ...c, code: shortCode(c.code), ...c.status === "open" || c.status === "taken" ? { redacted: true } : {} })) : all;
+      return { json: { invites: r, ...redacted ? { redacted: true } : {} }, human: formatCodes(r), pretty: (p) => prettyCodes(r, p) };
     })
   );
   invites.command("revoke [code]").description("Cancel a code (the full code, or its first 4+ characters)").option("--json", "JSON output").action(
@@ -43440,10 +43813,21 @@ async function loadInstalled(deps) {
 async function main(argvIn, deps) {
   {
     const env = { ...deps.env };
-    const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
-    const front = deps.front === true || takePersonToken(env, resolveHome2(env));
+    const token = (env.P2P_PERSON_TOKEN ?? "").trim();
+    const given = token !== "";
+    const home = resolveHome2(env);
+    const byToken = takePersonToken(env, home);
+    const front = deps.front === true || byToken;
+    const linked = given && !front && !homeFilesOwn(home);
+    if (given && !front && !linked) healPersonToken(home);
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
-    deps = { ...deps, front, env, ...given && !front ? { personTokenStale: true } : {} };
+    deps = {
+      ...deps,
+      front,
+      env,
+      ...byToken && deps.front !== true ? { frontToken: token, frontFresh: !identityHere(home) } : {},
+      ...linked ? { personTokenLinked: true } : given && !front ? { personTokenStale: true } : {}
+    };
   }
   const end = argvIn.indexOf("--");
   const head = end < 0 ? argvIn : argvIn.slice(0, end);

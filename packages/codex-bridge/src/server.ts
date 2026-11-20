@@ -181,10 +181,12 @@ export async function runMcpServer(o: McpOptions): Promise<void> {
   const bin = p2pBin && isAbsolute(p2pBin) ? [p2pBin] : o.bin;
   // The person token (projects.ts): this bridge speaks for the person's session, so its p2p runs pass it
   // (the session is registered, its sends are its own). The model's shell never has it.
-  // Only `p2p` and `p2p watch` get it (`extra`); childEnv never passes one through (CHILD_P2P_DENY), so
-  // `codex queue` and anything else this bridge runs can't.
-  // Read for every run, never kept: the CLI replaces person.key when an identity is created or restored on
-  // this home (a join in the person's terminal while this session runs), and refuses the old one.
+  // Only the short `p2p` runs get it (`extra`, below), never the long-lived `p2p watch` (childWatch); and
+  // childEnv never passes one through from this bridge's own environment (CHILD_P2P_DENY), so `codex
+  // queue` and anything else this bridge runs can't.
+  // Read for every run, never kept: the CLI derives it from the identity's device key and the home's salt,
+  // replaces person.key when an identity is created or restored on this home (a join in the person's
+  // terminal while this session runs), and refuses the old one.
   const front = () => {
     const token = personTokenOf(home);
     return token ? { P2P_PERSON_TOKEN: token } : {};

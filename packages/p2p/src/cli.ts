@@ -81,6 +81,12 @@ export interface ProgramDeps {
   front?: boolean;
   /** A person token was passed that isn't this home's (person.key was replaced since): every command refuses it (main()). */
   personTokenStale?: boolean;
+  /** A person token was passed to a home whose files are links (projects.ts homeFilesOwn): every command refuses it (main()). */
+  personTokenLinked?: boolean;
+  /** The token `front` rests on (main() keeps it in memory, never in the environment): re-checked against the home as the command finds it, and against the keys it loads (App.load). */
+  frontToken?: string;
+  /** The home held no identity when main() checked the token. */
+  frontFresh?: boolean;
   /** The person's "yes" on their controlling terminal (tty-confirm.ts; tests stand in). */
   confirmTty?: projects.ConfirmTty;
 }
@@ -111,6 +117,88 @@ export function wideningOf(cmd: Command): string | undefined {
     if ((o.add?.length ?? 0) > 0 || o.circle !== undefined) return p;
   }
   return undefined;
+}
+
+/**
+ * Commands that touch the person's identity key, their identity document, or their own setup (or
+ * narrow who reaches them): run only by the person, through the same gate as widening (their
+ * front end's token, or their "yes" typed on their own terminal; never from inside an agent's
+ * session). The CLI decides by the command it parsed and its agent detection (environment and
+ * process ancestry), not by the command line's words: a name built at run time, or a script the
+ * agent wrote and runs in its own process tree, is refused like the plain command. It is not a
+ * boundary against an agent that runs as the same user and means to get past it: a process started
+ * outside the agent's tree that fakes a terminal can answer the "yes", and the key files can be
+ * read directly. That boundary is the OS sandbox's read and write deny on P2P_HOME
+ * (docs/security/threat-model.md). Internal maintenance (`p2p watch`
+ * renewing the document and certificates, the retry of unpublished relays on connect) calls the
+ * App directly, never these commands, and is not gated.
+ */
+const PERSON_ONLY = new Map<string, string>([
+  ["backup show", "shows your identity key (its backup phrase)"],
+  ["backup restore", "replaces this device's identity key"],
+  ["identity rotate", "moves your identity to a new key"],
+  ["identity republish", "publishes your identity document"],
+  ["identity dispute", "decides which identity a friend of yours is"],
+  ["devices revoke", "changes the devices your identity lists"],
+  ["relays add", "changes the relays your identity lists"],
+  ["relays remove", "changes the relays your identity lists"],
+  ["trust remove", "changes who you trust"],
+  ["invites revoke", "changes your invites"],
+  ["remove", "changes your friendships and circles"],
+  ["unfriend", "changes your friendships"],
+  ["circle propose", "changes a circle's members"],
+  ["circle transfer", "changes who owns a circle"],
+  ["circle hold", "changes how your circle takes changes"],
+  ["extensions disable", "changes which extensions run with your identity"],
+  ["ix import", "writes into your Ix graph"],
+  ["ix resolve", "runs your Ix for a peer's reference"],
+  ["ix config", "changes how your Ix footprints name files"],
+  ["receipts", "changes whether you send delivery receipts"],
+  ["profile set", "publishes a new version of your identity document"],
+  ["proof add", "publishes a new version of your identity document"],
+  ["block", "changes who reaches you"],
+  ["petname", "changes the names you know people by"],
+  ["circle leave", "changes your circles"],
+  ["held decline", "decides a held request for you"],
+]);
+
+/** `identity rotate` options that do something beyond making or showing the plan. */
+const ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes", "branch"] as const;
+
+/**
+ * The person-only command `cmd` is ({what, why}), or undefined. Reads stay open: a bare
+ * `receipts`, `circle hold <cid>` and `ix config`, and a bare `identity rotate --plan` (it makes
+ * or shows the plan: the new fingerprint and which devices follow; nothing is published or
+ * revealed, and accepting it is gated).
+ */
+export function personOnlyOf(cmd: Command): { what: string; why: string; agentOnly?: boolean } | undefined {
+  const path: string[] = [];
+  for (let c: Command | null = cmd; c && c.parent; c = c.parent) path.unshift(c.name());
+  const p = path.join(" ");
+  const why = PERSON_ONLY.get(p);
+  if (why === undefined) return undefined;
+  const args = cmd.args ?? [];
+  switch (p) {
+    case "receipts":
+      return args.length > 0 ? { what: args[0] === "on" || args[0] === "off" ? `receipts ${args[0]}` : "receipts", why } : undefined;
+    case "circle hold":
+      return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why } : undefined;
+    case "ix config":
+      return args.length > 0 ? { what: "ix config", why } : undefined;
+    // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
+    // person's proof outside an agent's session (a fresh home has no person token yet, and a
+    // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
+    case "backup restore":
+      return { what: p, why, agentOnly: true };
+    case "identity rotate": {
+      const o = cmd.opts() as Record<string, unknown>;
+      const acts = ROTATE_ACTS.filter((k) => o[k] !== undefined && o[k] !== false && !(Array.isArray(o[k]) && (o[k] as unknown[]).length === 0));
+      if (o.plan && acts.length === 0) return undefined;
+      return { what: o.cancel ? "identity rotate --cancel" : o.plan ? "identity rotate --plan" : "identity rotate", why };
+    }
+    default:
+      return { what: p, why };
+  }
 }
 const posInt = (name: string) => (v: string) => {
   const n = Number(v);
@@ -153,6 +241,10 @@ export function buildProgram(deps: ProgramDeps): Command {
     const app = baseMakeApp(env, i, o);
     app.extensions ??= extensions;
     app.front = deps.front === true;
+    if (app.front && deps.frontToken !== undefined) {
+      app.frontToken = deps.frontToken;
+      app.frontFresh = deps.frontFresh === true;
+    }
     app.confirmTty = confirmTty;
     return app;
   };
@@ -173,6 +265,12 @@ export function buildProgram(deps: ProgramDeps): Command {
       const app = makeApp(deps.env, io, opts.readOnly ? { readOnly: true } : undefined);
       let stop = () => {};
       try {
+        if (deps.personTokenLinked) {
+          throw new CliError(
+            "refused",
+            `the person token is never taken in ${app.home}: its cli folder, keys, self document, token, salt or v3 store is a symbolic link (or a hard-linked copy). A home kept by a dotfile manager or linked from elsewhere can't use the token: point P2P_HOME at the real folder. Nothing was done`,
+          );
+        }
         if (deps.personTokenStale) {
           throw new CliError(
             "person_token_stale",
@@ -182,9 +280,20 @@ export function buildProgram(deps: ProgramDeps): Command {
         // §2.8 (L4): a follow that died mid-swap finishes before anything reads this home (not for a
         // read-only command, which must leave the home exactly as it found it).
         if (typeof app.home === "string" && !opts.readOnly) await rotation.recoverInterruptedFollow(app.home).catch(() => false);
+        // The token was checked when the command started; the home may have changed since (an
+        // interrupted follow finished just now, or files swapped in by something else). Checked again
+        // as the home is now, before any gate: a home that had no identity then and has one now keeps
+        // no token. The keys the command loads are checked against it too (App.load).
+        if (app.front && app.frontToken !== undefined) {
+          const still = projects.personTokenOk({ P2P_PERSON_TOKEN: app.frontToken }, app.home);
+          if (!still || (app.frontFresh && projects.identityHere(app.home))) app.front = false;
+        }
         // An agent can't widen who reaches this user, however it runs p2p (projects.ts).
         const widening = wideningOf(cmd);
         if (widening) await projects.assertPersonForWidening(app, widening, confirmTty, undefined, { noTokenBeforeIdentity: widening === "link join" });
+        // Nor touch the identity key, the identity document or the person's own setup (PERSON_ONLY).
+        const personOnly = personOnlyOf(cmd);
+        if (personOnly && !(personOnly.agentOnly && projects.personHereStrict(app))) await projects.assertPersonForWidening(app, personOnly.what, confirmTty, personOnly.why);
         if (opts.requireIdentity !== false) await app.load(true);
         // The person token the person's front ends pass back (projects.ts), made once, in the CLI's own folder.
         if (app.keys && !opts.readOnly && typeof app.home === "string") projects.personToken(app.home);
@@ -468,6 +577,11 @@ export function buildProgram(deps: ProgramDeps): Command {
         async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; allowPrivateRelay?: boolean; json?: boolean }) => {
           let mode: identity.BackupMode | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
           const existed = await app.load(false);
+          // On a home that already holds an identity, setup's backup options reveal the existing key's
+          // phrase (`backup show`'s gate): the person's only. A new identity's own phrase is not.
+          if (existed && (o.printBackup || o.backupFile !== undefined)) {
+            await projects.assertPersonForWidening(app, o.printBackup ? "setup --print-backup" : "setup --backup-file", confirmTty, PERSON_ONLY.get("backup show"));
+          }
           const p2p = identity.p2pCommand();
           // Asked only once an identity exists here (its key was just made): never before.
           const askBackup = async (): Promise<identity.BackupMode> => {
@@ -1063,8 +1177,13 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--json", "JSON output")
     .action(
       run(async (app) => {
-        const r = await ops.listCodes(app);
-        return { json: { invites: r }, human: fmt.formatCodes(r), pretty: (p) => pretty.prettyCodes(r, p) };
+        const all = await ops.listCodes(app);
+        // A live code (open, or taken and not yet joined) lets whoever holds it in: inside an agent's
+        // session (or where that can't be told) without the person's token, it is cut as a redeemed
+        // one is, in the JSON too. The status stays readable.
+        const redacted = !projects.personHereStrict(app);
+        const r = redacted ? all.map((c) => ({ ...c, code: fmt.shortCode(c.code), ...(c.status === "open" || c.status === "taken" ? { redacted: true } : {}) })) : all;
+        return { json: { invites: r, ...(redacted ? { redacted: true } : {}) }, human: fmt.formatCodes(r), pretty: (p) => pretty.prettyCodes(r, p) };
       }),
     );
   invites
@@ -2134,13 +2253,24 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
   {
     // A copy without it (an embedder's object is left as it was); the process's own environment loses it too.
     const env = { ...deps.env };
-    const given = (env.P2P_PERSON_TOKEN ?? "").trim() !== "";
-    const front = deps.front === true || projects.takePersonToken(env, resolveHome(env));
+    const token = (env.P2P_PERSON_TOKEN ?? "").trim();
+    const given = token !== "";
+    const home = resolveHome(env);
+    const byToken = projects.takePersonToken(env, home);
+    const front = deps.front === true || byToken;
+    const linked = given && !front && !projects.homeFilesOwn(home);
+    if (given && !front && !linked) projects.healPersonToken(home);
     if (deps.env === process.env) delete process.env.P2P_PERSON_TOKEN;
     // A token that isn't this home's is refused outright, never quietly taken as "not the person": the
     // person.key it was read from was replaced when an identity was created or restored here
     // (projects.ts renewPersonToken), and the front end that passed it reads the file again.
-    deps = { ...deps, front, env, ...(given && !front ? { personTokenStale: true } : {}) };
+    deps = {
+      ...deps,
+      front,
+      env,
+      ...(byToken && deps.front !== true ? { frontToken: token, frontFresh: !projects.identityHere(home) } : {}),
+      ...(linked ? { personTokenLinked: true } : given && !front ? { personTokenStale: true } : {}),
+    };
   }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
   const end = argvIn.indexOf("--");

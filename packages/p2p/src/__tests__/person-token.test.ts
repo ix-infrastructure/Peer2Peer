@@ -138,7 +138,8 @@ describe("the person token is replaced when an identity is created or restored (
     expect(await main(["whoami", "--json"], { env: { ...u.env, P2P_PERSON_TOKEN: "" }, io: { out: (l) => out.push(l), err: () => {} } })).toBe(0);
     process.exitCode = 0;
     expect(u.personToken).toMatch(TOKEN_RE);
-    expect(u.personToken).not.toBe(before);
+    // Derived from the identity's key and the home's salt (unchanged): the same token, written again.
+    expect(u.personToken).toBe(before);
   });
 
   it("renewPersonToken: a fresh 0600 file, a planted symlink replaced (never followed), a directory in the way removed", () => {
@@ -161,8 +162,8 @@ describe("the person token is replaced when an identity is created or restored (
     mkdirSync(join(personTokenFile(home), "x"), { recursive: true });
     const d = renewPersonToken(home);
     expect(readFileSync(personTokenFile(home), "utf8")).toBe(d);
-    // No temporary file is left beside it.
-    expect(readdirSync(join(home, "cli"))).toEqual(["person.key"]);
+    // No temporary file is left beside it (the salt of a derived token is its only neighbour).
+    expect(readdirSync(join(home, "cli")).sort()).toEqual(["person.key", "person.salt"]);
   });
 
   it("the token is replaced before any key is written: when it can't be, no identity is made (and keys alone aren't one)", async () => {
