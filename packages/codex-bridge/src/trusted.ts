@@ -106,6 +106,14 @@ export function typedPromptOf(line: string): boolean {
   }
 }
 
+/**
+ * Whether the first bytes of a rollout line are a `turn_context` record, without parsing it (Codex
+ * writes `{"timestamp":"…","type":"turn_context","payload":…}`; the type is looked for near the start).
+ */
+export function isTurnContextStart(head: string): boolean {
+  return /^\s*\{[^{}]{0,200}"type"\s*:\s*"turn_context"/.test(head.slice(0, 256));
+}
+
 export class RolloutReader implements TranscriptSource {
   private path: string | undefined;
   private offset = 0;
@@ -161,8 +169,12 @@ export class RolloutReader implements TranscriptSource {
           this.isSkipping = false;
         }
         if (this.partial.length > MAX_LINE) {
+          // Skipping a turn context would leave the previous mode in force: its first bytes say what it is.
+          const huge = isTurnContextStart(this.partial);
           this.partial = "";
           this.isSkipping = true;
+          // From here on nothing in the file counts: the mode is unknown (held) and releases are refused.
+          if (huge) return this.distrust("a turn context line was too long to read, so the session's current mode isn't known");
         }
         for (const line of lines) {
           const bad = this.check(line);

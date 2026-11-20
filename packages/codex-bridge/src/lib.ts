@@ -1241,12 +1241,18 @@ const hasLegacy = (p: Rec): boolean => p.sandbox_policy !== undefined || p.file_
  * `sandbox_policy` (and, from 0.130.0, `permission_profile` and
  * `file_system_sandbox_policy` beside it). With the legacy fields present
  * they decide, as before, and a readable `permission_profile` can only add
- * roots (or make it "all"); without them, `permission_profile` alone decides.
+ * roots (or make it "all"); a `permission_profile` whose roots can't be read
+ * makes them unknown whatever the legacy fields say; without the legacy
+ * fields, `permission_profile` alone decides.
  */
 export function writableRootsOf(p: Record<string, unknown>): string[] | "all" | undefined {
-  const profile = p.permission_profile === undefined ? undefined : permissionProfileOf(p.permission_profile).writable;
+  const hasProfile = p.permission_profile !== undefined;
+  const profile = hasProfile ? permissionProfileOf(p.permission_profile).writable : undefined;
   if (!hasLegacy(p)) return profile;
   const legacy = legacyWritable(p);
+  // A profile present but unreadable (an unknown shape, `external`, a write it can't place) makes the
+  // roots unknown even beside readable legacy fields: Codex enforces the profile, not the legacy view.
+  if (hasProfile && profile === undefined) return undefined;
   if (legacy === undefined || profile === undefined) return legacy;
   if (legacy === "all" || profile === "all") return "all";
   return [...new Set([...legacy, ...profile])];
@@ -1256,12 +1262,16 @@ export function writableRootsOf(p: Record<string, unknown>): string[] | "all" | 
  * The turn's sandbox as a legacy mode name (`read-only`, `workspace-write`,
  * `danger-full-access`, `external-sandbox`, ...), or undefined (unknown:
  * the session then never counts as asking). `sandbox_policy` when present,
- * except that a readable `permission_profile` broader than `read-only`
- * wins over a `read-only` one; else `permission_profile`.
+ * except that a `permission_profile` broader than `read-only` wins over a
+ * `read-only` one; else `permission_profile`. Either one present but
+ * unreadable makes it unknown.
  */
 export function sandboxOf(p: Record<string, unknown>): string | undefined {
   const legacy = rec(p.sandbox_policy) ? str((p.sandbox_policy as Rec).type) : str(p.sandbox_policy);
-  const profile = p.permission_profile === undefined ? undefined : permissionProfileOf(p.permission_profile).sandbox;
+  const hasProfile = p.permission_profile !== undefined;
+  const profile = hasProfile ? permissionProfileOf(p.permission_profile).sandbox : undefined;
+  // Either field present but unreadable (`sandbox_policy: null`, a profile of an unknown shape): unknown.
+  if ((p.sandbox_policy !== undefined && legacy === undefined) || (hasProfile && profile === undefined)) return undefined;
   if (legacy === undefined) return profile;
   return legacy === "read-only" && profile !== undefined ? profile : legacy;
 }

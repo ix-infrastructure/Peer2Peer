@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { classifyMode, modeFromTranscript, parseAutoDeliver, permissionProfileOf, screenMessage, TMPDIR_ROOT, turnContextOf, writableRootsOf } from "../lib.js";
-import { RolloutReader } from "../trusted.js";
+import { isTurnContextStart, RolloutReader } from "../trusted.js";
 import { makeBridge, World } from "./world.js";
 
 const dirs: string[] = [];
@@ -142,11 +142,41 @@ describe("turn contexts that carry both (Codex 0.130.0 to 0.168.x)", () => {
     expect(narrow?.writable).toEqual([REPO]);
     expect(turnContextOf(line({ sandbox_policy: { type: "danger-full-access" }, permission_profile: managed(readOnlyEntries) }))?.writable).toBe("all");
     expect(turnContextOf(line({ ...legacy, permission_profile: { type: "disabled" } }))?.writable).toBe("all");
-    // A profile it can't read (older Codex: project roots not yet resolved) leaves the legacy reading alone.
+    // A profile whose roots it can't read makes them unknown, whatever the legacy fields say (Codex enforces the profile).
     const unresolved = managed([{ path: special("root"), access: "read" }, { path: special("project_roots"), access: "write" }]);
-    expect(turnContextOf(line({ ...ws, permission_profile: unresolved }))?.writable).toEqual([REPO]);
+    expect(turnContextOf(line({ ...ws, permission_profile: unresolved }))?.writable).toBeUndefined();
     // An unreadable legacy policy stays unknown whatever the profile says.
     expect(turnContextOf(line({ sandbox_policy: { type: "new-kind" }, permission_profile: managed(readOnlyEntries) }))?.writable).toBeUndefined();
+  });
+
+  it("a read-only sandbox_policy beside a profile it can't fully read: releases refused (roots unknown)", () => {
+    const legacy = { sandbox_policy: { type: "read-only" } };
+    const cases: [string, unknown, string | null][] = [
+      ["external", { type: "external", network: "restricted" }, "external-sandbox"],
+      ["unknown type", { type: "sandboxed", level: 2 }, null],
+      ["glob write", managed([...readOnlyEntries, { path: { type: "glob_pattern", pattern: `${P2P_HOME}/**` }, access: "write" }]), "workspace-write"],
+    ];
+    for (const [name, pp, sandbox] of cases) {
+      const ctx = turnContextOf(line({ ...legacy, permission_profile: pp }));
+      expect(ctx?.writable, name).toBeUndefined();
+      expect(ctx?.mode.sandbox, name).toBe(sandbox);
+      expect(classifyMode({ transcript: ctx!.mode, meta: {}, reportedAuto: false, confirmed: true }), name).not.toBe("asking");
+    }
+  });
+
+  it("sandbox_policy: null beside a read-only profile: unknown, not read-only", () => {
+    const ctx = turnContextOf(line({ sandbox_policy: null, permission_profile: managed(readOnlyEntries) }));
+    expect(ctx?.mode.sandbox).toBeNull();
+    expect(ctx?.writable).toBeUndefined();
+    expect(classifyMode({ transcript: ctx!.mode, meta: {}, reportedAuto: false, confirmed: true })).toBe("unknown");
+  });
+
+  it("an object-form approval_policy (granular) is unknown: held", () => {
+    const ctx = turnContextOf(line({ permission_profile: managed(readOnlyEntries) }, { granular: { sandbox_approval: true, rules: true, mcp_elicitations: true } } as unknown as string));
+    expect(ctx?.mode.approval).toBeNull();
+    const mode = classifyMode({ transcript: ctx!.mode, meta: {}, reportedAuto: false, confirmed: true });
+    expect(mode).toBe("unknown");
+    expect(screenMessage({ fromSelf: false, fromUserId: "p2p:annannannannannannannannannannann", mode, autoDeliver: parseAutoDeliver(undefined) })).toMatchObject({ deliver: false });
   });
 
   it("legacy only (up to 0.129) reads as before", () => {
@@ -180,6 +210,34 @@ describe("a 0.169+ rollout end to end", () => {
     world.trusted = await rollout([line({ permission_profile: managed([...workspaceEntries, deny]), active_permission_profile: { id: "peer2peer", extends: ":workspace" } })]).refresh();
     await bridge.refreshTrusted();
     expect(bridge.modeClass()).toBe("auto");
+  });
+
+  it("an external profile (beside a read-only sandbox_policy too): auto, and releases refused", async () => {
+    for (const fields of [{ permission_profile: { type: "external", network: "restricted" } }, { sandbox_policy: { type: "read-only" }, permission_profile: { type: "external", network: "enabled" } }]) {
+      const t = await rollout([line(fields)]).refresh();
+      expect(t?.writable).toBeUndefined();
+      const world = new World();
+      world.trusted = t;
+      const { bridge } = await makeBridge({ world });
+      bridge.noteToolCall({ threadId: "thread-1" });
+      await bridge.refreshTrusted();
+      expect(bridge.modeClass()).toBe("auto");
+      expect(bridge.releaseReach(P2P_HOME).ok).toBe(false);
+    }
+  });
+
+  it("a turn context line too long to read distrusts the rollout from there (the earlier mode doesn't stay in force)", async () => {
+    const big = JSON.stringify({ timestamp: at(), type: "turn_context", payload: { turn_id: "t2", cwd: REPO, approval_policy: "never", permission_profile: { type: "disabled" }, pad: "x".repeat(2 * 1024 * 1024) } });
+    const reader = rollout([line({ permission_profile: managed(readOnlyEntries) }), big, JSON.stringify({ timestamp: at(), type: "event_msg", payload: {} })]);
+    const t = await reader.refresh();
+    expect(t?.untrusted).toContain("too long");
+    expect(t?.mode).toEqual({});
+    // A huge line of another kind is still just skipped.
+    const other = await rollout([line({ permission_profile: managed(readOnlyEntries) }), JSON.stringify({ timestamp: at(), type: "response_item", payload: { blob: "y".repeat(2 * 1024 * 1024) } })]).refresh();
+    expect(other?.untrusted).toBeUndefined();
+    expect(other?.mode.sandbox).toBe("read-only");
+    expect(isTurnContextStart('{"timestamp":"2026-11-19T09:00:00.000Z","type":"turn_context","payload":{')).toBe(true);
+    expect(isTurnContextStart('{"timestamp":"2026-11-19T09:00:00.000Z","type":"response_item","payload":{"text":"\\"type\\":\\"turn_context\\""')).toBe(false);
   });
 
   it("an unrecognised profile: unknown, held, and releases refused", async () => {

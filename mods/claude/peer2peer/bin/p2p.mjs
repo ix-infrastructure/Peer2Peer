@@ -29609,10 +29609,13 @@ function legacyWritable(p) {
 }
 var hasLegacy = (p) => p.sandbox_policy !== void 0 || p.file_system_sandbox_policy !== void 0;
 function writableRootsOf(p) {
-  const profile = p.permission_profile === void 0 ? void 0 : permissionProfileOf(p.permission_profile).writable;
+  const hasProfile = p.permission_profile !== void 0;
+  const profile = hasProfile ? permissionProfileOf(p.permission_profile).writable : void 0;
   if (!hasLegacy(p))
     return profile;
   const legacy = legacyWritable(p);
+  if (hasProfile && profile === void 0)
+    return void 0;
   if (legacy === void 0 || profile === void 0)
     return legacy;
   if (legacy === "all" || profile === "all")
@@ -29621,7 +29624,10 @@ function writableRootsOf(p) {
 }
 function sandboxOf(p) {
   const legacy = rec(p.sandbox_policy) ? str(p.sandbox_policy.type) : str(p.sandbox_policy);
-  const profile = p.permission_profile === void 0 ? void 0 : permissionProfileOf(p.permission_profile).sandbox;
+  const hasProfile = p.permission_profile !== void 0;
+  const profile = hasProfile ? permissionProfileOf(p.permission_profile).sandbox : void 0;
+  if (p.sandbox_policy !== void 0 && legacy === void 0 || hasProfile && profile === void 0)
+    return void 0;
   if (legacy === void 0)
     return profile;
   return legacy === "read-only" && profile !== void 0 ? profile : legacy;
@@ -33615,6 +33621,9 @@ function typedPromptOf(line) {
     return false;
   }
 }
+function isTurnContextStart(head) {
+  return /^\s*\{[^{}]{0,200}"type"\s*:\s*"turn_context"/.test(head.slice(0, 256));
+}
 var RolloutReader = class {
   codexHome;
   threadId;
@@ -33674,8 +33683,11 @@ var RolloutReader = class {
           this.isSkipping = false;
         }
         if (this.partial.length > MAX_LINE) {
+          const huge = isTurnContextStart(this.partial);
           this.partial = "";
           this.isSkipping = true;
+          if (huge)
+            return this.distrust("a turn context line was too long to read, so the session's current mode isn't known");
         }
         for (const line of lines) {
           const bad = this.check(line);
