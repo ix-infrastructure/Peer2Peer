@@ -9,7 +9,7 @@ A security release. Nothing changes on the wire: 0.1.3 clients interoperate in b
 ### Upgrade
 
 - Install with the one-line installers once they're pinned to 0.1.3, or `npm i -g @peer2peer/cli@0.1.3 @peer2peer/ext-ix@0.1.3`. The Claude Code mod ships matching copies of both. Each package depends on exactly `0.1.3` of the others.
-- **The person token changes format on first run.** On a home with an identity it is now derived from the device key (see Security). The Claude Code mod and the Codex bridge get one `person_token_stale`, read `<P2P_HOME>/cli/person.key` again and retry, as they already do. Scripts that pass `P2P_PERSON_TOKEN` should read that file on every run.
+- **The person token changes format on first run.** On a home with an identity it is now derived from the device key (see Security). The Claude Code mod gets one `person_token_stale`, reads `<P2P_HOME>/cli/person.key` again and retries, as it already does; the Codex bridge's first command after the upgrade fails once with `person_token_stale` and its next one picks up the new token. Scripts that pass `P2P_PERSON_TOKEN` should read that file on every run.
 - **More commands ask for you.** Commands that touch your identity key or document, or narrow who reaches you, now need the front end's token or your `yes` on the terminal, and are refused inside an agent's session (list under Security). At a plain terminal, `identity rotate` and `ix import` ask that `yes` before their own question.
 - `p2p relays remove` takes several relays at once.
 
