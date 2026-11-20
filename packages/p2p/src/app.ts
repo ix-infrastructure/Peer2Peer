@@ -33,6 +33,7 @@ import {
   scheduledWriter,
   refreshIdentity as coreRefreshIdentity,
   heldBackByOf,
+  heldBackForOf,
   unconnectedRelaysOf,
   unconnectedVersionsOf,
   type UnconnectedVersion,
@@ -635,7 +636,7 @@ export class App {
       // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
       if (opts.strict) {
         // #79: relays core held the refresh back for count like the ones it names (see the incomplete case below).
-        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? heldBackByOf(e) : [])])];
+        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e)) : [])])];
         const versions = unconnectedVersionsOf(e);
         const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
         if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -656,8 +657,9 @@ export class App {
       }
       // #79: relays core held the refresh back for (they sent a version of our identity that doesn't connect to
       // a current one we hold and lists more than it) count like the relays it names as serving versions that
-      // don't connect: a rotation sets them aside, any other edit refuses and names them.
-      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? (v.heldBackBy ?? []) : [])])];
+      // don't connect: a rotation sets them aside, any other edit refuses and names them. Only when what they left
+      // out is a version our own devices published (ownHeldBack).
+      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? []) : [])])];
       const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
       if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
       named = unconnected;
@@ -671,6 +673,20 @@ export class App {
     const last = (await this.state.get("fetched"))?.[userId];
     if (last === undefined || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: undefined }));
     return v;
+  }
+
+  /**
+   * #79, #92 follow-up: the relays core held a refresh of our own identity back for (`by`, they sent a head that
+   * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
+   * (a rotation sets them aside, the hint names them) only when one of `left` is a version our own devices published
+   * (the publish log): our own current tip against a key thief's head, the case this exists for. Otherwise none: a
+   * relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set aside,
+   * and a relay that really holds the owner up can still be removed (`p2p relays remove`).
+   */
+  private async ownHeldBack(by: readonly string[], left: readonly string[]): Promise<string[]> {
+    if (by.length === 0 || left.length === 0) return [];
+    const published = new Set((await this.store.getPublishLog()).published);
+    return left.some((h) => published.has(h)) ? [...by] : [];
   }
 
   /**

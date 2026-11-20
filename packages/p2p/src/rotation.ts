@@ -78,6 +78,8 @@ import {
   generateIdentityKey,
   IdentityChain,
   INVITE_MAX_TTL_SEC,
+  isCanonicalRelayUrl,
+  isDid,
   blockUser,
   createCap,
   jwsHash,
@@ -111,6 +113,7 @@ import {
 import { FileDocBackend } from "@peer2peer/core/v3/node";
 import { App, certDid, defaultLabel, newKeysDoc } from "./app.js";
 import { CliError } from "./errors.js";
+import { branchLine } from "./format.js";
 import { fetchTips, linkGet, linkPut, publishOver, relayCode, RelayConnection, sleep } from "./relay-client.js";
 import type { HeldItem, SelfDoc } from "./state.js";
 import { deliverCircle, memberCaps, ownerPublish, signOwnJoin } from "./circle-ops.js";
@@ -160,9 +163,10 @@ export interface RotationState {
    * #75: begun on this device's own branch of a fork that a version leaving this device out made
    * (ownBranchTip): that tip, and the name and relays the final version takes (ownBranchFinalFields).
    * The view's allowlist then leaves this device out, so, as contesting, its stored friendships count
-   * without verifying now.
+   * without verifying now. `others` (#91): the other branches that still list this device, when provenance
+   * picked this one among them (shown in the plan, so a wrong pick isn't silent).
    */
-  ownBranch?: { tip: string; name: string; relays: string[] };
+  ownBranch?: { tip: string; name: string; relays: string[]; others?: BranchSummary[] };
   keepKeyholders: boolean;
   devices: Record<string, RotationDeviceRec>;
   /** Excluded devices revoked on the old identity before any link code went out. */
@@ -188,6 +192,32 @@ export interface RotationState {
   backupFile?: string;
   /** Where the old home went, once this home is the new identity's. */
   archive?: string;
+}
+
+/** #75, #91: a branch of our forked identity as shown to the user: its tip, who published it since the fork, its relays. */
+export interface BranchSummary {
+  hash: string;
+  ver: number;
+  by: string[];
+  relays: string[];
+}
+
+/** Printable ASCII only, one to 2048 characters (a single anchored class: linear, no backtracking). */
+const PRINTABLE_ASCII = /^[\x21-\x7e]{1,2048}$/;
+
+/**
+ * #91: a branch summary for the plan and the `branch_ambiguous` error. Its relay URLs and device ids come from
+ * versions whoever holds the identity key may have signed. Core's parser only lets canonical relay URLs (§5.1:
+ * WHATWG-serialised, so percent-encoded, no userinfo, query or fragment) and device ids (`d_` + base32) into a
+ * verified version; they are checked again here before they are printed, and anything else is left out.
+ */
+export function branchSummary(hash: string, ver: number, by: readonly string[], relays: readonly string[]): BranchSummary {
+  return {
+    hash,
+    ver,
+    by: [...new Set(by.filter((d) => isDid(d)))],
+    relays: relays.filter((r) => typeof r === "string" && PRINTABLE_ASCII.test(r) && isCanonicalRelayUrl(r)),
+  };
 }
 
 const rotationDir = (home: string) => join(home, "rotation");
@@ -355,10 +385,13 @@ async function ownBranchFork(app: App): Promise<{ chain: IdentityChain; plain: V
  * hash (whoever holds the identity key can pick those). A candidate is plausible when every version on
  * it since the fork point (the versions not behind every plain tip) is in this device's publish log or
  * was published `by` this device or a device that a version in its publish log lists. One candidate, or
- * exactly one plausible: that one. Otherwise the user chooses (`choice`, `--branch <hash>`), shown each
- * branch's publishers and relays. Undefined when our identity isn't forked that way.
+ * exactly one plausible: that one (#91: with the other candidates as `others`, warned about and shown in
+ * the plan: the owner's branch counts as implausible when a version on it comes from an owner device the
+ * publish log never lists, so a stolen device's branch could be the only plausible one). Otherwise the
+ * user chooses (`choice`, `--branch <hash>`), shown each branch's publishers and relays. Undefined when
+ * our identity isn't forked that way.
  */
-async function ownBranchTip(app: App, choice?: string): Promise<VerifiedIdentityDoc | undefined> {
+async function ownBranchTip(app: App, choice?: string): Promise<{ tip: VerifiedIdentityDoc; others: BranchSummary[] } | undefined> {
   const fork = await ownBranchFork(app);
   if (!fork) {
     if (choice !== undefined) throw new CliError("usage", "--branch: your identity isn't forked by a version that leaves this device out");
@@ -368,24 +401,33 @@ async function ownBranchTip(app: App, choice?: string): Promise<VerifiedIdentity
   if (choice !== undefined) {
     const chosen = candidates.find((t) => t.hash === choice);
     if (!chosen) throw new CliError("usage", `--branch ${choice}: not a branch of your identity that lists this device (${candidates.map((t) => t.hash).join(", ")})`);
-    return chosen;
+    return { tip: chosen, others: [] };
   }
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) return { tip: candidates[0], others: [] };
   const log = new Set((await app.store.getPublishLog()).published);
+  // #91: every device any version in the publish log lists, including ones a later version revoked. That only
+  // ever makes more branches plausible, so it fails safe: more ambiguity (the user chooses), never a silent pick.
   const trusted = new Set([app.did, ...[...log].flatMap((h) => chain.get(h)?.devices ?? [])]);
   const behind = plain.map((t) => new Set(chain.ancestors(t.hash).map((v) => v.hash)));
   const common = new Set([...behind[0]].filter((h) => behind.every((set) => set.has(h))));
   const since = (t: VerifiedIdentityDoc) => chain.ancestors(t.hash).filter((v) => !common.has(v.hash));
   const plausible = candidates.filter((t) => since(t).every((v) => log.has(v.hash) || trusted.has(v.by)));
-  if (plausible.length === 1) return plausible[0];
-  const branches = candidates.map((t) => ({ hash: t.hash, ver: t.ver, by: [...new Set(since(t).map((v) => v.by))], relays: [...t.relays] }));
+  const branches = candidates.map((t) => branchSummary(t.hash, t.ver, since(t).map((v) => v.by), t.relays));
+  if (plausible.length === 1) return { tip: plausible[0], others: branches.filter((b) => b.hash !== plausible[0].hash) };
   throw new CliError(
     "branch_ambiguous",
     `your identity is forked by a version that leaves this device out, and more than one branch still lists it: ${branches
-      .map((x) => `${x.hash} (ver ${x.ver}, published by ${x.by.join(", ")}; relays ${x.relays.join(", ")})`)
+      .map(branchLine)
       .join("; ")}. Someone else holds your identity key. Check which branch is yours, then run \`p2p identity rotate --plan --branch <hash>\``,
     { branches },
   );
+}
+
+/** #91: the warning when provenance picked our own branch among others that still list this device. */
+function otherBranchesWarning(tip: string, others: readonly BranchSummary[]): string {
+  return `your identity is forked, and the plan builds on the branch ${tip} as yours (its versions come from your devices); other branches still list this device: ${others
+    .map(branchLine)
+    .join("; ")}. If ${tip} isn't yours, drop this plan (\`p2p identity rotate --cancel\`) and choose with \`p2p identity rotate --plan --branch <hash>\``;
 }
 
 /**
@@ -541,6 +583,10 @@ export interface RotationPlan {
   memberOf: number;
   contest: boolean;
   backup?: { file: string };
+  /** #75: the branch of a forked identity the plan builds on (its tip's jwsHash), when it is forked that way. */
+  branch?: string;
+  /** #91: the other branches that still list this device, when provenance picked `branch` among them. */
+  otherBranches?: BranchSummary[];
 }
 
 export interface RotateResult {
@@ -610,6 +656,8 @@ function planOf(st: RotationState): RotationPlan {
     friendsOptIn: optIn,
     contest: !!st.contest,
     ...(st.backupFile ? { backup: { file: st.backupFile } } : {}),
+    ...(st.ownBranch ? { branch: st.ownBranch.tip } : {}),
+    ...(st.ownBranch?.others?.length ? { otherBranches: st.ownBranch.others } : {}),
   };
 }
 
@@ -683,11 +731,30 @@ export async function rotatePlan(app: App, opts: RotateOptions = {}): Promise<Ro
   if (prior && prior.step !== "done" && prior.step !== "created") {
     throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is under way: finish it with \`p2p identity rotate --resume\``);
   }
+  if (prior && prior.step === "created") assertSameBranch(prior, opts);
   const st = prior && prior.step === "created" ? prior : await begin(app, opts);
   if (st === prior) applyExcludes(st, opts.exclude, opts.keep);
   await applyInvites(app, st, opts.invite);
   await saveState(app.home, st);
   return planWithAddress(app, st);
+}
+
+/**
+ * #91: a plan not yet accepted is reused by `--plan` and `--resume`, so a `--branch` naming another branch than the
+ * plan's own would be ignored: refused instead (drop the plan first).
+ */
+function assertSameBranch(st: RotationState, opts: RotateOptions): void {
+  if (opts.branch === undefined || opts.branch === st.ownBranch?.tip) return;
+  if (st.step !== "created" || st.accepted) {
+    throw new CliError("usage", `--branch ${opts.branch}: the rotation under way here ${st.ownBranch ? `builds on the branch ${st.ownBranch.tip}` : "isn't built on a branch of a forked identity"}, and can't change now`);
+  }
+  const how = `drop it first (\`p2p identity rotate --cancel\`), then \`p2p identity rotate --plan --branch ${opts.branch}\``;
+  throw new CliError(
+    "usage",
+    st.ownBranch
+      ? `--branch ${opts.branch}: the rotation plan here builds on the branch ${st.ownBranch.tip}. To choose another, ${how}`
+      : `--branch ${opts.branch}: the rotation plan here isn't built on a branch of a forked identity. To choose one, ${how}`,
+  );
 }
 
 /** `p2p identity rotate --cancel`: drops a rotation whose plan wasn't accepted (nothing was published). */
@@ -709,6 +776,14 @@ export async function rotate(app: App, opts: RotateOptions = {}): Promise<Rotate
   if (opts.resume) {
     if (!prior || prior.step === "done") throw new CliError("no_rotation", "there is no rotation in progress here to resume");
     st = prior;
+    assertSameBranch(st, opts);
+    // #91: `--resume --contest`: a rotation of this identity this device didn't publish came out while this one was
+    // under way (publishFinal points here): this one goes on as a competing one, so friends see a conflict.
+    if (opts.contest && !st.contest) {
+      if ((await foreignRotations(app)).length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
+      st.contest = true;
+      await saveState(app.home, st);
+    }
   } else {
     if (prior && prior.step !== "done") throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is in progress: finish it with \`p2p identity rotate --resume\``);
     st = await begin(app, opts);
@@ -841,14 +916,16 @@ async function begin(app: App, opts: RotateOptions): Promise<RotationState> {
     if (foreign.length === 0 && !alerted) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
   }
   // #75: forked by a version that leaves this device out, the plan lists from this device's own branch.
-  const own = view.rotations.length > 0 ? undefined : await ownBranchTip(app, opts.branch);
+  const picked = view.rotations.length > 0 ? undefined : await ownBranchTip(app, opts.branch);
+  const own = picked?.tip;
   if (!opts.contest && !(own ?? view).keyholders.includes(app.did)) {
     throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity");
   }
   let ownBranch: RotationState["ownBranch"];
-  if (own) {
+  if (picked && own) {
     const f = ownBranchFinalFields(app, (await ownChain(app))!, own, new Set((await app.store.getPublishLog()).published));
-    ownBranch = { tip: own.hash, name: f.name, relays: f.relays };
+    ownBranch = { tip: own.hash, name: f.name, relays: f.relays, ...(picked.others.length > 0 ? { others: picked.others } : {}) };
+    if (picked.others.length > 0) app.warn(otherBranchesWarning(own.hash, picked.others));
     if (f.extra.length > 0) app.warn(`your own branch lists relays no version this device published added (${f.extra.join(", ")}): your old identity's final version leaves them out`);
   }
   // What the plan lists from: the head, or (contesting) the version the other rotation replaced.
@@ -1282,7 +1359,18 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
   const mine = chain.allTips().find((t) => t.rotation !== undefined && rotationKey(t.rotation) === rotationKey(st.statement));
   // #75: a fork made by a version that leaves this device out can't go through publishNext (its merge
   // would leave this device unlisted, so it couldn't publish): see ownBranchTip and finalOnOwnBranch.
-  if (st.ownBranch && !contesting) return publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
+  if (st.ownBranch && !contesting) {
+    try {
+      return await publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
+    } catch (e) {
+      // #91: a rotation someone else published meanwhile (the refresh just brought it in) makes the relays refuse
+      // ours however often it is rebuilt: say so, and point to the contest, never to another --resume.
+      if (!(e instanceof CliError)) throw e;
+      const foreign = await foreignRotations(app);
+      if (foreign.length === 0) throw e;
+      throw rotatedMeanwhile(foreign, e);
+    }
+  }
   if (mine) {
     // Published by an interrupted run: make sure the relays have it.
     const r = await app.publishDoc(mine.jws, mine.relays);
@@ -1307,6 +1395,16 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
     app.warn("no relay took your competing final version (they already refuse your old devices); your friends still see the conflict from your new identity's invites");
   }
   return { ver: base.ver + 1, ...r };
+}
+
+/** #91: the error when a rotation this device didn't publish is out and the relays refuse our own final version. */
+function rotatedMeanwhile(foreign: readonly { rotation: VerifiedRotation }[], cause: CliError): CliError {
+  const to = [...new Set(foreign.map((f) => f.rotation.to))];
+  return new CliError(
+    "identity_rotated",
+    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
+    { to },
+  );
 }
 
 /**

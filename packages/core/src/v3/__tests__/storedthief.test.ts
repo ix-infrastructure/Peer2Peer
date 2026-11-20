@@ -172,6 +172,8 @@ describe("#92: IdentityChain.addForkRoot only places a proven fork", () => {
     const f = perRelay({ [RELAY]: [head.jws], [RELAY2]: [own4.jws] }, { [RELAY]: () => [], [RELAY2]: walkOf(u.docs, 4) });
     const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2], own: true });
     expect([v.incomplete, v.heldBackBy]).toEqual([true, [RELAY]]);
+    // #92 follow-up: with the version it left out (the owner's client checks it against its publish log).
+    expect(v.heldBackFor).toEqual([own4.hash]);
     expect((await store.getIdentity(u.userId))!.leftOut).toBeUndefined();
   });
 

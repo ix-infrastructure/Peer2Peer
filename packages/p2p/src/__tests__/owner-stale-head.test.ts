@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { b64uDecode, createIdentityDoc, generateDeviceKeysV3, IDENTITY_DOC_MAX_TTL_SEC, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { FileDocBackend } from "@peer2peer/core/v3/node";
 import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
@@ -338,4 +339,64 @@ describe("#79: a relay a refresh of our own identity was held back for doesn't b
     expect(`${rot.out}\n${rot.err}`).toContain(RB);
     u.cleanup();
   }, 120_000);
+
+  it("#92 follow-up: when the version left out isn't one this device published, RB isn't set aside: rotation refuses; removing RB goes ahead", async () => {
+    const u = new User("sal", { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3`, [RC]: `ws://127.0.0.1:${rc.port}/v3` });
+    const userId = (await u.ok(["init", "--name", "sal", "--relay", RA, "--yes"])).userId as string;
+    await u.ok(["relays", "add", RB]);
+    for (let i = 0; i < 3; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+    const head = await heldHead(u);
+    await storeOwn(u, userId, (cur) => ({ ...cur, versions: [head.jws] }));
+    // The head isn't in this device's publish log (as if another device published it, or an old one replayed).
+    {
+      const app = await u.app();
+      await app.load();
+      try {
+        const docs = new FileDocBackend(app.store.dir);
+        const log = (await docs.read("v3-publishLog")) as { published: string[] };
+        expect(log.published).toContain(head.hash);
+        await docs.write("v3-publishLog", { ...log, published: log.published.filter((h) => h !== head.hash) });
+        expect((await app.store.getPublishLog()).published).not.toContain(head.hash);
+      } finally {
+        await app.close();
+      }
+    }
+    const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+    const mallory = generateDeviceKeysV3(userId).did;
+    let prev = head.prev!;
+    let top = "";
+    for (let v = head.ver; v <= head.ver + 3; v++) {
+      top = createIdentityDoc(ik, { ver: v, prev, name: head.name, relays: [...head.relays], devices: [...head.devices, mallory], keyholders: [...head.keyholders], by: head.keyholders[0], iat: nowSec() - 5 });
+      prev = jwsHash(top);
+    }
+    const real = globalThis.fetch;
+    const id = `/v3/identity/${encodeURIComponent(userId)}/`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname.startsWith(id) && url.port === String(rb.port)) {
+        if (url.pathname.endsWith("/tips")) return json({ tips: [top] });
+        throw new Error("connect ETIMEDOUT");
+      }
+      return real(input, init);
+    });
+    // A plain edit refuses, naming RB as sending newer versions (not as a held-back relay to set aside).
+    const edit = await u.run(["profile", "set", "--bio", "blocked?"]);
+    expect(edit.code, `${edit.out}\n${edit.err}`).not.toBe(0);
+    expect(edit.json.error).toBe("refresh_failed");
+    expect(edit.json.reason).toContain(RB);
+    expect(edit.json.reason).toContain("p2p relays remove");
+    // Rotation doesn't set RB aside: refused, nothing published.
+    const rot = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(rot.code, `${rot.out}\n${rot.err}`).not.toBe(0);
+    expect(rot.json.error).toBe("refresh_failed");
+    expect(rot.json.reason).toContain(RB);
+    expect((await realTips(ra.port, userId)).map((t) => t.hash)).toEqual([head.hash]);
+    // The user removes RB: that goes ahead on the head RA confirms.
+    const removed = await u.run(["relays", "remove", RB]);
+    vi.restoreAllMocks();
+    expect(removed.code, `${removed.out}\n${removed.err}`).toBe(0);
+    expect(removed.json.relays).toEqual([RA]);
+    u.cleanup();
+  }, 120_000);
 });
+

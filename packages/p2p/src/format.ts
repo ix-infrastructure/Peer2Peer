@@ -13,7 +13,7 @@ import type { CodeRow } from "./codes.js";
 import type { DeviceRow, WhoamiResult } from "./identity.js";
 import type { PeerRow, RosterView } from "./sessions.js";
 import type { FriendRow } from "./social.js";
-import type { RotateResult, RotationPlan } from "./rotation.js";
+import type { BranchSummary, RotateResult, RotationPlan } from "./rotation.js";
 
 export function formatAge(sec: number): string {
   if (sec < 60) return `${Math.max(0, Math.round(sec))}s`;
@@ -195,6 +195,11 @@ export function formatJoin(r: JoinResult): string {
   }
 }
 
+/** One branch summary as text: `<hash> (ver N, published by ...; relays ...)`. */
+export function branchLine(b: BranchSummary): string {
+  return `${b.hash} (ver ${b.ver}, published by ${b.by.join(", ") || "?"}; relays ${b.relays.join(", ") || "?"})`;
+}
+
 export function formatRotationPlan(p: RotationPlan): string {
   // A label from a version this device didn't publish is shown as such (pre-release re-review N2), and so is why a device is dropped.
   const dev = (d: { did: string; label: string; keyholder?: boolean; labelTrusted?: boolean; why?: string }) =>
@@ -202,6 +207,14 @@ export function formatRotationPlan(p: RotationPlan): string {
   return [
     `${p.contest ? "Contesting a rotation you didn't publish: moving" : "Rotating"} ${p.address} to a new identity key ${p.newFingerprint} (§2.8).`,
     ...(p.backup ? [`Its backup phrase is in ${p.backup.file}.`] : []),
+    // #91: a branch picked by provenance among others that still list this device is never picked silently.
+    ...(p.branch && p.otherBranches?.length
+      ? [
+          `Your identity is forked: this plan builds on the branch ${p.branch} as yours (its versions come from your devices). Other branches still list this device:\n${p.otherBranches
+            .map((b) => `  ${branchLine(b)}`)
+            .join("\n")}\nIf ${p.branch} isn't yours, drop this plan (--cancel) and choose with --plan --branch <hash>.`,
+        ]
+      : []),
     p.follow.length ? `These devices get the rotation to follow (each follows only when you accept it there):\n${p.follow.map(dev).join("\n")}` : "No other device follows.",
     ...(p.excluded.length ? [`These devices do NOT follow (excluded):\n${p.excluded.map(dev).join("\n")}`] : []),
     `${plural(p.friends, "friend")} get a fresh invite (they approve it); ${plural(p.owned, "circle")} you own move to the new key; in ${plural(p.memberOf, "other circle")} the owner swaps you in.`,

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.3 5e9a9334dbf54077
+// @peer2peer/core 0.1.3 ad8687faf8cb39f1
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -11023,6 +11023,10 @@ function heldBackByOf(e) {
   const r = e?.heldBackBy;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
 }
+function heldBackForOf(e) {
+  const r = e?.heldBackFor;
+  return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+}
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
@@ -11361,9 +11365,9 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg, heldBackBy2 = []) => {
+  const broken = (msg, held2 = { by: [], for: [] }) => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...heldBackBy2.length > 0 ? { heldBackBy: heldBackBy2 } : {} });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...held2.by.length > 0 ? { heldBackBy: held2.by, heldBackFor: held2.for } : {} });
     throw e;
   };
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
@@ -11373,7 +11377,10 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const headMajority = headSupport * 2 > listed.length;
     return [...candidates].filter((e) => e.hash !== head.hash && !rejected.has(e.hash) && pendingUsable(e, { now, skewSec: opts.skewSec }) && (!headMajority || servedBy(e.hash) >= headSupport) && (head.devices.some((x) => !e.devices.includes(x)) || head.keyholders.some((x) => !e.keyholders.includes(x))));
   };
-  const heldBackOf = (head, left) => opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
+  const heldBackOf = (head, left) => {
+    const by = opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
+    return { by, for: by.length > 0 ? left.map((e) => e.hash) : [] };
+  };
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
   let jumpTo;
@@ -11389,7 +11396,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   const besideHead = [];
   let leftOutDocs = [];
-  let heldBackBy = [];
+  let heldBack = { by: [], for: [] };
   const forkRoots = /* @__PURE__ */ new Map();
   if (!exhausted && chain.size > 0 && !chain.anchored) {
     begin2();
@@ -11452,7 +11459,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     if (leftOut.length > 0) {
       docsCapped = true;
       incomplete = true;
-      heldBackBy = heldBackOf(head, leftOut);
+      heldBack = heldBackOf(head, leftOut);
       if (!opts.own)
         leftOutDocs = leftOut.filter((e) => !chain.has(e.hash) && e.ver <= chain.view().head.ver);
     }
@@ -11536,7 +11543,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       answeredRelays: answered,
       unconnectedRelays: unconnectedRelays(),
       unconnectedVersions: unconnectedVersions(),
-      ...heldBackBy.length > 0 ? { heldBackBy } : {}
+      ...heldBack.by.length > 0 ? { heldBackBy: heldBack.by, heldBackFor: heldBack.for } : {}
     };
   }
   await store2.deleteProvisional(userId);
@@ -21379,6 +21386,916 @@ var init_codes = __esm({
   }
 });
 
+// packages/p2p/node_modules/uqr/dist/index.mjs
+function appendBits(val, len, bb) {
+  if (len < 0 || len > 31 || val >>> len !== 0)
+    throw new RangeError("Value out of range");
+  for (let i = len - 1; i >= 0; i--)
+    bb.push(val >>> i & 1);
+}
+function getBit2(x, i) {
+  return (x >>> i & 1) !== 0;
+}
+function numCharCountBits(mode, ver) {
+  return mode[Math.floor((ver + 7) / 17) + 1];
+}
+function makeBytes(data) {
+  const bb = [];
+  for (const b of data)
+    appendBits(b, 8, bb);
+  return new QrSegment(MODE_BYTE, data.length, bb);
+}
+function makeNumeric(digits) {
+  if (!isNumeric(digits))
+    throw new RangeError("String contains non-numeric characters");
+  const bb = [];
+  for (let i = 0; i < digits.length; ) {
+    const n = Math.min(digits.length - i, 3);
+    appendBits(Number.parseInt(digits.substring(i, i + n), 10), n * 3 + 1, bb);
+    i += n;
+  }
+  return new QrSegment(MODE_NUMERIC, digits.length, bb);
+}
+function makeAlphanumeric(text2) {
+  if (!isAlphanumeric(text2))
+    throw new RangeError("String contains unencodable characters in alphanumeric mode");
+  const bb = [];
+  let i;
+  for (i = 0; i + 2 <= text2.length; i += 2) {
+    let temp = ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i)) * 45;
+    temp += ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i + 1));
+    appendBits(temp, 11, bb);
+  }
+  if (i < text2.length)
+    appendBits(ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i)), 6, bb);
+  return new QrSegment(MODE_ALPHANUMERIC, text2.length, bb);
+}
+function makeSegments(text2) {
+  if (text2 === "")
+    return [];
+  else if (isNumeric(text2))
+    return [makeNumeric(text2)];
+  else if (isAlphanumeric(text2))
+    return [makeAlphanumeric(text2)];
+  else
+    return [makeBytes(toUtf8ByteArray(text2))];
+}
+function isNumeric(text2) {
+  return NUMERIC_REGEX.test(text2);
+}
+function isAlphanumeric(text2) {
+  return ALPHANUMERIC_REGEX.test(text2);
+}
+function getTotalBits(segs, version) {
+  let result = 0;
+  for (const seg of segs) {
+    const ccbits = numCharCountBits(seg.mode, version);
+    if (seg.numChars >= 1 << ccbits)
+      return Number.POSITIVE_INFINITY;
+    result += 4 + ccbits + seg.bitData.length;
+  }
+  return result;
+}
+function toUtf8ByteArray(str4) {
+  str4 = encodeURI(str4);
+  const result = [];
+  for (let i = 0; i < str4.length; i++) {
+    if (str4.charAt(i) !== "%") {
+      result.push(str4.charCodeAt(i));
+    } else {
+      result.push(Number.parseInt(str4.substring(i + 1, i + 3), 16));
+      i += 2;
+    }
+  }
+  return result;
+}
+function getNumRawDataModules(ver) {
+  if (ver < MIN_VERSION || ver > MAX_VERSION)
+    throw new RangeError("Version number out of range");
+  let result = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const numAlign = Math.floor(ver / 7) + 2;
+    result -= (25 * numAlign - 10) * numAlign - 55;
+    if (ver >= 7)
+      result -= 36;
+  }
+  return result;
+}
+function getNumDataCodewords(ver, ecl) {
+  return Math.floor(getNumRawDataModules(ver) / 8) - ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver] * NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
+}
+function reedSolomonComputeDivisor(degree) {
+  if (degree < 1 || degree > 255)
+    throw new RangeError("Degree out of range");
+  const result = [];
+  for (let i = 0; i < degree - 1; i++)
+    result.push(0);
+  result.push(1);
+  let root = 1;
+  for (let i = 0; i < degree; i++) {
+    for (let j = 0; j < result.length; j++) {
+      result[j] = reedSolomonMultiply(result[j], root);
+      if (j + 1 < result.length)
+        result[j] ^= result[j + 1];
+    }
+    root = reedSolomonMultiply(root, 2);
+  }
+  return result;
+}
+function reedSolomonComputeRemainder(data, divisor) {
+  const result = divisor.map((_) => 0);
+  for (const b of data) {
+    const factor = b ^ result.shift();
+    result.push(0);
+    divisor.forEach((coef, i) => result[i] ^= reedSolomonMultiply(coef, factor));
+  }
+  return result;
+}
+function reedSolomonMultiply(x, y) {
+  if (x >>> 8 !== 0 || y >>> 8 !== 0)
+    throw new RangeError("Byte out of range");
+  let z = 0;
+  for (let i = 7; i >= 0; i--) {
+    z = z << 1 ^ (z >>> 7) * 285;
+    z ^= (y >>> i & 1) * x;
+  }
+  return z;
+}
+function encodeSegments(segs, ecl, minVersion = 1, maxVersion = 40, mask = -1, boostEcl = true) {
+  if (!(MIN_VERSION <= minVersion && minVersion <= maxVersion && maxVersion <= MAX_VERSION) || mask < -1 || mask > 7) {
+    throw new RangeError("Invalid value");
+  }
+  let version;
+  let dataUsedBits;
+  for (version = minVersion; ; version++) {
+    const dataCapacityBits2 = getNumDataCodewords(version, ecl) * 8;
+    const usedBits = getTotalBits(segs, version);
+    if (usedBits <= dataCapacityBits2) {
+      dataUsedBits = usedBits;
+      break;
+    }
+    if (version >= maxVersion)
+      throw new RangeError("Data too long");
+  }
+  for (const newEcl of [MEDIUM, QUARTILE, HIGH]) {
+    if (boostEcl && dataUsedBits <= getNumDataCodewords(version, newEcl) * 8)
+      ecl = newEcl;
+  }
+  const bb = [];
+  for (const seg of segs) {
+    appendBits(seg.mode[0], 4, bb);
+    appendBits(seg.numChars, numCharCountBits(seg.mode, version), bb);
+    for (const b of seg.getData())
+      bb.push(b);
+  }
+  const dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
+  appendBits(0, Math.min(4, dataCapacityBits - bb.length), bb);
+  appendBits(0, (8 - bb.length % 8) % 8, bb);
+  for (let padByte = 236; bb.length < dataCapacityBits; padByte ^= 236 ^ 17)
+    appendBits(padByte, 8, bb);
+  const dataCodewords = Array.from({ length: Math.ceil(bb.length / 8) }, () => 0);
+  bb.forEach((b, i) => dataCodewords[i >>> 3] |= b << 7 - (i & 7));
+  return new QrCode(version, ecl, dataCodewords, mask);
+}
+function encode(data, options) {
+  const {
+    ecc = "L",
+    boostEcc = false,
+    minVersion = 1,
+    maxVersion = 40,
+    maskPattern = -1,
+    border = 1
+  } = options || {};
+  const segment = typeof data === "string" ? makeSegments(data) : Array.isArray(data) ? [makeBytes(data)] : void 0;
+  if (!segment)
+    throw new Error(`uqr only supports encoding string and binary data, but got: ${typeof data}`);
+  const qr2 = encodeSegments(
+    segment,
+    EccMap[ecc],
+    minVersion,
+    maxVersion,
+    maskPattern,
+    boostEcc
+  );
+  const result = addBorder({
+    version: qr2.version,
+    maskPattern: qr2.mask,
+    size: qr2.size,
+    data: qr2.modules,
+    types: qr2.types
+  }, border);
+  if (options?.invert)
+    result.data = result.data.map((row2) => row2.map((mod2) => !mod2));
+  options?.onEncoded?.(result);
+  return result;
+}
+function addBorder(input, border = 1) {
+  if (!border)
+    return input;
+  const { size: size2 } = input;
+  const newSize = size2 + border * 2;
+  input.size = newSize;
+  input.data.forEach((row2) => {
+    for (let i = 0; i < border; i++) {
+      row2.unshift(false);
+      row2.push(false);
+    }
+  });
+  for (let i = 0; i < border; i++) {
+    input.data.unshift(Array.from({ length: newSize }, (_) => false));
+    input.data.push(Array.from({ length: newSize }, (_) => false));
+  }
+  const b = QrCodeDataType.Border;
+  input.types.forEach((row2) => {
+    for (let i = 0; i < border; i++) {
+      row2.unshift(b);
+      row2.push(b);
+    }
+  });
+  for (let i = 0; i < border; i++) {
+    input.types.unshift(Array.from({ length: newSize }, (_) => b));
+    input.types.push(Array.from({ length: newSize }, (_) => b));
+  }
+  return input;
+}
+function getDataAt(data, x, y, defaults = false) {
+  if (x < 0 || y < 0 || x >= data.length || y >= data.length)
+    return defaults;
+  return data[y][x];
+}
+function renderUnicodeCompact(data, options = {}) {
+  const palette = {
+    WHITE_ALL: "█",
+    WHITE_BLACK: "▀",
+    BLACK_WHITE: "▄",
+    BLACK_ALL: " "
+  };
+  const result = encode(data, options);
+  const WHITE = false;
+  const BLACK = true;
+  const at = (x, y) => getDataAt(result.data, x, y, true);
+  const lines = [];
+  let line = "";
+  for (let row2 = 0; row2 < result.size; row2 += 2) {
+    for (let col = 0; col < result.size; col++) {
+      if (at(col, row2) === WHITE && at(col, row2 + 1) === WHITE)
+        line += palette.WHITE_ALL;
+      else if (at(col, row2) === WHITE && at(col, row2 + 1) === BLACK)
+        line += palette.WHITE_BLACK;
+      else if (at(col, row2) === BLACK && at(col, row2 + 1) === WHITE)
+        line += palette.BLACK_WHITE;
+      else
+        line += palette.BLACK_ALL;
+    }
+    lines.push(line);
+    line = "";
+  }
+  return lines.join("\n");
+}
+var QrCodeDataType, LOW, MEDIUM, QUARTILE, HIGH, EccMap, NUMERIC_REGEX, ALPHANUMERIC_REGEX, ALPHANUMERIC_CHARSET, MIN_VERSION, MAX_VERSION, PENALTY_N1, PENALTY_N2, PENALTY_N3, PENALTY_N4, ECC_CODEWORDS_PER_BLOCK, NUM_ERROR_CORRECTION_BLOCKS, QrCode, QrSegment, MODE_NUMERIC, MODE_ALPHANUMERIC, MODE_BYTE;
+var init_dist = __esm({
+  "packages/p2p/node_modules/uqr/dist/index.mjs"() {
+    QrCodeDataType = /* @__PURE__ */ ((QrCodeDataType2) => {
+      QrCodeDataType2[QrCodeDataType2["Border"] = -1] = "Border";
+      QrCodeDataType2[QrCodeDataType2["Data"] = 0] = "Data";
+      QrCodeDataType2[QrCodeDataType2["Function"] = 1] = "Function";
+      QrCodeDataType2[QrCodeDataType2["Position"] = 2] = "Position";
+      QrCodeDataType2[QrCodeDataType2["Timing"] = 3] = "Timing";
+      QrCodeDataType2[QrCodeDataType2["Alignment"] = 4] = "Alignment";
+      return QrCodeDataType2;
+    })(QrCodeDataType || {});
+    LOW = [0, 1];
+    MEDIUM = [1, 0];
+    QUARTILE = [2, 3];
+    HIGH = [3, 2];
+    EccMap = {
+      L: LOW,
+      M: MEDIUM,
+      Q: QUARTILE,
+      H: HIGH
+    };
+    NUMERIC_REGEX = /^\d*$/;
+    ALPHANUMERIC_REGEX = /^[A-Z0-9 $%*+./:-]*$/;
+    ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+    MIN_VERSION = 1;
+    MAX_VERSION = 40;
+    PENALTY_N1 = 3;
+    PENALTY_N2 = 3;
+    PENALTY_N3 = 40;
+    PENALTY_N4 = 10;
+    ECC_CODEWORDS_PER_BLOCK = [
+      // Version: (note that index 0 is for padding, and is set to an illegal value)
+      // 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
+      [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+      // Low
+      [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+      // Medium
+      [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+      // Quartile
+      [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+      // High
+    ];
+    NUM_ERROR_CORRECTION_BLOCKS = [
+      // Version: (note that index 0 is for padding, and is set to an illegal value)
+      // 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
+      [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+      // Low
+      [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+      // Medium
+      [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+      // Quartile
+      [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81]
+      // High
+    ];
+    QrCode = class {
+      /* -- Constructor (low level) and fields -- */
+      // Creates a new QR Code with the given version number,
+      // error correction level, data codeword bytes, and mask number.
+      // This is a low-level API that most users should not use directly.
+      // A mid-level API is the encodeSegments() function.
+      constructor(version, ecc, dataCodewords, msk) {
+        this.version = version;
+        this.ecc = ecc;
+        if (version < MIN_VERSION || version > MAX_VERSION)
+          throw new RangeError("Version value out of range");
+        if (msk < -1 || msk > 7)
+          throw new RangeError("Mask value out of range");
+        this.size = version * 4 + 17;
+        const row2 = Array.from({ length: this.size }).fill(false);
+        for (let i = 0; i < this.size; i++) {
+          this.modules.push(row2.slice());
+          this.types.push(row2.map(() => 0));
+        }
+        this.drawFunctionPatterns();
+        const allCodewords = this.addEccAndInterleave(dataCodewords);
+        this.drawCodewords(allCodewords);
+        if (msk === -1) {
+          let minPenalty = 1e9;
+          for (let i = 0; i < 8; i++) {
+            this.applyMask(i);
+            this.drawFormatBits(i);
+            const penalty = this.getPenaltyScore();
+            if (penalty < minPenalty) {
+              msk = i;
+              minPenalty = penalty;
+            }
+            this.applyMask(i);
+          }
+        }
+        this.mask = msk;
+        this.applyMask(msk);
+        this.drawFormatBits(msk);
+      }
+      /* -- Fields -- */
+      // The width and height of this QR Code, measured in modules, between
+      // 21 and 177 (inclusive). This is equal to version * 4 + 17.
+      size;
+      // The index of the mask pattern used in this QR Code, which is between 0 and 7 (inclusive).
+      // Even if a QR Code is created with automatic masking requested (mask = -1),
+      // the resulting object still has a mask value between 0 and 7.
+      mask;
+      // The modules of this QR Code (false = light, true = dark).
+      // Immutable after constructor finishes. Accessed through getModule().
+      modules = [];
+      types = [];
+      /* -- Accessor methods -- */
+      // Returns the color of the module (pixel) at the given coordinates, which is false
+      // for light or true for dark. The top left corner has the coordinates (x=0, y=0).
+      // If the given coordinates are out of bounds, then false (light) is returned.
+      getModule(x, y) {
+        return x >= 0 && x < this.size && y >= 0 && y < this.size && this.modules[y][x];
+      }
+      /* -- Private helper methods for constructor: Drawing function modules -- */
+      // Reads this object's version field, and draws and marks all function modules.
+      drawFunctionPatterns() {
+        for (let i = 0; i < this.size; i++) {
+          this.setFunctionModule(6, i, i % 2 === 0, QrCodeDataType.Timing);
+          this.setFunctionModule(i, 6, i % 2 === 0, QrCodeDataType.Timing);
+        }
+        this.drawFinderPattern(3, 3);
+        this.drawFinderPattern(this.size - 4, 3);
+        this.drawFinderPattern(3, this.size - 4);
+        const alignPatPos = this.getAlignmentPatternPositions();
+        const numAlign = alignPatPos.length;
+        for (let i = 0; i < numAlign; i++) {
+          for (let j = 0; j < numAlign; j++) {
+            if (!(i === 0 && j === 0 || i === 0 && j === numAlign - 1 || i === numAlign - 1 && j === 0))
+              this.drawAlignmentPattern(alignPatPos[i], alignPatPos[j]);
+          }
+        }
+        this.drawFormatBits(0);
+        this.drawVersion();
+      }
+      // Draws two copies of the format bits (with its own error correction code)
+      // based on the given mask and this object's error correction level field.
+      drawFormatBits(mask) {
+        const data = this.ecc[1] << 3 | mask;
+        let rem = data;
+        for (let i = 0; i < 10; i++)
+          rem = rem << 1 ^ (rem >>> 9) * 1335;
+        const bits = (data << 10 | rem) ^ 21522;
+        for (let i = 0; i <= 5; i++)
+          this.setFunctionModule(8, i, getBit2(bits, i));
+        this.setFunctionModule(8, 7, getBit2(bits, 6));
+        this.setFunctionModule(8, 8, getBit2(bits, 7));
+        this.setFunctionModule(7, 8, getBit2(bits, 8));
+        for (let i = 9; i < 15; i++)
+          this.setFunctionModule(14 - i, 8, getBit2(bits, i));
+        for (let i = 0; i < 8; i++)
+          this.setFunctionModule(this.size - 1 - i, 8, getBit2(bits, i));
+        for (let i = 8; i < 15; i++)
+          this.setFunctionModule(8, this.size - 15 + i, getBit2(bits, i));
+        this.setFunctionModule(8, this.size - 8, true);
+      }
+      // Draws two copies of the version bits (with its own error correction code),
+      // based on this object's version field, iff 7 <= version <= 40.
+      drawVersion() {
+        if (this.version < 7)
+          return;
+        let rem = this.version;
+        for (let i = 0; i < 12; i++)
+          rem = rem << 1 ^ (rem >>> 11) * 7973;
+        const bits = this.version << 12 | rem;
+        for (let i = 0; i < 18; i++) {
+          const color2 = getBit2(bits, i);
+          const a = this.size - 11 + i % 3;
+          const b = Math.floor(i / 3);
+          this.setFunctionModule(a, b, color2);
+          this.setFunctionModule(b, a, color2);
+        }
+      }
+      // Draws a 9*9 finder pattern including the border separator,
+      // with the center module at (x, y). Modules can be out of bounds.
+      drawFinderPattern(x, y) {
+        for (let dy = -4; dy <= 4; dy++) {
+          for (let dx = -4; dx <= 4; dx++) {
+            const dist = Math.max(Math.abs(dx), Math.abs(dy));
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx >= 0 && xx < this.size && yy >= 0 && yy < this.size)
+              this.setFunctionModule(xx, yy, dist !== 2 && dist !== 4, QrCodeDataType.Position);
+          }
+        }
+      }
+      // Draws a 5*5 alignment pattern, with the center module
+      // at (x, y). All modules must be in bounds.
+      drawAlignmentPattern(x, y) {
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            this.setFunctionModule(
+              x + dx,
+              y + dy,
+              Math.max(Math.abs(dx), Math.abs(dy)) !== 1,
+              QrCodeDataType.Alignment
+            );
+          }
+        }
+      }
+      // Sets the color of a module and marks it as a function module.
+      // Only used by the constructor. Coordinates must be in bounds.
+      setFunctionModule(x, y, isDark, type = QrCodeDataType.Function) {
+        this.modules[y][x] = isDark;
+        this.types[y][x] = type;
+      }
+      /* -- Private helper methods for constructor: Codewords and masking -- */
+      // Returns a new byte string representing the given data with the appropriate error correction
+      // codewords appended to it, based on this object's version and error correction level.
+      addEccAndInterleave(data) {
+        const ver = this.version;
+        const ecl = this.ecc;
+        if (data.length !== getNumDataCodewords(ver, ecl))
+          throw new RangeError("Invalid argument");
+        const numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
+        const blockEccLen = ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver];
+        const rawCodewords = Math.floor(getNumRawDataModules(ver) / 8);
+        const numShortBlocks = numBlocks - rawCodewords % numBlocks;
+        const shortBlockLen = Math.floor(rawCodewords / numBlocks);
+        const blocks = [];
+        const rsDiv = reedSolomonComputeDivisor(blockEccLen);
+        for (let i = 0, k = 0; i < numBlocks; i++) {
+          const dat = data.slice(k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
+          k += dat.length;
+          const ecc = reedSolomonComputeRemainder(dat, rsDiv);
+          if (i < numShortBlocks)
+            dat.push(0);
+          blocks.push(dat.concat(ecc));
+        }
+        const result = [];
+        for (let i = 0; i < blocks[0].length; i++) {
+          blocks.forEach((block2, j) => {
+            if (i !== shortBlockLen - blockEccLen || j >= numShortBlocks)
+              result.push(block2[i]);
+          });
+        }
+        return result;
+      }
+      // Draws the given sequence of 8-bit codewords (data and error correction) onto the entire
+      // data area of this QR Code. Function modules need to be marked off before this is called.
+      drawCodewords(data) {
+        if (data.length !== Math.floor(getNumRawDataModules(this.version) / 8))
+          throw new RangeError("Invalid argument");
+        let i = 0;
+        for (let right = this.size - 1; right >= 1; right -= 2) {
+          if (right === 6)
+            right = 5;
+          for (let vert = 0; vert < this.size; vert++) {
+            for (let j = 0; j < 2; j++) {
+              const x = right - j;
+              const upward = (right + 1 & 2) === 0;
+              const y = upward ? this.size - 1 - vert : vert;
+              if (!this.types[y][x] && i < data.length * 8) {
+                this.modules[y][x] = getBit2(data[i >>> 3], 7 - (i & 7));
+                i++;
+              }
+            }
+          }
+        }
+      }
+      // XORs the codeword modules in this QR Code with the given mask pattern.
+      // The function modules must be marked and the codeword bits must be drawn
+      // before masking. Due to the arithmetic of XOR, calling applyMask() with
+      // the same mask value a second time will undo the mask. A final well-formed
+      // QR Code needs exactly one (not zero, two, etc.) mask applied.
+      applyMask(mask) {
+        if (mask < 0 || mask > 7)
+          throw new RangeError("Mask value out of range");
+        for (let y = 0; y < this.size; y++) {
+          for (let x = 0; x < this.size; x++) {
+            let invert2;
+            switch (mask) {
+              case 0:
+                invert2 = (x + y) % 2 === 0;
+                break;
+              case 1:
+                invert2 = y % 2 === 0;
+                break;
+              case 2:
+                invert2 = x % 3 === 0;
+                break;
+              case 3:
+                invert2 = (x + y) % 3 === 0;
+                break;
+              case 4:
+                invert2 = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+                break;
+              case 5:
+                invert2 = x * y % 2 + x * y % 3 === 0;
+                break;
+              case 6:
+                invert2 = (x * y % 2 + x * y % 3) % 2 === 0;
+                break;
+              case 7:
+                invert2 = ((x + y) % 2 + x * y % 3) % 2 === 0;
+                break;
+              default:
+                throw new Error("Unreachable");
+            }
+            if (!this.types[y][x] && invert2)
+              this.modules[y][x] = !this.modules[y][x];
+          }
+        }
+      }
+      // Calculates and returns the penalty score based on state of this QR Code's current modules.
+      // This is used by the automatic mask choice algorithm to find the mask pattern that yields the lowest score.
+      getPenaltyScore() {
+        let result = 0;
+        for (let y = 0; y < this.size; y++) {
+          let runColor = false;
+          let runX = 0;
+          const runHistory = [0, 0, 0, 0, 0, 0, 0];
+          for (let x = 0; x < this.size; x++) {
+            if (this.modules[y][x] === runColor) {
+              runX++;
+              if (runX === 5)
+                result += PENALTY_N1;
+              else if (runX > 5)
+                result++;
+            } else {
+              this.finderPenaltyAddHistory(runX, runHistory);
+              if (!runColor)
+                result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+              runColor = this.modules[y][x];
+              runX = 1;
+            }
+          }
+          result += this.finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3;
+        }
+        for (let x = 0; x < this.size; x++) {
+          let runColor = false;
+          let runY = 0;
+          const runHistory = [0, 0, 0, 0, 0, 0, 0];
+          for (let y = 0; y < this.size; y++) {
+            if (this.modules[y][x] === runColor) {
+              runY++;
+              if (runY === 5)
+                result += PENALTY_N1;
+              else if (runY > 5)
+                result++;
+            } else {
+              this.finderPenaltyAddHistory(runY, runHistory);
+              if (!runColor)
+                result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
+              runColor = this.modules[y][x];
+              runY = 1;
+            }
+          }
+          result += this.finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3;
+        }
+        for (let y = 0; y < this.size - 1; y++) {
+          for (let x = 0; x < this.size - 1; x++) {
+            const color2 = this.modules[y][x];
+            if (color2 === this.modules[y][x + 1] && color2 === this.modules[y + 1][x] && color2 === this.modules[y + 1][x + 1]) {
+              result += PENALTY_N2;
+            }
+          }
+        }
+        let dark = 0;
+        for (const row2 of this.modules)
+          dark = row2.reduce((sum2, color2) => sum2 + (color2 ? 1 : 0), dark);
+        const total = this.size * this.size;
+        const k = Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1;
+        result += k * PENALTY_N4;
+        return result;
+      }
+      /* -- Private helper functions -- */
+      // Returns an ascending list of positions of alignment patterns for this version number.
+      // Each position is in the range [0,177), and are used on both the x and y axes.
+      // This could be implemented as lookup table of 40 variable-length lists of integers.
+      getAlignmentPatternPositions() {
+        if (this.version === 1) {
+          return [];
+        } else {
+          const numAlign = Math.floor(this.version / 7) + 2;
+          const step2 = this.version === 32 ? 26 : Math.ceil((this.version * 4 + 4) / (numAlign * 2 - 2)) * 2;
+          const result = [6];
+          for (let pos = this.size - 7; result.length < numAlign; pos -= step2)
+            result.splice(1, 0, pos);
+          return result;
+        }
+      }
+      // Can only be called immediately after a light run is added, and
+      // returns either 0, 1, or 2. A helper function for getPenaltyScore().
+      finderPenaltyCountPatterns(runHistory) {
+        const n = runHistory[1];
+        const core = n > 0 && runHistory[2] === n && runHistory[3] === n * 3 && runHistory[4] === n && runHistory[5] === n;
+        return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0) + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
+      }
+      // Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
+      finderPenaltyTerminateAndCount(currentRunColor, currentRunLength, runHistory) {
+        if (currentRunColor) {
+          this.finderPenaltyAddHistory(currentRunLength, runHistory);
+          currentRunLength = 0;
+        }
+        currentRunLength += this.size;
+        this.finderPenaltyAddHistory(currentRunLength, runHistory);
+        return this.finderPenaltyCountPatterns(runHistory);
+      }
+      // Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
+      finderPenaltyAddHistory(currentRunLength, runHistory) {
+        if (runHistory[0] === 0)
+          currentRunLength += this.size;
+        runHistory.pop();
+        runHistory.unshift(currentRunLength);
+      }
+    };
+    QrSegment = class {
+      // Creates a new QR Code segment with the given attributes and data.
+      // The character count (numChars) must agree with the mode and the bit buffer length,
+      // but the constraint isn't checked. The given bit buffer is cloned and stored.
+      constructor(mode, numChars, bitData) {
+        this.mode = mode;
+        this.numChars = numChars;
+        this.bitData = bitData;
+        if (numChars < 0)
+          throw new RangeError("Invalid argument");
+        this.bitData = bitData.slice();
+      }
+      /* -- Methods -- */
+      // Returns a new copy of the data bits of this segment.
+      getData() {
+        return this.bitData.slice();
+      }
+    };
+    MODE_NUMERIC = [1, 10, 12, 14];
+    MODE_ALPHANUMERIC = [2, 9, 11, 13];
+    MODE_BYTE = [4, 8, 16, 16];
+  }
+});
+
+// packages/p2p/src/format.ts
+function formatAge(sec) {
+  if (sec < 60) return `${Math.max(0, Math.round(sec))}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
+function formatDate(sec) {
+  return new Date(sec * 1e3).toISOString().slice(0, 10);
+}
+function plural(n, one, many = `${one}s`) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+function formatCodes(rows) {
+  if (rows.length === 0) return "No invite codes. Make one: p2p invite <label>";
+  const now = Date.now() / 1e3;
+  return rows.map((r) => {
+    const who2 = r.label ? ` ${r.label}` : "";
+    const circle = r.circle ? ` +circle "${r.circle.name}"` : "";
+    const to = r.to ? ` (only ${r.to.address})` : "";
+    let st;
+    switch (r.status) {
+      case "open":
+        st = `open, ${plural(Math.max(1, Math.round((r.exp - now) / 86400)), "day")} left`;
+        break;
+      case "evicted":
+        st = "evicted by the relay (it was full): make a new code";
+        break;
+      case "taken":
+        st = "TAKEN, but nobody joined yet: if that wasn't them, `p2p invites revoke` refuses the join";
+        break;
+      case "redeemed":
+        st = `redeemed by ${r.redeemedBy?.address ?? "?"} (not them? p2p remove ${r.redeemedBy?.userId ?? ""})`;
+        break;
+      default:
+        st = r.status;
+    }
+    const shown = (r.status === "open" || r.status === "taken") && !r.redacted ? r.code : shortCode(r.code);
+    return `${shown}${who2}${circle}${to}: ${st}`;
+  }).join("\n");
+}
+function shortCode(code2) {
+  return code2.endsWith("…") ? code2 : code2.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
+}
+function formatDelivery(d) {
+  return `delivered via ${plural(d.relays.length, "relay")} (${plural(d.devices, "device")})`;
+}
+function qr(text2) {
+  try {
+    return renderUnicodeCompact(text2, { border: 1, ecc: "L" });
+  } catch {
+    return "";
+  }
+}
+function table(rows) {
+  if (rows.length === 0) return "";
+  const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => [...r[i] ?? ""].length)));
+  return rows.map((r) => r.map((c, i) => i === r.length - 1 ? c : c.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
+}
+function formatDevices(rows) {
+  return table([
+    ["DEVICE", "LABEL", "ROLE", "CERT EXPIRES"],
+    ...rows.map((d) => [`${d.did}${d.thisDevice ? " *" : ""}`, d.label || "-", d.keyholder ? "key holder" : "device", d.certExp ? formatDate(d.certExp) : "-"])
+  ]);
+}
+function formatWhoami(r) {
+  const lines = [
+    `${r.address}`,
+    `  userId       ${r.userId}`,
+    `  fingerprint  ${r.fingerprint}`,
+    `  this device  ${r.did}${r.keyholder ? " (key holder)" : ""}`,
+    `  relays       ${r.relays.join(", ")}`,
+    `  document     version ${r.doc.ver}, expires ${formatDate(r.doc.exp)}${r.doc.freshness !== "fresh" ? ` (${r.doc.freshness}, ${r.doc.daysPastExp} days past)` : ""}${r.doc.forked ? ", forked" : ""}`
+  ];
+  if (r.profile.bio) lines.push(`  bio          ${r.profile.bio}`);
+  if (r.profile.links.length > 0) lines.push(`  links        ${r.profile.links.join(" ")}`);
+  if (r.defaultCircle) lines.push(`  circle       ${r.defaultCircle} (default)`);
+  lines.push("", formatDevices(r.devices));
+  for (const w of r.warnings) lines.push("", `! ${w}`);
+  return lines.join("\n");
+}
+function formatPeers(rows) {
+  if (rows.length === 0) return "No live sessions. Friends' and circle-mates' sessions appear here once they post a status.";
+  const out = [];
+  for (const r of rows) {
+    const who2 = r.self ? `${r.address} (you${r.thisDevice ? ", this device" : ""})` : r.address;
+    const where = [r.repo, r.branch].filter(Boolean).join("@");
+    out.push(`${r.live ? r.state === "busy" ? "●" : "○" : "·"} ${who2} [${r.ref}] ${r.label} ${r.state}${where ? `  ${where}` : ""}  ${formatAge(r.ageSec)} ago${r.live ? "" : " (stale)"}`);
+    if (r.summary) out.push(`    ${r.summary}`);
+    if (r.files.length > 0) out.push(`    files: ${r.files.slice(0, 8).join(", ")}${r.files.length > 8 ? ` +${r.files.length - 8}` : ""}`);
+    for (const a of r.agents ?? []) {
+      const where2 = [a.state, a.wt ? `worktree${a.branch ? ` ${a.branch}` : ""}` : ""].filter(Boolean).join(", ");
+      const files = a.files?.length ? `: ${a.files.slice(0, 4).join(", ")}${a.files.length > 4 ? ` +${a.files.length - 4}` : ""}` : "";
+      out.push(`    ${a.parent ? `  ${a.id} (of ${a.parent})` : a.id} ${a.type} "${a.task}" (${where2})${files}`);
+    }
+    for (const x of r.xstate ?? []) out.push(`    ${x.kind}: ${x.fallback}`);
+  }
+  return out.join("\n");
+}
+function formatFriends(r) {
+  const out = [];
+  if (r.friends.length === 0) out.push("No friends yet: `p2p invite` makes a link to send someone.");
+  else {
+    out.push(
+      table([
+        ["FRIEND", "SINCE", "STATUS"],
+        ...r.friends.map((f) => [f.address, formatDate(f.since), f.canMessage ? "connected" : "waiting for their cap"])
+      ])
+    );
+  }
+  if (r.invites.outgoing.length > 0) out.push("", `${plural(r.invites.outgoing.length, "open invite")} (yours, not yet accepted)`);
+  if (r.invites.held > 0) out.push("", `${plural(r.invites.held, "held item")} waiting for you: \`p2p held\``);
+  if (r.blocked.length > 0) out.push("", `blocked: ${r.blocked.map((b) => b.address).join(", ")}`);
+  return out.join("\n");
+}
+function formatCircles(rows) {
+  if (rows.length === 0) return "No circles: `p2p circle create <name>` or `p2p circle join <link>`.";
+  return table([
+    ["CIRCLE", "NAME", "ROLE", "MEMBERS", "POLICY", "OWNER"],
+    ...rows.map((c) => [
+      `${c.cid}${c.isDefault ? " *" : ""}`,
+      c.name,
+      c.frozen ? `${c.role} (frozen)` : c.role,
+      `${c.standing}/${c.members}`,
+      c.policy,
+      c.ownerAddress
+    ])
+  ]);
+}
+function formatMembers(r) {
+  const head = `${r.circle.name} (${r.circle.cid}), version ${r.circle.ver}, ${r.circle.policy}${r.circle.policy === "open" ? ": anyone with the link can join" : ""}`;
+  return [
+    head,
+    table([
+      ["MEMBER", "ROLE", "STANDING"],
+      ...r.members.map((m) => [`${m.address}${m.self ? " (you)" : ""}`, m.owner ? "owner" : m.admin ? "admin" : "member", m.stands ? "stands" : m.statement === "leave" ? "left" : "not joined yet"])
+    ])
+  ].join("\n");
+}
+function formatRoster(r) {
+  const who2 = r.vis === "circle" ? `circle ${r.circleName ?? r.circle}${r.parts.length ? ` + ${r.parts.map((p) => p.address).join(", ")}` : ""}` : r.parts.length ? r.parts.map((p) => p.address).join(", ") : "nobody else (private)";
+  return `session ${r.sid} [${r.ref}] v${r.ver}: shared with ${who2}${r.openCircle ? "\n! this circle is open: anyone the owner admits sees this session" : ""}`;
+}
+function formatJoin(r) {
+  const owner = r.ownershipChanged ? `owner ${r.ownerAddress} (founded by ${r.founder})` : `owner ${r.ownerAddress}`;
+  switch (r.status) {
+    case "joined":
+      return `Joined "${r.name}" (${r.cid}), ${owner}.${r.confirmation === "owner-only" ? " Confirmed with the owner (no other member to ask)." : r.confirmation === "unconfirmed" ? " Joined without a second confirmation, as you chose." : " Confirmed with the owner and another member."}${r.openWarning ? "\nThis circle is open: anyone with its link can join." : ""}`;
+    case "waiting":
+      return `Asked ${r.asked.length || "the owner"} for "${r.name}"'s history; no answer yet. Run the same command again once they've been online (or wait with --wait <seconds>).`;
+    case "unconfirmed":
+      return `Couldn't confirm "${r.name}" with a second member. Run again with --yes to join anyway.`;
+    case "already":
+      return `You're already in "${r.name}" (${r.cid}).`;
+    case "refused":
+      return `Not joined "${r.name}" (${r.cid}): ${r.refused}.`;
+  }
+}
+function branchLine(b) {
+  return `${b.hash} (ver ${b.ver}, published by ${b.by.join(", ") || "?"}; relays ${b.relays.join(", ") || "?"})`;
+}
+function formatRotationPlan(p) {
+  const dev = (d) => `  ${d.did}${d.label ? ` (${d.labelTrusted === false ? "unverified label: " : ""}${sanitizePeerText(d.label, 64)})` : ""}${d.keyholder ? ", key holder" : ""}${d.why ? `: DROPPED, ${d.why} (keep it with --keep ${d.did})` : ""}`;
+  return [
+    `${p.contest ? "Contesting a rotation you didn't publish: moving" : "Rotating"} ${p.address} to a new identity key ${p.newFingerprint} (§2.8).`,
+    ...p.backup ? [`Its backup phrase is in ${p.backup.file}.`] : [],
+    // #91: a branch picked by provenance among others that still list this device is never picked silently.
+    ...p.branch && p.otherBranches?.length ? [
+      `Your identity is forked: this plan builds on the branch ${p.branch} as yours (its versions come from your devices). Other branches still list this device:
+${p.otherBranches.map((b) => `  ${branchLine(b)}`).join("\n")}
+If ${p.branch} isn't yours, drop this plan (--cancel) and choose with --plan --branch <hash>.`
+    ] : [],
+    p.follow.length ? `These devices get the rotation to follow (each follows only when you accept it there):
+${p.follow.map(dev).join("\n")}` : "No other device follows.",
+    ...p.excluded.length ? [`These devices do NOT follow (excluded):
+${p.excluded.map(dev).join("\n")}`] : [],
+    `${plural(p.friends, "friend")} get a fresh invite (they approve it); ${plural(p.owned, "circle")} you own move to the new key; in ${plural(p.memberOf, "other circle")} the owner swaps you in.`,
+    // pre-release re-review M1: friendships this device can't vouch for are invited only when the user says so.
+    ...(p.friendsOptIn ?? []).length ? [
+      `These friends are NOT invited unless you say so (a thief's device may have made them):
+${p.friendsOptIn.map((f) => `  ${sanitizePeerText(f.address ?? f.userId, 96)}: ${f.why}${f.invited ? " [INVITED: you chose to]" : ` (invite with --invite ${f.userId})`}`).join("\n")}`
+    ] : [],
+    "A lost or stolen device listed above must be dropped (--exclude <did>): it is revoked before any code goes out. Last, your old identity publishes a final version with no devices."
+  ].join("\n");
+}
+function formatRotation(r) {
+  const lines = [`Your identity is now ${r.address} (was ${r.from}); old identity final version ${r.finalVer ?? "?"}.`];
+  if (r.devices.followed.length) lines.push(`Followed: ${r.devices.followed.map((d) => d.label || d.did).join(", ")}.`);
+  if (r.devices.offline.length) lines.push(`Didn't follow (re-link each with \`p2p link join <code> --rotated\`): ${r.devices.offline.map((d) => d.label || d.did).join(", ")}.`);
+  lines.push(`Friends invited: ${r.friends.invited}${r.friends.failed.length ? `; not reached: ${r.friends.failed.length} (they can join a fresh code from you)` : ""}.`);
+  for (const c of r.circles) lines.push(`  circle "${sanitizePeerText(c.name, 64)}" (${c.cid}): ${c.role === "owner" ? "handed to the new key" : "join sent to the owner"}${c.status === "done" ? "" : ` [${c.status}${c.reason ? `: ${c.reason}` : ""}]`}`);
+  for (const p of r.proofs) lines.push(`Proof ${p.kind}: ${p.claim}. ${p.publish}`);
+  if (r.backup) lines.push(`New backup phrase saved to ${r.backup.file}: copy it somewhere safe, then delete the file. The old phrase no longer works.`);
+  return lines.join("\n");
+}
+function safeTerminal(s2) {
+  return String(s2).replace(TERMINAL_UNSAFE, "");
+}
+function safeJson(v) {
+  return JSON.stringify(v).replace(
+    /[\u007f-\u009f\u2028\u2029\p{Cf}]/gu,
+    (c) => c.split("").map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")
+  );
+}
+var TERMINAL_UNSAFE;
+var init_format = __esm({
+  "packages/p2p/src/format.ts"() {
+    "use strict";
+    init_v3();
+    init_dist();
+    TERMINAL_UNSAFE = new RegExp("[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\p{Cf}]|\\p{Cs}", "gu");
+  }
+});
+
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
 import { accessSync, constants, statSync as statSync4 } from "node:fs";
@@ -22270,6 +23187,7 @@ __export(rotation_exports, {
   approveRotation: () => approveRotation,
   approveRotationJoin: () => approveRotationJoin,
   assertAdopted: () => assertAdopted,
+  branchSummary: () => branchSummary,
   circleHeld: () => circleHeld,
   followHeld: () => followHeld,
   friendVerdict: () => friendVerdict,
@@ -22298,6 +23216,14 @@ __export(rotation_exports, {
 });
 import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
 import { join as join20 } from "node:path";
+function branchSummary(hash, ver, by, relays) {
+  return {
+    hash,
+    ver,
+    by: [...new Set(by.filter((d) => isDid(d)))],
+    relays: relays.filter((r) => typeof r === "string" && PRINTABLE_ASCII.test(r) && isCanonicalRelayUrl(r))
+  };
+}
 function stateBackend(home) {
   return new FileDocBackend(rotationDir(home));
 }
@@ -22411,22 +23337,25 @@ async function ownBranchTip(app, choice) {
   if (choice !== void 0) {
     const chosen = candidates.find((t2) => t2.hash === choice);
     if (!chosen) throw new CliError("usage", `--branch ${choice}: not a branch of your identity that lists this device (${candidates.map((t2) => t2.hash).join(", ")})`);
-    return chosen;
+    return { tip: chosen, others: [] };
   }
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) return { tip: candidates[0], others: [] };
   const log = new Set((await app.store.getPublishLog()).published);
   const trusted = /* @__PURE__ */ new Set([app.did, ...[...log].flatMap((h) => chain.get(h)?.devices ?? [])]);
   const behind = plain.map((t2) => new Set(chain.ancestors(t2.hash).map((v) => v.hash)));
   const common = new Set([...behind[0]].filter((h) => behind.every((set) => set.has(h))));
   const since = (t2) => chain.ancestors(t2.hash).filter((v) => !common.has(v.hash));
   const plausible = candidates.filter((t2) => since(t2).every((v) => log.has(v.hash) || trusted.has(v.by)));
-  if (plausible.length === 1) return plausible[0];
-  const branches = candidates.map((t2) => ({ hash: t2.hash, ver: t2.ver, by: [...new Set(since(t2).map((v) => v.by))], relays: [...t2.relays] }));
+  const branches = candidates.map((t2) => branchSummary(t2.hash, t2.ver, since(t2).map((v) => v.by), t2.relays));
+  if (plausible.length === 1) return { tip: plausible[0], others: branches.filter((b) => b.hash !== plausible[0].hash) };
   throw new CliError(
     "branch_ambiguous",
-    `your identity is forked by a version that leaves this device out, and more than one branch still lists it: ${branches.map((x) => `${x.hash} (ver ${x.ver}, published by ${x.by.join(", ")}; relays ${x.relays.join(", ")})`).join("; ")}. Someone else holds your identity key. Check which branch is yours, then run \`p2p identity rotate --plan --branch <hash>\``,
+    `your identity is forked by a version that leaves this device out, and more than one branch still lists it: ${branches.map(branchLine).join("; ")}. Someone else holds your identity key. Check which branch is yours, then run \`p2p identity rotate --plan --branch <hash>\``,
     { branches }
   );
+}
+function otherBranchesWarning(tip, others) {
+  return `your identity is forked, and the plan builds on the branch ${tip} as yours (its versions come from your devices); other branches still list this device: ${others.map(branchLine).join("; ")}. If ${tip} isn't yours, drop this plan (\`p2p identity rotate --cancel\`) and choose with \`p2p identity rotate --plan --branch <hash>\``;
 }
 function ownBranchFinalFields(app, chain, tip, log) {
   const mine = chain.ancestors(tip.hash).filter((v) => log.has(v.hash)).pop();
@@ -22518,7 +23447,9 @@ function planOf(st) {
     friends: invitedFriends(st).length,
     friendsOptIn: optIn,
     contest: !!st.contest,
-    ...st.backupFile ? { backup: { file: st.backupFile } } : {}
+    ...st.backupFile ? { backup: { file: st.backupFile } } : {},
+    ...st.ownBranch ? { branch: st.ownBranch.tip } : {},
+    ...st.ownBranch?.others?.length ? { otherBranches: st.ownBranch.others } : {}
   };
 }
 async function planWithAddress(app, st) {
@@ -22576,11 +23507,23 @@ async function rotatePlan(app, opts = {}) {
   if (prior && prior.step !== "done" && prior.step !== "created") {
     throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is under way: finish it with \`p2p identity rotate --resume\``);
   }
+  if (prior && prior.step === "created") assertSameBranch(prior, opts);
   const st = prior && prior.step === "created" ? prior : await begin(app, opts);
   if (st === prior) applyExcludes(st, opts.exclude, opts.keep);
   await applyInvites(app, st, opts.invite);
   await saveState(app.home, st);
   return planWithAddress(app, st);
+}
+function assertSameBranch(st, opts) {
+  if (opts.branch === void 0 || opts.branch === st.ownBranch?.tip) return;
+  if (st.step !== "created" || st.accepted) {
+    throw new CliError("usage", `--branch ${opts.branch}: the rotation under way here ${st.ownBranch ? `builds on the branch ${st.ownBranch.tip}` : "isn't built on a branch of a forked identity"}, and can't change now`);
+  }
+  const how = `drop it first (\`p2p identity rotate --cancel\`), then \`p2p identity rotate --plan --branch ${opts.branch}\``;
+  throw new CliError(
+    "usage",
+    st.ownBranch ? `--branch ${opts.branch}: the rotation plan here builds on the branch ${st.ownBranch.tip}. To choose another, ${how}` : `--branch ${opts.branch}: the rotation plan here isn't built on a branch of a forked identity. To choose one, ${how}`
+  );
 }
 async function rotateCancel(app) {
   const st = await readRotationState(app.home);
@@ -22599,6 +23542,12 @@ async function rotate(app, opts = {}) {
   if (opts.resume) {
     if (!prior || prior.step === "done") throw new CliError("no_rotation", "there is no rotation in progress here to resume");
     st = prior;
+    assertSameBranch(st, opts);
+    if (opts.contest && !st.contest) {
+      if ((await foreignRotations(app)).length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
+      st.contest = true;
+      await saveState(app.home, st);
+    }
   } else {
     if (prior && prior.step !== "done") throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is in progress: finish it with \`p2p identity rotate --resume\``);
     st = await begin(app, opts);
@@ -22717,14 +23666,16 @@ async function begin(app, opts) {
     const alerted = (await app.state.get("rotationAlerts") ?? []).length > 0;
     if (foreign.length === 0 && !alerted) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
   }
-  const own = view.rotations.length > 0 ? void 0 : await ownBranchTip(app, opts.branch);
+  const picked = view.rotations.length > 0 ? void 0 : await ownBranchTip(app, opts.branch);
+  const own = picked?.tip;
   if (!opts.contest && !(own ?? view).keyholders.includes(app.did)) {
     throw new CliError("device_revoked", "this device is no longer a listed key holder of your identity");
   }
   let ownBranch;
-  if (own) {
+  if (picked && own) {
     const f = ownBranchFinalFields(app, await ownChain(app), own, new Set((await app.store.getPublishLog()).published));
-    ownBranch = { tip: own.hash, name: f.name, relays: f.relays };
+    ownBranch = { tip: own.hash, name: f.name, relays: f.relays, ...picked.others.length > 0 ? { others: picked.others } : {} };
+    if (picked.others.length > 0) app.warn(otherBranchesWarning(own.hash, picked.others));
     if (f.extra.length > 0) app.warn(`your own branch lists relays no version this device published added (${f.extra.join(", ")}): your old identity's final version leaves them out`);
   }
   const base = view.rotations.length > 0 ? await preRotationHead(app) : own ?? view.head;
@@ -23066,7 +24017,16 @@ async function publishFinal(app, st) {
   if (!chain) throw new CliError("no_identity", "this device holds no identity document for its user");
   const tips = chain.tips();
   const mine = chain.allTips().find((t2) => t2.rotation !== void 0 && rotationKey(t2.rotation) === rotationKey(st.statement));
-  if (st.ownBranch && !contesting) return publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
+  if (st.ownBranch && !contesting) {
+    try {
+      return await publishOwnBranchFinal(app, ik, st, st.ownBranch, mine);
+    } catch (e) {
+      if (!(e instanceof CliError)) throw e;
+      const foreign = await foreignRotations(app);
+      if (foreign.length === 0) throw e;
+      throw rotatedMeanwhile(foreign, e);
+    }
+  }
   if (mine) {
     const r2 = await app.publishDoc(mine.jws, mine.relays);
     return { ver: mine.ver, ...r2 };
@@ -23090,6 +24050,14 @@ async function publishFinal(app, st) {
     app.warn("no relay took your competing final version (they already refuse your old devices); your friends still see the conflict from your new identity's invites");
   }
   return { ver: base.ver + 1, ...r };
+}
+function rotatedMeanwhile(foreign, cause) {
+  const to = [...new Set(foreign.map((f) => f.rotation.to))];
+  return new CliError(
+    "identity_rotated",
+    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
+    { to }
+  );
 }
 async function publishOwnBranchFinal(app, ik, st, own, pinned) {
   const targets = [.../* @__PURE__ */ new Set([...own.relays, ...app.relays])];
@@ -23920,7 +24888,7 @@ async function relinkRotated(app, code2, opts = {}) {
     }
   };
 }
-var STEPS, rotationDir, newHomeOf, followHomeOf, after, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
+var STEPS, PRINTABLE_ASCII, rotationDir, newHomeOf, followHomeOf, after, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
 var init_rotation = __esm({
   "packages/p2p/src/rotation.ts"() {
     "use strict";
@@ -23928,6 +24896,7 @@ var init_rotation = __esm({
     init_node();
     init_app();
     init_errors2();
+    init_format();
     init_relay_client();
     init_circle_ops();
     init_social();
@@ -23936,6 +24905,7 @@ var init_rotation = __esm({
     init_projects();
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
+    PRINTABLE_ASCII = /^[\x21-\x7e]{1,2048}$/;
     rotationDir = (home) => join20(home, "rotation");
     newHomeOf = (home) => join20(rotationDir(home), "new");
     followHomeOf = (home) => join20(rotationDir(home), "follow");
@@ -28309,7 +29279,7 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? heldBackByOf(e) : []])];
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e)) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
             if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -28327,7 +29297,7 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? v.heldBackBy ?? [] : []])];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? []) : []])];
           const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
           if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
           named = unconnected;
@@ -28338,6 +29308,19 @@ var init_app = __esm({
         const last = (await this.state.get("fetched"))?.[userId];
         if (last === void 0 || last < now - FETCHED_SLACK_MS) await this.state.update("fetched", (cur = {}) => ({ next: { ...cur, [userId]: Math.max(cur[userId] ?? 0, now) }, result: void 0 }));
         return v;
+      }
+      /**
+       * #79, #92 follow-up: the relays core held a refresh of our own identity back for (`by`, they sent a head that
+       * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
+       * (a rotation sets them aside, the hint names them) only when one of `left` is a version our own devices published
+       * (the publish log): our own current tip against a key thief's head, the case this exists for. Otherwise none: a
+       * relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set aside,
+       * and a relay that really holds the owner up can still be removed (`p2p relays remove`).
+       */
+      async ownHeldBack(by, left) {
+        if (by.length === 0 || left.length === 0) return [];
+        const published = new Set((await this.store.getPublishLog()).published);
+        return left.some((h) => published.has(h)) ? [...by] : [];
       }
       /**
        * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
@@ -38468,899 +39451,8 @@ async function trustCheck(app, userId) {
 
 // packages/p2p/src/cli.ts
 init_errors2();
-
-// packages/p2p/src/format.ts
-init_v3();
-
-// packages/p2p/node_modules/uqr/dist/index.mjs
-var QrCodeDataType = /* @__PURE__ */ ((QrCodeDataType2) => {
-  QrCodeDataType2[QrCodeDataType2["Border"] = -1] = "Border";
-  QrCodeDataType2[QrCodeDataType2["Data"] = 0] = "Data";
-  QrCodeDataType2[QrCodeDataType2["Function"] = 1] = "Function";
-  QrCodeDataType2[QrCodeDataType2["Position"] = 2] = "Position";
-  QrCodeDataType2[QrCodeDataType2["Timing"] = 3] = "Timing";
-  QrCodeDataType2[QrCodeDataType2["Alignment"] = 4] = "Alignment";
-  return QrCodeDataType2;
-})(QrCodeDataType || {});
-var LOW = [0, 1];
-var MEDIUM = [1, 0];
-var QUARTILE = [2, 3];
-var HIGH = [3, 2];
-var EccMap = {
-  L: LOW,
-  M: MEDIUM,
-  Q: QUARTILE,
-  H: HIGH
-};
-var NUMERIC_REGEX = /^\d*$/;
-var ALPHANUMERIC_REGEX = /^[A-Z0-9 $%*+./:-]*$/;
-var ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
-var MIN_VERSION = 1;
-var MAX_VERSION = 40;
-var PENALTY_N1 = 3;
-var PENALTY_N2 = 3;
-var PENALTY_N3 = 40;
-var PENALTY_N4 = 10;
-var ECC_CODEWORDS_PER_BLOCK = [
-  // Version: (note that index 0 is for padding, and is set to an illegal value)
-  // 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
-  [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
-  // Low
-  [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
-  // Medium
-  [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
-  // Quartile
-  [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30]
-  // High
-];
-var NUM_ERROR_CORRECTION_BLOCKS = [
-  // Version: (note that index 0 is for padding, and is set to an illegal value)
-  // 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40    Error correction level
-  [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
-  // Low
-  [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
-  // Medium
-  [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
-  // Quartile
-  [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81]
-  // High
-];
-var QrCode = class {
-  /* -- Constructor (low level) and fields -- */
-  // Creates a new QR Code with the given version number,
-  // error correction level, data codeword bytes, and mask number.
-  // This is a low-level API that most users should not use directly.
-  // A mid-level API is the encodeSegments() function.
-  constructor(version, ecc, dataCodewords, msk) {
-    this.version = version;
-    this.ecc = ecc;
-    if (version < MIN_VERSION || version > MAX_VERSION)
-      throw new RangeError("Version value out of range");
-    if (msk < -1 || msk > 7)
-      throw new RangeError("Mask value out of range");
-    this.size = version * 4 + 17;
-    const row2 = Array.from({ length: this.size }).fill(false);
-    for (let i = 0; i < this.size; i++) {
-      this.modules.push(row2.slice());
-      this.types.push(row2.map(() => 0));
-    }
-    this.drawFunctionPatterns();
-    const allCodewords = this.addEccAndInterleave(dataCodewords);
-    this.drawCodewords(allCodewords);
-    if (msk === -1) {
-      let minPenalty = 1e9;
-      for (let i = 0; i < 8; i++) {
-        this.applyMask(i);
-        this.drawFormatBits(i);
-        const penalty = this.getPenaltyScore();
-        if (penalty < minPenalty) {
-          msk = i;
-          minPenalty = penalty;
-        }
-        this.applyMask(i);
-      }
-    }
-    this.mask = msk;
-    this.applyMask(msk);
-    this.drawFormatBits(msk);
-  }
-  /* -- Fields -- */
-  // The width and height of this QR Code, measured in modules, between
-  // 21 and 177 (inclusive). This is equal to version * 4 + 17.
-  size;
-  // The index of the mask pattern used in this QR Code, which is between 0 and 7 (inclusive).
-  // Even if a QR Code is created with automatic masking requested (mask = -1),
-  // the resulting object still has a mask value between 0 and 7.
-  mask;
-  // The modules of this QR Code (false = light, true = dark).
-  // Immutable after constructor finishes. Accessed through getModule().
-  modules = [];
-  types = [];
-  /* -- Accessor methods -- */
-  // Returns the color of the module (pixel) at the given coordinates, which is false
-  // for light or true for dark. The top left corner has the coordinates (x=0, y=0).
-  // If the given coordinates are out of bounds, then false (light) is returned.
-  getModule(x, y) {
-    return x >= 0 && x < this.size && y >= 0 && y < this.size && this.modules[y][x];
-  }
-  /* -- Private helper methods for constructor: Drawing function modules -- */
-  // Reads this object's version field, and draws and marks all function modules.
-  drawFunctionPatterns() {
-    for (let i = 0; i < this.size; i++) {
-      this.setFunctionModule(6, i, i % 2 === 0, QrCodeDataType.Timing);
-      this.setFunctionModule(i, 6, i % 2 === 0, QrCodeDataType.Timing);
-    }
-    this.drawFinderPattern(3, 3);
-    this.drawFinderPattern(this.size - 4, 3);
-    this.drawFinderPattern(3, this.size - 4);
-    const alignPatPos = this.getAlignmentPatternPositions();
-    const numAlign = alignPatPos.length;
-    for (let i = 0; i < numAlign; i++) {
-      for (let j = 0; j < numAlign; j++) {
-        if (!(i === 0 && j === 0 || i === 0 && j === numAlign - 1 || i === numAlign - 1 && j === 0))
-          this.drawAlignmentPattern(alignPatPos[i], alignPatPos[j]);
-      }
-    }
-    this.drawFormatBits(0);
-    this.drawVersion();
-  }
-  // Draws two copies of the format bits (with its own error correction code)
-  // based on the given mask and this object's error correction level field.
-  drawFormatBits(mask) {
-    const data = this.ecc[1] << 3 | mask;
-    let rem = data;
-    for (let i = 0; i < 10; i++)
-      rem = rem << 1 ^ (rem >>> 9) * 1335;
-    const bits = (data << 10 | rem) ^ 21522;
-    for (let i = 0; i <= 5; i++)
-      this.setFunctionModule(8, i, getBit2(bits, i));
-    this.setFunctionModule(8, 7, getBit2(bits, 6));
-    this.setFunctionModule(8, 8, getBit2(bits, 7));
-    this.setFunctionModule(7, 8, getBit2(bits, 8));
-    for (let i = 9; i < 15; i++)
-      this.setFunctionModule(14 - i, 8, getBit2(bits, i));
-    for (let i = 0; i < 8; i++)
-      this.setFunctionModule(this.size - 1 - i, 8, getBit2(bits, i));
-    for (let i = 8; i < 15; i++)
-      this.setFunctionModule(8, this.size - 15 + i, getBit2(bits, i));
-    this.setFunctionModule(8, this.size - 8, true);
-  }
-  // Draws two copies of the version bits (with its own error correction code),
-  // based on this object's version field, iff 7 <= version <= 40.
-  drawVersion() {
-    if (this.version < 7)
-      return;
-    let rem = this.version;
-    for (let i = 0; i < 12; i++)
-      rem = rem << 1 ^ (rem >>> 11) * 7973;
-    const bits = this.version << 12 | rem;
-    for (let i = 0; i < 18; i++) {
-      const color2 = getBit2(bits, i);
-      const a = this.size - 11 + i % 3;
-      const b = Math.floor(i / 3);
-      this.setFunctionModule(a, b, color2);
-      this.setFunctionModule(b, a, color2);
-    }
-  }
-  // Draws a 9*9 finder pattern including the border separator,
-  // with the center module at (x, y). Modules can be out of bounds.
-  drawFinderPattern(x, y) {
-    for (let dy = -4; dy <= 4; dy++) {
-      for (let dx = -4; dx <= 4; dx++) {
-        const dist = Math.max(Math.abs(dx), Math.abs(dy));
-        const xx = x + dx;
-        const yy = y + dy;
-        if (xx >= 0 && xx < this.size && yy >= 0 && yy < this.size)
-          this.setFunctionModule(xx, yy, dist !== 2 && dist !== 4, QrCodeDataType.Position);
-      }
-    }
-  }
-  // Draws a 5*5 alignment pattern, with the center module
-  // at (x, y). All modules must be in bounds.
-  drawAlignmentPattern(x, y) {
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        this.setFunctionModule(
-          x + dx,
-          y + dy,
-          Math.max(Math.abs(dx), Math.abs(dy)) !== 1,
-          QrCodeDataType.Alignment
-        );
-      }
-    }
-  }
-  // Sets the color of a module and marks it as a function module.
-  // Only used by the constructor. Coordinates must be in bounds.
-  setFunctionModule(x, y, isDark, type = QrCodeDataType.Function) {
-    this.modules[y][x] = isDark;
-    this.types[y][x] = type;
-  }
-  /* -- Private helper methods for constructor: Codewords and masking -- */
-  // Returns a new byte string representing the given data with the appropriate error correction
-  // codewords appended to it, based on this object's version and error correction level.
-  addEccAndInterleave(data) {
-    const ver = this.version;
-    const ecl = this.ecc;
-    if (data.length !== getNumDataCodewords(ver, ecl))
-      throw new RangeError("Invalid argument");
-    const numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
-    const blockEccLen = ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver];
-    const rawCodewords = Math.floor(getNumRawDataModules(ver) / 8);
-    const numShortBlocks = numBlocks - rawCodewords % numBlocks;
-    const shortBlockLen = Math.floor(rawCodewords / numBlocks);
-    const blocks = [];
-    const rsDiv = reedSolomonComputeDivisor(blockEccLen);
-    for (let i = 0, k = 0; i < numBlocks; i++) {
-      const dat = data.slice(k, k + shortBlockLen - blockEccLen + (i < numShortBlocks ? 0 : 1));
-      k += dat.length;
-      const ecc = reedSolomonComputeRemainder(dat, rsDiv);
-      if (i < numShortBlocks)
-        dat.push(0);
-      blocks.push(dat.concat(ecc));
-    }
-    const result = [];
-    for (let i = 0; i < blocks[0].length; i++) {
-      blocks.forEach((block2, j) => {
-        if (i !== shortBlockLen - blockEccLen || j >= numShortBlocks)
-          result.push(block2[i]);
-      });
-    }
-    return result;
-  }
-  // Draws the given sequence of 8-bit codewords (data and error correction) onto the entire
-  // data area of this QR Code. Function modules need to be marked off before this is called.
-  drawCodewords(data) {
-    if (data.length !== Math.floor(getNumRawDataModules(this.version) / 8))
-      throw new RangeError("Invalid argument");
-    let i = 0;
-    for (let right = this.size - 1; right >= 1; right -= 2) {
-      if (right === 6)
-        right = 5;
-      for (let vert = 0; vert < this.size; vert++) {
-        for (let j = 0; j < 2; j++) {
-          const x = right - j;
-          const upward = (right + 1 & 2) === 0;
-          const y = upward ? this.size - 1 - vert : vert;
-          if (!this.types[y][x] && i < data.length * 8) {
-            this.modules[y][x] = getBit2(data[i >>> 3], 7 - (i & 7));
-            i++;
-          }
-        }
-      }
-    }
-  }
-  // XORs the codeword modules in this QR Code with the given mask pattern.
-  // The function modules must be marked and the codeword bits must be drawn
-  // before masking. Due to the arithmetic of XOR, calling applyMask() with
-  // the same mask value a second time will undo the mask. A final well-formed
-  // QR Code needs exactly one (not zero, two, etc.) mask applied.
-  applyMask(mask) {
-    if (mask < 0 || mask > 7)
-      throw new RangeError("Mask value out of range");
-    for (let y = 0; y < this.size; y++) {
-      for (let x = 0; x < this.size; x++) {
-        let invert2;
-        switch (mask) {
-          case 0:
-            invert2 = (x + y) % 2 === 0;
-            break;
-          case 1:
-            invert2 = y % 2 === 0;
-            break;
-          case 2:
-            invert2 = x % 3 === 0;
-            break;
-          case 3:
-            invert2 = (x + y) % 3 === 0;
-            break;
-          case 4:
-            invert2 = (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
-            break;
-          case 5:
-            invert2 = x * y % 2 + x * y % 3 === 0;
-            break;
-          case 6:
-            invert2 = (x * y % 2 + x * y % 3) % 2 === 0;
-            break;
-          case 7:
-            invert2 = ((x + y) % 2 + x * y % 3) % 2 === 0;
-            break;
-          default:
-            throw new Error("Unreachable");
-        }
-        if (!this.types[y][x] && invert2)
-          this.modules[y][x] = !this.modules[y][x];
-      }
-    }
-  }
-  // Calculates and returns the penalty score based on state of this QR Code's current modules.
-  // This is used by the automatic mask choice algorithm to find the mask pattern that yields the lowest score.
-  getPenaltyScore() {
-    let result = 0;
-    for (let y = 0; y < this.size; y++) {
-      let runColor = false;
-      let runX = 0;
-      const runHistory = [0, 0, 0, 0, 0, 0, 0];
-      for (let x = 0; x < this.size; x++) {
-        if (this.modules[y][x] === runColor) {
-          runX++;
-          if (runX === 5)
-            result += PENALTY_N1;
-          else if (runX > 5)
-            result++;
-        } else {
-          this.finderPenaltyAddHistory(runX, runHistory);
-          if (!runColor)
-            result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
-          runColor = this.modules[y][x];
-          runX = 1;
-        }
-      }
-      result += this.finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3;
-    }
-    for (let x = 0; x < this.size; x++) {
-      let runColor = false;
-      let runY = 0;
-      const runHistory = [0, 0, 0, 0, 0, 0, 0];
-      for (let y = 0; y < this.size; y++) {
-        if (this.modules[y][x] === runColor) {
-          runY++;
-          if (runY === 5)
-            result += PENALTY_N1;
-          else if (runY > 5)
-            result++;
-        } else {
-          this.finderPenaltyAddHistory(runY, runHistory);
-          if (!runColor)
-            result += this.finderPenaltyCountPatterns(runHistory) * PENALTY_N3;
-          runColor = this.modules[y][x];
-          runY = 1;
-        }
-      }
-      result += this.finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3;
-    }
-    for (let y = 0; y < this.size - 1; y++) {
-      for (let x = 0; x < this.size - 1; x++) {
-        const color2 = this.modules[y][x];
-        if (color2 === this.modules[y][x + 1] && color2 === this.modules[y + 1][x] && color2 === this.modules[y + 1][x + 1]) {
-          result += PENALTY_N2;
-        }
-      }
-    }
-    let dark = 0;
-    for (const row2 of this.modules)
-      dark = row2.reduce((sum2, color2) => sum2 + (color2 ? 1 : 0), dark);
-    const total = this.size * this.size;
-    const k = Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1;
-    result += k * PENALTY_N4;
-    return result;
-  }
-  /* -- Private helper functions -- */
-  // Returns an ascending list of positions of alignment patterns for this version number.
-  // Each position is in the range [0,177), and are used on both the x and y axes.
-  // This could be implemented as lookup table of 40 variable-length lists of integers.
-  getAlignmentPatternPositions() {
-    if (this.version === 1) {
-      return [];
-    } else {
-      const numAlign = Math.floor(this.version / 7) + 2;
-      const step2 = this.version === 32 ? 26 : Math.ceil((this.version * 4 + 4) / (numAlign * 2 - 2)) * 2;
-      const result = [6];
-      for (let pos = this.size - 7; result.length < numAlign; pos -= step2)
-        result.splice(1, 0, pos);
-      return result;
-    }
-  }
-  // Can only be called immediately after a light run is added, and
-  // returns either 0, 1, or 2. A helper function for getPenaltyScore().
-  finderPenaltyCountPatterns(runHistory) {
-    const n = runHistory[1];
-    const core = n > 0 && runHistory[2] === n && runHistory[3] === n * 3 && runHistory[4] === n && runHistory[5] === n;
-    return (core && runHistory[0] >= n * 4 && runHistory[6] >= n ? 1 : 0) + (core && runHistory[6] >= n * 4 && runHistory[0] >= n ? 1 : 0);
-  }
-  // Must be called at the end of a line (row or column) of modules. A helper function for getPenaltyScore().
-  finderPenaltyTerminateAndCount(currentRunColor, currentRunLength, runHistory) {
-    if (currentRunColor) {
-      this.finderPenaltyAddHistory(currentRunLength, runHistory);
-      currentRunLength = 0;
-    }
-    currentRunLength += this.size;
-    this.finderPenaltyAddHistory(currentRunLength, runHistory);
-    return this.finderPenaltyCountPatterns(runHistory);
-  }
-  // Pushes the given value to the front and drops the last value. A helper function for getPenaltyScore().
-  finderPenaltyAddHistory(currentRunLength, runHistory) {
-    if (runHistory[0] === 0)
-      currentRunLength += this.size;
-    runHistory.pop();
-    runHistory.unshift(currentRunLength);
-  }
-};
-function appendBits(val, len, bb) {
-  if (len < 0 || len > 31 || val >>> len !== 0)
-    throw new RangeError("Value out of range");
-  for (let i = len - 1; i >= 0; i--)
-    bb.push(val >>> i & 1);
-}
-function getBit2(x, i) {
-  return (x >>> i & 1) !== 0;
-}
-var QrSegment = class {
-  // Creates a new QR Code segment with the given attributes and data.
-  // The character count (numChars) must agree with the mode and the bit buffer length,
-  // but the constraint isn't checked. The given bit buffer is cloned and stored.
-  constructor(mode, numChars, bitData) {
-    this.mode = mode;
-    this.numChars = numChars;
-    this.bitData = bitData;
-    if (numChars < 0)
-      throw new RangeError("Invalid argument");
-    this.bitData = bitData.slice();
-  }
-  /* -- Methods -- */
-  // Returns a new copy of the data bits of this segment.
-  getData() {
-    return this.bitData.slice();
-  }
-};
-var MODE_NUMERIC = [1, 10, 12, 14];
-var MODE_ALPHANUMERIC = [2, 9, 11, 13];
-var MODE_BYTE = [4, 8, 16, 16];
-function numCharCountBits(mode, ver) {
-  return mode[Math.floor((ver + 7) / 17) + 1];
-}
-function makeBytes(data) {
-  const bb = [];
-  for (const b of data)
-    appendBits(b, 8, bb);
-  return new QrSegment(MODE_BYTE, data.length, bb);
-}
-function makeNumeric(digits) {
-  if (!isNumeric(digits))
-    throw new RangeError("String contains non-numeric characters");
-  const bb = [];
-  for (let i = 0; i < digits.length; ) {
-    const n = Math.min(digits.length - i, 3);
-    appendBits(Number.parseInt(digits.substring(i, i + n), 10), n * 3 + 1, bb);
-    i += n;
-  }
-  return new QrSegment(MODE_NUMERIC, digits.length, bb);
-}
-function makeAlphanumeric(text2) {
-  if (!isAlphanumeric(text2))
-    throw new RangeError("String contains unencodable characters in alphanumeric mode");
-  const bb = [];
-  let i;
-  for (i = 0; i + 2 <= text2.length; i += 2) {
-    let temp = ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i)) * 45;
-    temp += ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i + 1));
-    appendBits(temp, 11, bb);
-  }
-  if (i < text2.length)
-    appendBits(ALPHANUMERIC_CHARSET.indexOf(text2.charAt(i)), 6, bb);
-  return new QrSegment(MODE_ALPHANUMERIC, text2.length, bb);
-}
-function makeSegments(text2) {
-  if (text2 === "")
-    return [];
-  else if (isNumeric(text2))
-    return [makeNumeric(text2)];
-  else if (isAlphanumeric(text2))
-    return [makeAlphanumeric(text2)];
-  else
-    return [makeBytes(toUtf8ByteArray(text2))];
-}
-function isNumeric(text2) {
-  return NUMERIC_REGEX.test(text2);
-}
-function isAlphanumeric(text2) {
-  return ALPHANUMERIC_REGEX.test(text2);
-}
-function getTotalBits(segs, version) {
-  let result = 0;
-  for (const seg of segs) {
-    const ccbits = numCharCountBits(seg.mode, version);
-    if (seg.numChars >= 1 << ccbits)
-      return Number.POSITIVE_INFINITY;
-    result += 4 + ccbits + seg.bitData.length;
-  }
-  return result;
-}
-function toUtf8ByteArray(str4) {
-  str4 = encodeURI(str4);
-  const result = [];
-  for (let i = 0; i < str4.length; i++) {
-    if (str4.charAt(i) !== "%") {
-      result.push(str4.charCodeAt(i));
-    } else {
-      result.push(Number.parseInt(str4.substring(i + 1, i + 3), 16));
-      i += 2;
-    }
-  }
-  return result;
-}
-function getNumRawDataModules(ver) {
-  if (ver < MIN_VERSION || ver > MAX_VERSION)
-    throw new RangeError("Version number out of range");
-  let result = (16 * ver + 128) * ver + 64;
-  if (ver >= 2) {
-    const numAlign = Math.floor(ver / 7) + 2;
-    result -= (25 * numAlign - 10) * numAlign - 55;
-    if (ver >= 7)
-      result -= 36;
-  }
-  return result;
-}
-function getNumDataCodewords(ver, ecl) {
-  return Math.floor(getNumRawDataModules(ver) / 8) - ECC_CODEWORDS_PER_BLOCK[ecl[0]][ver] * NUM_ERROR_CORRECTION_BLOCKS[ecl[0]][ver];
-}
-function reedSolomonComputeDivisor(degree) {
-  if (degree < 1 || degree > 255)
-    throw new RangeError("Degree out of range");
-  const result = [];
-  for (let i = 0; i < degree - 1; i++)
-    result.push(0);
-  result.push(1);
-  let root = 1;
-  for (let i = 0; i < degree; i++) {
-    for (let j = 0; j < result.length; j++) {
-      result[j] = reedSolomonMultiply(result[j], root);
-      if (j + 1 < result.length)
-        result[j] ^= result[j + 1];
-    }
-    root = reedSolomonMultiply(root, 2);
-  }
-  return result;
-}
-function reedSolomonComputeRemainder(data, divisor) {
-  const result = divisor.map((_) => 0);
-  for (const b of data) {
-    const factor = b ^ result.shift();
-    result.push(0);
-    divisor.forEach((coef, i) => result[i] ^= reedSolomonMultiply(coef, factor));
-  }
-  return result;
-}
-function reedSolomonMultiply(x, y) {
-  if (x >>> 8 !== 0 || y >>> 8 !== 0)
-    throw new RangeError("Byte out of range");
-  let z = 0;
-  for (let i = 7; i >= 0; i--) {
-    z = z << 1 ^ (z >>> 7) * 285;
-    z ^= (y >>> i & 1) * x;
-  }
-  return z;
-}
-function encodeSegments(segs, ecl, minVersion = 1, maxVersion = 40, mask = -1, boostEcl = true) {
-  if (!(MIN_VERSION <= minVersion && minVersion <= maxVersion && maxVersion <= MAX_VERSION) || mask < -1 || mask > 7) {
-    throw new RangeError("Invalid value");
-  }
-  let version;
-  let dataUsedBits;
-  for (version = minVersion; ; version++) {
-    const dataCapacityBits2 = getNumDataCodewords(version, ecl) * 8;
-    const usedBits = getTotalBits(segs, version);
-    if (usedBits <= dataCapacityBits2) {
-      dataUsedBits = usedBits;
-      break;
-    }
-    if (version >= maxVersion)
-      throw new RangeError("Data too long");
-  }
-  for (const newEcl of [MEDIUM, QUARTILE, HIGH]) {
-    if (boostEcl && dataUsedBits <= getNumDataCodewords(version, newEcl) * 8)
-      ecl = newEcl;
-  }
-  const bb = [];
-  for (const seg of segs) {
-    appendBits(seg.mode[0], 4, bb);
-    appendBits(seg.numChars, numCharCountBits(seg.mode, version), bb);
-    for (const b of seg.getData())
-      bb.push(b);
-  }
-  const dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
-  appendBits(0, Math.min(4, dataCapacityBits - bb.length), bb);
-  appendBits(0, (8 - bb.length % 8) % 8, bb);
-  for (let padByte = 236; bb.length < dataCapacityBits; padByte ^= 236 ^ 17)
-    appendBits(padByte, 8, bb);
-  const dataCodewords = Array.from({ length: Math.ceil(bb.length / 8) }, () => 0);
-  bb.forEach((b, i) => dataCodewords[i >>> 3] |= b << 7 - (i & 7));
-  return new QrCode(version, ecl, dataCodewords, mask);
-}
-function encode(data, options) {
-  const {
-    ecc = "L",
-    boostEcc = false,
-    minVersion = 1,
-    maxVersion = 40,
-    maskPattern = -1,
-    border = 1
-  } = options || {};
-  const segment = typeof data === "string" ? makeSegments(data) : Array.isArray(data) ? [makeBytes(data)] : void 0;
-  if (!segment)
-    throw new Error(`uqr only supports encoding string and binary data, but got: ${typeof data}`);
-  const qr2 = encodeSegments(
-    segment,
-    EccMap[ecc],
-    minVersion,
-    maxVersion,
-    maskPattern,
-    boostEcc
-  );
-  const result = addBorder({
-    version: qr2.version,
-    maskPattern: qr2.mask,
-    size: qr2.size,
-    data: qr2.modules,
-    types: qr2.types
-  }, border);
-  if (options?.invert)
-    result.data = result.data.map((row2) => row2.map((mod2) => !mod2));
-  options?.onEncoded?.(result);
-  return result;
-}
-function addBorder(input, border = 1) {
-  if (!border)
-    return input;
-  const { size: size2 } = input;
-  const newSize = size2 + border * 2;
-  input.size = newSize;
-  input.data.forEach((row2) => {
-    for (let i = 0; i < border; i++) {
-      row2.unshift(false);
-      row2.push(false);
-    }
-  });
-  for (let i = 0; i < border; i++) {
-    input.data.unshift(Array.from({ length: newSize }, (_) => false));
-    input.data.push(Array.from({ length: newSize }, (_) => false));
-  }
-  const b = QrCodeDataType.Border;
-  input.types.forEach((row2) => {
-    for (let i = 0; i < border; i++) {
-      row2.unshift(b);
-      row2.push(b);
-    }
-  });
-  for (let i = 0; i < border; i++) {
-    input.types.unshift(Array.from({ length: newSize }, (_) => b));
-    input.types.push(Array.from({ length: newSize }, (_) => b));
-  }
-  return input;
-}
-function getDataAt(data, x, y, defaults = false) {
-  if (x < 0 || y < 0 || x >= data.length || y >= data.length)
-    return defaults;
-  return data[y][x];
-}
-function renderUnicodeCompact(data, options = {}) {
-  const palette = {
-    WHITE_ALL: "█",
-    WHITE_BLACK: "▀",
-    BLACK_WHITE: "▄",
-    BLACK_ALL: " "
-  };
-  const result = encode(data, options);
-  const WHITE = false;
-  const BLACK = true;
-  const at = (x, y) => getDataAt(result.data, x, y, true);
-  const lines = [];
-  let line = "";
-  for (let row2 = 0; row2 < result.size; row2 += 2) {
-    for (let col = 0; col < result.size; col++) {
-      if (at(col, row2) === WHITE && at(col, row2 + 1) === WHITE)
-        line += palette.WHITE_ALL;
-      else if (at(col, row2) === WHITE && at(col, row2 + 1) === BLACK)
-        line += palette.WHITE_BLACK;
-      else if (at(col, row2) === BLACK && at(col, row2 + 1) === WHITE)
-        line += palette.BLACK_WHITE;
-      else
-        line += palette.BLACK_ALL;
-    }
-    lines.push(line);
-    line = "";
-  }
-  return lines.join("\n");
-}
-
-// packages/p2p/src/format.ts
-function formatAge(sec) {
-  if (sec < 60) return `${Math.max(0, Math.round(sec))}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
-  return `${Math.floor(sec / 86400)}d`;
-}
-function formatDate(sec) {
-  return new Date(sec * 1e3).toISOString().slice(0, 10);
-}
-function plural(n, one, many = `${one}s`) {
-  return `${n} ${n === 1 ? one : many}`;
-}
-function formatCodes(rows) {
-  if (rows.length === 0) return "No invite codes. Make one: p2p invite <label>";
-  const now = Date.now() / 1e3;
-  return rows.map((r) => {
-    const who2 = r.label ? ` ${r.label}` : "";
-    const circle = r.circle ? ` +circle "${r.circle.name}"` : "";
-    const to = r.to ? ` (only ${r.to.address})` : "";
-    let st;
-    switch (r.status) {
-      case "open":
-        st = `open, ${plural(Math.max(1, Math.round((r.exp - now) / 86400)), "day")} left`;
-        break;
-      case "evicted":
-        st = "evicted by the relay (it was full): make a new code";
-        break;
-      case "taken":
-        st = "TAKEN, but nobody joined yet: if that wasn't them, `p2p invites revoke` refuses the join";
-        break;
-      case "redeemed":
-        st = `redeemed by ${r.redeemedBy?.address ?? "?"} (not them? p2p remove ${r.redeemedBy?.userId ?? ""})`;
-        break;
-      default:
-        st = r.status;
-    }
-    const shown = (r.status === "open" || r.status === "taken") && !r.redacted ? r.code : shortCode(r.code);
-    return `${shown}${who2}${circle}${to}: ${st}`;
-  }).join("\n");
-}
-function shortCode(code2) {
-  return code2.endsWith("…") ? code2 : code2.replace(/[^/]*$/, (c) => `${c.slice(0, 4)}…`);
-}
-function formatDelivery(d) {
-  return `delivered via ${plural(d.relays.length, "relay")} (${plural(d.devices, "device")})`;
-}
-function qr(text2) {
-  try {
-    return renderUnicodeCompact(text2, { border: 1, ecc: "L" });
-  } catch {
-    return "";
-  }
-}
-function table(rows) {
-  if (rows.length === 0) return "";
-  const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => [...r[i] ?? ""].length)));
-  return rows.map((r) => r.map((c, i) => i === r.length - 1 ? c : c.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
-}
-function formatDevices(rows) {
-  return table([
-    ["DEVICE", "LABEL", "ROLE", "CERT EXPIRES"],
-    ...rows.map((d) => [`${d.did}${d.thisDevice ? " *" : ""}`, d.label || "-", d.keyholder ? "key holder" : "device", d.certExp ? formatDate(d.certExp) : "-"])
-  ]);
-}
-function formatWhoami(r) {
-  const lines = [
-    `${r.address}`,
-    `  userId       ${r.userId}`,
-    `  fingerprint  ${r.fingerprint}`,
-    `  this device  ${r.did}${r.keyholder ? " (key holder)" : ""}`,
-    `  relays       ${r.relays.join(", ")}`,
-    `  document     version ${r.doc.ver}, expires ${formatDate(r.doc.exp)}${r.doc.freshness !== "fresh" ? ` (${r.doc.freshness}, ${r.doc.daysPastExp} days past)` : ""}${r.doc.forked ? ", forked" : ""}`
-  ];
-  if (r.profile.bio) lines.push(`  bio          ${r.profile.bio}`);
-  if (r.profile.links.length > 0) lines.push(`  links        ${r.profile.links.join(" ")}`);
-  if (r.defaultCircle) lines.push(`  circle       ${r.defaultCircle} (default)`);
-  lines.push("", formatDevices(r.devices));
-  for (const w of r.warnings) lines.push("", `! ${w}`);
-  return lines.join("\n");
-}
-function formatPeers(rows) {
-  if (rows.length === 0) return "No live sessions. Friends' and circle-mates' sessions appear here once they post a status.";
-  const out = [];
-  for (const r of rows) {
-    const who2 = r.self ? `${r.address} (you${r.thisDevice ? ", this device" : ""})` : r.address;
-    const where = [r.repo, r.branch].filter(Boolean).join("@");
-    out.push(`${r.live ? r.state === "busy" ? "●" : "○" : "·"} ${who2} [${r.ref}] ${r.label} ${r.state}${where ? `  ${where}` : ""}  ${formatAge(r.ageSec)} ago${r.live ? "" : " (stale)"}`);
-    if (r.summary) out.push(`    ${r.summary}`);
-    if (r.files.length > 0) out.push(`    files: ${r.files.slice(0, 8).join(", ")}${r.files.length > 8 ? ` +${r.files.length - 8}` : ""}`);
-    for (const a of r.agents ?? []) {
-      const where2 = [a.state, a.wt ? `worktree${a.branch ? ` ${a.branch}` : ""}` : ""].filter(Boolean).join(", ");
-      const files = a.files?.length ? `: ${a.files.slice(0, 4).join(", ")}${a.files.length > 4 ? ` +${a.files.length - 4}` : ""}` : "";
-      out.push(`    ${a.parent ? `  ${a.id} (of ${a.parent})` : a.id} ${a.type} "${a.task}" (${where2})${files}`);
-    }
-    for (const x of r.xstate ?? []) out.push(`    ${x.kind}: ${x.fallback}`);
-  }
-  return out.join("\n");
-}
-function formatFriends(r) {
-  const out = [];
-  if (r.friends.length === 0) out.push("No friends yet: `p2p invite` makes a link to send someone.");
-  else {
-    out.push(
-      table([
-        ["FRIEND", "SINCE", "STATUS"],
-        ...r.friends.map((f) => [f.address, formatDate(f.since), f.canMessage ? "connected" : "waiting for their cap"])
-      ])
-    );
-  }
-  if (r.invites.outgoing.length > 0) out.push("", `${plural(r.invites.outgoing.length, "open invite")} (yours, not yet accepted)`);
-  if (r.invites.held > 0) out.push("", `${plural(r.invites.held, "held item")} waiting for you: \`p2p held\``);
-  if (r.blocked.length > 0) out.push("", `blocked: ${r.blocked.map((b) => b.address).join(", ")}`);
-  return out.join("\n");
-}
-function formatCircles(rows) {
-  if (rows.length === 0) return "No circles: `p2p circle create <name>` or `p2p circle join <link>`.";
-  return table([
-    ["CIRCLE", "NAME", "ROLE", "MEMBERS", "POLICY", "OWNER"],
-    ...rows.map((c) => [
-      `${c.cid}${c.isDefault ? " *" : ""}`,
-      c.name,
-      c.frozen ? `${c.role} (frozen)` : c.role,
-      `${c.standing}/${c.members}`,
-      c.policy,
-      c.ownerAddress
-    ])
-  ]);
-}
-function formatMembers(r) {
-  const head = `${r.circle.name} (${r.circle.cid}), version ${r.circle.ver}, ${r.circle.policy}${r.circle.policy === "open" ? ": anyone with the link can join" : ""}`;
-  return [
-    head,
-    table([
-      ["MEMBER", "ROLE", "STANDING"],
-      ...r.members.map((m) => [`${m.address}${m.self ? " (you)" : ""}`, m.owner ? "owner" : m.admin ? "admin" : "member", m.stands ? "stands" : m.statement === "leave" ? "left" : "not joined yet"])
-    ])
-  ].join("\n");
-}
-function formatRoster(r) {
-  const who2 = r.vis === "circle" ? `circle ${r.circleName ?? r.circle}${r.parts.length ? ` + ${r.parts.map((p) => p.address).join(", ")}` : ""}` : r.parts.length ? r.parts.map((p) => p.address).join(", ") : "nobody else (private)";
-  return `session ${r.sid} [${r.ref}] v${r.ver}: shared with ${who2}${r.openCircle ? "\n! this circle is open: anyone the owner admits sees this session" : ""}`;
-}
-function formatJoin(r) {
-  const owner = r.ownershipChanged ? `owner ${r.ownerAddress} (founded by ${r.founder})` : `owner ${r.ownerAddress}`;
-  switch (r.status) {
-    case "joined":
-      return `Joined "${r.name}" (${r.cid}), ${owner}.${r.confirmation === "owner-only" ? " Confirmed with the owner (no other member to ask)." : r.confirmation === "unconfirmed" ? " Joined without a second confirmation, as you chose." : " Confirmed with the owner and another member."}${r.openWarning ? "\nThis circle is open: anyone with its link can join." : ""}`;
-    case "waiting":
-      return `Asked ${r.asked.length || "the owner"} for "${r.name}"'s history; no answer yet. Run the same command again once they've been online (or wait with --wait <seconds>).`;
-    case "unconfirmed":
-      return `Couldn't confirm "${r.name}" with a second member. Run again with --yes to join anyway.`;
-    case "already":
-      return `You're already in "${r.name}" (${r.cid}).`;
-    case "refused":
-      return `Not joined "${r.name}" (${r.cid}): ${r.refused}.`;
-  }
-}
-function formatRotationPlan(p) {
-  const dev = (d) => `  ${d.did}${d.label ? ` (${d.labelTrusted === false ? "unverified label: " : ""}${sanitizePeerText(d.label, 64)})` : ""}${d.keyholder ? ", key holder" : ""}${d.why ? `: DROPPED, ${d.why} (keep it with --keep ${d.did})` : ""}`;
-  return [
-    `${p.contest ? "Contesting a rotation you didn't publish: moving" : "Rotating"} ${p.address} to a new identity key ${p.newFingerprint} (§2.8).`,
-    ...p.backup ? [`Its backup phrase is in ${p.backup.file}.`] : [],
-    p.follow.length ? `These devices get the rotation to follow (each follows only when you accept it there):
-${p.follow.map(dev).join("\n")}` : "No other device follows.",
-    ...p.excluded.length ? [`These devices do NOT follow (excluded):
-${p.excluded.map(dev).join("\n")}`] : [],
-    `${plural(p.friends, "friend")} get a fresh invite (they approve it); ${plural(p.owned, "circle")} you own move to the new key; in ${plural(p.memberOf, "other circle")} the owner swaps you in.`,
-    // pre-release re-review M1: friendships this device can't vouch for are invited only when the user says so.
-    ...(p.friendsOptIn ?? []).length ? [
-      `These friends are NOT invited unless you say so (a thief's device may have made them):
-${p.friendsOptIn.map((f) => `  ${sanitizePeerText(f.address ?? f.userId, 96)}: ${f.why}${f.invited ? " [INVITED: you chose to]" : ` (invite with --invite ${f.userId})`}`).join("\n")}`
-    ] : [],
-    "A lost or stolen device listed above must be dropped (--exclude <did>): it is revoked before any code goes out. Last, your old identity publishes a final version with no devices."
-  ].join("\n");
-}
-function formatRotation(r) {
-  const lines = [`Your identity is now ${r.address} (was ${r.from}); old identity final version ${r.finalVer ?? "?"}.`];
-  if (r.devices.followed.length) lines.push(`Followed: ${r.devices.followed.map((d) => d.label || d.did).join(", ")}.`);
-  if (r.devices.offline.length) lines.push(`Didn't follow (re-link each with \`p2p link join <code> --rotated\`): ${r.devices.offline.map((d) => d.label || d.did).join(", ")}.`);
-  lines.push(`Friends invited: ${r.friends.invited}${r.friends.failed.length ? `; not reached: ${r.friends.failed.length} (they can join a fresh code from you)` : ""}.`);
-  for (const c of r.circles) lines.push(`  circle "${sanitizePeerText(c.name, 64)}" (${c.cid}): ${c.role === "owner" ? "handed to the new key" : "join sent to the owner"}${c.status === "done" ? "" : ` [${c.status}${c.reason ? `: ${c.reason}` : ""}]`}`);
-  for (const p of r.proofs) lines.push(`Proof ${p.kind}: ${p.claim}. ${p.publish}`);
-  if (r.backup) lines.push(`New backup phrase saved to ${r.backup.file}: copy it somewhere safe, then delete the file. The old phrase no longer works.`);
-  return lines.join("\n");
-}
-var TERMINAL_UNSAFE = new RegExp("[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\p{Cf}]|\\p{Cs}", "gu");
-function safeTerminal(s2) {
-  return String(s2).replace(TERMINAL_UNSAFE, "");
-}
-function safeJson(v) {
-  return JSON.stringify(v).replace(
-    /[\u007f-\u009f\u2028\u2029\p{Cf}]/gu,
-    (c) => c.split("").map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")
-  );
-}
-
-// packages/p2p/src/cli.ts
+init_format();
+init_format();
 init_circle_ops();
 
 // packages/p2p/src/ext-host.ts
@@ -40172,12 +40264,13 @@ init_inbound();
 init_circle_ops();
 init_sessions();
 init_errors2();
-import { watch as watchDir } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join25 } from "node:path";
+init_format();
 init_rotation();
 init_outbox();
 init_running();
+import { watch as watchDir } from "node:fs";
+import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
+import { join as join25 } from "node:path";
 
 // packages/p2p/src/graph-memory.ts
 init_v3();
@@ -43197,6 +43290,7 @@ function summary2(s2, o) {
 }
 
 // packages/p2p/src/pretty.ts
+init_format();
 var styleOf = (p) => p.color ? COLOR : PLAIN;
 var nowOf = (p) => p.now ?? Date.now() / 1e3;
 function safePretty(s2) {
