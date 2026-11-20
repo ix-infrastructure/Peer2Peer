@@ -8,10 +8,12 @@
 //
 //   - `p2p sandbox`: whether Claude Code's and Codex's sandboxes deny P2P_HOME (read-only).
 //   - `p2p sandbox enable [--claude] [--codex] [--yes]`: adds the deny to the person's own config
-//     (Claude Code's user settings.json, Codex's config.toml), after showing exactly what it writes
-//     and asking (default Yes). Backs each file up first, writes atomically, keeps everything else.
+//     (Claude Code's user settings.json, Codex's config.toml), asking about each agent on its own
+//     after saying what changes, how to undo it and exactly what it writes (default Yes). Writes
+//     only a file that still holds what was shown; backs it up beside itself (0600) first, writes
+//     atomically, keeps everything else. `--yes` is refused on Windows (no process-tree check).
 //   - `p2p setup` (at a terminal) and `p2p codex install --write` offer the same once; a "no" is
-//     remembered (config.json `sandboxDeclined`) and `p2p sandbox enable` asks again.
+//     remembered per agent (config.json `sandboxDeclined`) and `p2p sandbox enable` asks again.
 //   - `p2p doctor` reports both (doctor.ts), and the Claude Code mod tells the person once.
 //
 // Only the person changes these files, and only outside every agent's session: the front ends'
@@ -29,7 +31,7 @@
 //     (codex-bridge sandbox.ts). MCP servers and hooks aren't sandboxed by it, so the bridge keeps
 //     working.
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import * as codex from "@peer2peer/codex-bridge";
@@ -37,7 +39,7 @@ import { ancestryUnknown, ancestryWhy } from "./ancestry.js";
 import { readFileConfig, resolveHome, setFileConfigField, type Env, type FileConfig } from "./config.js";
 import { CliError } from "./errors.js";
 import type { App } from "./app.js";
-import { agentContext } from "./projects.js";
+import { agentContext, sessionWorkdir } from "./projects.js";
 
 /** The person's home folder, as the agents expand `~` (HOME, USERPROFILE on Windows). */
 export function userHomeOf(env: Env): string {
@@ -97,14 +99,24 @@ export function claudeWanted(paths: { home: string; real?: string }, userHome: s
   return { sandbox, read: homes.map((h) => `Read(${rule(h)})`), edit: homes.map((h) => `Edit(${rule(h)})`) };
 }
 
-/** A sandbox path entry as an absolute path (`~/x`, `/x`, `//x`), or undefined for a relative one. */
-function sandboxPath(entry: string, userHome: string): string | undefined {
-  const e = entry.trim().replace(/[\\/]+$/, "");
+/** `s` without its trailing slashes and backslashes (a loop: no regular expression on settings text). */
+function trimSlashes(s: string): string {
+  let end = s.length;
+  while (end > 1 && (s[end - 1] === "/" || s[end - 1] === "\\")) end--;
+  return s.slice(0, end);
+}
+
+/**
+ * A sandbox path entry as an absolute path (`~/x`, `/x`, `//x`), or undefined for a relative one.
+ * `base` resolves a relative entry (a project's settings resolve it against the project root).
+ */
+function sandboxPath(entry: string, userHome: string, base?: string): string | undefined {
+  const e = trimSlashes(entry.trim());
   if (e === "~") return normalize(userHome);
   if (e.startsWith("~/")) return normalize(join(userHome, e.slice(2)));
   if (e.startsWith("//")) return normalize(e.slice(1));
   if (isAbsolute(e)) return normalize(e);
-  return undefined;
+  return base && e !== "" ? normalize(resolve(base, e)) : undefined;
 }
 
 /** A `Read(…)`/`Edit(…)` rule's folder when it covers everything under it (`P` or `P/**`, no other glob), else undefined. */
@@ -151,65 +163,135 @@ function readJson(path: string | undefined): Json | undefined | "bad" {
   }
 }
 
-/** Whether Claude Code's sandbox denies its commands (and its file tools) P2P_HOME, from the user and managed settings. */
-export function claudeSandboxStatus(env: Env, o: { platform?: NodeJS.Platform; managedPath?: string | null } = {}): ClaudeSandboxStatus {
+/** The folders whose `.claude` settings a session here loads: its working directory and, in a git repository, the repository root. */
+export function projectRoots(workdir: string): string[] {
+  const out = [normalize(workdir)];
+  let d = normalize(workdir);
+  for (let i = 0; i < 64; i++) {
+    if (existsSync(join(d, ".git"))) {
+      if (!out.includes(d)) out.push(d);
+      break;
+    }
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+
+/** Whether `name` is an executable file in one of PATH's absolute folders. */
+function onPath(name: string, env: Env): boolean {
+  for (const dir of (env.PATH ?? "").split(":")) {
+    if (!dir || !isAbsolute(dir)) continue;
+    try {
+      if (statSync(join(dir, name)).isFile()) return true;
+    } catch {
+      // not here
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether Claude Code's sandbox denies its commands (and its file tools) P2P_HOME: from the user,
+ * managed and this folder's project settings (`.claude/settings.json` and `.claude/settings.local.json`
+ * in the session's folder and its repository root), and, on Linux, whether bubblewrap is there.
+ */
+export function claudeSandboxStatus(env: Env, o: { platform?: NodeJS.Platform; managedPath?: string | null; workdir?: string } = {}): ClaudeSandboxStatus {
   const settings = claudeSettingsPath(env);
   const platform = o.platform ?? process.platform;
   const base = { settings, missing: [] as string[], notes: [] as string[] };
   if (platform === "win32") return { ...base, state: "unavailable", detail: "Claude Code has no sandbox on native Windows (it runs commands unsandboxed); use WSL2" };
+  const problem = p2pHomeProblem(env);
+  if (problem) return { ...base, state: "unknown", detail: problem };
   const user = readJson(settings);
   if (user === "bad") return { ...base, state: "unknown", detail: `${settings} isn't a JSON object, so it couldn't be read` };
   const managedFile = o.managedPath === null ? undefined : (o.managedPath ?? claudeManagedPath(platform));
   const managed = readJson(managedFile);
-  const sources = [user, managed === "bad" ? undefined : managed].filter((s): s is Json => s !== undefined);
+  // Project settings, highest first (local over shared, the session's folder over the repository root).
+  const project: { file: string; root: string; doc: Json }[] = [];
+  const unreadable: string[] = [];
+  for (const root of projectRoots(o.workdir ?? sessionWorkdir(env))) {
+    for (const name of ["settings.local.json", "settings.json"]) {
+      const file = join(root, ".claude", name);
+      if (file === settings) continue;
+      const doc = readJson(file);
+      if (doc === "bad") unreadable.push(file);
+      else if (doc) project.push({ file, root, doc });
+    }
+  }
+  const managedDoc = managed && managed !== "bad" ? managed : undefined;
   const userHome = userHomeOf(env);
   const want = claudeWanted(p2pHomePaths(env), userHome);
   const homes = want.sandbox.map((s) => sandboxPath(s, userHome) as string);
   const sb = (s: Json) => obj(s.sandbox) ?? {};
   const fs = (s: Json) => obj(sb(s).filesystem) ?? {};
-  const managedSb = managed && managed !== "bad" ? sb(managed) : {};
-  const flag = (k: string) => (typeof managedSb[k] === "boolean" ? managedSb[k] : user ? sb(user)[k] : undefined);
-  const deny = sources.flatMap((s) => strs(obj(s.permissions)?.deny));
-  const covered = (entries: string[], tool: "Read" | "Edit") => (h: string) =>
-    entries.some((e) => {
-      const p = sandboxPath(e, userHome);
-      return p !== undefined && within(h, p);
-    }) || deny.some((r) => {
+  // Every source with the folder its relative paths resolve against.
+  const sources: { doc: Json; base?: string; file?: string }[] = [
+    ...(managedDoc ? [{ doc: managedDoc }] : []),
+    ...project.map((p) => ({ doc: p.doc, base: p.root, file: p.file })),
+    ...(user ? [{ doc: user, base: dirname(settings) }] : []),
+  ];
+  // Booleans: the highest source that sets one decides (managed, project local, project, user).
+  const flag = (k: string): { value: unknown; file?: string } => {
+    for (const src of sources) if (typeof sb(src.doc)[k] === "boolean") return { value: sb(src.doc)[k], ...(src.file ? { file: src.file } : {}) };
+    return { value: undefined };
+  };
+  const deny = sources.flatMap((src) => strs(obj(src.doc.permissions)?.deny));
+  const ruleCovers = (tool: "Read" | "Edit") => (h: string) =>
+    deny.some((r) => {
       const p = ruleFolder(r, tool, userHome);
       return p !== undefined && within(h, p);
     });
+  const covered = (key: "denyRead" | "denyWrite", tool: "Read" | "Edit") => (h: string) =>
+    sources.some((src) =>
+      strs(fs(src.doc)[key]).some((e) => {
+        const p = sandboxPath(e, userHome, src.base);
+        return p !== undefined && within(h, p);
+      }),
+    ) || ruleCovers(tool)(h);
   const missing: string[] = [];
-  if (flag("enabled") !== true) missing.push("sandbox.enabled");
-  if (flag("allowUnsandboxedCommands") !== false) missing.push("sandbox.allowUnsandboxedCommands = false");
-  const denyRead = sources.flatMap((s) => strs(fs(s).denyRead));
-  const denyWrite = sources.flatMap((s) => strs(fs(s).denyWrite));
-  if (!homes.every(covered(denyRead, "Read"))) missing.push(`sandbox.filesystem.denyRead ${want.sandbox.join(", ")}`);
-  if (!homes.every(covered(denyWrite, "Edit"))) missing.push(`sandbox.filesystem.denyWrite ${want.sandbox.join(", ")}`);
-  const ruleCovers = (tool: "Read" | "Edit") => (h: string) => deny.some((r) => {
-    const p = ruleFolder(r, tool, userHome);
-    return p !== undefined && within(h, p);
-  });
+  const enabled = flag("enabled");
+  if (enabled.value !== true) missing.push(enabled.file ? `sandbox.enabled (${enabled.file} turns it off in this project)` : "sandbox.enabled");
+  const retry = flag("allowUnsandboxedCommands");
+  if (retry.value !== false) missing.push(retry.file ? `sandbox.allowUnsandboxedCommands = false (${retry.file} allows the retry in this project)` : "sandbox.allowUnsandboxedCommands = false");
+  if (!homes.every(covered("denyRead", "Read"))) missing.push(`sandbox.filesystem.denyRead ${want.sandbox.join(", ")}`);
+  if (!homes.every(covered("denyWrite", "Edit"))) missing.push(`sandbox.filesystem.denyWrite ${want.sandbox.join(", ")}`);
   if (!homes.every(ruleCovers("Read"))) missing.push(`permissions.deny ${want.read.join(", ")}`);
   if (!homes.every(ruleCovers("Edit"))) missing.push(`permissions.deny ${want.edit.join(", ")}`);
   const notes: string[] = [];
   // A narrower allow inside the denied folder opens it again ("the rule with the narrower path applies").
   for (const k of ["allowRead", "allowWrite"] as const) {
-    for (const e of sources.flatMap((s) => strs(fs(s)[k]))) {
-      const p = sandboxPath(e, userHome);
-      if (p && homes.some((h) => within(p, h))) missing.push(`no sandbox.filesystem.${k} inside P2P_HOME (${e})`);
+    for (const src of sources) {
+      for (const e of strs(fs(src.doc)[k])) {
+        const p = sandboxPath(e, userHome, src.base);
+        if (p && homes.some((h) => within(p, h))) missing.push(`no sandbox.filesystem.${k} inside P2P_HOME (${e}${src.file ? ` in ${src.file}` : ""})`);
+      }
     }
   }
-  const excluded = sources.flatMap((s) => strs(sb(s).excludedCommands));
+  if (platform === "linux" && (!onPath("bwrap", env) || !onPath("socat", env))) {
+    missing.push("bubblewrap and socat (Claude Code's sandbox needs both on Linux; without them it runs commands unsandboxed unless sandbox.failIfUnavailable is set)");
+  }
+  const excluded = sources.flatMap((src) => strs(sb(src.doc).excludedCommands));
   if (excluded.length > 0) notes.push(`sandbox.excludedCommands lists ${excluded.length} command pattern${excluded.length === 1 ? "" : "s"}: those run outside the sandbox, P2P_HOME included`);
   if (managed === "bad") notes.push(`${managedFile} couldn't be read`);
+  for (const f of unreadable) notes.push(`${f} couldn't be read, so what it sets isn't known`);
+  if (missing.length === 0 && unreadable.length > 0) {
+    return { settings, missing, notes, state: "unknown", detail: `the user settings deny ${want.sandbox.join(" and ")}, but a project settings file here couldn't be read` };
+  }
   if (missing.length === 0) return { settings, missing, notes, state: "on", detail: `Claude Code's sandbox denies its commands ${want.sandbox.join(" and ")}, and its file tools have deny rules for it` };
   return { settings, missing, notes, state: "off", detail: `Claude Code's sandbox doesn't keep its commands out of ${want.sandbox.join(" and ")}: missing ${missing.join("; ")}` };
 }
 
 /** The indentation a JSON text uses (its first indented line), else two spaces. */
 function indentOf(text: string): string {
-  const m = /\n([ \t]+)["}\]]/.exec(text);
-  return m ? (m[1] as string) : "  ";
+  // A loop, not a regular expression, over the person's file.
+  for (const line of text.split("\n")) {
+    let i = 0;
+    while (i < line.length && (line[i] === " " || line[i] === "\t")) i++;
+    if (i > 0 && (line[i] === '"' || line[i] === "}" || line[i] === "]")) return line.slice(0, i);
+  }
+  return "  ";
 }
 
 /** One change to settings.json, for the preview. */
@@ -251,6 +333,12 @@ export function planClaudeSandbox(text: string | null, env: Env): ClaudeSandboxP
   if (sandbox.enabled !== true) {
     edits.push({ key: "sandbox.enabled", value: true, ...(sandbox.enabled !== undefined ? { was: sandbox.enabled } : {}) });
     sandbox.enabled = true;
+  }
+  // Older Claude Code releases ran sandboxed commands without a prompt by default (before v2.1.324):
+  // the person's own approvals stay, unless they set this themselves.
+  if (sandbox.autoAllowBashIfSandboxed === undefined) {
+    edits.push({ key: "sandbox.autoAllowBashIfSandboxed", value: false });
+    sandbox.autoAllowBashIfSandboxed = false;
   }
   if (sandbox.allowUnsandboxedCommands !== false) {
     edits.push({ key: "sandbox.allowUnsandboxedCommands", value: false, ...(sandbox.allowUnsandboxedCommands !== undefined ? { was: sandbox.allowUnsandboxedCommands } : {}) });
@@ -301,7 +389,11 @@ export interface FrontPlan {
   /** Whether the agent looks installed (its config folder exists). */
   present: boolean;
   status: { state: string; detail: string; notes: string[] };
-  plan: { kind: "already" } | { kind: "edit"; before: string | null; after: string; preview: string[] } | { kind: "manual"; reason: string; snippet?: string } | { kind: "unavailable" };
+  plan:
+    | { kind: "already" }
+    | { kind: "edit"; before: string | null; after: string; preview: string[]; /** Codex: what the new profile extends. */ base?: string; /** Codex: the config set no sandbox, so the base was chosen. */ assumed?: true }
+    | { kind: "manual"; reason: string; snippet?: string }
+    | { kind: "unavailable" };
 }
 
 function readText(path: string): string | null {
@@ -333,75 +425,189 @@ export function codexDenyPathsOf(env: Env): string[] {
   return codex.codexDenyPaths(p.home, userHomeOf(env), p.real);
 }
 
-export function codexStatus(env: Env): codex.CodexSandboxStatus & { settings: string } {
+/** Characters that mean something in a permission rule or a glob: a P2P_HOME holding one isn't written into a rule. */
+const RULE_CHARS = new Set(["[", "]", "{", "}", "*", "?", "(", ")"]);
+
+/**
+ * Why P2P_HOME can't be denied safely, or undefined: a path with rule or glob characters (it would
+ * match something else, or break the rule), or the home folder itself, `/` or a folder above the home
+ * folder (denying it would lock the agents out of everything).
+ */
+export function p2pHomeProblem(env: Env): string | undefined {
+  const paths = p2pHomePaths(env);
+  const userHome = normalize(resolve(userHomeOf(env)));
+  for (const h of [paths.home, ...(paths.real ? [paths.real] : [])]) {
+    if ([...h].some((c) => RULE_CHARS.has(c))) return `P2P_HOME (${h}) has a character that means something in a sandbox rule ([ ] { } * ? ( )): move it to a plain path, then run this again`;
+    if (h === sep || within(userHome, h)) return `P2P_HOME (${h}) is your home folder or a folder above it: denying it would shut your agents out of everything. Point P2P_HOME at its own folder`;
+  }
+  return undefined;
+}
+
+/** The project `.codex/config.toml` files Codex loads here when the project is trusted (repository root down to the folder). */
+function codexProjectConfigs(workdir: string): string[] {
+  const roots = projectRoots(workdir);
+  const top = roots[roots.length - 1] as string;
+  const out: string[] = [];
+  let d = normalize(workdir);
+  for (let i = 0; i < 64; i++) {
+    const f = join(d, ".codex", "config.toml");
+    if (existsSync(f)) out.push(f);
+    if (d === top) break;
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+
+export function codexStatus(env: Env, o: { workdir?: string } = {}): codex.CodexSandboxStatus & { settings: string } {
   const path = codexConfigPath(env);
+  const problem = p2pHomeProblem(env);
+  if (problem) return { state: "unknown", detail: problem, notes: [], settings: path };
   let text: string | null;
   try {
     text = readText(path);
   } catch {
     return { state: "unknown", detail: `${path} couldn't be read`, notes: [], settings: path };
   }
-  return { ...codex.codexSandboxStatus(text, codexDenyPathsOf(env), userHomeOf(env)), settings: path };
+  const st = { ...codex.codexSandboxStatus(text, codexDenyPathsOf(env), userHomeOf(env)), settings: path };
+  // A trusted project's own config.toml can choose another sandbox here; whether Codex trusts the
+  // project isn't known from outside, so "on" becomes "?" when one does.
+  const overriding: string[] = [];
+  for (const f of codexProjectConfigs(o.workdir ?? sessionWorkdir(env))) {
+    if (f === path) continue;
+    let t: string | null;
+    try {
+      t = readText(f);
+    } catch {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    const lines = t === null ? [] : codex.scanTomlLines(t);
+    if (lines === null) {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    if (lines.some((l) => l.kind === "kv" && (["sandbox_mode", "default_permissions", "permissions"].includes([...l.table, ...l.key][0] as string)))) overriding.push(f);
+    else if (lines.some((l) => l.kind === "header" && l.table[0] === "permissions")) overriding.push(f);
+  }
+  if (overriding.length === 0) return st;
+  const note = `${overriding.join(", ")} sets its own sandbox or permissions: when Codex trusts this project, that applies here instead`;
+  return st.state === "on" ? { ...st, state: "unknown", detail: `${st.detail}, but a project config may override it here`, notes: [...st.notes, note] } : { ...st, notes: [...st.notes, note] };
 }
 
 const show = (v: unknown) => JSON.stringify(v);
 
+export interface PlanOptions {
+  platform?: NodeJS.Platform;
+  managedPath?: string | null;
+  workdir?: string;
+  /** For a Codex config that sets no sandbox at all: what the new profile extends (default :read-only). */
+  codexBase?: ":read-only" | ":workspace";
+}
+
 /** What `enable` would do for one front end (computed, nothing written). */
-export function planFront(front: "claude" | "codex", env: Env, o: { platform?: NodeJS.Platform; managedPath?: string | null } = {}): FrontPlan {
+export function planFront(front: "claude" | "codex", env: Env, o: PlanOptions = {}): FrontPlan {
+  const path = front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env);
+  const present = isDir(dirname(path));
+  const problem = p2pHomeProblem(env);
   if (front === "claude") {
-    const path = claudeSettingsPath(env);
     const status = claudeSandboxStatus(env, o);
-    const present = isDir(dirname(path));
     if (status.state === "unavailable") return { front, path, present, status, plan: { kind: "unavailable" } };
+    if (problem) return { front, path, present, status, plan: { kind: "manual", reason: problem } };
     const before = readText(path);
     const p = planClaudeSandbox(before, env);
     if (p.kind !== "edit") return { front, path, present, status, plan: p };
     const preview = p.edits.map((e) => (e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== undefined ? `   (was ${show(e.was)})` : ""}`));
     return { front, path, present, status, plan: { kind: "edit", before, after: p.after, preview } };
   }
-  const path = codexConfigPath(env);
-  const status = codexStatus(env);
-  const present = isDir(dirname(path));
+  const status = codexStatus(env, o);
+  if (problem) return { front, path, present, status, plan: { kind: "manual", reason: problem } };
   const before = readText(path);
-  const p = codex.planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env));
+  const p = codex.planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env), o.codexBase ? { baseWhenUnset: o.codexBase } : {});
   if (p.kind === "already") return { front, path, present, status, plan: { kind: "already" } };
   if (p.kind === "manual") return { front, path, present, status, plan: { kind: "manual", reason: p.reason, snippet: p.snippet } };
   const preview = p.edits.map((e) => ("add" in e ? `  + ${e.add}` : `  - ${e.before}\n  + ${e.after}`));
-  return { front, path, present, status, plan: { kind: "edit", before, after: p.after, preview } };
+  return { front, path, present, status, plan: { kind: "edit", before, after: p.after, preview, ...(p.base ? { base: p.base } : {}), ...(p.assumed ? { assumed: true as const } : {}) } };
 }
 
-/** What each front end's edit does, said once above the preview. */
-const WHY: Record<"claude" | "codex", string[]> = {
-  claude: [
-    "Turns on Claude Code's sandbox for its shell commands in every project (they then write only in the",
-    "project and reach only network hosts you allow), with no retry outside it, and denies them and Claude's",
-    "file tools P2P_HOME. Peer2Peer's mod isn't affected: what a mod starts runs outside the sandbox.",
-  ],
-  codex: [
-    "Has Codex's commands run under a permissions profile that denies them P2P_HOME (keeping your current",
-    "sandbox otherwise). The Peer2Peer bridge isn't affected: Codex doesn't sandbox MCP servers or hooks.",
-  ],
-};
+/** The name the person knows each front end's agent by. */
+export const AGENT_NAME: Record<"claude" | "codex", string> = { claude: "Claude Code", codex: "Codex" };
 
-/** The question: every change, file by file, and what it does. */
-export function previewText(plans: readonly FrontPlan[], p2pHome: string): string {
-  const lines = [
-    `Your agents run as you, so they can read ${p2pHome} (your identity key and person token) unless their`,
-    "sandbox denies it. Peer2Peer can add that deny to your agents' own config:",
-  ];
-  for (const f of plans) {
-    if (f.plan.kind !== "edit") continue;
-    lines.push("", `${f.front === "claude" ? "Claude Code" : "Codex"}: ${f.path}`, ...WHY[f.front].map((l) => `  ${l}`), "", ...f.plan.preview);
-  }
-  lines.push("", "Each file is backed up first (<file>.p2p-backup-<time>); everything else in it stays as it is.");
-  return lines.join("\n");
+/** What one agent's edit does, in full, then the exact lines: asked about on its own. */
+export function frontPreview(f: FrontPlan, p2pHome: string, userHome: string): string {
+  if (f.plan.kind !== "edit") return "";
+  const home = tildeForm(p2pHome, userHome);
+  const why =
+    f.front === "claude"
+      ? [
+          `Your agents run as you, so Claude Code can read ${home} (your identity key and person token) unless its`,
+          "sandbox denies it. This adds that deny to your Claude Code user settings, and changes, in every project:",
+          "  - Claude's shell commands run in Claude Code's sandbox: they write only inside the project (and folders",
+          "    you add to sandbox.filesystem.allowWrite) and reach only network hosts you allow (Claude Code asks for",
+          "    a new host). A build or tool that writes elsewhere (a global cache, say) may fail or ask.",
+          "  - No retry outside the sandbox (allowUnsandboxedCommands: false): a command the sandbox blocks just fails.",
+          "  - Your permission prompts stay as they are (autoAllowBashIfSandboxed: false, unless you set it already).",
+          `  - Claude's shell and its Read/Edit tools can't open ${home}, so they can't run p2p any more either; Claude`,
+          "    uses ListAgents, SendMessage and /peers. The Peer2Peer mod isn't affected (what a mod starts runs outside",
+          "    the sandbox).",
+          `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the keys below.`,
+        ]
+      : [
+          `Your agents run as you, so Codex can read ${home} (your identity key and person token) unless its sandbox`,
+          "denies it. This has Codex's commands run under a permissions profile that denies it:",
+          ...(f.plan.assumed
+            ? [
+                "  - Your config sets no sandbox, and Codex then picks one per folder (workspace-write in a version-controlled",
+                `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? ": Codex asks before it writes" : ": Codex writes in the workspace without asking"}.`,
+                `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets it write in the workspace instead." : "`--codex-base read-only` keeps it read-only instead."}`,
+              ]
+            : ["  - It extends the sandbox you use now, so writes and network stay as they were."]),
+          "  - Codex's shell can't open it, so it can't run p2p any more either; Codex uses the bridge's p2p_* tools.",
+          "    The bridge isn't affected (Codex doesn't sandbox MCP servers or hooks). Restart open Codex sessions.",
+          `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the lines marked p2p sandbox.`,
+        ];
+  return [`${AGENT_NAME[f.front]}: ${f.path}`, ...why, "", "Exactly what is written (the file is backed up first; everything else in it stays):", ...f.plan.preview].join("\n");
 }
 
-/** Writes the planned edits (backup, atomic, a symbolic link written through), returning each file and its backup. */
+/** The question for one agent. */
+export function frontQuestion(f: FrontPlan): string {
+  return f.front === "claude" ? "Turn on Claude Code's sandbox with this deny?" : "Add this to Codex's config?";
+}
+
+/**
+ * Writes the planned edits. Each file must still hold what the preview was made from (else nothing
+ * is written). The backup sits next to the path as named (a symbolic link's own folder, not its
+ * target's), 0600, created exclusively; the new content is written atomically to the link's target,
+ * keeping its mode.
+ */
 export function applyPlans(plans: readonly FrontPlan[], now: Date = new Date()): { path: string; backup?: string }[] {
   const changes = plans.flatMap((f) => (f.plan.kind === "edit" ? [{ path: f.path, before: f.plan.before, after: f.plan.after }] : []));
+  for (const c of changes) {
+    if (readText(c.path) !== c.before) throw new CliError("changed", `${c.path} changed after it was shown: nothing was written. Run the command again to see the changes`);
+  }
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  return codex.applyChanges(changes, stamp).map((c) => ({ path: c.path, ...(c.backup ? { backup: c.backup } : {}) }));
+  const done: { path: string; backup?: string }[] = [];
+  for (const c of changes) {
+    const target = codex.resolveLink(c.path);
+    mkdirSync(dirname(target), { recursive: true });
+    let backup: string | undefined;
+    if (c.before !== null) {
+      backup = `${c.path}.p2p-backup-${stamp}`;
+      writeFileSync(backup, c.before, { mode: 0o600, flag: "wx" });
+    }
+    let mode = 0o600;
+    try {
+      mode = statSync(target).mode & 0o777;
+    } catch {
+      // a new file: 0600
+    }
+    const tmp = `${target}.p2p-tmp-${process.pid}`;
+    writeFileSync(tmp, c.after, { mode, flag: "wx" });
+    renameSync(tmp, target);
+    done.push({ path: c.path, ...(backup ? { backup } : {}) });
+  }
+  return done;
 }
 
 /**
@@ -416,25 +622,39 @@ export function assertPersonOutsideAgents(app: { env: Env; front?: boolean }, wh
   if (ancestryUnknown()) throw new CliError("refused", `${why}. It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session${ancestryWhy() ? ` (${ancestryWhy()})` : ""}`);
 }
 
-/** The person said no to the sandbox offer (FileConfig.sandboxDeclined): not offered again until `p2p sandbox enable`. */
-export function sandboxDeclined(file: Pick<FileConfig, "sandboxDeclined">): boolean {
-  return file.sandboxDeclined === true;
+type Front = "claude" | "codex";
+
+/** Which agents the person said no for (FileConfig.sandboxDeclined: `true` for both, as an older answer, or a list). */
+export function sandboxDeclined(file: Pick<FileConfig, "sandboxDeclined">, front?: Front): boolean {
+  const v = file.sandboxDeclined;
+  if (v === true) return true;
+  if (!Array.isArray(v)) return false;
+  return front ? v.includes(front) : v.length > 0;
 }
 
-export function setSandboxDeclined(home: string, declined: boolean): void {
-  setFileConfigField(home, "sandboxDeclined", declined);
+/** Records the person's answer for one agent. */
+export function setSandboxDeclined(home: string, front: Front, declined: boolean): void {
+  let cur: Front[] = [];
+  try {
+    const v = readFileConfig(home).sandboxDeclined;
+    cur = v === true ? ["claude", "codex"] : Array.isArray(v) ? v.filter((x): x is Front => x === "claude" || x === "codex") : [];
+  } catch {
+    // unreadable: start over
+  }
+  const next = declined ? [...new Set([...cur, front])] : cur.filter((f) => f !== front);
+  setFileConfigField(home, "sandboxDeclined", next);
 }
 
 /** The front ends worth offering: installed here (their config folder exists), with an edit to make. */
-export function offerablePlans(env: Env, only?: readonly ("claude" | "codex")[]): FrontPlan[] {
+export function offerablePlans(env: Env, only?: readonly Front[], o: PlanOptions = {}): FrontPlan[] {
   const fronts = only ?? (["claude", "codex"] as const);
-  return fronts.map((f) => planFront(f, env)).filter((f) => (only ? true : f.present) && f.plan.kind === "edit");
+  return fronts.map((f) => planFront(f, env, o)).filter((f) => (only ? true : f.present) && f.plan.kind === "edit");
 }
 
-/** Whether the person said no before (config.json unreadable counts as no answer). */
-export function declinedHere(env: Env): boolean {
+/** Whether the person said no before, for `front` (any, without one); config.json unreadable counts as no answer. */
+export function declinedHere(env: Env, front?: Front): boolean {
   try {
-    return sandboxDeclined(readFileConfig(resolveHome(env)));
+    return sandboxDeclined(readFileConfig(resolveHome(env)), front);
   } catch {
     return false;
   }
@@ -449,11 +669,12 @@ export function frontPresent(front: "claude" | "codex", env: Env): boolean {
  * The one-time notice a front end shows its person (never its model) when its agent's sandbox
  * doesn't deny P2P_HOME: the command to run in their own terminal. Undefined when the sandbox
  * already does, the person said no before, it was shown already (once per device and front end),
- * or the caller is neither the person's front end nor the person (an agent's own shell can't use it up).
+ * or the caller is neither the person's front end nor the person. An agent's shell without the token
+ * can't use it up; one that already reads P2P_HOME (no sandbox yet) can take the token and can.
  */
 export async function sandboxNotice(app: App, front: "claude" | "codex"): Promise<string | undefined> {
   if (app.front !== true && agentContext(app.env)) return undefined;
-  if (declinedHere(app.env)) return undefined;
+  if (declinedHere(app.env, front)) return undefined;
   const st = front === "claude" ? claudeSandboxStatus(app.env) : codexStatus(app.env);
   if (st.state !== "off") return undefined;
   const shown = await app.state.update("sandboxNotice", (cur) => (cur?.[front] !== undefined ? { result: false } : { next: { ...(cur ?? {}), [front]: Date.now() }, result: true }));
@@ -471,12 +692,12 @@ export interface SandboxReport {
 }
 
 /** Both front ends' sandbox status (read-only; whoever asks). */
-export function sandboxReport(env: Env, o: { platform?: NodeJS.Platform; managedPath?: string | null } = {}): SandboxReport {
+export function sandboxReport(env: Env, o: { platform?: NodeJS.Platform; managedPath?: string | null; workdir?: string } = {}): SandboxReport {
   return {
     p2pHome: p2pHomePaths(env).home,
     declined: declinedHere(env),
     claude: { ...claudeSandboxStatus(env, o), present: frontPresent("claude", env) },
-    codex: { ...codexStatus(env), present: frontPresent("codex", env) },
+    codex: { ...codexStatus(env, o), present: frontPresent("codex", env) },
   };
 }
 

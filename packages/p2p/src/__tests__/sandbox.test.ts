@@ -5,12 +5,17 @@
 // config.toml; `p2p doctor` and `p2p sandbox` report it. Every test runs in its own home folder
 // (HOME, CLAUDE_CONFIG_DIR, CODEX_HOME), never the person's real config.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { main } from "../cli.js";
-import { claudeSandboxStatus, planClaudeSandbox, sandboxReport } from "../sandbox.js";
+import { applyPlans, claudeSandboxStatus, offerablePlans, p2pHomeProblem, planClaudeSandbox, planFront, sandboxReport } from "../sandbox.js";
+
+const edited = (p: ReturnType<typeof planClaudeSandbox>): string => {
+  if (p.kind !== "edit") throw new Error(`expected an edit, got ${p.kind}`);
+  return p.after;
+};
 import { personTokenFor, startRelay, type TestRelay } from "./harness.js";
 
 const dirs: string[] = [];
@@ -29,7 +34,10 @@ function person(o: { claude?: boolean; codex?: boolean } = {}) {
   if (o.codex !== false) mkdirSync(join(home, ".codex"));
   const p2pHome = join(home, ".p2p");
   mkdirSync(p2pHome, { mode: 0o700 });
-  const env: Record<string, string> = { HOME: home, P2P_HOME: p2pHome, P2P_PERSON_TOKEN: "" };
+  // Linux's sandbox needs bubblewrap and socat: stand-ins on PATH, so the status doesn't depend on the machine.
+  mkdirSync(join(home, "bin"));
+  for (const b of ["bwrap", "socat"]) writeFileSync(join(home, "bin", b), "", { mode: 0o755 });
+  const env: Record<string, string> = { HOME: home, P2P_HOME: p2pHome, P2P_PERSON_TOKEN: "", PATH: `${join(home, "bin")}:${process.env.PATH ?? ""}` };
   return { home, p2pHome, env, settings: join(home, ".claude", "settings.json"), config: join(home, ".codex", "config.toml") };
 }
 
@@ -68,7 +76,7 @@ describe("Claude Code settings.json", () => {
     if (plan.kind !== "edit") return;
     const doc = JSON.parse(plan.after);
     expect(doc).toEqual({
-      sandbox: { enabled: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~/.p2p"], denyWrite: ["~/.p2p"] } },
+      sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~/.p2p"], denyWrite: ["~/.p2p"] } },
       permissions: { deny: ["Read(~/.p2p/**)", "Edit(~/.p2p/**)"] },
     });
     writeFileSync(p.settings, plan.after);
@@ -108,8 +116,32 @@ describe("Claude Code settings.json", () => {
 
   it("doesn't add what a folder above P2P_HOME already covers", () => {
     const p = person();
-    const before = JSON.stringify({ sandbox: { enabled: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~/"], denyWrite: ["~"] } }, permissions: { deny: ["Read(~/**)", "Edit(~/**)"] } });
+    const before = JSON.stringify({ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~/"], denyWrite: ["~"] } }, permissions: { deny: ["Read(~/**)", "Edit(~/**)"] } });
     expect(planClaudeSandbox(before, p.env).kind).toBe("already");
+  });
+
+  it("keeps the person's permission prompts: autoAllowBashIfSandboxed false unless they set it", () => {
+    const p = person();
+    const plan = planClaudeSandbox(null, p.env);
+    if (plan.kind !== "edit") throw new Error("expected an edit");
+    expect(plan.edits).toContainEqual({ key: "sandbox.autoAllowBashIfSandboxed", value: false });
+    const mine = planClaudeSandbox(JSON.stringify({ sandbox: { autoAllowBashIfSandboxed: true } }), p.env);
+    if (mine.kind !== "edit") throw new Error("expected an edit");
+    expect(JSON.parse(mine.after).sandbox.autoAllowBashIfSandboxed).toBe(true);
+    expect(mine.edits.some((e) => e.key === "sandbox.autoAllowBashIfSandboxed")).toBe(false);
+  });
+
+  it("refuses a P2P_HOME with rule characters, or one that is the home folder or above it", () => {
+    const p = person();
+    const odd = join(p.home, "p2p[x]");
+    mkdirSync(odd);
+    for (const env of [{ ...p.env, P2P_HOME: odd }, { ...p.env, P2P_HOME: p.home }, { ...p.env, P2P_HOME: "/" }, { ...p.env, P2P_HOME: join(p.home, "..") }]) {
+      expect(p2pHomeProblem(env)).toBeDefined();
+      expect(planFront("claude", env, NO_MANAGED).plan.kind).toBe("manual");
+      expect(planFront("codex", env).plan.kind).toBe("manual");
+      expect(claudeSandboxStatus(env, NO_MANAGED).state).toBe("unknown");
+    }
+    expect(p2pHomeProblem(p.env)).toBeUndefined();
   });
 
   it("uses an absolute rule for a P2P_HOME outside the home folder", () => {
@@ -152,14 +184,72 @@ describe("Claude Code settings.json", () => {
   });
 });
 
+describe("what else decides it here (doctor)", () => {
+  it("a project's settings that turn the sandbox off, or open P2P_HOME, count", () => {
+    const p = person();
+    writeFileSync(p.settings, edited(planClaudeSandbox(null, p.env)));
+    const proj = join(p.home, "work", "repo");
+    mkdirSync(join(proj, ".git"), { recursive: true });
+    const sub = join(proj, "pkg");
+    mkdirSync(join(sub, ".claude"), { recursive: true });
+    expect(claudeSandboxStatus(p.env, { ...NO_MANAGED, workdir: sub }).state).toBe("on");
+    mkdirSync(join(proj, ".claude"));
+    writeFileSync(join(proj, ".claude", "settings.json"), JSON.stringify({ sandbox: { enabled: false } }));
+    const off = claudeSandboxStatus(p.env, { ...NO_MANAGED, workdir: sub });
+    expect(off.state).toBe("off");
+    expect(off.detail).toMatch(/turns it off in this project/);
+    // The local file outranks the shared one.
+    writeFileSync(join(sub, ".claude", "settings.local.json"), JSON.stringify({ sandbox: { enabled: true, filesystem: { allowRead: ["~/.p2p/cli"] } } }));
+    const opened = claudeSandboxStatus(p.env, { ...NO_MANAGED, workdir: sub });
+    expect(opened.detail).not.toMatch(/turns it off/);
+    expect(opened.detail).toMatch(/allowRead inside P2P_HOME/);
+    writeFileSync(join(sub, ".claude", "settings.local.json"), "{ not json");
+    expect(claudeSandboxStatus(p.env, { ...NO_MANAGED, workdir: join(p.home, "work") }).state).toBe("on");
+    rmSync(join(proj, ".claude"), { recursive: true });
+    expect(claudeSandboxStatus(p.env, { ...NO_MANAGED, workdir: sub }).state).toBe("unknown");
+  });
+
+  it("on Linux, a missing bubblewrap means no sandbox", () => {
+    const p = person();
+    writeFileSync(p.settings, edited(planClaudeSandbox(null, p.env)));
+    expect(claudeSandboxStatus(p.env, { ...NO_MANAGED, platform: "linux" }).state).toBe("on");
+    const st = claudeSandboxStatus({ ...p.env, PATH: "/nonexistent-p2p-test" }, { ...NO_MANAGED, platform: "linux" });
+    expect(st.state).toBe("off");
+    expect(st.detail).toMatch(/bubblewrap/);
+  });
+
+  it("a project's .codex/config.toml that picks its own sandbox makes Codex's line unknown", () => {
+    const p = person();
+    const plan = planFront("codex", p.env);
+    if (plan.plan.kind !== "edit") throw new Error("expected an edit");
+    writeFileSync(p.config, plan.plan.after);
+    const proj = join(p.home, "repo");
+    mkdirSync(join(proj, ".git"), { recursive: true });
+    expect(sandboxReport(p.env, { ...NO_MANAGED, workdir: proj }).codex.state).toBe("on");
+    mkdirSync(join(proj, ".codex"));
+    writeFileSync(join(proj, ".codex", "config.toml"), 'model = "x"\n');
+    expect(sandboxReport(p.env, { ...NO_MANAGED, workdir: proj }).codex.state).toBe("on");
+    writeFileSync(join(proj, ".codex", "config.toml"), 'sandbox_mode = "danger-full-access"\n');
+    const st = sandboxReport(p.env, { ...NO_MANAGED, workdir: proj }).codex;
+    expect(st.state).toBe("unknown");
+    expect(st.notes.join()).toMatch(/when Codex trusts this project/);
+  });
+});
+
 describe("p2p sandbox enable", () => {
   it("shows the changes, asks (Enter is yes), backs up, writes both, and is idempotent", async () => {
     const p = person();
     writeFileSync(p.settings, '{\n  "model": "m"\n}\n');
     writeFileSync(p.config, '# my codex config\nmodel = "x"\n\n[mcp_servers.other]\ncommand = "other"\n');
-    const r = await run(["sandbox", "enable"], p.env, { answers: [""] });
+    const r = await run(["sandbox", "enable"], p.env, { answers: ["", ""] });
     expect(r.code).toBe(0);
-    expect(r.asked).toEqual(["Add these? [Y/n] "]);
+    // Each agent on its own, with what changes and how to undo it.
+    expect(r.asked).toEqual(["Turn on Claude Code's sandbox with this deny? [Y/n] ", "Add this to Codex's config? [Y/n] "]);
+    expect(r.out).toMatch(/write only inside the project/);
+    expect(r.out).toMatch(/autoAllowBashIfSandboxed: false/);
+    expect(r.out).toMatch(/can't run p2p any more/);
+    expect(r.out).toMatch(/To undo: put the backup back/);
+    expect(r.out).toMatch(/This one extends :read-only: Codex asks before it writes/);
     expect(r.out).toMatch(/sandbox\.filesystem\.denyRead \+= "~\/\.p2p"/);
     expect(r.out).toMatch(/\+ "~\/\.p2p" = "deny"/);
     expect(r.out).toMatch(/Wrote .*settings\.json \(backup: .*settings\.json\.p2p-backup-/);
@@ -179,17 +269,64 @@ describe("p2p sandbox enable", () => {
 
   it("a no changes nothing and is remembered; setup then doesn't offer it", async () => {
     const p = person();
-    const r = await run(["sandbox", "enable"], p.env, { answers: ["n"] });
+    const r = await run(["sandbox", "enable"], p.env, { answers: ["n", "n"] });
     expect(r.code).toBe(0);
     expect(existsSync(p.settings)).toBe(false);
     expect(existsSync(p.config)).toBe(false);
-    expect(JSON.parse(readFileSync(join(p.p2pHome, "config.json"), "utf8")).sandboxDeclined).toBe(true);
+    expect(JSON.parse(readFileSync(join(p.p2pHome, "config.json"), "utf8")).sandboxDeclined).toEqual(["claude", "codex"]);
     expect(sandboxReport(p.env, NO_MANAGED).declined).toBe(true);
     // Asked explicitly, it asks again, and a yes clears the "no".
     const yes = await run(["sandbox", "enable", "--claude"], p.env, { answers: ["y"] });
     expect(yes.code).toBe(0);
     expect(claudeSandboxStatus(p.env, NO_MANAGED).state).toBe("on");
-    expect(JSON.parse(readFileSync(join(p.p2pHome, "config.json"), "utf8")).sandboxDeclined).toBe(false);
+    expect(JSON.parse(readFileSync(join(p.p2pHome, "config.json"), "utf8")).sandboxDeclined).toEqual(["codex"]);
+  });
+
+  it("asks for each agent apart: no to one, yes to the other", async () => {
+    const p = person();
+    const r = await run(["sandbox", "enable"], p.env, { answers: ["n", "y"] });
+    expect(r.code).toBe(0);
+    expect(existsSync(p.settings)).toBe(false);
+    expect(sandboxReport(p.env, NO_MANAGED).codex.state).toBe("on");
+    expect(JSON.parse(readFileSync(join(p.p2pHome, "config.json"), "utf8")).sandboxDeclined).toEqual(["claude"]);
+  });
+
+  it("writes nothing when the file changed after it was shown", async () => {
+    const p = person({ codex: false });
+    writeFileSync(p.settings, '{"model": "a"}\n');
+    const plans = offerablePlans(p.env);
+    writeFileSync(p.settings, '{"model": "b"}\n');
+    expect(() => applyPlans(plans)).toThrow(/changed after it was shown/);
+    expect(readFileSync(p.settings, "utf8")).toBe('{"model": "b"}\n');
+  });
+
+  it("keeps a backup next to a symbolic link (0600), and writes through to its target", () => {
+    const p = person({ codex: false });
+    const dots = join(p.home, "dotfiles");
+    mkdirSync(dots);
+    writeFileSync(join(dots, "settings.json"), '{"model": "m"}\n', { mode: 0o644 });
+    symlinkSync(join(dots, "settings.json"), p.settings);
+    const done = applyPlans(offerablePlans(p.env));
+    expect(done[0]?.backup?.startsWith(`${p.settings}.p2p-backup-`)).toBe(true);
+    expect(statSync(done[0]?.backup as string).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dots)).toEqual(["settings.json"]);
+    expect(lstatSync(p.settings).isSymbolicLink()).toBe(true);
+    expect(statSync(join(dots, "settings.json")).mode & 0o777).toBe(0o644);
+    expect(JSON.parse(readFileSync(join(dots, "settings.json"), "utf8")).sandbox.enabled).toBe(true);
+  });
+
+  it("on Windows it needs the person's answer: --yes is refused", async () => {
+    const p = person();
+    const was = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const r = await run(["sandbox", "enable", "--yes", "--codex", "--json"], p.env);
+      expect(r.json.error).toBe("usage");
+      expect(String(r.json.reason)).toMatch(/on Windows/);
+    } finally {
+      Object.defineProperty(process, "platform", was);
+    }
+    expect(existsSync(p.config)).toBe(false);
   });
 
   it("without a terminal it needs --yes; --json --yes writes", async () => {
@@ -279,7 +416,7 @@ describe("p2p sandbox, p2p doctor and the front ends' notice", () => {
     await run(["sandbox", "enable", "--yes", "--claude"], q.env);
     expect((await run(["sandbox", "notice", "--json"], q.env, { front: true })).json.notice).toBeUndefined();
     const n = person();
-    await run(["sandbox", "enable"], n.env, { answers: ["no"] });
+    await run(["sandbox", "enable"], n.env, { answers: ["no", "no"] });
     expect((await run(["sandbox", "notice", "--json"], n.env, { front: true })).json.notice).toBeUndefined();
   });
 });
@@ -296,6 +433,7 @@ describe("p2p setup offers it once", () => {
     await relay?.close();
   });
 
+  const QUESTION = /Turn on Claude Code's sandbox|Add this to Codex's config/;
   /** setup at a terminal: Ix's question is answered no, the sandbox's with `sandbox`. */
   async function setupAt(env: Record<string, string>, sandboxAnswer: string, extra: string[] = []) {
     const asked: string[] = [];
@@ -307,13 +445,13 @@ describe("p2p setup offers it once", () => {
         err: () => {},
         prompt: async (q: string) => {
           asked.push(q);
-          return /Add these/.test(q) ? sandboxAnswer : "n";
+          return QUESTION.test(q) ? sandboxAnswer : "n";
         },
       },
       confirmTty: async () => false,
     });
     process.exitCode = 0;
-    return { asked: asked.filter((q) => /Add these/.test(q)), out: out.join("\n") };
+    return { asked: asked.filter((q) => QUESTION.test(q)), out: out.join("\n") };
   }
 
   it("asks at the person's terminal, writes on Enter, and doesn't ask again", async () => {
@@ -321,9 +459,9 @@ describe("p2p setup offers it once", () => {
     const env = { ...p.env, P2P_RELAY_TRANSPORT: tr, PATH: "/nonexistent-p2p-test" };
     expect((await run(["init", "--name", "ann", "--relay", R, "--yes", "--json"], env)).code).toBe(0);
     const first = await setupAt(env, "");
-    expect(first.asked).toEqual(["Add these? [Y/n] "]);
+    expect(first.asked.length).toBe(2);
     expect(first.out).toMatch(/Claude Code: .*settings\.json/);
-    expect(first.out).toMatch(/sandbox wrote .*config\.toml/);
+    expect(first.out).toMatch(/sandbox Wrote .*config\.toml/);
     expect(sandboxReport(env, NO_MANAGED).claude.state).toBe("on");
     expect(sandboxReport(env, NO_MANAGED).codex.state).toBe("on");
     expect((await setupAt(env, "")).asked).toEqual([]);
@@ -334,13 +472,13 @@ describe("p2p setup offers it once", () => {
     const env = { ...p.env, P2P_RELAY_TRANSPORT: tr, PATH: "/nonexistent-p2p-test" };
     expect((await run(["init", "--name", "ben", "--relay", R, "--yes", "--json"], env)).code).toBe(0);
     const no = await setupAt(env, "n");
-    expect(no.asked.length).toBe(1);
+    expect(no.asked.length).toBe(2);
     expect(no.out).toMatch(/You won't be asked again/);
     expect(existsSync(p.settings)).toBe(false);
     expect((await setupAt(env, "")).asked).toEqual([]);
     expect((await setupAt({ ...env, CLAUDECODE: "1" }, "", ["--sandbox"])).asked).toEqual([]);
     const again = await setupAt(env, "y", ["--sandbox"]);
-    expect(again.asked.length).toBe(1);
+    expect(again.asked.length).toBe(2);
     expect(sandboxReport(env, NO_MANAGED).claude.state).toBe("on");
   });
 });

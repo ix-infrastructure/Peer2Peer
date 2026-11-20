@@ -58,10 +58,10 @@ export interface FileConfig {
    */
   ixDeclined?: boolean;
   /**
-   * The person said no when `p2p setup` (or `p2p codex install --write`) offered to deny P2P_HOME to
-   * their agents' sandboxes (sandbox.ts): not offered again. `p2p sandbox enable` asks again.
+   * The agents the person said no for when `p2p setup` (or `p2p codex install --write`) offered to deny
+   * P2P_HOME to their sandboxes (sandbox.ts; `true`: both): not offered again. `p2p sandbox enable` asks again.
    */
-  sandboxDeclined?: boolean;
+  sandboxDeclined?: boolean | ("claude" | "codex")[];
   /**
    * Messages from your own agent sessions skip the hold in a session that approves its own tool calls
    * (`p2p own-agents deliver`, person only). Off by default: they are held like a peer's. No variable

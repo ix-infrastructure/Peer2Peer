@@ -65,8 +65,76 @@ describe("codexSandboxStatus", () => {
   });
 });
 
+/** What Codex enforced before an edit, and after it: writes (0 none, 1 workspace, 2 everything; +0.5 for extra roots) and network. */
+function effective(text: string): { writes: number; network: boolean } {
+  const lines = text.split("\n").map((l) => l.trim());
+  const top = (k: string) => {
+    for (const l of lines) {
+      if (l.startsWith("[")) return undefined;
+      const m = new RegExp(`^${k} = "([^"]*)"`).exec(l);
+      if (m) return m[1];
+    }
+    return undefined;
+  };
+  const mode = top("sandbox_mode");
+  const dp = top("default_permissions");
+  const rank = (b: string | undefined) => (b === "workspace-write" || b === ":workspace" ? 1 : b === "danger-full-access" || b === ":danger-full-access" ? 2 : 0);
+  const sww = text.includes("[sandbox_workspace_write]") ? text.slice(text.indexOf("[sandbox_workspace_write]")) : "";
+  if (mode) return { writes: rank(mode) + (mode === "workspace-write" && sww.includes("writable_roots") ? 0.5 : 0), network: mode === "workspace-write" && sww.includes("network_access = true") };
+  if (dp && !dp.startsWith(":")) {
+    const block = text.slice(text.indexOf(`[permissions.${dp}]`));
+    const ext = block.split("\n").find((l) => l.startsWith("extends = "))?.slice(11, -1);
+    return { writes: rank(ext) + (block.includes('" = "write"') ? 0.5 : 0), network: block.includes(".network]\nenabled = true") };
+  }
+  return { writes: rank(dp), network: false };
+}
+
+describe("never broader than before", () => {
+  const fixtures = [
+    null,
+    'model = "x"\n',
+    'sandbox_mode = "read-only"\n',
+    'default_permissions = ":workspace"\nsandbox_mode = "read-only"\n',
+    'default_permissions = ":read-only"\n',
+    'default_permissions = ":workspace"\n',
+    'sandbox_mode = "workspace-write"\n',
+    'sandbox_mode = "workspace-write"\n[sandbox_workspace_write]\nnetwork_access = true\nwritable_roots = ["/w"]\n',
+    'sandbox_mode = "read-only"\n[sandbox_workspace_write]\nnetwork_access = true\nwritable_roots = ["/w"]\n',
+    '[sandbox_workspace_write]\nnetwork_access = true\n',
+  ];
+  for (const f of fixtures) {
+    it(`${JSON.stringify(f)}: writes and network don't widen`, () => {
+      const p = plan(f);
+      expect(p.kind).toBe("edit");
+      if (p.kind !== "edit") return;
+      const before = effective(f ?? "");
+      const after = effective(p.after);
+      expect(after.writes, p.after).toBeLessThanOrEqual(before.writes);
+      if (!before.network) expect(after.network, p.after).toBe(false);
+    });
+  }
+
+  it("sandbox_mode decides over default_permissions, as in Codex", () => {
+    const p = plan('default_permissions = ":workspace"\nsandbox_mode = "read-only"\n');
+    expect(p).toMatchObject({ kind: "edit", base: ":read-only" });
+    if (p.kind === "edit") expect(p.after).toContain('extends = ":read-only"');
+  });
+
+  it("carries [sandbox_workspace_write] over only under sandbox_mode = workspace-write", () => {
+    for (const t of ['[sandbox_workspace_write]\nnetwork_access = true\nwritable_roots = ["/w"]\n', 'sandbox_mode = "read-only"\n[sandbox_workspace_write]\nnetwork_access = true\n']) {
+      const after = edited(t);
+      expect(after).not.toContain("[permissions.peer2peer.network]");
+      expect(after).not.toContain('"/w" = "write"');
+    }
+  });
+
+  it("refuses when sandbox_mode is set beside an existing peer2peer profile", () => {
+    expect(plan('sandbox_mode = "read-only"\n[permissions.peer2peer]\nextends = ":workspace"\n').kind).toBe("manual");
+  });
+});
+
 describe("planCodexSandbox", () => {
-  it("adds a profile extending :workspace to an empty or missing config", () => {
+  it("adds a profile extending :read-only to an empty or missing config (Codex's per-folder default can't be expressed)", () => {
     for (const text of [null, ""]) {
       const after = edited(text);
       expect(after).toBe(
@@ -76,7 +144,7 @@ describe("planCodexSandbox", () => {
           SANDBOX_BEGIN,
           "[permissions.peer2peer]",
           `description = "Codex's sandbox, with Peer2Peer's keys (P2P_HOME) denied to its commands"`,
-          'extends = ":workspace"',
+          'extends = ":read-only"',
           "",
           "[permissions.peer2peer.filesystem]",
           '"~/.p2p" = "deny"',
@@ -84,6 +152,10 @@ describe("planCodexSandbox", () => {
           "",
         ].join("\n"),
       );
+      const p = plan(text);
+      expect(p.kind === "edit" && p.assumed).toBe(true);
+      // The person may choose :workspace instead.
+      expect(planCodexSandbox(text, DENY, HOME, { baseWhenUnset: ":workspace" })).toMatchObject({ kind: "edit", base: ":workspace", assumed: true });
       expect(codexSandboxStatus(after, DENY, HOME).state).toBe("on");
       expect(plan(after).kind).toBe("already");
     }

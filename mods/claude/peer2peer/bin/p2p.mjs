@@ -34232,12 +34232,12 @@ function codexSandboxStatus(text2, denyPaths, userHome2) {
     return { state: "off", profile: dp, detail: `the permissions profile "${dp}" is active, but ${gap}`, notes };
   return { state: "on", profile: dp, detail: `the permissions profile "${dp}" denies Codex's commands ${denyPaths.join(" and ")} (read and write)`, notes };
 }
-function codexManualSnippet(denyPaths, base = ":workspace") {
+function codexManualSnippet(denyPaths, base) {
   return [
     `default_permissions = ${toml(SANDBOX_PROFILE)}   # at the top, before any [table]; remove any sandbox_mode line`,
     "",
     `[permissions.${SANDBOX_PROFILE}]`,
-    `extends = ${toml(base)}`,
+    base ? `extends = ${toml(base)}` : `extends = ":read-only"   # or ":workspace", if Codex may write in your workspace without asking`,
     "",
     `[permissions.${SANDBOX_PROFILE}.filesystem]`,
     ...denyPaths.map((p) => `${toml(p)} = "deny"`)
@@ -34246,7 +34246,7 @@ function codexManualSnippet(denyPaths, base = ":workspace") {
 function definedOutside(lines, prefix) {
   return lines.some((l) => l.kind === "kv" && startsWith([...l.table, ...l.key], prefix) && !startsWith(l.table, prefix));
 }
-function planCodexSandbox(text2, denyPaths, userHome2) {
+function planCodexSandbox(text2, denyPaths, userHome2, o = {}) {
   const src = text2 ?? "";
   const status = codexSandboxStatus(text2, denyPaths, userHome2);
   if (status.state === "on" && status.profile)
@@ -34277,17 +34277,27 @@ function planCodexSandbox(text2, denyPaths, userHome2) {
     return manual(`[permissions.${target}.filesystem] is written as an inline table or dotted keys, so it wasn't edited`);
   const ours = target === SANDBOX_PROFILE;
   const oursDefined = ours && scanned.some((l) => l.kind === "header" && startsWith(l.table, ["permissions", SANDBOX_PROFILE]) || l.kind === "kv" && startsWith([...l.table, ...l.key], ["permissions", SANDBOX_PROFILE]));
-  let base = ":workspace";
+  let base = ":read-only";
+  let assumed = false;
   const carried = [];
   let network = false;
+  if (ours && oursDefined && mode)
+    return manual("sandbox_mode is set and a [permissions.peer2peer] profile exists already: remove one of them first");
   if (ours && !oursDefined) {
-    if (dp?.value === ":read-only" || !dp && mode?.value === "read-only")
-      base = ":read-only";
-    else if (dp?.value === ":workspace" || mode?.value === "workspace-write" || !mode)
-      base = ":workspace";
-    else
-      return manual(`sandbox_mode = "${mode?.value}" isn't one this edit knows`);
-    if (base === ":workspace") {
+    if (mode) {
+      if (mode.value === "read-only")
+        base = ":read-only";
+      else if (mode.value === "workspace-write")
+        base = ":workspace";
+      else
+        return manual(`sandbox_mode = "${mode.value}" isn't one this edit knows`);
+    } else if (dp?.value === ":read-only" || dp?.value === ":workspace")
+      base = dp.value;
+    else {
+      base = o.baseWhenUnset ?? ":read-only";
+      assumed = true;
+    }
+    if (mode?.value === "workspace-write") {
       const sww = scanned.filter((l) => l.kind === "kv" && startsWith([...l.table, ...l.key], ["sandbox_workspace_write"]));
       for (const l of sww) {
         const k = [...l.table, ...l.key].slice(1).join(".");
@@ -34361,7 +34371,7 @@ function planCodexSandbox(text2, denyPaths, userHome2) {
   const check = codexSandboxStatus(after2, denyPaths, userHome2);
   if (check.state !== "on")
     return manual(`the edit wouldn't make the sandbox deny P2P_HOME (${check.detail}), so nothing was changed`, base);
-  return { kind: "edit", after: after2, edits, profile: target };
+  return { kind: "edit", after: after2, edits, profile: target, ...ours && !oursDefined ? { base } : {}, ...assumed ? { assumed: true } : {} };
 }
 
 // packages/codex-bridge/dist/install.js
@@ -39311,7 +39321,7 @@ init_v3();
 init_ix_local();
 
 // packages/p2p/src/sandbox.ts
-import { existsSync as existsSync5, readFileSync as readFileSync16, realpathSync as realpathSync6, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync12, readFileSync as readFileSync16, realpathSync as realpathSync6, renameSync as renameSync10, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname7, isAbsolute as isAbsolute11, join as join24, normalize as normalize3, resolve as resolve5, sep as sep5 } from "node:path";
 init_ancestry();
@@ -39359,13 +39369,18 @@ function claudeWanted(paths, userHome2) {
   };
   return { sandbox, read: homes.map((h) => `Read(${rule(h)})`), edit: homes.map((h) => `Edit(${rule(h)})`) };
 }
-function sandboxPath(entry, userHome2) {
-  const e = entry.trim().replace(/[\\/]+$/, "");
+function trimSlashes2(s2) {
+  let end = s2.length;
+  while (end > 1 && (s2[end - 1] === "/" || s2[end - 1] === "\\")) end--;
+  return s2.slice(0, end);
+}
+function sandboxPath(entry, userHome2, base) {
+  const e = trimSlashes2(entry.trim());
   if (e === "~") return normalize3(userHome2);
   if (e.startsWith("~/")) return normalize3(join24(userHome2, e.slice(2)));
   if (e.startsWith("//")) return normalize3(e.slice(1));
   if (isAbsolute11(e)) return normalize3(e);
-  return void 0;
+  return base && e !== "" ? normalize3(resolve5(base, e)) : void 0;
 }
 function ruleFolder(rule, tool, userHome2) {
   if (!rule.startsWith(`${tool}(`) || !rule.endsWith(")")) return void 0;
@@ -39394,60 +39409,116 @@ function readJson(path2) {
     return "bad";
   }
 }
+function projectRoots(workdir) {
+  const out = [normalize3(workdir)];
+  let d = normalize3(workdir);
+  for (let i = 0; i < 64; i++) {
+    if (existsSync5(join24(d, ".git"))) {
+      if (!out.includes(d)) out.push(d);
+      break;
+    }
+    const up = dirname7(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+function onPath(name2, env) {
+  for (const dir of (env.PATH ?? "").split(":")) {
+    if (!dir || !isAbsolute11(dir)) continue;
+    try {
+      if (statSync6(join24(dir, name2)).isFile()) return true;
+    } catch {
+    }
+  }
+  return false;
+}
 function claudeSandboxStatus(env, o = {}) {
   const settings = claudeSettingsPath(env);
   const platform = o.platform ?? process.platform;
   const base = { settings, missing: [], notes: [] };
   if (platform === "win32") return { ...base, state: "unavailable", detail: "Claude Code has no sandbox on native Windows (it runs commands unsandboxed); use WSL2" };
+  const problem = p2pHomeProblem(env);
+  if (problem) return { ...base, state: "unknown", detail: problem };
   const user = readJson(settings);
   if (user === "bad") return { ...base, state: "unknown", detail: `${settings} isn't a JSON object, so it couldn't be read` };
   const managedFile = o.managedPath === null ? void 0 : o.managedPath ?? claudeManagedPath(platform);
   const managed = readJson(managedFile);
-  const sources2 = [user, managed === "bad" ? void 0 : managed].filter((s2) => s2 !== void 0);
+  const project = [];
+  const unreadable = [];
+  for (const root of projectRoots(o.workdir ?? sessionWorkdir(env))) {
+    for (const name2 of ["settings.local.json", "settings.json"]) {
+      const file = join24(root, ".claude", name2);
+      if (file === settings) continue;
+      const doc = readJson(file);
+      if (doc === "bad") unreadable.push(file);
+      else if (doc) project.push({ file, root, doc });
+    }
+  }
+  const managedDoc = managed && managed !== "bad" ? managed : void 0;
   const userHome2 = userHomeOf(env);
   const want = claudeWanted(p2pHomePaths(env), userHome2);
   const homes = want.sandbox.map((s2) => sandboxPath(s2, userHome2));
   const sb = (s2) => obj(s2.sandbox) ?? {};
   const fs3 = (s2) => obj(sb(s2).filesystem) ?? {};
-  const managedSb = managed && managed !== "bad" ? sb(managed) : {};
-  const flag = (k) => typeof managedSb[k] === "boolean" ? managedSb[k] : user ? sb(user)[k] : void 0;
-  const deny = sources2.flatMap((s2) => strs2(obj(s2.permissions)?.deny));
-  const covered = (entries, tool) => (h) => entries.some((e) => {
-    const p = sandboxPath(e, userHome2);
-    return p !== void 0 && within4(h, p);
-  }) || deny.some((r) => {
-    const p = ruleFolder(r, tool, userHome2);
-    return p !== void 0 && within4(h, p);
-  });
-  const missing = [];
-  if (flag("enabled") !== true) missing.push("sandbox.enabled");
-  if (flag("allowUnsandboxedCommands") !== false) missing.push("sandbox.allowUnsandboxedCommands = false");
-  const denyRead = sources2.flatMap((s2) => strs2(fs3(s2).denyRead));
-  const denyWrite = sources2.flatMap((s2) => strs2(fs3(s2).denyWrite));
-  if (!homes.every(covered(denyRead, "Read"))) missing.push(`sandbox.filesystem.denyRead ${want.sandbox.join(", ")}`);
-  if (!homes.every(covered(denyWrite, "Edit"))) missing.push(`sandbox.filesystem.denyWrite ${want.sandbox.join(", ")}`);
+  const sources2 = [
+    ...managedDoc ? [{ doc: managedDoc }] : [],
+    ...project.map((p) => ({ doc: p.doc, base: p.root, file: p.file })),
+    ...user ? [{ doc: user, base: dirname7(settings) }] : []
+  ];
+  const flag = (k) => {
+    for (const src of sources2) if (typeof sb(src.doc)[k] === "boolean") return { value: sb(src.doc)[k], ...src.file ? { file: src.file } : {} };
+    return { value: void 0 };
+  };
+  const deny = sources2.flatMap((src) => strs2(obj(src.doc.permissions)?.deny));
   const ruleCovers = (tool) => (h) => deny.some((r) => {
     const p = ruleFolder(r, tool, userHome2);
     return p !== void 0 && within4(h, p);
   });
+  const covered = (key, tool) => (h) => sources2.some(
+    (src) => strs2(fs3(src.doc)[key]).some((e) => {
+      const p = sandboxPath(e, userHome2, src.base);
+      return p !== void 0 && within4(h, p);
+    })
+  ) || ruleCovers(tool)(h);
+  const missing = [];
+  const enabled = flag("enabled");
+  if (enabled.value !== true) missing.push(enabled.file ? `sandbox.enabled (${enabled.file} turns it off in this project)` : "sandbox.enabled");
+  const retry = flag("allowUnsandboxedCommands");
+  if (retry.value !== false) missing.push(retry.file ? `sandbox.allowUnsandboxedCommands = false (${retry.file} allows the retry in this project)` : "sandbox.allowUnsandboxedCommands = false");
+  if (!homes.every(covered("denyRead", "Read"))) missing.push(`sandbox.filesystem.denyRead ${want.sandbox.join(", ")}`);
+  if (!homes.every(covered("denyWrite", "Edit"))) missing.push(`sandbox.filesystem.denyWrite ${want.sandbox.join(", ")}`);
   if (!homes.every(ruleCovers("Read"))) missing.push(`permissions.deny ${want.read.join(", ")}`);
   if (!homes.every(ruleCovers("Edit"))) missing.push(`permissions.deny ${want.edit.join(", ")}`);
   const notes = [];
   for (const k of ["allowRead", "allowWrite"]) {
-    for (const e of sources2.flatMap((s2) => strs2(fs3(s2)[k]))) {
-      const p = sandboxPath(e, userHome2);
-      if (p && homes.some((h) => within4(p, h))) missing.push(`no sandbox.filesystem.${k} inside P2P_HOME (${e})`);
+    for (const src of sources2) {
+      for (const e of strs2(fs3(src.doc)[k])) {
+        const p = sandboxPath(e, userHome2, src.base);
+        if (p && homes.some((h) => within4(p, h))) missing.push(`no sandbox.filesystem.${k} inside P2P_HOME (${e}${src.file ? ` in ${src.file}` : ""})`);
+      }
     }
   }
-  const excluded = sources2.flatMap((s2) => strs2(sb(s2).excludedCommands));
+  if (platform === "linux" && (!onPath("bwrap", env) || !onPath("socat", env))) {
+    missing.push("bubblewrap and socat (Claude Code's sandbox needs both on Linux; without them it runs commands unsandboxed unless sandbox.failIfUnavailable is set)");
+  }
+  const excluded = sources2.flatMap((src) => strs2(sb(src.doc).excludedCommands));
   if (excluded.length > 0) notes.push(`sandbox.excludedCommands lists ${excluded.length} command pattern${excluded.length === 1 ? "" : "s"}: those run outside the sandbox, P2P_HOME included`);
   if (managed === "bad") notes.push(`${managedFile} couldn't be read`);
+  for (const f of unreadable) notes.push(`${f} couldn't be read, so what it sets isn't known`);
+  if (missing.length === 0 && unreadable.length > 0) {
+    return { settings, missing, notes, state: "unknown", detail: `the user settings deny ${want.sandbox.join(" and ")}, but a project settings file here couldn't be read` };
+  }
   if (missing.length === 0) return { settings, missing, notes, state: "on", detail: `Claude Code's sandbox denies its commands ${want.sandbox.join(" and ")}, and its file tools have deny rules for it` };
   return { settings, missing, notes, state: "off", detail: `Claude Code's sandbox doesn't keep its commands out of ${want.sandbox.join(" and ")}: missing ${missing.join("; ")}` };
 }
 function indentOf(text2) {
-  const m = /\n([ \t]+)["}\]]/.exec(text2);
-  return m ? m[1] : "  ";
+  for (const line of text2.split("\n")) {
+    let i = 0;
+    while (i < line.length && (line[i] === " " || line[i] === "	")) i++;
+    if (i > 0 && (line[i] === '"' || line[i] === "}" || line[i] === "]")) return line.slice(0, i);
+  }
+  return "  ";
 }
 function planClaudeSandbox(text2, env) {
   let doc = {};
@@ -39478,6 +39549,10 @@ function planClaudeSandbox(text2, env) {
   if (sandbox.enabled !== true) {
     edits.push({ key: "sandbox.enabled", value: true, ...sandbox.enabled !== void 0 ? { was: sandbox.enabled } : {} });
     sandbox.enabled = true;
+  }
+  if (sandbox.autoAllowBashIfSandboxed === void 0) {
+    edits.push({ key: "sandbox.autoAllowBashIfSandboxed", value: false });
+    sandbox.autoAllowBashIfSandboxed = false;
   }
   if (sandbox.allowUnsandboxedCommands !== false) {
     edits.push({ key: "sandbox.allowUnsandboxedCommands", value: false, ...sandbox.allowUnsandboxedCommands !== void 0 ? { was: sandbox.allowUnsandboxedCommands } : {} });
@@ -39542,67 +39617,148 @@ function codexDenyPathsOf(env) {
   const p = p2pHomePaths(env);
   return codexDenyPaths(p.home, userHomeOf(env), p.real);
 }
-function codexStatus(env) {
+var RULE_CHARS = /* @__PURE__ */ new Set(["[", "]", "{", "}", "*", "?", "(", ")"]);
+function p2pHomeProblem(env) {
+  const paths = p2pHomePaths(env);
+  const userHome2 = normalize3(resolve5(userHomeOf(env)));
+  for (const h of [paths.home, ...paths.real ? [paths.real] : []]) {
+    if ([...h].some((c) => RULE_CHARS.has(c))) return `P2P_HOME (${h}) has a character that means something in a sandbox rule ([ ] { } * ? ( )): move it to a plain path, then run this again`;
+    if (h === sep5 || within4(userHome2, h)) return `P2P_HOME (${h}) is your home folder or a folder above it: denying it would shut your agents out of everything. Point P2P_HOME at its own folder`;
+  }
+  return void 0;
+}
+function codexProjectConfigs(workdir) {
+  const roots = projectRoots(workdir);
+  const top = roots[roots.length - 1];
+  const out = [];
+  let d = normalize3(workdir);
+  for (let i = 0; i < 64; i++) {
+    const f = join24(d, ".codex", "config.toml");
+    if (existsSync5(f)) out.push(f);
+    if (d === top) break;
+    const up = dirname7(d);
+    if (up === d) break;
+    d = up;
+  }
+  return out;
+}
+function codexStatus(env, o = {}) {
   const path2 = codexConfigPath(env);
+  const problem = p2pHomeProblem(env);
+  if (problem) return { state: "unknown", detail: problem, notes: [], settings: path2 };
   let text2;
   try {
     text2 = readText(path2);
   } catch {
     return { state: "unknown", detail: `${path2} couldn't be read`, notes: [], settings: path2 };
   }
-  return { ...codexSandboxStatus(text2, codexDenyPathsOf(env), userHomeOf(env)), settings: path2 };
+  const st = { ...codexSandboxStatus(text2, codexDenyPathsOf(env), userHomeOf(env)), settings: path2 };
+  const overriding = [];
+  for (const f of codexProjectConfigs(o.workdir ?? sessionWorkdir(env))) {
+    if (f === path2) continue;
+    let t2;
+    try {
+      t2 = readText(f);
+    } catch {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    const lines = t2 === null ? [] : scanTomlLines(t2);
+    if (lines === null) {
+      overriding.push(`${f} (unreadable)`);
+      continue;
+    }
+    if (lines.some((l) => l.kind === "kv" && ["sandbox_mode", "default_permissions", "permissions"].includes([...l.table, ...l.key][0]))) overriding.push(f);
+    else if (lines.some((l) => l.kind === "header" && l.table[0] === "permissions")) overriding.push(f);
+  }
+  if (overriding.length === 0) return st;
+  const note2 = `${overriding.join(", ")} sets its own sandbox or permissions: when Codex trusts this project, that applies here instead`;
+  return st.state === "on" ? { ...st, state: "unknown", detail: `${st.detail}, but a project config may override it here`, notes: [...st.notes, note2] } : { ...st, notes: [...st.notes, note2] };
 }
 var show = (v) => JSON.stringify(v);
 function planFront(front, env, o = {}) {
-  if (front === "claude") {
-    const path3 = claudeSettingsPath(env);
-    const status2 = claudeSandboxStatus(env, o);
-    const present3 = isDir(dirname7(path3));
-    if (status2.state === "unavailable") return { front, path: path3, present: present3, status: status2, plan: { kind: "unavailable" } };
-    const before2 = readText(path3);
-    const p2 = planClaudeSandbox(before2, env);
-    if (p2.kind !== "edit") return { front, path: path3, present: present3, status: status2, plan: p2 };
-    const preview2 = p2.edits.map((e) => e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== void 0 ? `   (was ${show(e.was)})` : ""}`);
-    return { front, path: path3, present: present3, status: status2, plan: { kind: "edit", before: before2, after: p2.after, preview: preview2 } };
-  }
-  const path2 = codexConfigPath(env);
-  const status = codexStatus(env);
+  const path2 = front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env);
   const present2 = isDir(dirname7(path2));
+  const problem = p2pHomeProblem(env);
+  if (front === "claude") {
+    const status2 = claudeSandboxStatus(env, o);
+    if (status2.state === "unavailable") return { front, path: path2, present: present2, status: status2, plan: { kind: "unavailable" } };
+    if (problem) return { front, path: path2, present: present2, status: status2, plan: { kind: "manual", reason: problem } };
+    const before2 = readText(path2);
+    const p2 = planClaudeSandbox(before2, env);
+    if (p2.kind !== "edit") return { front, path: path2, present: present2, status: status2, plan: p2 };
+    const preview2 = p2.edits.map((e) => e.append ? `  ${e.key} += ${show(e.value)}` : `  ${e.key} = ${show(e.value)}${e.was !== void 0 ? `   (was ${show(e.was)})` : ""}`);
+    return { front, path: path2, present: present2, status: status2, plan: { kind: "edit", before: before2, after: p2.after, preview: preview2 } };
+  }
+  const status = codexStatus(env, o);
+  if (problem) return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: problem } };
   const before = readText(path2);
-  const p = planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env));
+  const p = planCodexSandbox(before, codexDenyPathsOf(env), userHomeOf(env), o.codexBase ? { baseWhenUnset: o.codexBase } : {});
   if (p.kind === "already") return { front, path: path2, present: present2, status, plan: { kind: "already" } };
   if (p.kind === "manual") return { front, path: path2, present: present2, status, plan: { kind: "manual", reason: p.reason, snippet: p.snippet } };
   const preview = p.edits.map((e) => "add" in e ? `  + ${e.add}` : `  - ${e.before}
   + ${e.after}`);
-  return { front, path: path2, present: present2, status, plan: { kind: "edit", before, after: p.after, preview } };
+  return { front, path: path2, present: present2, status, plan: { kind: "edit", before, after: p.after, preview, ...p.base ? { base: p.base } : {}, ...p.assumed ? { assumed: true } : {} } };
 }
-var WHY = {
-  claude: [
-    "Turns on Claude Code's sandbox for its shell commands in every project (they then write only in the",
-    "project and reach only network hosts you allow), with no retry outside it, and denies them and Claude's",
-    "file tools P2P_HOME. Peer2Peer's mod isn't affected: what a mod starts runs outside the sandbox."
-  ],
-  codex: [
-    "Has Codex's commands run under a permissions profile that denies them P2P_HOME (keeping your current",
-    "sandbox otherwise). The Peer2Peer bridge isn't affected: Codex doesn't sandbox MCP servers or hooks."
-  ]
-};
-function previewText2(plans, p2pHome) {
-  const lines = [
-    `Your agents run as you, so they can read ${p2pHome} (your identity key and person token) unless their`,
-    "sandbox denies it. Peer2Peer can add that deny to your agents' own config:"
+var AGENT_NAME = { claude: "Claude Code", codex: "Codex" };
+function frontPreview(f, p2pHome, userHome2) {
+  if (f.plan.kind !== "edit") return "";
+  const home = tildeForm(p2pHome, userHome2);
+  const why2 = f.front === "claude" ? [
+    `Your agents run as you, so Claude Code can read ${home} (your identity key and person token) unless its`,
+    "sandbox denies it. This adds that deny to your Claude Code user settings, and changes, in every project:",
+    "  - Claude's shell commands run in Claude Code's sandbox: they write only inside the project (and folders",
+    "    you add to sandbox.filesystem.allowWrite) and reach only network hosts you allow (Claude Code asks for",
+    "    a new host). A build or tool that writes elsewhere (a global cache, say) may fail or ask.",
+    "  - No retry outside the sandbox (allowUnsandboxedCommands: false): a command the sandbox blocks just fails.",
+    "  - Your permission prompts stay as they are (autoAllowBashIfSandboxed: false, unless you set it already).",
+    `  - Claude's shell and its Read/Edit tools can't open ${home}, so they can't run p2p any more either; Claude`,
+    "    uses ListAgents, SendMessage and /peers. The Peer2Peer mod isn't affected (what a mod starts runs outside",
+    "    the sandbox).",
+    `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the keys below.`
+  ] : [
+    `Your agents run as you, so Codex can read ${home} (your identity key and person token) unless its sandbox`,
+    "denies it. This has Codex's commands run under a permissions profile that denies it:",
+    ...f.plan.assumed ? [
+      "  - Your config sets no sandbox, and Codex then picks one per folder (workspace-write in a version-controlled",
+      `    folder, read-only elsewhere), which a profile can't. This one extends ${f.plan.base}${f.plan.base === ":read-only" ? ": Codex asks before it writes" : ": Codex writes in the workspace without asking"}.`,
+      `    ${f.plan.base === ":read-only" ? "`p2p sandbox enable --codex --codex-base workspace` lets it write in the workspace instead." : "`--codex-base read-only` keeps it read-only instead."}`
+    ] : ["  - It extends the sandbox you use now, so writes and network stay as they were."],
+    "  - Codex's shell can't open it, so it can't run p2p any more either; Codex uses the bridge's p2p_* tools.",
+    "    The bridge isn't affected (Codex doesn't sandbox MCP servers or hooks). Restart open Codex sessions.",
+    `  - To undo: put the backup back (${f.path}.p2p-backup-<time>), or remove the lines marked p2p sandbox.`
   ];
-  for (const f of plans) {
-    if (f.plan.kind !== "edit") continue;
-    lines.push("", `${f.front === "claude" ? "Claude Code" : "Codex"}: ${f.path}`, ...WHY[f.front].map((l) => `  ${l}`), "", ...f.plan.preview);
-  }
-  lines.push("", "Each file is backed up first (<file>.p2p-backup-<time>); everything else in it stays as it is.");
-  return lines.join("\n");
+  return [`${AGENT_NAME[f.front]}: ${f.path}`, ...why2, "", "Exactly what is written (the file is backed up first; everything else in it stays):", ...f.plan.preview].join("\n");
+}
+function frontQuestion(f) {
+  return f.front === "claude" ? "Turn on Claude Code's sandbox with this deny?" : "Add this to Codex's config?";
 }
 function applyPlans(plans, now = /* @__PURE__ */ new Date()) {
   const changes = plans.flatMap((f) => f.plan.kind === "edit" ? [{ path: f.path, before: f.plan.before, after: f.plan.after }] : []);
+  for (const c of changes) {
+    if (readText(c.path) !== c.before) throw new CliError("changed", `${c.path} changed after it was shown: nothing was written. Run the command again to see the changes`);
+  }
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  return applyChanges(changes, stamp).map((c) => ({ path: c.path, ...c.backup ? { backup: c.backup } : {} }));
+  const done = [];
+  for (const c of changes) {
+    const target = resolveLink(c.path);
+    mkdirSync12(dirname7(target), { recursive: true });
+    let backup;
+    if (c.before !== null) {
+      backup = `${c.path}.p2p-backup-${stamp}`;
+      writeFileSync12(backup, c.before, { mode: 384, flag: "wx" });
+    }
+    let mode = 384;
+    try {
+      mode = statSync6(target).mode & 511;
+    } catch {
+    }
+    const tmp = `${target}.p2p-tmp-${process.pid}`;
+    writeFileSync12(tmp, c.after, { mode, flag: "wx" });
+    renameSync10(tmp, target);
+    done.push({ path: c.path, ...backup ? { backup } : {} });
+  }
+  return done;
 }
 function assertPersonOutsideAgents(app, what) {
   const why2 = `\`p2p ${what}\` changes your agents' sandbox, so only you run it, in your own terminal (not inside Claude Code or Codex)`;
@@ -39610,19 +39766,29 @@ function assertPersonOutsideAgents(app, what) {
   if (agentContext(app.env)) throw new CliError("refused", `${why2}. It was refused here because it runs inside an agent's session`);
   if (ancestryUnknown()) throw new CliError("refused", `${why2}. It was refused here because p2p couldn't read its process tree to tell whether it runs inside an agent's session${ancestryWhy() ? ` (${ancestryWhy()})` : ""}`);
 }
-function sandboxDeclined(file) {
-  return file.sandboxDeclined === true;
+function sandboxDeclined(file, front) {
+  const v = file.sandboxDeclined;
+  if (v === true) return true;
+  if (!Array.isArray(v)) return false;
+  return front ? v.includes(front) : v.length > 0;
 }
-function setSandboxDeclined(home, declined) {
-  setFileConfigField(home, "sandboxDeclined", declined);
-}
-function offerablePlans(env, only) {
-  const fronts = only ?? ["claude", "codex"];
-  return fronts.map((f) => planFront(f, env)).filter((f) => (only ? true : f.present) && f.plan.kind === "edit");
-}
-function declinedHere(env) {
+function setSandboxDeclined(home, front, declined) {
+  let cur = [];
   try {
-    return sandboxDeclined(readFileConfig(resolveHome2(env)));
+    const v = readFileConfig(home).sandboxDeclined;
+    cur = v === true ? ["claude", "codex"] : Array.isArray(v) ? v.filter((x) => x === "claude" || x === "codex") : [];
+  } catch {
+  }
+  const next = declined ? [.../* @__PURE__ */ new Set([...cur, front])] : cur.filter((f) => f !== front);
+  setFileConfigField(home, "sandboxDeclined", next);
+}
+function offerablePlans(env, only, o = {}) {
+  const fronts = only ?? ["claude", "codex"];
+  return fronts.map((f) => planFront(f, env, o)).filter((f) => (only ? true : f.present) && f.plan.kind === "edit");
+}
+function declinedHere(env, front) {
+  try {
+    return sandboxDeclined(readFileConfig(resolveHome2(env)), front);
   } catch {
     return false;
   }
@@ -39632,7 +39798,7 @@ function frontPresent(front, env) {
 }
 async function sandboxNotice(app, front) {
   if (app.front !== true && agentContext(app.env)) return void 0;
-  if (declinedHere(app.env)) return void 0;
+  if (declinedHere(app.env, front)) return void 0;
   const st = front === "claude" ? claudeSandboxStatus(app.env) : codexStatus(app.env);
   if (st.state !== "off") return void 0;
   const shown = await app.state.update("sandboxNotice", (cur) => cur?.[front] !== void 0 ? { result: false } : { next: { ...cur ?? {}, [front]: Date.now() }, result: true });
@@ -39645,7 +39811,7 @@ function sandboxReport(env, o = {}) {
     p2pHome: p2pHomePaths(env).home,
     declined: declinedHere(env),
     claude: { ...claudeSandboxStatus(env, o), present: frontPresent("claude", env) },
-    codex: { ...codexStatus(env), present: frontPresent("codex", env) }
+    codex: { ...codexStatus(env, o), present: frontPresent("codex", env) }
   };
 }
 function sandboxFix(person) {
@@ -43174,22 +43340,9 @@ function buildProgram(deps) {
     const a = (await io2.prompt(`${q} [y/N] `)).trim().toLowerCase();
     return a === "y" || a === "yes";
   };
-  const confirmDefaultYes = (q) => askDefaultYes(io2, q);
-  const offerSandbox = async (env, home, only) => {
-    const plans = offerablePlans(env, only);
-    if (plans.length === 0) return [];
-    io2.out(`
-${previewText2(plans, home)}`);
-    if (!await confirmDefaultYes("Add these?")) {
-      setSandboxDeclined(home, true);
-      return ["  sandbox not changed. You won't be asked again; `p2p sandbox enable` adds it any time (`p2p sandbox` shows where things stand)"];
-    }
-    const done = applyPlans(plans);
-    if (declinedHere(env)) setSandboxDeclined(home, false);
-    return [
-      ...done.map((d) => `  sandbox wrote ${d.path}${d.backup ? ` (backup: ${d.backup})` : ""}`),
-      ...plans.some((f) => f.front === "codex") ? ["  sandbox Codex reads config.toml when it starts: restart open Codex sessions"] : []
-    ];
+  const offerSandbox = async (env, home, reoffer = false) => {
+    const plans = offerablePlans(env).filter((f) => reoffer || !declinedHere(env, f.front));
+    return (await askEachAgent(io2, env, home, plans, { from: "setup" })).lines;
   };
   const cmdOf = (o) => ({ opts: () => o });
   const canAsk = (cmd) => Boolean(io2.select) && !cmd.opts().json && !cmd.opts().yes;
@@ -43467,10 +43620,10 @@ ${r.backup.phrase}
             return false;
           }
         })();
-        if (!o.json && Boolean(io2.prompt || io2.select) && !ciEnv(app.env) && sandboxHere && (o.sandbox === true || !declinedHere(app.env))) {
+        if (!o.json && Boolean(io2.prompt || io2.select) && !ciEnv(app.env) && sandboxHere) {
           io2.out(lines.join("\n"));
           lines.length = 0;
-          lines.push(...await offerSandbox(app.env, app.home));
+          lines.push(...await offerSandbox(app.env, app.home, o.sandbox === true));
         }
         lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
         return { json: r, human: lines.join("\n") };
@@ -43493,7 +43646,8 @@ ${r.backup.phrase}
       async (app, o) => {
         assertPersonOutsideAgents(app, "sandbox enable");
         const only = o.claude || o.codex ? [...o.claude ? ["claude"] : [], ...o.codex ? ["codex"] : []] : void 0;
-        const fronts = (only ?? ["claude", "codex"]).map((f) => planFront(f, app.env)).filter((f) => only !== void 0 || f.present);
+        const planOpts = o.codexBase ? { codexBase: o.codexBase === "workspace" ? ":workspace" : ":read-only" } : {};
+        const fronts = (only ?? ["claude", "codex"]).map((f) => planFront(f, app.env, planOpts)).filter((f) => only !== void 0 || f.present);
         const name2 = (f) => f.front === "claude" ? "Claude Code" : "Codex";
         const lines = [];
         if (fronts.length === 0) {
@@ -43510,24 +43664,13 @@ ${f.plan.snippet}
         const edits = fronts.filter((f) => f.plan.kind === "edit");
         let written = [];
         if (edits.length > 0) {
-          let yes = o.yes === true;
-          if (!yes) {
-            if (o.json || !(io2.prompt || io2.select)) {
-              throw new CliError("usage", "nothing was changed: run `p2p sandbox enable` at your terminal to see the changes and be asked, or add --yes");
-            }
-            io2.out(previewText2(edits, app.home));
-            yes = await confirmDefaultYes("Add these?");
+          if (o.yes && process.platform === "win32") throw new CliError("usage", "nothing was changed: on Windows, run `p2p sandbox enable` at your terminal without --yes and answer the question");
+          if (!o.yes && (o.json || !(io2.prompt || io2.select))) {
+            throw new CliError("usage", "nothing was changed: run `p2p sandbox enable` at your terminal to see the changes and be asked, or add --yes");
           }
-          if (!yes) {
-            setSandboxDeclined(app.home, true);
-            lines.push("Nothing was changed. `p2p setup` won't offer it again; `p2p sandbox enable` does.");
-          } else {
-            written = applyPlans(edits);
-            if (declinedHere(app.env)) setSandboxDeclined(app.home, false);
-            for (const w of written) lines.push(`Wrote ${w.path}${w.backup ? ` (backup: ${w.backup})` : ""}`);
-            if (edits.some((f) => f.front === "codex")) lines.push("Codex reads config.toml when it starts: restart open Codex sessions.");
-            if (edits.some((f) => f.front === "claude")) lines.push("Claude Code applies settings changes to open sessions at their next command.");
-          }
+          const res = await askEachAgent(io2, app.env, app.home, edits, { yes: o.yes === true, from: "enable" });
+          written = res.written;
+          lines.push(...res.lines);
         }
         return {
           json: { written, fronts: fronts.map((f) => ({ front: f.front, path: f.path, plan: f.plan.kind, ...f.plan.kind === "manual" ? { reason: f.plan.reason } : {} })) },
@@ -43537,6 +43680,7 @@ ${f.plan.snippet}
       { requireIdentity: false, noDeadline: true }
     )
   );
+  sb.commands.find((c) => c.name() === "enable")?.addOption(new Option("--codex-base <base>", "When your Codex config sets no sandbox: what the new profile extends (read-only, the default, or workspace)").choices(["read-only", "workspace"]));
   sb.command("notice").description("For a front end: the one-time notice for its person when its agent's sandbox doesn't deny P2P_HOME").option("--front <name>", "claude or codex", "claude").option("--json", "JSON output").action(
     run(
       async (app, o) => {
@@ -44547,6 +44691,34 @@ ${projectView2(r.project)}` };
   codexCommands(program2, deps, io2);
   return program2;
 }
+async function askEachAgent(io2, env, home, plans, o) {
+  const lines = [];
+  const written = [];
+  const pre = o.from === "setup" ? "  sandbox " : "";
+  for (const f of plans) {
+    if (f.plan.kind !== "edit") continue;
+    if (!o.yes) io2.out(`
+${frontPreview(f, home, userHomeOf(env))}`);
+    const yes = o.yes === true || await askDefaultYes(io2, frontQuestion(f));
+    if (!yes) {
+      setSandboxDeclined(home, f.front, true);
+      lines.push(`${pre}${AGENT_NAME[f.front]}: not changed. ${o.from === "enable" ? "`p2p setup` won't offer it again" : "You won't be asked again"}; \`p2p sandbox enable\` adds it any time`);
+      continue;
+    }
+    try {
+      for (const w of applyPlans([f])) {
+        written.push(w);
+        lines.push(`${pre}Wrote ${w.path}${w.backup ? ` (backup: ${w.backup})` : ""}`);
+      }
+    } catch (e) {
+      lines.push(`${pre}${AGENT_NAME[f.front]}: not changed: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    if (declinedHere(env, f.front)) setSandboxDeclined(home, f.front, false);
+    lines.push(f.front === "codex" ? `${pre}Codex reads config.toml when it starts: restart open Codex sessions.` : `${pre}Claude Code applies settings changes to open sessions at their next command.`);
+  }
+  return { lines, written };
+}
 async function askDefaultYes(io2, q) {
   if (io2.select) {
     const lines = q.split("\n");
@@ -44590,18 +44762,10 @@ function codexCommands(program2, deps, io2) {
         } catch {
           here = false;
         }
-        const plans = here && !declinedHere(env) ? offerablePlans(env, ["codex"]) : [];
+        const plans = here && !declinedHere(env, "codex") ? offerablePlans(env, ["codex"]) : [];
         if (plans.length > 0) {
-          const home = resolveHome2(env);
-          io2.out(`
-${previewText2(plans, home)}`);
-          if (await askDefaultYes(io2, "Add these?")) {
-            for (const d of applyPlans(plans)) io2.out(`Wrote ${d.path}${d.backup ? ` (backup: ${d.backup})` : ""}`);
-            if (declinedHere(env)) setSandboxDeclined(home, false);
-          } else {
-            setSandboxDeclined(home, true);
-            io2.out("Sandbox not changed. You won't be asked again; `p2p sandbox enable` adds it any time.");
-          }
+          const r = await askEachAgent(io2, env, resolveHome2(env), plans, { from: "codex install" });
+          for (const l of r.lines) io2.out(l.trim());
         }
       }
     } catch (e) {

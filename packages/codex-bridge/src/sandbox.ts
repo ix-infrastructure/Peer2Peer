@@ -17,7 +17,9 @@
 // top-level line it changes carries a `# p2p sandbox` comment, and the profile it adds sits in a
 // marked block. Anything it can't edit with confidence (a profile written as an inline table or
 // dotted keys, a multi-line `writable_roots`, the `exclude_*` switches) is left alone: the person
-// gets the lines to add by hand.
+// gets the lines to add by hand. The profile it adds is never broader than what Codex enforced
+// before (writes and network): `sandbox_mode` alone decides what it extends when set, else a
+// built-in `default_permissions`, else `:read-only` (or what the person chose).
 
 import { isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { readTomlTable, scanTomlLines, type TomlLine } from "./knobs.js";
@@ -48,7 +50,7 @@ export type TomlEdit = { add: string } | { before: string; after: string };
 
 export type CodexSandboxPlan =
   | { kind: "already"; profile: string }
-  | { kind: "edit"; after: string; edits: TomlEdit[]; profile: string }
+  | { kind: "edit"; after: string; edits: TomlEdit[]; profile: string; base?: string; assumed?: true }
   | { kind: "manual"; reason: string; snippet: string };
 
 /** P2P_HOME as config.toml paths: `~/…` under the home folder, else absolute; its real path too when that differs. */
@@ -184,12 +186,12 @@ export function codexSandboxStatus(text: string | null, denyPaths: readonly stri
 }
 
 /** The lines a person adds by hand (when the edit can't be made safely). */
-export function codexManualSnippet(denyPaths: readonly string[], base = ":workspace"): string {
+export function codexManualSnippet(denyPaths: readonly string[], base?: string): string {
   return [
     `default_permissions = ${toml(SANDBOX_PROFILE)}   # at the top, before any [table]; remove any sandbox_mode line`,
     "",
     `[permissions.${SANDBOX_PROFILE}]`,
-    `extends = ${toml(base)}`,
+    base ? `extends = ${toml(base)}` : `extends = ":read-only"   # or ":workspace", if Codex may write in your workspace without asking`,
     "",
     `[permissions.${SANDBOX_PROFILE}.filesystem]`,
     ...denyPaths.map((p) => `${toml(p)} = "deny"`),
@@ -205,7 +207,12 @@ function definedOutside(lines: readonly TomlLine[], prefix: readonly string[]): 
  * The edit that makes Codex's sandbox deny `denyPaths` (to config.toml's text, null when there is
  * none), or why it must be done by hand. Idempotent: on its own output it answers "already".
  */
-export function planCodexSandbox(text: string | null, denyPaths: readonly string[], userHome: string): CodexSandboxPlan {
+export function planCodexSandbox(
+  text: string | null,
+  denyPaths: readonly string[],
+  userHome: string,
+  o: { baseWhenUnset?: ":read-only" | ":workspace" } = {},
+): CodexSandboxPlan {
   const src = text ?? "";
   const status = codexSandboxStatus(text, denyPaths, userHome);
   if (status.state === "on" && status.profile) return { kind: "already", profile: status.profile };
@@ -235,15 +242,28 @@ export function planCodexSandbox(text: string | null, denyPaths: readonly string
   const ours = target === SANDBOX_PROFILE;
   const oursDefined = ours && scanned.some((l) => (l.kind === "header" && startsWith(l.table, ["permissions", SANDBOX_PROFILE])) || (l.kind === "kv" && startsWith([...l.table, ...l.key], ["permissions", SANDBOX_PROFILE])));
 
-  // What the profile we add extends, and what it carries over from [sandbox_workspace_write].
-  let base = ":workspace";
+  // What the profile we add extends: never broader than what Codex enforces now. Codex uses
+  // sandbox_mode whenever it is set (default_permissions is ignored then), so it alone decides; else
+  // a built-in default_permissions; else nothing is set, and Codex picks per folder (workspace-write
+  // in a version-controlled folder, read-only elsewhere and until a folder is trusted), which a
+  // profile can't express: :read-only unless the person chose :workspace.
+  let base = ":read-only";
+  let assumed = false;
   const carried: string[] = [];
   let network = false;
+  if (ours && oursDefined && mode) return manual("sandbox_mode is set and a [permissions.peer2peer] profile exists already: remove one of them first");
   if (ours && !oursDefined) {
-    if (dp?.value === ":read-only" || (!dp && mode?.value === "read-only")) base = ":read-only";
-    else if (dp?.value === ":workspace" || mode?.value === "workspace-write" || !mode) base = ":workspace";
-    else return manual(`sandbox_mode = "${mode?.value}" isn't one this edit knows`);
-    if (base === ":workspace") {
+    if (mode) {
+      if (mode.value === "read-only") base = ":read-only";
+      else if (mode.value === "workspace-write") base = ":workspace";
+      else return manual(`sandbox_mode = "${mode.value}" isn't one this edit knows`);
+    } else if (dp?.value === ":read-only" || dp?.value === ":workspace") base = dp.value;
+    else {
+      base = o.baseWhenUnset ?? ":read-only";
+      assumed = true;
+    }
+    // [sandbox_workspace_write] applies only under sandbox_mode = "workspace-write": carried over only then.
+    if (mode?.value === "workspace-write") {
       const sww = scanned.filter((l): l is Extract<TomlLine, { kind: "kv" }> => l.kind === "kv" && startsWith([...l.table, ...l.key], ["sandbox_workspace_write"]));
       for (const l of sww) {
         const k = [...l.table, ...l.key].slice(1).join(".");
@@ -324,5 +344,5 @@ export function planCodexSandbox(text: string | null, denyPaths: readonly string
   // The edit must read back as "on"; anything else is left to the person.
   const check = codexSandboxStatus(after, denyPaths, userHome);
   if (check.state !== "on") return manual(`the edit wouldn't make the sandbox deny P2P_HOME (${check.detail}), so nothing was changed`, base);
-  return { kind: "edit", after, edits, profile: target };
+  return { kind: "edit", after, edits, profile: target, ...(ours && !oursDefined ? { base } : {}), ...(assumed ? { assumed: true as const } : {}) };
 }
