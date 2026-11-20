@@ -265,6 +265,13 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  *    way to a head listing a device or key holder it doesn't: the refresh
  *    ends incomplete, nothing is replaced, a newer version is pending. Two
  *    unconnected same-ver tips are kept side by side (a fork).
+ *  - #92: a current tip a relay served below the held unanchored head, whose
+ *    fetched ancestry shows it revoked a device every held tip lists, is kept
+ *    as another root with that ancestry under it (a fork: no tip can descend
+ *    from it), so a key holder's head stored first can't keep trusting a
+ *    device the owner's later version revoked. When its parent is gone, such
+ *    a held-back version narrows the view while current instead, like a
+ *    pending head (IdentityChain.noteLeftOut; never for `own`).
  *  - A gap whose missing version is a genesis pruning dropped (a replay of a
  *    long history's pruned versions) is settled, never walked (#81).
  *  - Fails closed if no relay returns anything usable, or if the identity is
@@ -812,8 +819,41 @@ export async function refreshIdentity(
   // same-ver branch signed with the identity key (which one was placed first is only the order the relays'
   // answers arrived in): kept as another root, so the view shows the fork and trusts only what both list.
   const besideHead: string[] = [];
+  /** #92: the versions held back for (leftOut) that aren't held, at or below the head: see IdentityChain.noteLeftOut. */
+  let leftOutDocs: VerifiedIdentityDoc[] = [];
   /** #79: see RefreshedView.heldBackBy. */
   let heldBackBy: string[] = [];
+  // #92: on unanchored history, a current tip a relay served BELOW the head, left on a gap, whose ancestry this
+  // refresh fetched (the walk asked for its parent like any gap's) is placed as another unanchored root with
+  // that ancestry under it, when the ancestry proves it is a fork: a device every held tip lists was revoked on
+  // its line (IdentityChain.addForkRoot). That is a key holder's head stored first (v8' keeping a device) and the
+  // owner's revoking v4 arriving later, the relays keeping only v2 or v3 up: the view intersects the two, as it
+  // would had they connected. An honest stale tip is an old version of the head's own line and never revokes
+  // what the head lists, so it is never placed this way. Not after the chain-work budget is spent.
+  /** #92: each fork root placed (by its JWS), with the versions placed under it, to place again at commit. */
+  const forkRoots = new Map<string, VerifiedIdentityDoc[]>();
+  if (!exhausted && chain.size > 0 && !chain.anchored) {
+    begin();
+    const headVer = chain.view().head.ver;
+    const unplaced = new Map(gaps.map((g) => [g.d.hash, g.d]));
+    for (const g of gaps) {
+      if (!servedTip.has(g.d.hash) || g.d.ver >= headVer || rejected.has(g.d.hash) || chain.has(g.d.hash) || overBudget()) continue;
+      // Its line down through this refresh's unplaced versions, at most a walk page deep (bounded chain work).
+      const below: VerifiedIdentityDoc[] = [];
+      for (let d = unplaced.get(g.d.prev ?? ""); d && below.length < CHAIN_WALK_PAGE && !below.includes(d); d = d.prev ? unplaced.get(d.prev) : undefined) below.push(d);
+      if (below.length === 0) continue;
+      try {
+        if (chain.addForkRoot(g.d.jws, below, { now, skewSec: opts.skewSec })) {
+          forkRoots.set(g.d.jws, below);
+          for (const d of [g.d, ...below]) if (chain.has(d.hash) && !accepted.includes(d.jws)) accepted.push(d.jws);
+        }
+      } catch (e) {
+        if (!(e instanceof P2PError)) throw e;
+      }
+    }
+    if (forkRoots.size > 0) gaps = gaps.filter((g) => !chain.has(g.d.hash));
+    end();
+  }
   if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
     begin();
     const headVer = chain.view().head.ver;
@@ -842,6 +882,9 @@ export async function refreshIdentity(
       docsCapped = true;
       incomplete = true;
       heldBackBy = heldBackOf(head, leftOut);
+      // #92: those not held narrow the view while current, as pending heads do above the head (noteLeftOut). Not
+      // for our own identity, whose view never narrows this way (heldBackBy reports it instead).
+      if (!opts.own) leftOutDocs = leftOut.filter((e) => !chain.has(e.hash) && e.ver <= chain.view().head.ver);
     }
   }
   if (replacing && !incomplete) {
@@ -863,7 +906,8 @@ export async function refreshIdentity(
   const sentFrom = (h: string) => relays.filter((r) => sentBy.get(r)?.has(h));
   const pendingChange = (c: IdentityChain) =>
     incomplete
-      ? c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom)
+      ? // Both (no short-circuit): pending heads above the head, and left-out versions at or below it (#92).
+        [c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom), c.noteLeftOut(leftOutDocs, { now, skewSec: opts.skewSec })].some(Boolean)
       : majority
         ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {})
         : false;
@@ -906,7 +950,10 @@ export async function refreshIdentity(
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
+        // #92: a fork root is placed again with the versions under it (each re-checked against what is stored now).
+        const below = forkRoots.get(j);
+        if (below !== undefined) c.addForkRoot(j, below, { now, skewSec: opts.skewSec });
+        else c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
       } catch (e) {
         if (!(e instanceof P2PError)) throw e;
       }
@@ -1055,10 +1102,12 @@ export async function getIdentityView(store: TrustStoreV3, userId: string, opts:
   const raw = await store.getIdentity(userId);
   if (!raw || raw.versions.length === 0) return undefined;
   const pendingHeads = opts.ignorePending ? [] : usablePendingHeads(raw, { now: opts.now });
-  const stored = { ...raw, pendingHeads };
+  // #92: left-out versions narrow like pending heads, and are ignored with them (a client's own identity).
+  const leftOut = opts.ignorePending ? [] : usablePendingHeads({ ...raw, pendingHeads: raw.leftOut }, { now: opts.now });
+  const stored = { ...raw, pendingHeads, leftOut };
   // Verified views are cached per store, keyed by the exact stored versions
   // (review N2): signatures are checked once per distinct chain, not per call.
-  const key = `${stored.historyGap ? "g" : "a"}${stored.anchoredAtV1 ? "1" : ""}${stored.anchoredGenesis?.length ? jwsHash(stored.anchoredGenesis.join(".")) : ""}:${jwsHash(stored.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
+  const key = `${stored.historyGap ? "g" : "a"}${stored.anchoredAtV1 ? "1" : ""}${stored.anchoredGenesis?.length ? jwsHash(stored.anchoredGenesis.join(".")) : ""}:${jwsHash(stored.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}:${leftOut.length > 0 ? jwsHash(leftOut.join(".")) : ""}`;
   let cache = viewCache.get(store);
   if (!cache) viewCache.set(store, (cache = new Map()));
   const hit = cache.get(userId);

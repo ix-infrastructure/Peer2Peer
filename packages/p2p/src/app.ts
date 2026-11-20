@@ -1021,7 +1021,7 @@ export class App {
     const stored = await this.store.getIdentity(this.userId);
     // Only devices a merge dropped come back: never one revoked along the head's ancestry, nor one
     // core denies after a history jump.
-    const plan = stored && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored, pendingHeads: [] }), preTips, unionDevices, view.devices, head.hash, stored.denied ?? []) : { readd: [], skipped: [] };
+    const plan = stored && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored, pendingHeads: [], leftOut: [] }), preTips, unionDevices, view.devices, head.hash, stored.denied ?? []) : { readd: [], skipped: [] };
     for (const d of plan.skipped) this.warn(`device ${d} was dropped by the merge of your identity document's branches; link it again (this device's copy of the history can't prove it wasn't revoked)`);
     const readd = plan.readd;
     const devices = [...view.devices, ...readd].slice(0, MAX_DEVICES);

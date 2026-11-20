@@ -603,6 +603,15 @@ export interface StoredIdentityChain {
    */
   pendingHeadRelays?: Record<string, string[]>;
   /**
+   * #92: current versions at or below the held head that an incomplete refresh left out because they list less
+   * than the head and nothing connects them (a key holder's head stored first, the owner's revoking version
+   * below it, its parent gone from every relay), at most MAX_PENDING_HEADS. Like pending heads: while one is
+   * usable and not held, the view trusts only the devices and key holders it lists too; one issued in the future
+   * or past its `exp` is ignored, and the next complete refresh a majority of the listed relays answered clears
+   * them. A client never applies them to its own identity (getIdentityView `ignorePending`).
+   */
+  leftOut?: string[];
+  /**
    * Where an incomplete refresh's chain walk stopped (#67), at most MAX_WALK_ANCHORS: signature-verified
    * versions of this identity whose ancestors the walk hadn't reached yet. The next refresh starts its walk
    * from them instead of from the tips, so a client further behind than one refresh can walk still catches
@@ -663,6 +672,39 @@ function revokedStep(v: VerifiedIdentityDoc, get: (hash: string) => VerifiedIden
   const o = v.merge !== undefined ? get(v.merge) : undefined;
   if (v.merge !== undefined && !o) return [];
   return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
+}
+
+/**
+ * #92 (follow-up from #79's review): revokedStep, but only across a link that is valid by the chain rules. A
+ * version dropped because its link to its parent is broken revoked nothing relative to that parent: a key holder
+ * can't get a device denied for good by naming a genuine version as the parent of a malformed child.
+ */
+function validRevokedStep(v: VerifiedIdentityDoc, get: (hash: string) => VerifiedIdentityDoc | undefined): string[] {
+  const p = v.prev ? get(v.prev) : undefined;
+  if (!p) return [];
+  const o = v.merge !== undefined ? get(v.merge) : undefined;
+  if (v.merge !== undefined && !o) return [];
+  try {
+    checkLink(p, v, o);
+  } catch (e) {
+    if (!(e instanceof P2PError)) throw e;
+    return [];
+  }
+  return revokedStep(v, get);
+}
+
+/** The devices every tip lists (not denied) and the key holders every tip lists: what a new tip could narrow. */
+function sharedByTips(tips: readonly VerifiedIdentityDoc[], denied: ReadonlySet<string>): { devices: string[]; keyholders: string[] } {
+  if (tips.length === 0) return { devices: [], keyholders: [] };
+  return {
+    devices: tips[0].devices.filter((d) => !denied.has(d) && tips.every((t) => t.devices.includes(d))),
+    keyholders: tips[0].keyholders.filter((d) => tips.every((t) => t.keyholders.includes(d))),
+  };
+}
+
+/** Whether `d` leaves out a device or key holder `shared` holds (it would narrow the view as a tip or a cap). */
+function narrows(d: Pick<VerifiedIdentityDoc, "devices" | "keyholders">, shared: { devices: string[]; keyholders: string[] }): boolean {
+  return shared.devices.some((x) => !d.devices.includes(x)) || shared.keyholders.some((x) => !d.keyholders.includes(x));
 }
 
 /** At most this many relays are kept per pending head or walk anchor (local data; a document lists at most a few). */
@@ -727,6 +769,8 @@ export class IdentityChain {
   private pending: VerifiedIdentityDoc[] = [];
   /** Which relays sent each pending head (#78). */
   private pendingFrom = new Map<string, string[]>();
+  /** Current versions an incomplete refresh left out at or below the head (#92, see noteLeftOut). */
+  private left: VerifiedIdentityDoc[] = [];
   /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
   private anchors: VerifiedIdentityDoc[] = [];
   /** Which relays sent each anchor (#67 re-review G2). */
@@ -755,6 +799,11 @@ export class IdentityChain {
         if (from.length > 0) c.pendingFrom.set(p.hash, from);
       }
     }
+    for (const j of s.leftOut ?? []) {
+      const p = verifyIdentityDocSignature(j);
+      if (p.iss !== s.iss) fail("issuer-mismatch", "stored left-out version of another identity");
+      if (pendingUsable(p, opts)) c.left.push(p);
+    }
     for (const j of s.walkAnchors ?? []) {
       const a = verifyIdentityDocSignature(j);
       if (a.iss !== s.iss) fail("issuer-mismatch", "stored walk anchor of another identity");
@@ -766,16 +815,20 @@ export class IdentityChain {
     // before add() checked versions placed ahead of their parent) is dropped with what was placed on it, as
     // add() now does, instead of making every load fail.
     // What each dropped version revoked relative to its stored parent(s) is denied, so dropping only narrows.
+    // #92: only for a version dropped for no-return (its link valid) and what was placed on it. A version whose
+    // link to its parent is broken, and everything placed on it, is off valid history: it revoked nothing.
     const dropped = new Set<string>();
+    const offChain = new Set<string>();
     const stored = new Map(docs.map((d) => [d.hash, d]));
-    const drop = (d: VerifiedIdentityDoc) => {
+    const drop = (d: VerifiedIdentityDoc, broken = false) => {
       dropped.add(d.hash);
-      for (const x of revokedStep(d, (h) => stored.get(h))) c.denied.add(x);
+      if (broken) offChain.add(d.hash);
+      else for (const x of validRevokedStep(d, (h) => stored.get(h))) c.denied.add(x);
     };
     for (const d of docs) {
       if (d.iss !== s.iss) fail("issuer-mismatch", "stored version of another identity");
       if ((d.prev !== null && dropped.has(d.prev)) || (d.merge !== undefined && dropped.has(d.merge))) {
-        drop(d);
+        drop(d, (d.prev !== null && offChain.has(d.prev)) || (d.merge !== undefined && offChain.has(d.merge)));
         continue;
       }
       const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === undefined || c.versions.has(d.merge));
@@ -784,6 +837,12 @@ export class IdentityChain {
         const parent = c.versions.get(d.prev!)!;
         try {
           checkLink(parent, d, d.merge !== undefined ? c.versions.get(d.merge) : undefined);
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+          drop(d, true);
+          continue;
+        }
+        try {
           if (d.merge === undefined) c.checkNoReturn(d, parent);
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
@@ -809,6 +868,7 @@ export class IdentityChain {
       ...(this.pendingCap().some((d) => this.pendingFrom.has(d.hash))
         ? { pendingHeadRelays: Object.fromEntries(this.pendingCap().filter((d) => this.pendingFrom.has(d.hash)).map((d) => [d.hash, [...this.pendingFrom.get(d.hash)!]])) }
         : {}),
+      ...(this.leftOutCap().length > 0 ? { leftOut: this.leftOutCap().map((d) => d.jws) } : {}),
       ...(this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {}),
       ...(this.walkAnchors().some((d) => this.anchorFrom.has(d.hash))
         ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)!]])) }
@@ -933,6 +993,9 @@ export class IdentityChain {
    */
   clearPending(opts: { keepSentBy?: readonly string[] } = {}): boolean {
     const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+    // #92: the left-out versions too (a complete refresh left nothing out).
+    const hadLeft = this.leftOutCap().length > 0;
+    this.left = [];
     const keep = new Set(opts.keepSentBy ?? []);
     const from = new Map<string, string[]>();
     for (const d of this.pendingCap()) {
@@ -942,7 +1005,57 @@ export class IdentityChain {
     this.pending = this.pendingCap().filter((d) => from.has(d.hash));
     this.pendingFrom = from;
     const after = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+    return hadLeft || after.length !== before.length || after.some((h) => !before.includes(h));
+  }
+
+  /**
+   * #92: records `docs`, current versions at or below the held head that an incomplete refresh left out because
+   * each lists less than the head and nothing connects it (RefreshedView.incomplete with a version held back),
+   * beside those already recorded. While one is recorded and not held, the view trusts only what it lists too,
+   * as pending heads narrow above the head: so a key holder's head stored first doesn't keep a device trusted
+   * that the owner's version below it revoked, when the relays no longer hold that version's parent (which would
+   * place it as a fork, addForkRoot).
+   *  - Narrowing only, never the denylist (what the left-out version revoked isn't known without its parent).
+   *  - Temporary: one past its `exp` (or issued in the future) is ignored, one placed in the chain no longer
+   *    counts, and the next complete refresh a majority of the listed relays answered clears them (clearPending).
+   *  - Only the ones that narrow are kept, and none that narrows is evicted for one that doesn't: a candidate is
+   *    redundant when everything it leaves out is already left out by a kept one lasting at least as long, so a
+   *    key holder's many versions listing the device can't push out the owner's one leaving it out. At most
+   *    MAX_PENDING_HEADS. Returns whether anything changed.
+   */
+  noteLeftOut(docs: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
+    if (this.versions.size === 0) return false;
+    const before = this.leftOutCap().map((d) => d.hash);
+    const byHash = new Map(this.leftOutCap().map((d) => [d.hash, d]));
+    for (const d of docs) {
+      if (d.iss !== this.iss) fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+      if (!this.versions.has(d.hash) && pendingUsable(d, opts)) byHash.set(d.hash, d);
+    }
+    const universe = new Set<string>();
+    for (const t of this.tips()) {
+      for (const x of t.devices) universe.add(`d:${x}`);
+      for (const x of t.keyholders) universe.add(`k:${x}`);
+    }
+    const covered = new Map<string, number>();
+    const kept: VerifiedIdentityDoc[] = [];
+    // The longest-lasting first (tie: higher ver, then hash), so a kept one covers those it outlasts.
+    for (const d of [...byHash.values()].sort((a, b) => b.exp - a.exp || b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
+      const lists = new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
+      const leaves = [...universe].filter((x) => !lists.has(x));
+      if (leaves.length === 0 || leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp)) continue;
+      kept.push(d);
+      for (const x of leaves) covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
+      if (kept.length >= MAX_PENDING_HEADS) break;
+    }
+    this.left = kept;
+    const after = this.leftOutCap().map((d) => d.hash);
     return after.length !== before.length || after.some((h) => !before.includes(h));
+  }
+
+  /** The recorded left-out versions not held (#92). */
+  private leftOutCap(): VerifiedIdentityDoc[] {
+    if (this.left.length === 0 || this.versions.size === 0) return [];
+    return this.left.filter((d) => !this.versions.has(d.hash));
   }
 
   /** The pending heads still newer than the held head (#35). */
@@ -1090,10 +1203,15 @@ export class IdentityChain {
       // is kept as another unanchored root, a tip beside the head (a fork: only the identity key signs one).
       // Only a current version, and at most MAX_SIDE_ROOTS tips held: a key holder can't grow the chain this way.
       // (Counted: current tips, strays aside, so tips that expired make room again.)
-      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.tips().filter((t) => pendingUsable(t, opts)).length < MAX_SIDE_ROOTS) {
+      // #92 (follow-up from #79's review): past the cap, one that leaves out a device or key holder every tip
+      // lists is still kept, so a key holder filling the slots with forks keeping a device can't keep the owner's
+      // same-ver tip revoking it out. Each such tip only narrows the view (at most once per device or key holder
+      // the tips share), so this still can't grow the chain without bound.
+      if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver) {
         const doc = verifyIdentityDoc(jws, opts);
         if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
-        if (pendingUsable(doc, opts)) {
+        const tips = this.tips();
+        if (pendingUsable(doc, opts) && (tips.filter((t) => pendingUsable(t, opts)).length < MAX_SIDE_ROOTS || narrows(doc, sharedByTips(tips, this.denied)))) {
           this.placeOver(doc);
           return { status: "accepted", doc, unanchored: true };
         }
@@ -1115,6 +1233,72 @@ export class IdentityChain {
     if (doc.merge === undefined) this.checkNoReturn(doc, parent);
     this.placeOver(doc);
     return { status: "accepted", doc };
+  }
+
+  /**
+   * #92: on unanchored history, places `jws`, a current version below the held head whose parent isn't held, as
+   * another unanchored root (a tip beside the head: a fork), with its parents from `below` placed under it (as
+   * extendDown places a root's parents), when that proves it is a fork: along the line from `jws` down through
+   * `below` (signature-verified versions of this identity; each link checked by the chain rules), a device every
+   * held tip lists (not denied) was revoked.
+   * A revoked did never returns and a merge never adds one, so no held tip descends from `jws`: it isn't an
+   * old version of the head's own line (an honest relay's stale tip never qualifies), and the view intersecting
+   * it is what it would be had the two connected. That is a key holder's branch stored first (head v8' keeping a
+   * device) against the owner's later revoking version (v4) whose ancestry the relays kept only from v2 or v3 up.
+   * Placed like a side root, but past MAX_SIDE_ROOTS too: it always narrows (it leaves out the revoked device),
+   * at most once per device the tips share. Returns whether it was placed; nothing changes otherwise (a broken
+   * link, a re-listed revoked device, nothing revoked that every tip lists, the history anchored, at the cap).
+   */
+  addForkRoot(jws: string, below: readonly VerifiedIdentityDoc[], opts: TimeOptions = {}): boolean {
+    const held = this.anyHeld();
+    if (!held || this.anchored || below.length === 0 || this.versions.size + 1 + below.length > MAX_CHAIN_VERSIONS) return false;
+    const doc = verifyIdentityDoc(jws, opts);
+    if (doc.iss !== this.iss) fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
+    if (doc.ik !== held.ik) fail("issuer-mismatch", "a different ik for this userId");
+    const tips = this.tips();
+    if (this.versions.has(doc.hash) || !pendingUsable(doc, opts) || doc.ver >= tips[0].ver) return false;
+    // Its parent held: an ordinary add (or a refusal), not a root.
+    if (doc.prev === null || this.versions.has(doc.prev)) return false;
+    const supplied = new Map<string, VerifiedIdentityDoc>();
+    for (const d of below) {
+      if (d.iss !== this.iss || d.ik !== held.ik) fail("issuer-mismatch", "a different identity's version below a root");
+      supplied.set(d.hash, d);
+    }
+    const get = (h: string) => supplied.get(h) ?? this.versions.get(h);
+    // The line down from `doc` along prev through the supplied versions, each link checked (a merge's other
+    // parent supplied or held; the line stops where it isn't).
+    const line: VerifiedIdentityDoc[] = [doc];
+    for (let c = doc; line.length <= supplied.size; ) {
+      const p = c.prev ? supplied.get(c.prev) : undefined;
+      if (!p || this.versions.has(p.hash)) break;
+      const o = c.merge !== undefined ? get(c.merge) : undefined;
+      if (c.merge !== undefined && !o) break;
+      try {
+        checkLink(p, c, o);
+      } catch (e) {
+        if (!(e instanceof P2PError)) throw e;
+        return false;
+      }
+      line.push(p);
+      c = p;
+    }
+    if (line.length < 2) return false;
+    // What the line revoked, from the bottom up, refusing a version that re-lists a device revoked below it (or
+    // denied), as add() would.
+    const revoked = new Set<string>();
+    for (let i = line.length - 2; i >= 0; i--) {
+      const c = line[i];
+      const p = line[i + 1];
+      if (c.merge === undefined && c.devices.some((d) => !p.devices.includes(d) && (revoked.has(d) || this.denied.has(d)))) return false;
+      for (const d of revokedStep(c, get)) revoked.add(d);
+    }
+    if (!sharedByTips(tips, this.denied).devices.some((d) => revoked.has(d))) return false;
+    this.placeOver(doc);
+    for (const p of line.slice(1)) {
+      if (!this.versions.has(line[line.indexOf(p) - 1].hash)) break; // dropped by a check below it
+      if (this.add(p.jws, { ...opts, replace: false }).status !== "accepted") break;
+    }
+    return true;
   }
 
   /**
@@ -1157,7 +1341,7 @@ export class IdentityChain {
         bad.push(child);
       }
     }
-    if (bad.length > 0) this.dropWithDescendants(bad);
+    if (bad.length > 0) this.dropWithDescendants(bad, { offChain: true });
     this.put(doc);
     // No-return along the links now known (#79 re-review): a held version re-listing a device revoked on its
     // ancestry, now that the ancestry reaches further down, is what add() would refuse in the other order. It
@@ -1189,7 +1373,7 @@ export class IdentityChain {
   }
 
   /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
-  private dropWithDescendants(docs: readonly VerifiedIdentityDoc[]): void {
+  private dropWithDescendants(docs: readonly VerifiedIdentityDoc[], opts: { offChain?: boolean } = {}): void {
     const doomed = new Set<string>();
     const stack = docs.map((d) => d.hash);
     while (stack.length > 0) {
@@ -1200,7 +1384,15 @@ export class IdentityChain {
     }
     // Dropping only ever narrows (#79 fourth review): what each dropped version revoked relative to its held
     // parent(s) goes on the denylist first, as a replacement carries a replaced branch's revocations (R1).
-    for (const h of doomed) for (const d of revokedStep(this.versions.get(h)!, (x) => this.versions.get(x))) this.denied.add(d);
+    // #92: only for a no-return drop (a valid link) and what was placed on it. `offChain`: `docs` were dropped
+    // because their links to their parents are broken, so they and everything placed on them are off valid
+    // history and revoked nothing (a key holder hanging a valid child under a malformed version can't get the
+    // owner's devices denied for good).
+    if (opts.offChain) {
+      for (const h of doomed) this.versions.delete(h);
+      return;
+    }
+    for (const h of doomed) for (const d of validRevokedStep(this.versions.get(h)!, (x) => this.versions.get(x))) this.denied.add(d);
     for (const h of doomed) this.versions.delete(h);
   }
 
@@ -1378,7 +1570,8 @@ export class IdentityChain {
     if (tips.length === 0) fail("identity-unknown", `no identity document for ${this.iss}`);
     const head = tips[0];
     // #35: a newer verified version not connected yet narrows the allowlist and the key holders.
-    const cap = this.pendingCap();
+    // #92: so do current versions an incomplete refresh left out at or below the head (noteLeftOut).
+    const cap = [...this.pendingCap(), ...this.leftOutCap()];
     // #74: a stray isn't intersected, but what it signed still applies: the devices revoked along it stay out
     // (a replay of genuine history only carries genuine revocations, and a revoked did never returns).
     const strays = this.strays();
