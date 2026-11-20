@@ -1138,28 +1138,86 @@ export function modeFromTranscript(tail: string): CodexMode {
 export const TMPDIR_ROOT = "@tmpdir";
 const SLASH_TMP_ROOTS = ["/tmp", "/private/tmp"];
 
+type Rec = Record<string, unknown>;
+const rec = (v: unknown): Rec | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Rec) : undefined);
+/** An absolute path as Codex records one (POSIX, a Windows drive, or UNC); anything else can't be placed. */
+const isAbsolutePath = (v: unknown): v is string => typeof v === "string" && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v);
+const NON_WRITE_ACCESS = new Set(["read", "deny", "none"]);
+
 /**
- * Where the session's sandboxed commands may write, from a turn context:
- * a list of roots (TMPDIR as `@tmpdir`), "all" (no sandbox, or root
- * writable), or undefined when it can't be told (an unknown policy shape:
- * treated as "could be anywhere").
+ * Where a list of Codex file-system entries (`{ path, access }`, as in
+ * `file_system_sandbox_policy` and a managed `permission_profile`) lets
+ * commands write: roots, "all" (the root itself writable), or undefined
+ * when any entry can't be read (an unknown access, path type or special
+ * path, a relative path, a write glob, an unresolved `project_roots`).
+ * `read` and `deny` entries add nothing; a deny carved out of a writable
+ * root isn't subtracted (the roots only ever over-approximate).
  */
-export function writableRootsOf(p: Record<string, unknown>): string[] | "all" | undefined {
-  const fs = p.file_system_sandbox_policy as { kind?: unknown; entries?: unknown } | null | undefined;
-  if (fs && typeof fs === "object" && fs.kind === "restricted" && Array.isArray(fs.entries)) {
-    const roots: string[] = [];
-    for (const e of fs.entries as Record<string, unknown>[]) {
-      if (e?.access !== "write") continue;
-      const path = e.path as { type?: unknown; path?: unknown; value?: { kind?: unknown } } | undefined;
-      if (path?.type === "path" && typeof path.path === "string") roots.push(path.path);
-      else if (path?.type === "special" && path.value?.kind === "slash_tmp") roots.push(...SLASH_TMP_ROOTS);
-      else if (path?.type === "special" && path.value?.kind === "tmpdir") roots.push(TMPDIR_ROOT);
-      else if (path?.type === "special" && path.value?.kind === "root") return "all";
-      else return undefined;
-    }
-    return roots;
+function writableFromEntries(entries: unknown): string[] | "all" | undefined {
+  if (!Array.isArray(entries)) return undefined;
+  const roots: string[] = [];
+  for (const raw of entries) {
+    const e = rec(raw);
+    if (!e) return undefined;
+    if (typeof e.access === "string" && NON_WRITE_ACCESS.has(e.access)) continue;
+    if (e.access !== "write") return undefined;
+    const path = rec(e.path);
+    const kind = rec(path?.value)?.kind;
+    if (path?.type === "path" && isAbsolutePath(path.path)) roots.push(path.path);
+    else if (path?.type === "special" && kind === "slash_tmp") roots.push(...SLASH_TMP_ROOTS);
+    else if (path?.type === "special" && kind === "tmpdir") roots.push(TMPDIR_ROOT);
+    else if (path?.type === "special" && kind === "root") return "all";
+    else return undefined;
   }
-  const sp = (typeof p.sandbox_policy === "object" && p.sandbox_policy !== null ? p.sandbox_policy : { type: p.sandbox_policy }) as Record<string, unknown>;
+  return roots;
+}
+
+/**
+ * The legacy `sandbox_policy` mode name for a list of entries: `read-only`
+ * when nothing is writable, `workspace-write` when something is, undefined
+ * when an access can't be read.
+ */
+function sandboxFromEntries(entries: unknown): string | undefined {
+  if (!Array.isArray(entries)) return undefined;
+  const access = entries.map((e) => rec(e)?.access);
+  if (access.some((a) => a === "write")) return "workspace-write";
+  return access.every((a) => typeof a === "string" && NON_WRITE_ACCESS.has(a)) ? "read-only" : undefined;
+}
+
+/**
+ * What a turn context's `permission_profile` (Codex 0.169.0 and later write
+ * it in place of `sandbox_policy`; 0.130.0 to 0.168.x write both) says, as
+ * the legacy mode name and writable roots:
+ *  - `{type:"disabled"}`: no sandbox: `danger-full-access`, writes anywhere;
+ *  - `{type:"external", network}`: `external-sandbox`, writes unknown;
+ *  - `{type:"managed", file_system:{type:"unrestricted"}, network}`: writes
+ *    anywhere: `danger-full-access`;
+ *  - `{type:"managed", file_system:{type:"restricted", entries}, network}`:
+ *    `read-only` when no entry writes, else `workspace-write`, roots from the
+ *    entries (`:read-only`, `:workspace` and `[permissions.<name>]` profiles
+ *    that extend them all compile to this; the name, `active_permission_profile`,
+ *    is never trusted for anything).
+ * Anything else (no profile, an unknown type, a network value that isn't
+ * `restricted`/`enabled`) is unknown on both counts.
+ */
+export function permissionProfileOf(profile: unknown): { sandbox?: string; writable?: string[] | "all" } {
+  const pp = rec(profile);
+  if (pp?.type === "disabled") return { sandbox: "danger-full-access", writable: "all" };
+  if (pp?.type === "external") return { sandbox: "external-sandbox" };
+  if (pp?.type !== "managed" || (pp.network !== "restricted" && pp.network !== "enabled")) return {};
+  const fs = rec(pp.file_system);
+  if (fs?.type === "unrestricted") return { sandbox: "danger-full-access", writable: "all" };
+  if (fs?.type !== "restricted") return {};
+  const sandbox = sandboxFromEntries(fs.entries);
+  const writable = writableFromEntries(fs.entries);
+  return { ...(sandbox ? { sandbox } : {}), ...(writable !== undefined ? { writable } : {}) };
+}
+
+/** The pre-0.169 fields, from which Codex derived the turn's permissions. */
+function legacyWritable(p: Rec): string[] | "all" | undefined {
+  const fs = rec(p.file_system_sandbox_policy);
+  if (fs && fs.kind === "restricted" && Array.isArray(fs.entries)) return writableFromEntries(fs.entries);
+  const sp = rec(p.sandbox_policy) ?? { type: p.sandbox_policy };
   if (sp.type === "danger-full-access") return "all";
   if (sp.type === "read-only") return [];
   if (sp.type !== "workspace-write") return undefined;
@@ -1171,6 +1229,43 @@ export function writableRootsOf(p: Record<string, unknown>): string[] | "all" | 
   return roots;
 }
 
+const hasLegacy = (p: Rec): boolean => p.sandbox_policy !== undefined || p.file_system_sandbox_policy !== undefined;
+
+/**
+ * Where the session's sandboxed commands may write, from a turn context:
+ * a list of roots (TMPDIR as `@tmpdir`), "all" (no sandbox, or root
+ * writable), or undefined when it can't be told (an unknown policy shape:
+ * treated as "could be anywhere").
+ *
+ * Codex 0.169.0+ records only `permission_profile`; earlier versions record
+ * `sandbox_policy` (and, from 0.130.0, `permission_profile` and
+ * `file_system_sandbox_policy` beside it). With the legacy fields present
+ * they decide, as before, and a readable `permission_profile` can only add
+ * roots (or make it "all"); without them, `permission_profile` alone decides.
+ */
+export function writableRootsOf(p: Record<string, unknown>): string[] | "all" | undefined {
+  const profile = p.permission_profile === undefined ? undefined : permissionProfileOf(p.permission_profile).writable;
+  if (!hasLegacy(p)) return profile;
+  const legacy = legacyWritable(p);
+  if (legacy === undefined || profile === undefined) return legacy;
+  if (legacy === "all" || profile === "all") return "all";
+  return [...new Set([...legacy, ...profile])];
+}
+
+/**
+ * The turn's sandbox as a legacy mode name (`read-only`, `workspace-write`,
+ * `danger-full-access`, `external-sandbox`, ...), or undefined (unknown:
+ * the session then never counts as asking). `sandbox_policy` when present,
+ * except that a readable `permission_profile` broader than `read-only`
+ * wins over a `read-only` one; else `permission_profile`.
+ */
+export function sandboxOf(p: Record<string, unknown>): string | undefined {
+  const legacy = rec(p.sandbox_policy) ? str((p.sandbox_policy as Rec).type) : str(p.sandbox_policy);
+  const profile = p.permission_profile === undefined ? undefined : permissionProfileOf(p.permission_profile).sandbox;
+  if (legacy === undefined) return profile;
+  return legacy === "read-only" && profile !== undefined ? profile : legacy;
+}
+
 /** One rollout line, when it is a `turn_context`: the mode it records, its turn, cwd and writable roots. */
 export function turnContextOf(line: string): { mode: CodexMode; turnId?: string; cwd?: string; writable?: string[] | "all"; at?: number } | null {
   if (!line.includes('"turn_context"')) return null;
@@ -1178,7 +1273,7 @@ export function turnContextOf(line: string): { mode: CodexMode; turnId?: string;
     const v = JSON.parse(line) as { type?: string; timestamp?: unknown; payload?: Record<string, unknown> };
     if (v.type !== "turn_context" || typeof v.payload !== "object" || v.payload === null) return null;
     const p = v.payload;
-    const sandbox = typeof p.sandbox_policy === "object" && p.sandbox_policy !== null ? str((p.sandbox_policy as Record<string, unknown>).type) : str(p.sandbox_policy);
+    const sandbox = sandboxOf(p);
     const reviewer = str(p.approvals_reviewer);
     const turnId = str(p.turn_id);
     const cwd = str(p.cwd);

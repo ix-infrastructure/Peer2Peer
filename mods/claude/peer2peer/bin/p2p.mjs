@@ -3912,23 +3912,23 @@ function mergeWindows(a, b) {
     x[i] |= y[i];
   return { h, bits: b64uEncode(x) };
 }
-function checkReplay(p, rec, nowMs, maxAgeMs = REPLAY_MAX_AGE_MS) {
+function checkReplay(p, rec2, nowMs, maxAgeMs = REPLAY_MAX_AGE_MS) {
   if (p.ts > nowMs + REPLAY_FUTURE_SKEW_MS) {
     return { reason: "stale-timestamp", message: `ts ${p.ts} is more than 10 min ahead of ${nowMs}` };
   }
   if (p.ts < nowMs - maxAgeMs) {
     return { reason: "stale-timestamp", message: `ts ${p.ts} is older than ${maxAgeMs} ms before ${nowMs}` };
   }
-  const seq = checkSeq(p.seq, rec?.windows[sessionKey(p.own, p.sid)]);
+  const seq = checkSeq(p.seq, rec2?.windows[sessionKey(p.own, p.sid)]);
   if (seq)
     return seq;
-  if (rec?.nonces.includes(p.n))
+  if (rec2?.nonces.includes(p.n))
     return { reason: "replayed-nonce", message: `nonce ${p.n} already seen` };
   return void 0;
 }
-function recordReplay(p, rec) {
+function recordReplay(p, rec2) {
   const k = sessionKey(p.own, p.sid);
-  return mergeReplay(rec, { nonces: [p.n], windows: { [k]: advanceWindow(p.seq, rec?.windows[k]) } });
+  return mergeReplay(rec2, { nonces: [p.n], windows: { [k]: advanceWindow(p.seq, rec2?.windows[k]) } });
 }
 function mergeReplay(a, b) {
   const seen = new Set(a?.nonces ?? []);
@@ -11689,12 +11689,12 @@ function trackRemovals(cur, before, after2, now) {
 }
 async function openCircleCapActions(store2, self, now = nowSec()) {
   const out = [];
-  for (const rec of await store2.listCircles()) {
-    if (!rec.joinedByMe)
+  for (const rec2 of await store2.listCircles()) {
+    if (!rec2.joinedByMe)
       continue;
     let head;
     try {
-      head = CircleChain.fromStored(rec.chain).head;
+      head = CircleChain.fromStored(rec2.chain).head;
     } catch (e) {
       if (!(e instanceof P2PError))
         throw e;
@@ -11702,23 +11702,23 @@ async function openCircleCapActions(store2, self, now = nowSec()) {
     }
     if (circlePolicy(head) !== "open")
       continue;
-    const mine = rec.statements[self];
+    const mine = rec2.statements[self];
     if (!mine || mine.op !== "join")
       continue;
     const cap2 = mine.capInfo;
     let reason;
     if (!cap2 || !joinCapFitsPolicy(cap2, "open"))
       reason = "too-long";
-    else if (rec.removalSeenAt !== void 0 && cap2.iat < rec.removalSeenAt)
+    else if (rec2.removalSeenAt !== void 0 && cap2.iat < rec2.removalSeenAt)
       reason = "removal";
     else if (cap2.exp - now <= OPEN_JOIN_CAP_RENEW_SEC)
       reason = "renew";
     if (!reason)
       continue;
     out.push({
-      cid: rec.cid,
+      cid: rec2.cid,
       reason,
-      nextN: Math.max(rec.myN ?? -1, mine.n) + 1,
+      nextN: Math.max(rec2.myN ?? -1, mine.n) + 1,
       at: head.hash,
       capTtlSec: OPEN_JOIN_CAP_MAX_TTL_SEC,
       ...cap2 ? { revoke: { capid: cap2.capid, relays: cap2.relays } } : {}
@@ -12116,12 +12116,12 @@ async function authorizeCircle(pt, p, signerCtx, ctx) {
     return { authorizedBy: "stands", cids: list };
   let allMember = list.length > 0;
   for (const cid of list) {
-    const rec = await store2.getCircle(cid);
-    if (!rec) {
+    const rec2 = await store2.getCircle(cid);
+    if (!rec2) {
       allMember = false;
       break;
     }
-    const head = CircleChain.fromStored(rec.chain).head;
+    const head = CircleChain.fromStored(rec2.chain).head;
     if (!head.members.includes(p.from))
       allMember = false;
   }
@@ -13393,9 +13393,9 @@ async function stillAllowed(app, item, views = /* @__PURE__ */ new Map()) {
       const friend = (await liveFriendshipsV3(app.store, app.signerCtx(), (f) => [f.inviter, f.invitee].includes(to))).some((f) => f.inviter === to || f.invitee === to);
       let comember = false;
       if (!friend) {
-        for (const rec of await app.store.listCircles()) {
-          const members = CircleChain.fromStored(rec.chain).head.members;
-          if (rec.joinedByMe && members.includes(to) && members.includes(app.userId)) comember = true;
+        for (const rec2 of await app.store.listCircles()) {
+          const members = CircleChain.fromStored(rec2.chain).head.members;
+          if (rec2.joinedByMe && members.includes(to) && members.includes(app.userId)) comember = true;
         }
       }
       if (!friend && !comember) return "refused";
@@ -13925,8 +13925,8 @@ function deviceCaps(src, userId, did) {
 function supportsIn(src, userId, scope, feature) {
   const now = src.now ?? Date.now();
   if ("sid" in scope) {
-    const rec = src.peers[sessKey(userId, scope.sid)];
-    return rec !== void 0 && isLive(rec.ts, now) && statusHasCap(rec.status, feature);
+    const rec2 = src.peers[sessKey(userId, scope.sid)];
+    return rec2 !== void 0 && isLive(rec2.ts, now) && statusHasCap(rec2.status, feature);
   }
   if ("did" in scope) return deviceCaps(src, userId, scope.did)?.caps.includes(feature) === true;
   const live = Object.values(src.peers).filter((p) => p.own === userId && isLive(p.ts, now) && !(p.own === src.self.userId && p.did === src.self.did));
@@ -14776,48 +14776,48 @@ function trimSender(recs, max, budget, keep) {
     cost -= xstateCost(r);
   }
 }
-async function store(app, rec) {
+async function store(app, rec2) {
   const peers = await app.state.get("peers") ?? {};
   const backend = app.state.backend;
   return backend.withLock(async () => {
-    const now = rec.at;
+    const now = rec2.at;
     let index = asIndex(await backend.read("xstate"));
     if (!reconciled.has(backend)) {
       index = await reconcile(backend, index, now);
       reconciled.add(backend);
     }
-    const name2 = senderDoc(rec.own);
-    const doc = asSenderDoc(await backend.read(name2), rec.own);
-    const key = valueKey(rec.sid, rec.kind);
+    const name2 = senderDoc(rec2.own);
+    const doc = asSenderDoc(await backend.read(name2), rec2.own);
+    const key = valueKey(rec2.sid, rec2.kind);
     const recs = prune3(doc.recs, peers, now);
     const old = recs[key];
-    if (old && old.ts >= rec.ts) return "older";
-    if (old && !rec.self && rec.ts - old.ts < EXT_STATE_MIN_INTERVAL_MS - XSTATE_SPACING_SLACK_MS) return "rate-limited";
-    if (!old && Object.values(recs).filter((x) => x.sid === rec.sid).length >= XSTATE_KINDS_PER_SESSION) return "too-many-kinds";
+    if (old && old.ts >= rec2.ts) return "older";
+    if (old && !rec2.self && rec2.ts - old.ts < EXT_STATE_MIN_INTERVAL_MS - XSTATE_SPACING_SLACK_MS) return "rate-limited";
+    if (!old && Object.values(recs).filter((x) => x.sid === rec2.sid).length >= XSTATE_KINDS_PER_SESSION) return "too-many-kinds";
     doc.rate = liveWindows(doc.rate, now);
-    if (!rec.self) {
+    if (!rec2.self) {
       const all = doc.all && now - doc.all.start < 6e4 ? doc.all : { start: now, n: 0 };
-      const w = doc.rate[rec.sid] ?? { start: now, n: 0 };
+      const w = doc.rate[rec2.sid] ?? { start: now, n: 0 };
       if (w.n >= XSTATE_UPDATES_PER_MIN || all.n >= XSTATE_SENDER_UPDATES_PER_MIN) {
         await writeSender(backend, name2, { ...doc, recs }, now);
         return "flood";
       }
-      doc.rate[rec.sid] = { start: w.start, n: w.n + 1 };
+      doc.rate[rec2.sid] = { start: w.start, n: w.n + 1 };
       doc.all = { start: all.start, n: all.n + 1 };
     }
-    recs[key] = rec;
+    recs[key] = rec2;
     trimSender(recs, XSTATE_VALUES_PER_USER, XSTATE_BYTES_PER_USER, key);
-    const users = { ...index.users, [rec.own]: { doc: name2, ...summarize(recs) } };
-    if (!index.users[rec.own]) await backend.write("xstate", { v: 2, users });
+    const users = { ...index.users, [rec2.own]: { doc: name2, ...summarize(recs) } };
+    if (!index.users[rec2.own]) await backend.write("xstate", { v: 2, users });
     await writeSender(backend, name2, { ...doc, recs }, now);
     const gone = /* @__PURE__ */ new Set();
     let total = Object.values(users).reduce((t2, u) => t2 + u.n, 0);
     while (total > XSTATE_MAX_RECORDS) {
       let evicted = false;
       for (const [own, u] of Object.entries(users).sort((x, y) => y[1].n - x[1].n || y[1].cost - x[1].cost)) {
-        const theirs = own === rec.own ? doc : asSenderDoc(await backend.read(u.doc), own);
-        const live = own === rec.own ? recs : prune3(theirs.recs, peers, now);
-        const victim = Object.entries(live).filter(([k]) => !(own === rec.own && k === key)).sort((x, y) => x[1].at - y[1].at)[0];
+        const theirs = own === rec2.own ? doc : asSenderDoc(await backend.read(u.doc), own);
+        const live = own === rec2.own ? recs : prune3(theirs.recs, peers, now);
+        const victim = Object.entries(live).filter(([k]) => !(own === rec2.own && k === key)).sort((x, y) => x[1].at - y[1].at)[0];
         if (!victim && Object.keys(live).length === u.n) continue;
         if (victim) delete live[victim[0]];
         if (!await writeSender(backend, u.doc, { ...theirs, recs: live }, now)) gone.add(own);
@@ -14833,8 +14833,8 @@ async function store(app, rec) {
     return "stored";
   });
 }
-function expiresAt(rec) {
-  return Math.min(rec.ts, rec.at) + rec.ttl * 1e3;
+function expiresAt(rec2) {
+  return Math.min(rec2.ts, rec2.at) + rec2.ttl * 1e3;
 }
 function prune3(recs, peers, now) {
   const out = {};
@@ -15338,9 +15338,9 @@ async function sendStatus(app, o) {
     if (o2?.ok) delivered.push(o2.ok);
     else if (o2?.failed) failed.push(o2.failed);
   }
-  const rec = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
-  await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec }, result: void 0 }));
-  if (status.state === "idle" && prev?.status.state === "busy") await localIdle(app, sid, rec.ts);
+  const rec2 = { own: app.userId, sid, did: app.did, ts: Date.now(), status, self: true };
+  await app.state.update("peers", (cur = {}) => ({ next: { ...cur, [sessKey(app.userId, sid)]: rec2 }, result: void 0 }));
+  if (status.state === "idle" && prev?.status.state === "busy") await localIdle(app, sid, rec2.ts);
   return { status, roster: await rosterView(app, sess), delivered, failed, ...warnings.length > 0 ? { warnings } : {}, project: await sessionProjectView(app, sid), bound: true };
 }
 async function retract(app, sid, before, now) {
@@ -15661,8 +15661,8 @@ async function onSessionEnvelope(app, env, r) {
       const prev = await app.state.update("peers", (cur = {}) => {
         const old = cur[key];
         if (old && old.ts >= e.ts) return { result: { old, newer: false } };
-        const rec = { own: e.own, sid: e.sid, did: e.fdid, ts: e.ts, status: pt.status, rule: r.rule, ...r.viewerRule ? { viewerRule: r.viewerRule } : {}, ...e.own === app.userId ? { self: true } : {} };
-        return { next: { ...cur, [key]: rec }, result: { old, newer: true } };
+        const rec2 = { own: e.own, sid: e.sid, did: e.fdid, ts: e.ts, status: pt.status, rule: r.rule, ...r.viewerRule ? { viewerRule: r.viewerRule } : {}, ...e.own === app.userId ? { self: true } : {} };
+        return { next: { ...cur, [key]: rec2 }, result: { old, newer: true } };
       });
       if (!prev.newer) return [];
       const out = [makeEvent(env, "p2p.status", e.ts, { from, ...sess, status: displayStatus(pt.status), live: isLive(e.ts, Date.now()) }, extra)];
@@ -15746,8 +15746,8 @@ async function ownBound(app, fromSession, target, userId) {
   const bound = await boundOf(app, fromSession);
   if (bound === void 0) return {};
   if (target.did && target.did !== app.did) {
-    const rec = (await app.state.get("peers"))?.[sessKey(target.own, target.sid)];
-    const caps = rec ? displayStatus(rec.status).caps ?? [] : [];
+    const rec2 = (await app.state.get("peers"))?.[sessKey(target.own, target.sid)];
+    const caps = rec2 ? displayStatus(rec2.status).caps ?? [] : [];
     if (!caps.includes(CAP_PROJECTS)) {
       throw new CliError(
         "not_shared",
@@ -20524,7 +20524,7 @@ async function inviteCode(app, opts) {
   const chars = encodeCodeChars(s2);
   const cap2 = capPeek(m.cap);
   const cids = circles.map((c) => c.record.cid);
-  const rec = {
+  const rec2 = {
     lid,
     code: groupCode(chars),
     short: formatShortCode(relay, s2),
@@ -20538,21 +20538,21 @@ async function inviteCode(app, opts) {
     exp: Math.min(exp, m.exp),
     status: "open"
   };
-  await app.state.update("codes", (cur = {}) => ({ next: pruneCodes({ ...cur, [lid]: rec }), result: void 0 }));
-  await sendSync(app, { codes: [rec] });
+  await app.state.update("codes", (cur = {}) => ({ next: pruneCodes({ ...cur, [lid]: rec2 }), result: void 0 }));
+  await sendSync(app, { codes: [rec2] });
   const list = circles.map((c) => ({ cid: c.record.cid, name: circleDisplayName(c.chain.head), members: c.chain.head.members.length }));
-  const web = codeWebLink(rec.short);
+  const web = codeWebLink(rec2.short);
   const privateRelay = await relayLooksPrivate(relay);
   return {
-    code: rec.short,
-    line: `Join me on Peer2Peer: ${web} (or: p2p join ${rec.short})`,
+    code: rec2.short,
+    line: `Join me on Peer2Peer: ${web} (or: p2p join ${rec2.short})`,
     relay,
     label: label ?? null,
     to: aud === "*" ? null : { userId: aud, address: await app.addressOf(aud) },
     circle: list[0] ? { cid: list[0].cid, name: list[0].name } : null,
     circles: list,
     web,
-    expiresAt: rec.exp,
+    expiresAt: rec2.exp,
     uses: 1,
     lid,
     message: inviteMessage(web, privateRelay),
@@ -20585,16 +20585,16 @@ async function codeByInv(app, inv) {
   const all = await app.state.get("codes") ?? {};
   return Object.values(all).find((c) => c.inv === inv);
 }
-async function onCodeRedeemed(app, env, at, from, rec, who2) {
+async function onCodeRedeemed(app, env, at, from, rec2, who2) {
   const updated = await app.state.update("codes", (cur = {}) => {
-    const now = cur[rec.lid];
+    const now = cur[rec2.lid];
     if (!now || now.status !== "open") return { result: void 0 };
     const next = { ...now, status: "redeemed", redeemedBy: who2, redeemedAt: nowSec() };
-    return { next: { ...cur, [rec.lid]: next }, result: next };
+    return { next: { ...cur, [rec2.lid]: next }, result: next };
   });
   if (!updated) return [];
   const outcomes = [];
-  for (const cid of rec.cids ?? (rec.cid ? [rec.cid] : [])) {
+  for (const cid of rec2.cids ?? (rec2.cid ? [rec2.cid] : [])) {
     try {
       outcomes.push({ cid, ...await addMemberViaCode(app, cid, who2) });
     } catch (e) {
@@ -20603,10 +20603,10 @@ async function onCodeRedeemed(app, env, at, from, rec, who2) {
   }
   const added = outcomes.filter((o) => o.status === "added" || o.status === "proposed").map((o) => o.cid);
   const recorded = await app.state.update("codes", (cur = {}) => {
-    const now = cur[rec.lid];
+    const now = cur[rec2.lid];
     if (!now) return { result: updated };
     const next = { ...now, added };
-    return { next: { ...cur, [rec.lid]: next }, result: next };
+    return { next: { ...cur, [rec2.lid]: next }, result: next };
   });
   const circle = outcomes[0] ?? null;
   const address = from.address;
@@ -20617,7 +20617,7 @@ async function onCodeRedeemed(app, env, at, from, rec, who2) {
   const one = outcomes.length === 1 ? outcomes[0] : void 0;
   const where = one?.status === "added" ? ` and was added to "${one.name}"` : one?.status === "already" ? ` (already in "${one.name}")` : one?.status === "proposed" ? ` (their add to "${one.name}" went to the owner)` : "";
   app.io.err(
-    `${address} joined via your code ${codeHint(rec.code)}${rec.label ? ` ("${rec.label}")` : ""}${where}. Not who you meant? p2p remove ${who2}` + (one ? one.status === "failed" ? `
+    `${address} joined via your code ${codeHint(rec2.code)}${rec2.label ? ` ("${rec2.label}")` : ""}${where}. Not who you meant? p2p remove ${who2}` + (one ? one.status === "failed" ? `
   couldn't add them to the circle: ${one.reason}` : "" : lines.length ? `
 ${lines.join("\n")}` : "") + (old ? `
   their client looks older: it joins only "${outcomes[0].name ?? outcomes[0].cid}" by itself, and shows the others as circle invites to approve` : "")
@@ -20626,9 +20626,9 @@ ${lines.join("\n")}` : "") + (old ? `
   return [
     makeEvent(env, "p2p.joined", at, {
       from,
-      code: codeHint(rec.code),
-      lid: rec.lid,
-      ...rec.label ? { label: rec.label } : {},
+      code: codeHint(rec2.code),
+      lid: rec2.lid,
+      ...rec2.label ? { label: rec2.label } : {},
       ...circle ? { cid: circle.cid, ...circle.name ? { circleName: circle.name } : {}, circleStatus: circle.status } : {},
       ...outcomes.length > 1 ? { circles: outcomes.map((o) => ({ cid: o.cid, ...o.name ? { name: o.name } : {}, status: o.status })) } : {},
       ...old ? { olderClient: true } : {},
@@ -20872,8 +20872,8 @@ async function joinCodeCircles(app, inviter, lid, heads, offered, opts) {
   for (const [i, headJws] of heads.entries()) {
     const pc = offered[i];
     const cid = pc.cid;
-    const rec = await app.store.getCircle(cid);
-    if (rec?.joinedByMe) {
+    const rec2 = await app.store.getCircle(cid);
+    if (rec2?.joinedByMe) {
       out.push({ cid, name: pc.name, status: "already", default: app.self?.defaultCircle === cid });
       continue;
     }
@@ -21073,26 +21073,26 @@ async function findCode(app, input) {
   return hits[0];
 }
 async function revokeCode(app, input) {
-  const rec = await findCode(app, input);
-  if (rec.status === "revoked") return { code: rec.short, revoked: true, wasOpen: false, redeemedBy: null };
+  const rec2 = await findCode(app, input);
+  if (rec2.status === "revoked") return { code: rec2.short, revoked: true, wasOpen: false, redeemedBy: null };
   const pool = await app.connect({ allowNone: true });
   let wasOpen = false;
   try {
-    wasOpen = await inviteDel(await pool.ensure(rec.relay), rec.lid);
+    wasOpen = await inviteDel(await pool.ensure(rec2.relay), rec2.lid);
   } catch (e) {
-    app.warn(`couldn't reach ${rec.relay} to delete the code (${e.message}); it is refused here anyway`);
+    app.warn(`couldn't reach ${rec2.relay} to delete the code (${e.message}); it is refused here anyway`);
   }
-  if (rec.capid) {
-    const caps = (await app.store.listCapsIssued()).filter((c) => c.capid === rec.capid);
+  if (rec2.capid) {
+    const caps = (await app.store.listCapsIssued()).filter((c) => c.capid === rec2.capid);
     await app.revokeCaps(caps).catch(() => 0);
   }
-  const updated = { ...rec, status: rec.status === "redeemed" ? "redeemed" : "revoked" };
-  if (rec.status !== "redeemed") {
-    await app.state.update("codes", (cur = {}) => ({ next: { ...cur, [rec.lid]: updated }, result: void 0 }));
+  const updated = { ...rec2, status: rec2.status === "redeemed" ? "redeemed" : "revoked" };
+  if (rec2.status !== "redeemed") {
+    await app.state.update("codes", (cur = {}) => ({ next: { ...cur, [rec2.lid]: updated }, result: void 0 }));
     await sendSync(app, { codes: [updated] });
   }
-  if (rec.status === "redeemed") app.warn(`${codeHint(rec.code)} was already redeemed by ${await app.addressOf(rec.redeemedBy)}: \`p2p remove ${rec.redeemedBy}\` undoes that`);
-  return { code: rec.short, revoked: rec.status !== "redeemed", wasOpen, redeemedBy: rec.redeemedBy ?? null };
+  if (rec2.status === "redeemed") app.warn(`${codeHint(rec2.code)} was already redeemed by ${await app.addressOf(rec2.redeemedBy)}: \`p2p remove ${rec2.redeemedBy}\` undoes that`);
+  return { code: rec2.short, revoked: rec2.status !== "redeemed", wasOpen, redeemedBy: rec2.redeemedBy ?? null };
 }
 async function removeUser(app, who2) {
   const u = await app.resolveUser(who2);
@@ -21470,13 +21470,13 @@ async function reissueForRelays(app) {
     }
   }
   const rejoined = [];
-  for (const rec of await app.store.listCircles()) {
-    const mine = rec.statements[app.userId];
-    if (!rec.joinedByMe || mine?.op !== "join") continue;
+  for (const rec2 of await app.store.listCircles()) {
+    const mine = rec2.statements[app.userId];
+    if (!rec2.joinedByMe || mine?.op !== "join") continue;
     const cap2 = joinCapOf(mine.jws);
     const p = cap2 ? capPeek(cap2) : void 0;
     if (p && sameRelays(p.relays)) continue;
-    if (await resignJoin(app, rec.cid)) rejoined.push(rec.cid);
+    if (await resignJoin(app, rec2.cid)) rejoined.push(rec2.cid);
   }
   if (issued.length > 0) await sendSync(app, { capsIssued: issued });
   return { capsReissued, rejoined };
@@ -21589,15 +21589,15 @@ async function revokeDevice(app, did) {
     }
   }
   const rejoined = [];
-  for (const rec of await app.store.listCircles()) {
-    const mine = rec.statements[app.userId];
+  for (const rec2 of await app.store.listCircles()) {
+    const mine = rec2.statements[app.userId];
     if (!mine || mine.op !== "join") continue;
     const kid = JSON.parse(Buffer.from(mine.jws.split(".")[0], "base64url").toString()).kid;
     if (kid !== did) continue;
-    const c = await loadCircle(app.store, rec.cid);
+    const c = await loadCircle(app.store, rec2.cid);
     if (!c) continue;
     const cap2 = createCap(app.device, app.keys.cert, { purpose: "join", relays: app.relays });
-    const jws = createMembershipStatement(app.signer(), { cid: rec.cid, n: nextMembershipN(rec.myN), op: "join", at: c.chain.head.hash, cap: cap2 });
+    const jws = createMembershipStatement(app.signer(), { cid: rec2.cid, n: nextMembershipN(rec2.myN), op: "join", at: c.chain.head.hash, cap: cap2 });
     const s2 = await verifyMembershipStatement(jws, app.signerCtx());
     await recordJoin(app, s2);
     await app.recordIssued(cap2);
@@ -21605,7 +21605,7 @@ async function revokeDevice(app, did) {
       if (m === app.userId) continue;
       await app.deliver(m, "circle", { own: app.userId, sid: "~circle" }, { circles: [], joins: [jws], ops: [] }).catch(() => void 0);
     }
-    rejoined.push(rec.cid);
+    rejoined.push(rec2.cid);
   }
   const warnings = wasKeyholder ? [lostKeyholderWarning(1)] : [];
   for (const w of warnings) app.warn(w);
@@ -22323,17 +22323,17 @@ async function friendSigners(app) {
 }
 function applyExcludes(st, exclude = [], keep = []) {
   for (const d of exclude) {
-    const rec = st.devices[d];
-    if (!rec) throw new CliError("usage", `--exclude ${d}: not one of your other devices`);
-    if (rec.status === "pending") rec.status = "excluded";
+    const rec2 = st.devices[d];
+    if (!rec2) throw new CliError("usage", `--exclude ${d}: not one of your other devices`);
+    if (rec2.status === "pending") rec2.status = "excluded";
   }
   for (const d of keep) {
-    const rec = st.devices[d];
-    if (!rec) throw new CliError("usage", `--keep ${d}: not one of your other devices`);
+    const rec2 = st.devices[d];
+    if (!rec2) throw new CliError("usage", `--keep ${d}: not one of your other devices`);
     if (exclude.includes(d)) throw new CliError("usage", `${d} is both kept and excluded`);
-    if (rec.status === "excluded") {
-      rec.status = "pending";
-      delete rec.why;
+    if (rec2.status === "excluded") {
+      rec2.status = "pending";
+      delete rec2.why;
     }
   }
 }
@@ -22720,9 +22720,9 @@ async function followers(app, napp, st, opts) {
   while (open3.length > 0 && Date.now() < deadline) {
     for (const o of [...open3]) {
       const entries = await linkGet(conn, o.lid, "req");
-      const rec = st.devices[o.did];
+      const rec2 = st.devices[o.did];
       if (entries === void 0) {
-        rec.status = "offline";
+        rec2.status = "offline";
         open3.splice(open3.indexOf(o), 1);
         continue;
       }
@@ -22732,7 +22732,7 @@ async function followers(app, napp, st, opts) {
       } catch (e) {
         if (e instanceof P2PError && e.reason === "link-multiple-requests") {
           app.warn(`more than one device answered the code sent to ${o.did}: not linking it (re-link it by hand)`);
-          rec.status = "aborted";
+          rec2.status = "aborted";
           open3.splice(open3.indexOf(o), 1);
           continue;
         }
@@ -22749,8 +22749,8 @@ async function followers(app, napp, st, opts) {
       await napp.store.putDeviceCert({ userId: napp.userId, did: req.did, exp: verifyDeviceCertV3(cert).exp, jws: cert });
       const frame = sealLinkResponse(o.s, req, { cert, doc: pub.doc, ...o.keyholder ? { ik: b64uEncode(newIk.secretKey) } : {} }, napp.device);
       await linkPut(conn, o.lid, "resp", JSON.stringify(frame));
-      rec.status = "followed";
-      rec.newDid = req.did;
+      rec2.status = "followed";
+      rec2.newDid = req.did;
       open3.splice(open3.indexOf(o), 1);
       await saveState(app.home, st);
     }
@@ -23592,9 +23592,9 @@ async function followHeld(app, idOrItem) {
       "a key-holding device never follows a rotation: if you started it, link this device to the new identity by hand (`p2p link start` there, `p2p link join <code> --rotated` here); if you didn't, contest it (`p2p identity rotate --contest`)"
     );
   }
-  const rec = (await app.state.get("follows"))?.[item.id];
-  if (!rec) throw new CliError("not_found", "this rotation's link code is gone: re-link by hand (`p2p link start` on the new identity, `p2p link join <code> --rotated` here)");
-  const r = verifyRotationSignatures(rec.statement);
+  const rec2 = (await app.state.get("follows"))?.[item.id];
+  if (!rec2) throw new CliError("not_found", "this rotation's link code is gone: re-link by hand (`p2p link start` on the new identity, `p2p link join <code> --rotated` here)");
+  const r = verifyRotationSignatures(rec2.statement);
   if (r.from !== app.userId) throw new CliError("wrong_identity", "that rotation is another identity's");
   if (following) throw new CliError("busy", "already following");
   following = true;
@@ -23604,7 +23604,7 @@ async function followHeld(app, idOrItem) {
     const napp = await appAt(app, tmp);
     let res;
     try {
-      const j = await linkJoin(napp, rec.link, { label: certLabel(app.keys.cert) || defaultLabel(), maxWaitMs: followWaitMs(app) });
+      const j = await linkJoin(napp, rec2.link, { label: certLabel(app.keys.cert) || defaultLabel(), maxWaitMs: followWaitMs(app) });
       res = await j.wait();
     } finally {
       await napp.close();
@@ -24865,10 +24865,10 @@ async function chainOpts(app) {
   return { ...app.signerCtx(), self: app.userId, identityFreshness: await freshnessLookup(app.store) };
 }
 async function signOwnJoin(app, cid, at) {
-  const rec = await app.store.getCircle(cid);
-  const policy = rec ? circlePolicy(CircleChain.fromStored(rec.chain).head) : "invite";
+  const rec2 = await app.store.getCircle(cid);
+  const policy = rec2 ? circlePolicy(CircleChain.fromStored(rec2.chain).head) : "invite";
   const cap2 = createCap(app.device, app.keys.cert, { purpose: "join", relays: app.relays, ttlSec: joinCapTtlFor(policy) });
-  const jws = createMembershipStatement(app.signer(), { cid, n: nextMembershipN(rec?.myN), op: "join", at, cap: cap2 });
+  const jws = createMembershipStatement(app.signer(), { cid, n: nextMembershipN(rec2?.myN), op: "join", at, cap: cap2 });
   const v = await verifyMembershipStatement(jws, app.signerCtx());
   await recordJoin(app, v);
   await app.recordIssued(cap2);
@@ -25400,15 +25400,15 @@ async function renewOpenJoinCaps(app) {
 }
 async function rekeyJoinsExcluding(app, blocked) {
   const out = [];
-  for (const rec of await app.store.listCircles()) {
-    if (!rec.joinedByMe) continue;
-    const c = await loadCircle(app.store, rec.cid);
+  for (const rec2 of await app.store.listCircles()) {
+    if (!rec2.joinedByMe) continue;
+    const c = await loadCircle(app.store, rec2.cid);
     if (!c || !c.chain.head.members.includes(blocked)) continue;
     const mine = c.book[app.userId];
     if (!mine || mine.op !== "join") continue;
     const oldCap = joinCapOf(mine.jws);
     const cap2 = createCap(app.device, app.keys.cert, { purpose: "join", relays: app.relays, ttlSec: joinCapTtlFor(circlePolicy(c.chain.head)) });
-    const jws = createMembershipStatement(app.signer(), { cid: rec.cid, n: nextMembershipN(rec.myN), op: "join", at: c.chain.head.hash, cap: cap2 });
+    const jws = createMembershipStatement(app.signer(), { cid: rec2.cid, n: nextMembershipN(rec2.myN), op: "join", at: c.chain.head.hash, cap: cap2 });
     const v = await verifyMembershipStatement(jws, app.signerCtx());
     await recordJoin(app, v);
     await app.recordIssued(cap2);
@@ -25422,7 +25422,7 @@ async function rekeyJoinsExcluding(app, blocked) {
       if (m === app.userId || m === blocked) continue;
       await deliverCircle(app, m, { joins: [jws] }, memberCaps(c, m)).catch(() => void 0);
     }
-    out.push(rec.cid);
+    out.push(rec2.cid);
   }
   return out;
 }
@@ -25893,8 +25893,8 @@ async function answerDeferredWants(app) {
   }
   return n;
 }
-async function noteHandled(app, rec) {
-  await sendSync(app, { wantAnswered: [rec] }).catch(() => void 0);
+async function noteHandled(app, rec2) {
+  await sendSync(app, { wantAnswered: [rec2] }).catch(() => void 0);
 }
 async function importWantAnswered(app, recs) {
   if (!Array.isArray(recs)) return;
@@ -26432,8 +26432,8 @@ function projectOf(dir, doc) {
   const ns = named === void 0 ? void 0 : existingDir(named);
   const stop = !present(given) ? start : ns === void 0 ? void 0 : within3(start, ns) ? ns : start;
   for (let c = start, i = 0; i < 4096; i++) {
-    const rec = doc.projects[dirProjectId(c)];
-    if (rec) return c === start || rec.covers === true ? dirRef(c, false) : dirRef(start, false);
+    const rec2 = doc.projects[dirProjectId(c)];
+    if (rec2) return c === start || rec2.covers === true ? dirRef(c, false) : dirRef(start, false);
     if (c === stop) break;
     const up = dirname6(c);
     if (up === c) break;
@@ -26459,9 +26459,9 @@ async function projectView(app, ref, doc) {
   const people2 = [];
   if (share !== "private") {
     for (const cid of share.circles) {
-      const rec = await app.store.getCircle(cid);
+      const rec2 = await app.store.getCircle(cid);
       const c = await loadCircle(app.store, cid).catch(() => void 0);
-      circles.push({ cid, ...c ? { name: sanitizePeerText(c.chain.head.name, 64) } : {}, ...c && circlePolicy(c.chain.head) === "open" ? { open: true } : {}, joined: rec?.joinedByMe === true });
+      circles.push({ cid, ...c ? { name: sanitizePeerText(c.chain.head.name, 64) } : {}, ...c && circlePolicy(c.chain.head) === "open" ? { open: true } : {}, joined: rec2?.joinedByMe === true });
     }
     for (const u of share.people) people2.push({ userId: u, address: await app.addressOf(u) });
   }
@@ -27496,17 +27496,17 @@ async function relayInfo(app, relay, opts = {}) {
   const now = Date.now();
   const held2 = (await app.state.get("relayInfo") ?? {})[url];
   if (held2 && !opts.refresh && now - held2.at < (held2.ok ? RELAY_INFO_TTL_MS : RELAY_INFO_RETRY_MS)) return held2;
-  let rec;
+  let rec2;
   try {
     const j = await fetchRelayInfo(app.transport(url), RELAY_INFO_TIMEOUT_MS, app.progress);
     const minor = typeof j?.protocolMinor === "number" && Number.isSafeInteger(j.protocolMinor) && j.protocolMinor >= 0 ? j.protocolMinor : 0;
     const sw = j?.software?.version;
-    rec = j ? { at: now, ok: true, minor, features: strs(j.features, 64), frames: strs(j.frames, 64), ...typeof sw === "string" ? { software: sw.slice(0, 40) } : {} } : { at: now, ok: false, minor: 0, features: [], frames: [] };
+    rec2 = j ? { at: now, ok: true, minor, features: strs(j.features, 64), frames: strs(j.frames, 64), ...typeof sw === "string" ? { software: sw.slice(0, 40) } : {} } : { at: now, ok: false, minor: 0, features: [], frames: [] };
   } catch {
-    rec = { at: now, ok: false, minor: 0, features: [], frames: [] };
+    rec2 = { at: now, ok: false, minor: 0, features: [], frames: [] };
   }
-  await app.state.update("relayInfo", (cur = {}) => ({ next: { ...cur, [url]: rec }, result: void 0 }));
-  return rec;
+  await app.state.update("relayInfo", (cur = {}) => ({ next: { ...cur, [url]: rec2 }, result: void 0 }));
+  return rec2;
 }
 async function relaysSupport(app, relays, feature) {
   if (relays.length === 0) return false;
@@ -27900,9 +27900,9 @@ var init_app = __esm({
         const rc = conn.circle;
         if (!rc || !conn.authed || conn.restricted) return;
         if (!this.relays.includes(conn.relay)) return;
-        const rec = await this.store.getCircle(rc.cid);
-        if (!rec || !rec.joinedByMe) return;
-        const chain = CircleChain.fromStored(rec.chain);
+        const rec2 = await this.store.getCircle(rc.cid);
+        if (!rec2 || !rec2.joinedByMe) return;
+        const chain = CircleChain.fromStored(rec2.chain);
         if (!chain.head.members.includes(this.userId)) return;
         if (chain.head.ver <= rc.ver) return;
         const versions = chain.versionsFrom(rc.ver === 0 ? 1 : rc.ver + 1);
@@ -28572,10 +28572,10 @@ var init_app = __esm({
           if (c.sub === this.userId || c.sub === "*") cands.push({ jws: c.jws, relays: c.relays, kinds: c.kinds, exp: c.exp });
         }
         const joinCaps = [...extra];
-        for (const rec of await this.store.listCircles()) {
-          if (!rec.joinedByMe) continue;
-          const s2 = rec.statements[to];
-          if (s2?.op === "join" && CircleChain.fromStored(rec.chain).head.members.includes(to)) {
+        for (const rec2 of await this.store.listCircles()) {
+          if (!rec2.joinedByMe) continue;
+          const s2 = rec2.statements[to];
+          if (s2?.op === "join" && CircleChain.fromStored(rec2.chain).head.members.includes(to)) {
             const cap2 = joinCapOf(s2.jws);
             if (cap2) joinCaps.push(cap2);
           }
@@ -29531,28 +29531,66 @@ function touchesSecrets(command) {
 var str = (v) => typeof v === "string" && v !== "" ? v : void 0;
 var TMPDIR_ROOT = "@tmpdir";
 var SLASH_TMP_ROOTS = ["/tmp", "/private/tmp"];
-function writableRootsOf(p) {
-  const fs3 = p.file_system_sandbox_policy;
-  if (fs3 && typeof fs3 === "object" && fs3.kind === "restricted" && Array.isArray(fs3.entries)) {
-    const roots2 = [];
-    for (const e of fs3.entries) {
-      if (e?.access !== "write")
-        continue;
-      const path2 = e.path;
-      if (path2?.type === "path" && typeof path2.path === "string")
-        roots2.push(path2.path);
-      else if (path2?.type === "special" && path2.value?.kind === "slash_tmp")
-        roots2.push(...SLASH_TMP_ROOTS);
-      else if (path2?.type === "special" && path2.value?.kind === "tmpdir")
-        roots2.push(TMPDIR_ROOT);
-      else if (path2?.type === "special" && path2.value?.kind === "root")
-        return "all";
-      else
-        return void 0;
-    }
-    return roots2;
+var rec = (v) => typeof v === "object" && v !== null && !Array.isArray(v) ? v : void 0;
+var isAbsolutePath = (v) => typeof v === "string" && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(v);
+var NON_WRITE_ACCESS = /* @__PURE__ */ new Set(["read", "deny", "none"]);
+function writableFromEntries(entries) {
+  if (!Array.isArray(entries))
+    return void 0;
+  const roots = [];
+  for (const raw of entries) {
+    const e = rec(raw);
+    if (!e)
+      return void 0;
+    if (typeof e.access === "string" && NON_WRITE_ACCESS.has(e.access))
+      continue;
+    if (e.access !== "write")
+      return void 0;
+    const path2 = rec(e.path);
+    const kind = rec(path2?.value)?.kind;
+    if (path2?.type === "path" && isAbsolutePath(path2.path))
+      roots.push(path2.path);
+    else if (path2?.type === "special" && kind === "slash_tmp")
+      roots.push(...SLASH_TMP_ROOTS);
+    else if (path2?.type === "special" && kind === "tmpdir")
+      roots.push(TMPDIR_ROOT);
+    else if (path2?.type === "special" && kind === "root")
+      return "all";
+    else
+      return void 0;
   }
-  const sp = typeof p.sandbox_policy === "object" && p.sandbox_policy !== null ? p.sandbox_policy : { type: p.sandbox_policy };
+  return roots;
+}
+function sandboxFromEntries(entries) {
+  if (!Array.isArray(entries))
+    return void 0;
+  const access = entries.map((e) => rec(e)?.access);
+  if (access.some((a) => a === "write"))
+    return "workspace-write";
+  return access.every((a) => typeof a === "string" && NON_WRITE_ACCESS.has(a)) ? "read-only" : void 0;
+}
+function permissionProfileOf(profile) {
+  const pp = rec(profile);
+  if (pp?.type === "disabled")
+    return { sandbox: "danger-full-access", writable: "all" };
+  if (pp?.type === "external")
+    return { sandbox: "external-sandbox" };
+  if (pp?.type !== "managed" || pp.network !== "restricted" && pp.network !== "enabled")
+    return {};
+  const fs3 = rec(pp.file_system);
+  if (fs3?.type === "unrestricted")
+    return { sandbox: "danger-full-access", writable: "all" };
+  if (fs3?.type !== "restricted")
+    return {};
+  const sandbox = sandboxFromEntries(fs3.entries);
+  const writable = writableFromEntries(fs3.entries);
+  return { ...sandbox ? { sandbox } : {}, ...writable !== void 0 ? { writable } : {} };
+}
+function legacyWritable(p) {
+  const fs3 = rec(p.file_system_sandbox_policy);
+  if (fs3 && fs3.kind === "restricted" && Array.isArray(fs3.entries))
+    return writableFromEntries(fs3.entries);
+  const sp = rec(p.sandbox_policy) ?? { type: p.sandbox_policy };
   if (sp.type === "danger-full-access")
     return "all";
   if (sp.type === "read-only")
@@ -29569,6 +29607,25 @@ function writableRootsOf(p) {
     roots.push(...SLASH_TMP_ROOTS);
   return roots;
 }
+var hasLegacy = (p) => p.sandbox_policy !== void 0 || p.file_system_sandbox_policy !== void 0;
+function writableRootsOf(p) {
+  const profile = p.permission_profile === void 0 ? void 0 : permissionProfileOf(p.permission_profile).writable;
+  if (!hasLegacy(p))
+    return profile;
+  const legacy = legacyWritable(p);
+  if (legacy === void 0 || profile === void 0)
+    return legacy;
+  if (legacy === "all" || profile === "all")
+    return "all";
+  return [.../* @__PURE__ */ new Set([...legacy, ...profile])];
+}
+function sandboxOf(p) {
+  const legacy = rec(p.sandbox_policy) ? str(p.sandbox_policy.type) : str(p.sandbox_policy);
+  const profile = p.permission_profile === void 0 ? void 0 : permissionProfileOf(p.permission_profile).sandbox;
+  if (legacy === void 0)
+    return profile;
+  return legacy === "read-only" && profile !== void 0 ? profile : legacy;
+}
 function turnContextOf(line) {
   if (!line.includes('"turn_context"'))
     return null;
@@ -29577,7 +29634,7 @@ function turnContextOf(line) {
     if (v.type !== "turn_context" || typeof v.payload !== "object" || v.payload === null)
       return null;
     const p = v.payload;
-    const sandbox = typeof p.sandbox_policy === "object" && p.sandbox_policy !== null ? str(p.sandbox_policy.type) : str(p.sandbox_policy);
+    const sandbox = sandboxOf(p);
     const reviewer = str(p.approvals_reviewer);
     const turnId = str(p.turn_id);
     const cwd = str(p.cwd);
@@ -39178,10 +39235,10 @@ function extContext(app, ext, io2, json, confirm) {
     mayShareSessionContext: (ofSid, fromSid) => mayShareSessionContext(app, ofSid, fromSid),
     localMac: (data) => localMac(app, ext.ns, data),
     ownStatus: async (sid) => {
-      const rec = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
-      if (!rec) return void 0;
-      const d = displayStatus(rec.status);
-      return { ...rec.status.repo ? { repo: rec.status.repo } : {}, files: rec.status.files ?? [], ...d.caps ? { caps: d.caps } : {}, ...d.agents ? { agents: d.agents } : {} };
+      const rec2 = (await app.state.get("peers"))?.[sessKey(app.userId, sid)];
+      if (!rec2) return void 0;
+      const d = displayStatus(rec2.status);
+      return { ...rec2.status.repo ? { repo: rec2.status.repo } : {}, files: rec2.status.files ?? [], ...d.caps ? { caps: d.caps } : {}, ...d.agents ? { agents: d.agents } : {} };
     }
   };
 }
@@ -39913,10 +39970,10 @@ function docOf(cur) {
   };
 }
 var short = (s2, max) => typeof s2 === "string" ? sanitizePeerText(s2, max).trim() : "";
-function statusFiles(rec) {
+function statusFiles(rec2) {
   const out = /* @__PURE__ */ new Set();
-  for (const f of rec.status.files ?? []) if (typeof f === "string") out.add(f);
-  for (const a of rec.status.agents ?? []) for (const f of a.files ?? []) if (typeof f === "string") out.add(f);
+  for (const f of rec2.status.files ?? []) if (typeof f === "string") out.add(f);
+  for (const a of rec2.status.agents ?? []) for (const f of a.files ?? []) if (typeof f === "string") out.add(f);
   return [...out];
 }
 function gather(doc, recs, ended, now = Date.now(), recordable = () => true) {
@@ -39933,30 +39990,30 @@ function gather(doc, recs, ended, now = Date.now(), recordable = () => true) {
     next.queue.push(item);
     queued++;
   };
-  for (const rec of recs) {
-    const sid = rec.sid;
+  for (const rec2 of recs) {
+    const sid = rec2.sid;
     if (!recordable(sid)) continue;
     let s2 = next.sessions[sid];
     const isEnded = ended(sid);
     if (!s2) {
-      if (isEnded || now - rec.ts > GRAPH_MEMORY_FRESH_MS) continue;
+      if (isEnded || now - rec2.ts > GRAPH_MEMORY_FRESH_MS) continue;
       s2 = { start: now, files: [] };
-      push({ sid, kind: "start", at: rec.ts, label: short(rec.status.label, 64) || "session", ...rec.status.repo ? { repo: short(rec.status.repo, 200) } : {}, ...rec.status.branch ? { branch: short(rec.status.branch, 128) } : {} });
+      push({ sid, kind: "start", at: rec2.ts, label: short(rec2.status.label, 64) || "session", ...rec2.status.repo ? { repo: short(rec2.status.repo, 200) } : {}, ...rec2.status.branch ? { branch: short(rec2.status.branch, 128) } : {} });
     }
     if (s2.ended) continue;
-    const summary3 = short(rec.status.summary, 280);
+    const summary3 = short(rec2.status.summary, 280);
     if (summary3 && summary3 !== s2.summary) {
-      push({ sid, kind: "status", at: rec.status.summaryAt ?? rec.ts, summary: summary3 });
+      push({ sid, kind: "status", at: rec2.status.summaryAt ?? rec2.ts, summary: summary3 });
       s2 = { ...s2, summary: summary3 };
     }
     const known2 = new Set(s2.files);
-    const fresh = statusFiles(rec).filter((f) => !known2.has(f));
+    const fresh = statusFiles(rec2).filter((f) => !known2.has(f));
     if (fresh.length > 0) {
-      push({ sid, kind: "files", at: rec.ts, files: fresh });
+      push({ sid, kind: "files", at: rec2.ts, files: fresh });
       s2 = { ...s2, files: [...s2.files, ...fresh].slice(-GRAPH_MEMORY_FILES_MAX) };
     }
     if (isEnded) {
-      push({ sid, kind: "end", at: rec.ts });
+      push({ sid, kind: "end", at: rec2.ts });
       s2 = { ...s2, ended: now };
     }
     next.sessions[sid] = s2;
@@ -41078,8 +41135,8 @@ async function userChecks(c, app, userId, ms, mine) {
   const ours = new Set(app.relays);
   const fromCircles = [];
   for (const s2 of standing) {
-    const rec = (await bounded(store2.getCircle(s2.cid), ms)).value;
-    const st = rec?.statements[me];
+    const rec2 = (await bounded(store2.getCircle(s2.cid), ms)).value;
+    const st = rec2?.statements[me];
     const cap2 = st?.op === "join" ? joinCapOf(st.jws) : void 0;
     const p = cap2 ? capPeek(cap2) : void 0;
     if (p && p.exp > nowS + 60) fromCircles.push({ relays: p.relays, exp: p.exp });
