@@ -309,10 +309,10 @@ function certLabel(cert: string | undefined): string {
   }
 }
 
-/** Our own identity's chain, verified (or undefined); pending heads never narrow our own view (#65 review M1). */
+/** Our own identity's chain, verified (or undefined); pending heads (and #92 left-out versions) never narrow our own view (#65 review M1). */
 async function ownChain(app: App): Promise<IdentityChain | undefined> {
   const stored = await app.store.getIdentity(app.userId);
-  return stored && stored.versions.length > 0 ? IdentityChain.fromStored({ ...stored, pendingHeads: [] }) : undefined;
+  return stored && stored.versions.length > 0 ? IdentityChain.fromStored({ ...stored, pendingHeads: [], leftOut: [] }) : undefined;
 }
 
 /**

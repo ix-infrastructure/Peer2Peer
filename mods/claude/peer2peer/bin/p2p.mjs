@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.3 0f3dd1701626c868
+// @peer2peer/core 0.1.3 78a231532d30e0f5
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7028,6 +7028,33 @@ function revokedStep(v, get) {
     return [];
   return p.devices.filter((d) => !v.devices.includes(d) && (!o || o.devices.includes(d)));
 }
+function validRevokedStep(v, get) {
+  const p = v.prev ? get(v.prev) : void 0;
+  if (!p)
+    return [];
+  const o = v.merge !== void 0 ? get(v.merge) : void 0;
+  if (v.merge !== void 0 && !o)
+    return [];
+  try {
+    checkLink(p, v, o);
+  } catch (e) {
+    if (!(e instanceof P2PError))
+      throw e;
+    return [];
+  }
+  return revokedStep(v, get);
+}
+function sharedByTips(tips, denied) {
+  if (tips.length === 0)
+    return { devices: [], keyholders: [] };
+  return {
+    devices: tips[0].devices.filter((d) => !denied.has(d) && tips.every((t2) => t2.devices.includes(d))),
+    keyholders: tips[0].keyholders.filter((d) => tips.every((t2) => t2.keyholders.includes(d)))
+  };
+}
+function narrows(d, shared) {
+  return shared.devices.some((x) => !d.devices.includes(x)) || shared.keyholders.some((x) => !d.keyholders.includes(x));
+}
 function sendersOf(v) {
   return Array.isArray(v) ? v.filter((r) => typeof r === "string").slice(0, MAX_SENDERS) : [];
 }
@@ -7120,6 +7147,8 @@ var init_identitydoc = __esm({
       pending = [];
       /** Which relays sent each pending head (#78). */
       pendingFrom = /* @__PURE__ */ new Map();
+      /** Current versions an incomplete refresh left out at or below the head (#92, see noteLeftOut). */
+      left = [];
       /** Where the last incomplete refresh's walk stopped (#67, see setWalkAnchors). */
       anchors = [];
       /** Which relays sent each anchor (#67 re-review G2). */
@@ -7149,6 +7178,13 @@ var init_identitydoc = __esm({
               c.pendingFrom.set(p.hash, from);
           }
         }
+        for (const j of s2.leftOut ?? []) {
+          const p = verifyIdentityDocSignature(j);
+          if (p.iss !== s2.iss)
+            fail("issuer-mismatch", "stored left-out version of another identity");
+          if (pendingUsable(p, opts))
+            c.left.push(p);
+        }
         for (const j of s2.walkAnchors ?? []) {
           const a = verifyIdentityDocSignature(j);
           if (a.iss !== s2.iss)
@@ -7161,7 +7197,7 @@ var init_identitydoc = __esm({
         const stored2 = new Map(docs.map((d) => [d.hash, d]));
         const drop = (d) => {
           dropped.add(d.hash);
-          for (const x of revokedStep(d, (h) => stored2.get(h)))
+          for (const x of validRevokedStep(d, (h) => stored2.get(h)))
             c.denied.add(x);
         };
         for (const d of docs) {
@@ -7201,6 +7237,7 @@ var init_identitydoc = __esm({
           // Each dropped once the held head reaches its ver.
           ...this.pendingCap().length > 0 ? { pendingHeads: this.pendingCap().map((d) => d.jws) } : {},
           ...this.pendingCap().some((d) => this.pendingFrom.has(d.hash)) ? { pendingHeadRelays: Object.fromEntries(this.pendingCap().filter((d) => this.pendingFrom.has(d.hash)).map((d) => [d.hash, [...this.pendingFrom.get(d.hash)]])) } : {},
+          ...this.leftOutCap().length > 0 ? { leftOut: this.leftOutCap().map((d) => d.jws) } : {},
           ...this.walkAnchors().length > 0 ? { walkAnchors: this.walkAnchors().map((d) => d.jws) } : {},
           ...this.walkAnchors().some((d) => this.anchorFrom.has(d.hash)) ? { walkAnchorRelays: Object.fromEntries(this.walkAnchors().filter((d) => this.anchorFrom.has(d.hash)).map((d) => [d.hash, [...this.anchorFrom.get(d.hash)]])) } : {}
         };
@@ -7321,6 +7358,8 @@ var init_identitydoc = __esm({
        */
       clearPending(opts = {}) {
         const before = this.pendingCap().map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+        const hadLeft = this.leftOutCap().length > 0;
+        this.left = [];
         const keep = new Set(opts.keepSentBy ?? []);
         const from = /* @__PURE__ */ new Map();
         for (const d of this.pendingCap()) {
@@ -7331,7 +7370,63 @@ var init_identitydoc = __esm({
         this.pending = this.pendingCap().filter((d) => from.has(d.hash));
         this.pendingFrom = from;
         const after2 = this.pending.map((d) => `${d.hash}:${(this.pendingFrom.get(d.hash) ?? []).join(",")}`);
+        return hadLeft || after2.length !== before.length || after2.some((h) => !before.includes(h));
+      }
+      /**
+       * #92: records `docs`, current versions at or below the held head that an incomplete refresh left out because
+       * each lists less than the head and nothing connects it (RefreshedView.incomplete with a version held back),
+       * beside those already recorded. While one is recorded and not held, the view trusts only what it lists too,
+       * as pending heads narrow above the head: so a key holder's head stored first doesn't keep a device trusted
+       * that the owner's version below it revoked, when the relays no longer hold that version's parent (which would
+       * place it as a fork, addForkRoot).
+       *  - Narrowing only, never the denylist (what the left-out version revoked isn't known without its parent).
+       *  - Temporary: one past its `exp` (or issued in the future) is ignored, one placed in the chain no longer
+       *    counts, and the next complete refresh a majority of the listed relays answered clears them (clearPending).
+       *  - Only the ones that narrow are kept, and none that narrows is evicted for one that doesn't: a candidate is
+       *    redundant when everything it leaves out is already left out by a kept one lasting at least as long, so a
+       *    key holder's many versions listing the device can't push out the owner's one leaving it out. At most
+       *    MAX_PENDING_HEADS. Returns whether anything changed.
+       */
+      noteLeftOut(docs, opts = {}) {
+        if (this.versions.size === 0)
+          return false;
+        const before = this.leftOutCap().map((d) => d.hash);
+        const byHash = new Map(this.leftOutCap().map((d) => [d.hash, d]));
+        for (const d of docs) {
+          if (d.iss !== this.iss)
+            fail("issuer-mismatch", `document of ${d.iss}, chain of ${this.iss}`);
+          if (!this.versions.has(d.hash) && pendingUsable(d, opts))
+            byHash.set(d.hash, d);
+        }
+        const universe = /* @__PURE__ */ new Set();
+        for (const t2 of this.tips()) {
+          for (const x of t2.devices)
+            universe.add(`d:${x}`);
+          for (const x of t2.keyholders)
+            universe.add(`k:${x}`);
+        }
+        const covered = /* @__PURE__ */ new Map();
+        const kept = [];
+        for (const d of [...byHash.values()].sort((a, b) => b.exp - a.exp || b.ver - a.ver || asciiCompare(b.hash, a.hash))) {
+          const lists = /* @__PURE__ */ new Set([...d.devices.map((x) => `d:${x}`), ...d.keyholders.map((x) => `k:${x}`)]);
+          const leaves = [...universe].filter((x) => !lists.has(x));
+          if (leaves.length === 0 || leaves.every((x) => (covered.get(x) ?? -Infinity) >= d.exp))
+            continue;
+          kept.push(d);
+          for (const x of leaves)
+            covered.set(x, Math.max(covered.get(x) ?? -Infinity, d.exp));
+          if (kept.length >= MAX_PENDING_HEADS)
+            break;
+        }
+        this.left = kept;
+        const after2 = this.leftOutCap().map((d) => d.hash);
         return after2.length !== before.length || after2.some((h) => !before.includes(h));
+      }
+      /** The recorded left-out versions not held (#92). */
+      leftOutCap() {
+        if (this.left.length === 0 || this.versions.size === 0)
+          return [];
+        return this.left.filter((d) => !this.versions.has(d.hash));
       }
       /** The pending heads still newer than the held head (#35). */
       pendingCap() {
@@ -7481,11 +7576,12 @@ var init_identitydoc = __esm({
           const below = this.extendDown(peek.hash, jws, opts);
           if (below)
             return below;
-          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver && this.tips().filter((t2) => pendingUsable(t2, opts)).length < MAX_SIDE_ROOTS) {
+          if (opts.asRoot === true && !this.anchored && peek.ver === this.view().head.ver) {
             const doc2 = verifyIdentityDoc(jws, opts);
             if (doc2.ik !== held2.ik)
               fail("issuer-mismatch", "a different ik for this userId");
-            if (pendingUsable(doc2, opts)) {
+            const tips = this.tips();
+            if (pendingUsable(doc2, opts) && (tips.filter((t2) => pendingUsable(t2, opts)).length < MAX_SIDE_ROOTS || narrows(doc2, sharedByTips(tips, this.denied)))) {
               this.placeOver(doc2);
               return { status: "accepted", doc: doc2, unanchored: true };
             }
@@ -7507,6 +7603,81 @@ var init_identitydoc = __esm({
           this.checkNoReturn(doc, parent);
         this.placeOver(doc);
         return { status: "accepted", doc };
+      }
+      /**
+       * #92: on unanchored history, places `jws`, a current version below the held head whose parent isn't held, as
+       * another unanchored root (a tip beside the head: a fork), with its parents from `below` placed under it (as
+       * extendDown places a root's parents), when that proves it is a fork: along the line from `jws` down through
+       * `below` (signature-verified versions of this identity; each link checked by the chain rules), a device every
+       * held tip lists (not denied) was revoked.
+       * A revoked did never returns and a merge never adds one, so no held tip descends from `jws`: it isn't an
+       * old version of the head's own line (an honest relay's stale tip never qualifies), and the view intersecting
+       * it is what it would be had the two connected. That is a key holder's branch stored first (head v8' keeping a
+       * device) against the owner's later revoking version (v4) whose ancestry the relays kept only from v2 or v3 up.
+       * Placed like a side root, but past MAX_SIDE_ROOTS too: it always narrows (it leaves out the revoked device),
+       * at most once per device the tips share. Returns whether it was placed; nothing changes otherwise (a broken
+       * link, a re-listed revoked device, nothing revoked that every tip lists, the history anchored, at the cap).
+       */
+      addForkRoot(jws, below, opts = {}) {
+        const held2 = this.anyHeld();
+        if (!held2 || this.anchored || below.length === 0 || this.versions.size + 1 + below.length > MAX_CHAIN_VERSIONS)
+          return false;
+        const doc = verifyIdentityDoc(jws, opts);
+        if (doc.iss !== this.iss)
+          fail("issuer-mismatch", `document of ${doc.iss}, chain of ${this.iss}`);
+        if (doc.ik !== held2.ik)
+          fail("issuer-mismatch", "a different ik for this userId");
+        const tips = this.tips();
+        if (this.versions.has(doc.hash) || !pendingUsable(doc, opts) || doc.ver >= tips[0].ver)
+          return false;
+        if (doc.prev === null || this.versions.has(doc.prev))
+          return false;
+        const supplied = /* @__PURE__ */ new Map();
+        for (const d of below) {
+          if (d.iss !== this.iss || d.ik !== held2.ik)
+            fail("issuer-mismatch", "a different identity's version below a root");
+          supplied.set(d.hash, d);
+        }
+        const get = (h) => supplied.get(h) ?? this.versions.get(h);
+        const line = [doc];
+        for (let c = doc; line.length <= supplied.size; ) {
+          const p = c.prev ? supplied.get(c.prev) : void 0;
+          if (!p || this.versions.has(p.hash))
+            break;
+          const o = c.merge !== void 0 ? get(c.merge) : void 0;
+          if (c.merge !== void 0 && !o)
+            break;
+          try {
+            checkLink(p, c, o);
+          } catch (e) {
+            if (!(e instanceof P2PError))
+              throw e;
+            return false;
+          }
+          line.push(p);
+          c = p;
+        }
+        if (line.length < 2)
+          return false;
+        const revoked = /* @__PURE__ */ new Set();
+        for (let i = line.length - 2; i >= 0; i--) {
+          const c = line[i];
+          const p = line[i + 1];
+          if (c.merge === void 0 && c.devices.some((d) => !p.devices.includes(d) && (revoked.has(d) || this.denied.has(d))))
+            return false;
+          for (const d of revokedStep(c, get))
+            revoked.add(d);
+        }
+        if (!sharedByTips(tips, this.denied).devices.some((d) => revoked.has(d)))
+          return false;
+        this.placeOver(doc);
+        for (const p of line.slice(1)) {
+          if (!this.versions.has(line[line.indexOf(p) - 1].hash))
+            break;
+          if (this.add(p.jws, { ...opts, replace: false }).status !== "accepted")
+            break;
+        }
+        return true;
       }
       /**
        * #79: on unanchored history, `jws` (whose own parent isn't held) placed as the parent of the held versions
@@ -7594,7 +7765,7 @@ var init_identitydoc = __esm({
             stack.push(c.hash);
         }
         for (const h of doomed)
-          for (const d of revokedStep(this.versions.get(h), (x) => this.versions.get(x)))
+          for (const d of validRevokedStep(this.versions.get(h), (x) => this.versions.get(x)))
             this.denied.add(d);
         for (const h of doomed)
           this.versions.delete(h);
@@ -7778,7 +7949,7 @@ var init_identitydoc = __esm({
         if (tips.length === 0)
           fail("identity-unknown", `no identity document for ${this.iss}`);
         const head = tips[0];
-        const cap2 = this.pendingCap();
+        const cap2 = [...this.pendingCap(), ...this.leftOutCap()];
         const strays = this.strays();
         const strayTips = strays.size === 0 ? [] : this.rawTips().filter((t2) => strays.has(t2.hash));
         const strayRevoked = new Set(strayTips.flatMap((t2) => [...this.revokedAlong(t2.hash)]));
@@ -11201,7 +11372,37 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     }
   }
   const besideHead = [];
+  let leftOutDocs = [];
   let heldBackBy = [];
+  const forkRoots = /* @__PURE__ */ new Map();
+  if (!exhausted && chain.size > 0 && !chain.anchored) {
+    begin2();
+    const headVer = chain.view().head.ver;
+    const unplaced = new Map(gaps.map((g) => [g.d.hash, g.d]));
+    for (const g of gaps) {
+      if (!servedTip.has(g.d.hash) || g.d.ver >= headVer || rejected.has(g.d.hash) || chain.has(g.d.hash) || overBudget())
+        continue;
+      const below = [];
+      for (let d = unplaced.get(g.d.prev ?? ""); d && below.length < CHAIN_WALK_PAGE && !below.includes(d); d = d.prev ? unplaced.get(d.prev) : void 0)
+        below.push(d);
+      if (below.length === 0)
+        continue;
+      try {
+        if (chain.addForkRoot(g.d.jws, below, { now, skewSec: opts.skewSec })) {
+          forkRoots.set(g.d.jws, below);
+          for (const d of [g.d, ...below])
+            if (chain.has(d.hash) && !accepted.includes(d.jws))
+              accepted.push(d.jws);
+        }
+      } catch (e) {
+        if (!(e instanceof P2PError))
+          throw e;
+      }
+    }
+    if (forkRoots.size > 0)
+      gaps = gaps.filter((g) => !chain.has(g.d.hash));
+    end();
+  }
   if (!incomplete && !replacing && chain.size > 0 && !chain.anchored) {
     begin2();
     const headVer = chain.view().head.ver;
@@ -11236,6 +11437,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       docsCapped = true;
       incomplete = true;
       heldBackBy = heldBackOf(head, leftOut);
+      if (!opts.own)
+        leftOutDocs = leftOut.filter((e) => !chain.has(e.hash) && e.ver <= chain.view().head.ver);
     }
   }
   if (replacing && !incomplete) {
@@ -11245,7 +11448,10 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   const pending = incomplete ? tips.filter((d) => !rejected.has(d.hash)) : [];
   const majority = listed.filter((r) => answeredRelays.has(r)).length * 2 > listed.length;
   const sentFrom = (h) => relays.filter((r) => sentBy.get(r)?.has(h));
-  const pendingChange = (c) => incomplete ? c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom) : majority ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {}) : false;
+  const pendingChange = (c) => incomplete ? (
+    // Both (no short-circuit): pending heads above the head, and left-out versions at or below it (#92).
+    [c.notePending(pending, { now, skewSec: opts.skewSec }, sentFrom), c.noteLeftOut(leftOutDocs, { now, skewSec: opts.skewSec })].some(Boolean)
+  ) : majority ? c.clearPending(opts.own ? { keepSentBy: relays.filter((r) => !answeredRelays.has(r)) } : {}) : false;
   const tipHashes = new Set(tips.map((d) => d.hash));
   const gapHashes = new Set(gaps.map((g) => g.d.hash));
   const wasAnchor = new Set(anchors.map((d) => d.hash));
@@ -11273,7 +11479,11 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const anchoredAtCommit = c.size > 0 && c.anchored;
     for (const j of accepted) {
       try {
-        c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
+        const below = forkRoots.get(j);
+        if (below !== void 0)
+          c.addForkRoot(j, below, { now, skewSec: opts.skewSec });
+        else
+          c.add(j, { now, skewSec: opts.skewSec, replace: false, asRoot: besideHead.includes(j) });
       } catch (e) {
         if (!(e instanceof P2PError))
           throw e;
@@ -11369,8 +11579,9 @@ async function getIdentityView(store2, userId, opts = {}) {
   if (!raw || raw.versions.length === 0)
     return void 0;
   const pendingHeads = opts.ignorePending ? [] : usablePendingHeads(raw, { now: opts.now });
-  const stored2 = { ...raw, pendingHeads };
-  const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}${stored2.anchoredGenesis?.length ? jwsHash(stored2.anchoredGenesis.join(".")) : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}`;
+  const leftOut = opts.ignorePending ? [] : usablePendingHeads({ ...raw, pendingHeads: raw.leftOut }, { now: opts.now });
+  const stored2 = { ...raw, pendingHeads, leftOut };
+  const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}${stored2.anchoredGenesis?.length ? jwsHash(stored2.anchoredGenesis.join(".")) : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}:${leftOut.length > 0 ? jwsHash(leftOut.join(".")) : ""}`;
   let cache2 = viewCache.get(store2);
   if (!cache2)
     viewCache.set(store2, cache2 = /* @__PURE__ */ new Map());
@@ -22152,7 +22363,7 @@ function certLabel(cert) {
 }
 async function ownChain(app) {
   const stored2 = await app.store.getIdentity(app.userId);
-  return stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored({ ...stored2, pendingHeads: [] }) : void 0;
+  return stored2 && stored2.versions.length > 0 ? IdentityChain.fromStored({ ...stored2, pendingHeads: [], leftOut: [] }) : void 0;
 }
 async function preRotationHead(app) {
   const chain = await ownChain(app);
@@ -28399,7 +28610,7 @@ var init_app = __esm({
         }
         const head = view.head;
         const stored2 = await this.store.getIdentity(this.userId);
-        const plan = stored2 && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored2, pendingHeads: [] }), preTips, unionDevices, view.devices, head.hash, stored2.denied ?? []) : { readd: [], skipped: [] };
+        const plan = stored2 && merges.length > 0 ? planReadd(IdentityChain.fromStored({ ...stored2, pendingHeads: [], leftOut: [] }), preTips, unionDevices, view.devices, head.hash, stored2.denied ?? []) : { readd: [], skipped: [] };
         for (const d of plan.skipped) this.warn(`device ${d} was dropped by the merge of your identity document's branches; link it again (this device's copy of the history can't prove it wasn't revoked)`);
         const readd = plan.readd;
         const devices2 = [...view.devices, ...readd].slice(0, MAX_DEVICES);
