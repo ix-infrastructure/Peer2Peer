@@ -12,15 +12,20 @@
 //  - a thief's device on its own branch rotates the same way, and the owner's contest makes it a conflict;
 //  - a resume after the merge landed but the final version didn't, with a pinned final version the relays
 //    never take, finishes.
+// #91 (low follow-ups from #89's review): a branch picked by provenance among others is shown, never silent; a
+// re-plan doesn't ignore a new --branch; a thief's rotation out meanwhile points a resume to the contest; what the
+// branch summaries print is checked again (relay URLs and device ids only).
 
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addIdentityVersion, b64uDecode, createDeviceCert, createIdentityDoc, generateDeviceKeysV3, identityKeyFromSeed, jwsHash, mergePrevTip, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { formatRotationPlan } from "../format.js";
 import { linkJoin, linkStart } from "../identity.js";
 import { receiving } from "../inbound.js";
 import { publishOver, RelayConnection } from "../relay-client.js";
-import { readRotationState, rotate } from "../rotation.js";
+import { branchSummary, readRotationState, rotate, rotationLockOf } from "../rotation.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R1 = "wss://relay-fork-one.test/v3";
@@ -235,12 +240,22 @@ describe("#75 review: which branch is the owner's", () => {
   }
 
   it("a branch whose versions come from a device this one never listed loses, at any ver; the final takes the owner's relays", async () => {
-    const { u, m } = await setup("gus", () => "");
-    const plan = await u.ok(["identity", "rotate", "--plan"]);
+    const { u, o, t1, m } = await setup("gus", () => "");
+    const run = await u.run(["identity", "rotate", "--plan"]);
+    expect(run.code, run.err).toBe(0);
+    const plan = run.json;
     // The plan lists O's devices (B and C), from the branch whose versions came from a listed device: T1,
     // at the higher ver, would have listed the other device too (and named RX).
     expect(plan.follow.map((d: any) => d.label).sort()).toEqual(["laptop", "phone"]);
-    expect(JSON.stringify(plan)).not.toContain(m);
+    expect(JSON.stringify([plan.follow, plan.excluded])).not.toContain(m);
+    // #91: never silently: the other branch that still lists this device is warned about and shown in the plan.
+    expect(plan.branch).toBe(o.hash);
+    expect(plan.otherBranches).toEqual([{ hash: t1, ver: o.ver + 1, by: [m], relays: [R1, RX] }]);
+    expect(run.err).toContain(t1);
+    expect(run.err).toContain("--plan --branch <hash>");
+    const text = formatRotationPlan(plan);
+    expect(text).toContain(`builds on the branch ${o.hash}`);
+    expect(text).toContain(`${t1} (ver ${o.ver + 1}, published by ${m}; relays ${R1}, ${RX})`);
     const res = await u.run(["identity", "rotate", "--resume", "--yes", "--wait", "1", "--backup-file"]);
     expect(res.code, `${res.out}\n${res.err}`).toBe(0);
     const [final] = await relayTips(ids.gus);
@@ -255,11 +270,29 @@ describe("#75 review: which branch is the owner's", () => {
     expect(amb.json.error).toBe("branch_ambiguous");
     expect(amb.json.branches.map((b: any) => b.hash).sort()).toEqual([o.hash, t1].sort());
     expect(amb.json.branches.find((b: any) => b.hash === t1).relays).toEqual([R1, RX]);
+    // #91: what the error echoes from the other branch is relay URLs and device ids only.
+    for (const b of amb.json.branches) {
+      for (const r of b.relays) expect(r).toMatch(/^wss:\/\/[\x21-\x7e]+$/);
+      for (const d of b.by) expect(d).toMatch(/^d_[a-z2-7]{26}$/);
+    }
     expect((await u.run(["identity", "rotate", "--plan", "--branch", "nope"])).json.error).toBe("usage");
     // The user picks the thief's branch by mistake: the final version still names only the owner's relays.
     const plan = await u.run(["identity", "rotate", "--plan", "--branch", t1]);
     expect(plan.code, plan.err).toBe(0);
     expect(plan.err).toContain(RX);
+    expect(plan.json.branch).toBe(t1);
+    // #91: the plan made is reused, so another --branch is refused (drop the plan first), on --plan and --resume.
+    for (const args of [
+      ["--plan", "--branch", o.hash],
+      ["--resume", "--yes", "--branch", o.hash, "--wait", "1"],
+    ]) {
+      const again = await u.run(["identity", "rotate", ...args]);
+      expect(again.json.error, again.err).toBe("usage");
+      expect(again.json.reason).toContain(`builds on the branch ${t1}`);
+      expect(again.json.reason).toContain("p2p identity rotate --cancel");
+    }
+    // The same branch again is fine.
+    expect((await u.run(["identity", "rotate", "--plan", "--branch", t1])).code).toBe(0);
     const res = await u.run(["identity", "rotate", "--resume", "--yes", "--wait", "1", "--backup-file"]);
     expect(res.code, `${res.out}\n${res.err}`).toBe(0);
     const [final] = await relayTips(ids.hal);
@@ -349,4 +382,166 @@ describe("#75 review: the thief's side, and a resume", () => {
     await jo.ok(["held", "approve", items[0].id]);
     expect((await jo.ok(["friends"])).friends.map((f: any) => f.userId)).toContain(res.json.to);
   }, 240_000);
+});
+
+describe("#91: a thief's rotation while the owner's is under way", () => {
+  it("--resume points to the contest (not to another --resume); --resume --contest finishes it as a competing one", async () => {
+    const kim = user("kim");
+    const kim2 = user("kim2");
+    const kim3 = user("kim3");
+    const lee = user("lee");
+    await init(kim);
+    await init(lee);
+    await link(kim, kim2, "stolen", true);
+    // Another key holder of kim's, on her own branch: it gets the rotation to follow.
+    await link(kim, kim3, "tablet", true);
+    await befriend(kim, lee);
+    await kim2.ok(["friends"]);
+    const kim2Did = keysOf(kim2).did;
+    // kim revokes the stolen key holder; its thief had published a sibling of that revocation that lists it.
+    await kim.ok(["devices", "revoke", kim2Did]);
+    await connectingFork(kim, { devices: [kim2Did] });
+    // kim's rotation from her own branch, interrupted before its final version.
+    {
+      const app = await kim.app();
+      await app.load();
+      receiving(app);
+      await expect(rotate(app, { yes: true, backupFileDefault: true, waitSec: 1, stopAfter: "social" })).rejects.toThrow(/stopped after social/);
+      await app.close();
+    }
+    const st = (await readRotationState(kim.home))!;
+    expect(st.ownBranch).toBeDefined();
+    expect(st.devices[keysOf(kim3).did]?.status).not.toBe("excluded");
+    // No rotation of kim's to contest yet: --resume --contest is refused.
+    const early = await kim.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+    expect(early.json.error, early.err).toBe("usage");
+    expect(early.json.reason).toMatch(/no rotation of your identity to contest/);
+    // The thief's rotation goes out meanwhile.
+    const thief = await kim2.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(thief.code, `${thief.out}\n${thief.err}`).toBe(0);
+    const res = await kim.run(["identity", "rotate", "--resume", "--yes", "--wait", "1"]);
+    expect(res.code).not.toBe(0);
+    expect(res.json.error, res.err).toBe("identity_rotated");
+    expect(res.json.to).toEqual([thief.json.to]);
+    // Named by the device that signed it, so kim can tell it isn't one of hers she still has.
+    expect(res.json.by).toEqual([kim2Did]);
+    expect(res.json.reason).toContain(kim2Did);
+    expect(res.json.reason).toContain("p2p identity rotate --resume --contest");
+    expect(res.json.reason).not.toMatch(/run `p2p identity rotate --resume`/);
+    const contest = await kim.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+    expect(contest.code, `${contest.out}\n${contest.err}`).toBe(0);
+    expect(contest.json).toMatchObject({ contest: true, step: "done" });
+    // Past the devices step: the key holder that was sent the rotation is named, to revoke on the new identity if lost.
+    expect(contest.err).toContain(keysOf(kim3).did);
+    expect(contest.err).toMatch(/holds your identity key/);
+    // In the fork case the competing final version reaches no relay (the thief's final is terminal, and a restricted
+    // connection takes only a version on top of every held tip): the friends' conflict comes from the invites.
+    expect(contest.json.finalPublished).toBe(false);
+    const tips = await relayTips(ids.kim);
+    expect(tips.filter((t) => t.rotation !== undefined)).toHaveLength(1);
+    expect(JSON.stringify(tips)).not.toContain(contest.json.to);
+    const items = (await lee.ok(["held"])).held.filter((h: any) => h.type === "rotation");
+    // lee holds the contest's invite; the old identity's head carries the thief's rotation: a conflict, neither applies.
+    expect(items.map((h: any) => h.from)).toContain(contest.json.to);
+    for (const h of items) expect((await lee.run(["held", "approve", h.id])).json.error).toBe("rotation_conflict");
+  }, 240_000);
+});
+
+describe("#91: --resume --contest on a plan not yet accepted", () => {
+  it("is refused (the plan never dropped the devices that could have published the rotation): --cancel, then --contest", async () => {
+    const mia = user("mia");
+    const mia2 = user("mia2");
+    await init(mia);
+    await link(mia, mia2, "stolen", true);
+    const mia2Did = keysOf(mia2).did;
+    await mia.ok(["devices", "revoke", mia2Did]);
+    await connectingFork(mia, { devices: [mia2Did] });
+    const plan = await mia.run(["identity", "rotate", "--plan"]);
+    expect(plan.code, plan.err).toBe(0);
+    const thief = await mia2.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(thief.code, `${thief.out}\n${thief.err}`).toBe(0);
+    {
+      // mia's device sees the thief's rotation (a refresh brings it in).
+      const app = await mia.app();
+      await app.load();
+      await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+      await app.close();
+    }
+    const r = await mia.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+    expect(r.json.error, r.err).toBe("usage");
+    expect(r.json.reason).toContain("p2p identity rotate --cancel");
+    expect(r.json.reason).toContain("p2p identity rotate --contest");
+    const st = (await readRotationState(mia.home))!;
+    expect([st.step, st.accepted ?? false, st.contest ?? false]).toEqual(["created", false, false]);
+    expect((await mia.run(["identity", "rotate", "--cancel"])).json.cancelled).toBe(true);
+    const contest = await mia.run(["identity", "rotate", "--contest", "--yes", "--wait", "1", "--backup-file"]);
+    expect(contest.code, `${contest.out}\n${contest.err}`).toBe(0);
+    expect(contest.json).toMatchObject({ contest: true, step: "done" });
+  }, 240_000);
+});
+
+describe("#91 review: --resume --contest past acceptance, before any link code went out", () => {
+  it("drops the key holders that could have published the contested rotation (no code goes to them); one run at a time", async () => {
+    const nia = user("nia");
+    const nia2 = user("nia2");
+    const nia3 = user("nia3");
+    await init(nia);
+    await link(nia, nia2, "stolen", true);
+    await link(nia, nia3, "tablet", true);
+    const nia2Did = keysOf(nia2).did;
+    const nia3Did = keysOf(nia3).did;
+    await nia.ok(["devices", "revoke", nia2Did]);
+    await connectingFork(nia, { devices: [nia2Did] });
+    {
+      const app = await nia.app();
+      await app.load();
+      receiving(app);
+      await expect(rotate(app, { yes: true, backupFileDefault: true, waitSec: 1, stopAfter: "published" })).rejects.toThrow(/stopped after published/);
+      await app.close();
+    }
+    expect((await readRotationState(nia.home))!.devices[nia3Did]?.status).toBe("pending");
+    const thief = await nia2.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(thief.code, `${thief.out}\n${thief.err}`).toBe(0);
+    {
+      const app = await nia.app();
+      await app.load();
+      await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+      await app.close();
+    }
+    // Another run holds the rotation lock (a live process): refused, nothing changed.
+    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    try {
+      writeFileSync(rotationLockOf(nia.home), `${other.pid}\n`);
+      const busy = await nia.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+      expect(busy.json.error, busy.err).toBe("rotation_in_progress");
+      expect(busy.json.reason).toMatch(/another .* run is in progress/);
+      expect((await readRotationState(nia.home))!.contest).toBeUndefined();
+    } finally {
+      other.kill();
+    }
+    await new Promise((r) => other.once("exit", r));
+    // That process is gone: its lock is taken over.
+    const contest = await nia.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+    expect(contest.code, `${contest.out}\n${contest.err}`).toBe(0);
+    expect(contest.json).toMatchObject({ contest: true, step: "done" });
+    expect(contest.json.devices.excluded.map((x: any) => x.did)).toContain(nia3Did);
+    expect(contest.json.devices.followed.map((x: any) => x.did)).not.toContain(nia3Did);
+    expect(contest.json.devices.offline.map((x: any) => x.did)).not.toContain(nia3Did);
+  }, 240_000);
+});
+
+describe("#91: branch summaries print relay URLs and device ids only", () => {
+  it("core keeps anything else out of a verified version, and the summary checks again", () => {
+    const ik = identityKeyFromSeed(new Uint8Array(32).fill(7));
+    const d = generateDeviceKeysV3(ik.userId).did;
+    const base = { ver: 1, prev: null, name: "x", devices: [d], keyholders: [d], by: d };
+    // Core: a relay URL that isn't canonical (control characters, bidi overrides, userinfo) never gets in.
+    for (const r of ["wss://r.test/v3\u001b[2J", "wss://r.test/\u202ev3", "wss://user@r.test/v3", "wss://r.test/v3?x=1"]) {
+      expect(() => createIdentityDoc(ik, { ...base, relays: [r] })).toThrow();
+    }
+    expect(() => createIdentityDoc(ik, { ...base, relays: [R1], devices: ["d_\u001b[31m"], keyholders: [], by: "d_\u001b[31m" })).toThrow();
+    // The summary: only canonical, printable relay URLs and device ids are kept.
+    const s = branchSummary("h", 3, [d, d, "not a did", "d_\u202eaaaaaaaaaaaaaaaaaaaaaaaaa"], [R1, "wss://r.test/v3\u001b[2J", "wss://r.test/\u202ev3", "wss://R.TEST/v3/", RX]);
+    expect(s).toEqual({ hash: "h", ver: 3, by: [d], relays: [R1, RX] });
+  });
 });

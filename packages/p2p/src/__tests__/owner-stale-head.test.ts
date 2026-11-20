@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { b64uDecode, createIdentityDoc, generateDeviceKeysV3, IDENTITY_DOC_MAX_TTL_SEC, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
+import { addIdentityVersion, b64uDecode, createIdentityDoc, generateDeviceKeysV3, IDENTITY_DOC_MAX_TTL_SEC, identityKeyFromSeed, jwsHash, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
 import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
@@ -338,4 +338,174 @@ describe("#79: a relay a refresh of our own identity was held back for doesn't b
     expect(`${rot.out}\n${rot.err}`).toContain(RB);
     u.cleanup();
   }, 120_000);
+
+  /**
+   * #92 follow-up: as above (RB serves a key holder's newer head off the held head's parent and times out on the
+   * walk), but the held head X was published by another device, which this device's publish log doesn't list:
+   * `listed`, a version this device published (in its log) lists that device; otherwise no such version does.
+   * `dropsMe`: the key holder's head leaves this device out (the #79 case); otherwise it still lists it.
+   */
+  async function otherDeviceHead(name: string, listed: boolean, dropsMe: boolean) {
+    const u = new User(name, { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3`, [RC]: `ws://127.0.0.1:${rc.port}/v3` });
+    const userId = (await u.ok(["init", "--name", name, "--relay", RA, "--yes"])).userId as string;
+    await u.ok(["relays", "add", RB]);
+    for (let i = 0; i < 2; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+    const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+    const other = generateDeviceKeysV3(userId).did;
+    const app = await u.app();
+    await app.load();
+    let head = (await app.ownView()).head;
+    const docs: string[] = [];
+    const next = (by: string, devices: string[], keyholders: string[]) => {
+      const jws = createIdentityDoc(ik, { ver: head.ver + 1, prev: head.hash, name: head.name, relays: [...head.relays], devices, keyholders, by, iat: nowSec() - 20 + docs.length });
+      docs.push(jws);
+      head = peekIdentityDoc(jws) as typeof head;
+      return jws;
+    };
+    try {
+      const me = keysOf(u).did;
+      if (listed) {
+        // This device added the other one (recorded in its publish log); the other then published X.
+        const add = next(me, [...head.devices, other], [...head.keyholders, other]);
+        await app.store.recordPublished({ hash: jwsHash(add), devices: [other] });
+        next(other, [...head.devices], [...head.keyholders]);
+      } else {
+        // X adds the other device and is published by it: no version in this device's log lists it.
+        next(other, [...head.devices, other], [...head.keyholders, other]);
+      }
+      for (const jws of docs) expect((await app.publishDoc(jws, [RA, RB])).ok.sort()).toEqual([RA, RB].sort());
+      for (const jws of docs) await addIdentityVersion(app.store, jws);
+    } finally {
+      await app.close();
+    }
+    const x = await heldHead(u);
+    expect(x.hash).toBe(head.hash);
+    expect(x.by).toBe(other);
+    await storeOwn(u, userId, (cur) => ({ ...cur, versions: [x.jws] }));
+    const mallory = generateDeviceKeysV3(userId).did;
+    let prev = x.prev!;
+    let top = "";
+    const me = keysOf(u).did;
+    for (let v = x.ver; v <= x.ver + 3; v++) {
+      top = dropsMe
+        ? createIdentityDoc(ik, { ver: v, prev, name: x.name, relays: [...x.relays], devices: [...x.devices.filter((d) => d !== me), mallory], keyholders: [mallory], by: mallory, iat: nowSec() - 5 })
+        : createIdentityDoc(ik, { ver: v, prev, name: x.name, relays: [...x.relays], devices: [...x.devices, mallory], keyholders: [...x.keyholders], by: me, iat: nowSec() - 5 });
+      prev = jwsHash(top);
+    }
+    const real = globalThis.fetch;
+    const id = `/v3/identity/${encodeURIComponent(userId)}/`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname.startsWith(id) && url.port === String(rb.port)) {
+        if (url.pathname.endsWith("/tips")) return json({ tips: [top] });
+        throw new Error("connect ETIMEDOUT");
+      }
+      return real(input, init);
+    });
+    return { u, userId, x };
+  }
+
+  it("#92 follow-up: the left-out head was published by a device no version in this device's publish log lists: RB isn't set aside; rotation refuses; removing RB goes ahead", async () => {
+    const { u, userId, x } = await otherDeviceHead("sal", false, false);
+    // A plain edit refuses, naming RB as sending newer versions (not as a held-back relay to set aside).
+    const edit = await u.run(["profile", "set", "--bio", "blocked?"]);
+    expect(edit.code, `${edit.out}\n${edit.err}`).not.toBe(0);
+    expect(edit.json.error).toBe("refresh_failed");
+    expect(edit.json.reason).toContain(RB);
+    expect(edit.json.reason).toContain("p2p relays remove");
+    // Rotation doesn't set RB aside: refused, nothing published.
+    const rot = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(rot.code, `${rot.out}\n${rot.err}`).not.toBe(0);
+    expect(rot.json.error).toBe("refresh_failed");
+    expect(rot.json.reason).toContain(RB);
+    expect((await realTips(ra.port, userId)).map((t) => t.hash)).toEqual([x.hash]);
+    // The user removes RB: that goes ahead on the head RA confirms.
+    const removed = await u.run(["relays", "remove", RB]);
+    vi.restoreAllMocks();
+    expect(removed.code, `${removed.out}\n${removed.err}`).toBe(0);
+    expect(removed.json.relays).toEqual([RA]);
+    u.cleanup();
+  }, 120_000);
+
+  it("#92 follow-up: the left-out head was published by another owner device a version in the publish log lists (not yet in this device's log), and the key holder's head leaves this device out: RB is set aside, rotation goes ahead", async () => {
+    const { u } = await otherDeviceHead("tam", true, true);
+    const rot = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    vi.restoreAllMocks();
+    expect(rot.code, `${rot.out}\n${rot.err}`).toBe(0);
+    expect(`${rot.out}\n${rot.err}`).toContain(RB);
+    u.cleanup();
+  }, 120_000);
+
+  it("#92 follow-up: only our own CURRENT tip counts: an old own version (as a relay could replay) or one not held never does", async () => {
+    const u = new User("uma", { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3` });
+    await u.ok(["init", "--name", "uma", "--relay", RA, "--yes"]);
+    for (let i = 0; i < 3; i++) await u.ok(["profile", "set", "--bio", `edit ${i}`]);
+    const app = await u.app();
+    await app.load();
+    try {
+      const chain = (await app.ownView()).head;
+      const log = (await app.store.getPublishLog()).published;
+      const old = log.find((h) => h !== chain.hash)!;
+      expect(old).toBeDefined();
+      const heldBack = (by: string[], left: string[]) => (app as unknown as { ownHeldBack(by: string[], left: string[]): Promise<string[]> }).ownHeldBack(by, left);
+      expect(await heldBack([RB], [chain.hash])).toEqual([RB]);
+      expect(await heldBack([RB], [old])).toEqual([]);
+      expect(await heldBack([RB], ["A".repeat(43)])).toEqual([]);
+      expect(await heldBack([], [chain.hash])).toEqual([]);
+    } finally {
+      await app.close();
+    }
+    u.cleanup();
+  }, 60_000);
+
+  it("#91 review: a version a revoked device signed, held here, never gets the relay serving the owner's revocation set aside", async () => {
+    // A version this device published listed D (later stolen) and B. B revoked D (H, then H2); before that, someone
+    // holding the key published T `by` D, listing D and this device but not B, to another relay. This device holds T.
+    const u = new User("vic", { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3` });
+    const userId = (await u.ok(["init", "--name", "vic", "--relay", RA, "--yes"])).userId as string;
+    await u.ok(["relays", "add", RB]);
+    await u.ok(["profile", "set", "--bio", "hello"]);
+    const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+    const me = keysOf(u).did;
+    const d = generateDeviceKeysV3(userId).did;
+    const b = generateDeviceKeysV3(userId).did;
+    const base = await heldHead(u);
+    const doc = (ver: number, prev: string, by: string, devices: string[], iat: number) => createIdentityDoc(ik, { ver, prev, name: base.name, relays: [...base.relays], devices, keyholders: devices, by, iat });
+    const vA = doc(base.ver + 1, base.hash, me, [me, d, b], nowSec() - 30);
+    {
+      const app = await u.app();
+      await app.load();
+      try {
+        expect((await app.publishDoc(vA, [RA, RB])).ok.sort()).toEqual([RA, RB].sort());
+        await addIdentityVersion(app.store, vA);
+        await app.store.recordPublished({ hash: jwsHash(vA), devices: [d, b] });
+      } finally {
+        await app.close();
+      }
+    }
+    const t = doc(base.ver + 2, jwsHash(vA), d, [me, d], nowSec() - 20);
+    const h = doc(base.ver + 2, jwsHash(vA), b, [me, b], nowSec() - 15);
+    const h2 = doc(base.ver + 3, jwsHash(h), b, [me, b], nowSec() - 10);
+    await storeOwn(u, userId, (cur) => ({ ...cur, versions: [t] }));
+    // RA serves the owner's H2 and times out on the walk; RB serves T as its tip (and the history below it).
+    const real = globalThis.fetch;
+    const id = `/v3/identity/${encodeURIComponent(userId)}/`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname.startsWith(id) && url.port === String(ra.port)) {
+        if (url.pathname.endsWith("/tips")) return json({ tips: [h2] });
+        throw new Error("connect ETIMEDOUT");
+      }
+      if (url.pathname.startsWith(id) && url.port === String(rb.port) && url.pathname.endsWith("/tips")) return json({ tips: [t] });
+      return real(input, init);
+    });
+    const rot = await u.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    vi.restoreAllMocks();
+    // RA isn't set aside (H2 still lists this device as a key holder, and T isn't in the publish log): refused.
+    expect(rot.code, `${rot.out}\n${rot.err}`).not.toBe(0);
+    expect(rot.json.error).toBe("refresh_failed");
+    expect(rot.err).not.toContain("left out of this check");
+    u.cleanup();
+  }, 120_000);
 });
+
