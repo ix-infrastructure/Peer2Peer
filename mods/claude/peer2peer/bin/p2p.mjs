@@ -91,7 +91,7 @@ function procRead(pid) {
         if (statSync3(`/proc/${pid}`).uid !== process.getuid?.()) throw new OtherUsersProcess();
       } catch (s2) {
         if (s2 instanceof OtherUsersProcess) throw s2;
-        if (s2.code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess();
+        if (s2.code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess(true);
       }
     }
     throw e;
@@ -131,15 +131,27 @@ function psRead(ps, pid) {
     }
   };
 }
-function walkAncestry(start, read2) {
+function walkAncestry(start, read2, self = process.pid) {
   let pid = start;
+  let child = self;
   for (let i = 0; i < 64; i++) {
     if (pid <= 1) return "none";
     let p;
     try {
       p = read2(pid);
     } catch (e) {
-      if (e instanceof OtherUsersProcess) return "none";
+      if (e instanceof OtherUsersProcess) {
+        if (!e.hidden) return "none";
+        let still;
+        try {
+          still = read2(child).ppid === pid;
+        } catch {
+          still = false;
+        }
+        if (still) return "none";
+        why = "a process in it exited while it was read: run the command again";
+        return "unknown";
+      }
       why = e.code === "ETIMEDOUT" || /timed? ?out/i.test(String(e.message)) ? "reading it timed out: run the command again" : "a process in it couldn't be read: run the command again";
       return "unknown";
     }
@@ -148,10 +160,15 @@ function walkAncestry(start, read2) {
       why = "it loops";
       return "unknown";
     }
+    child = pid;
     pid = p.ppid;
   }
   why = "it is deeper than 64 processes";
   return "unknown";
+}
+function initialUserNamespace(uidMap) {
+  const lines = uidMap.split("\n").map((l) => l.trim().split(/\s+/).join(" ")).filter((l) => l !== "");
+  return lines.length === 1 && lines[0] === "0 0 4294967295";
 }
 function nestedPidNamespace(status) {
   const line = status.split("\n").find((l) => l.startsWith("NSpid:"));
@@ -165,6 +182,15 @@ function ancestry() {
     try {
       status = readFileSync8("/proc/self/status", "utf8");
     } catch {
+    }
+    let uidMap = "";
+    try {
+      uidMap = readFileSync8("/proc/self/uid_map", "utf8");
+    } catch {
+    }
+    if (!initialUserNamespace(uidMap)) {
+      why = "it runs in a user namespace (a sandbox or rootless container), where the process tree can't be trusted: pass your person token there";
+      return cached = "unknown";
     }
     if (nestedPidNamespace(status)) {
       why = "it runs in a container or sandbox with its own process namespace, where an agent outside can't be seen: pass your person token there";
@@ -195,6 +221,12 @@ var init_ancestry = __esm({
     "use strict";
     why = "";
     OtherUsersProcess = class extends Error {
+      /** Not visible at all (/proc's `hidepid`): it may also have just exited, so the walk checks that it didn't. */
+      constructor(hidden = false) {
+        super(hidden ? "hidden process" : "another user's process");
+        this.hidden = hidden;
+      }
+      hidden;
     };
     PS_PATHS = ["/bin/ps", "/usr/bin/ps"];
   }
@@ -22010,6 +22042,7 @@ __export(rotation_exports, {
   alertForeignRotations: () => alertForeignRotations,
   approveRotation: () => approveRotation,
   approveRotationJoin: () => approveRotationJoin,
+  assertAdopted: () => assertAdopted,
   circleHeld: () => circleHeld,
   followHeld: () => followHeld,
   friendVerdict: () => friendVerdict,
@@ -22073,6 +22106,9 @@ async function appAt(app, home) {
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
+  for (const p of [src, join19(src, "cli"), join19(src, "v3"), join19(src, "cursors")]) {
+    if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
+  }
   const archive = join19(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
   const srcHasState = await exists(join19(src, "cli"));
@@ -22085,6 +22121,11 @@ async function moveHomes(home, src, tag) {
   await rm2(src, { recursive: true, force: true });
   for (const d of ["cli", "v3"]) await rm2(join19(archive, d, ".lock"), { force: true });
   return archive;
+}
+function assertAdopted(app, userId) {
+  if (app.userId === userId) return;
+  app.front = false;
+  throw new CliError("wrong_identity", `after the move this home holds ${app.userId}, not ${userId}: it stopped here`);
 }
 async function adoptHome(app, src, tag) {
   app.identityMadeHere = true;
@@ -23574,6 +23615,7 @@ async function followHeld(app, idOrItem) {
     await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
+    assertAdopted(app, res.userId);
     app.io.err(`this device moved with your identity: it is now ${res.address} (${res.did})`);
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
@@ -23646,6 +23688,7 @@ async function relinkRotated(app, code2, opts = {}) {
       await writeFile3(join19(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
+      assertAdopted(app, res.userId);
       return { ...res, from: old };
     }
   };
@@ -42214,7 +42257,7 @@ var PERSON_ONLY = /* @__PURE__ */ new Map([
   ["circle leave", "changes your circles"],
   ["held decline", "decides a held request for you"]
 ]);
-var ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes"];
+var ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes", "branch"];
 function personOnlyOf(cmd) {
   const path2 = [];
   for (let c = cmd; c && c.parent; c = c.parent) path2.unshift(c.name());

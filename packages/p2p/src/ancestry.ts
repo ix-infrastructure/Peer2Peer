@@ -23,7 +23,12 @@ let why = "";
  * `hidepid`): the end of this user's own process tree, so the walk answers "none". An agent's
  * session runs as the person, so its processes are always this user's and always readable.
  */
-export class OtherUsersProcess extends Error {}
+export class OtherUsersProcess extends Error {
+  /** Not visible at all (/proc's `hidepid`): it may also have just exited, so the walk checks that it didn't. */
+  constructor(readonly hidden = false) {
+    super(hidden ? "hidden process" : "another user's process");
+  }
+}
 
 /** An executable that is Claude Code or Codex, by its basename (argv0) only: never a word elsewhere on a command line. */
 export function isAgentProcess(executable: string): boolean {
@@ -89,7 +94,7 @@ function procRead(pid: number): ProcInfo {
         if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) throw new OtherUsersProcess();
       } catch (s) {
         if (s instanceof OtherUsersProcess) throw s;
-        if ((s as NodeJS.ErrnoException).code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess();
+        if ((s as NodeJS.ErrnoException).code === "ENOENT" && procHidesOthers()) throw new OtherUsersProcess(true);
       }
     }
     throw e;
@@ -139,15 +144,29 @@ function psRead(ps: string, pid: number): ProcInfo {
  * host's script path). "agent" on a match; "none" once the walk reaches the root (pid 1 or 0);
  * "unknown" when a process can't be read or the walk runs past 64 steps.
  */
-export function walkAncestry(start: number, read: (pid: number) => ProcInfo): Ancestry {
+export function walkAncestry(start: number, read: (pid: number) => ProcInfo, self: number = process.pid): Ancestry {
   let pid = start;
+  let child = self;
   for (let i = 0; i < 64; i++) {
     if (pid <= 1) return "none";
     let p: ProcInfo;
     try {
       p = read(pid);
     } catch (e) {
-      if (e instanceof OtherUsersProcess) return "none";
+      if (e instanceof OtherUsersProcess) {
+        if (!e.hidden) return "none";
+        // Hidden, or gone: a parent that exited mid-walk is no end of the tree. Its child (ours,
+        // readable) still naming it as parent means it is there, only hidden: another user's.
+        let still: boolean;
+        try {
+          still = read(child).ppid === pid;
+        } catch {
+          still = false;
+        }
+        if (still) return "none";
+        why = "a process in it exited while it was read: run the command again";
+        return "unknown";
+      }
       why = (e as NodeJS.ErrnoException).code === "ETIMEDOUT" || /timed? ?out/i.test(String((e as Error).message)) ? "reading it timed out: run the command again" : "a process in it couldn't be read: run the command again";
       return "unknown";
     }
@@ -156,10 +175,21 @@ export function walkAncestry(start: number, read: (pid: number) => ProcInfo): An
       why = "it loops";
       return "unknown";
     }
+    child = pid;
     pid = p.ppid;
   }
   why = "it is deeper than 64 processes";
   return "unknown";
+}
+
+/**
+ * Linux: whether this process's user namespace is the initial one: /proc/self/uid_map is exactly
+ * one line "0 0 4294967295". In any other (an unprivileged sandbox, a rootless container) /proc
+ * entries can be bind-mounted to say anything, so the walk can't be trusted: "unknown".
+ */
+export function initialUserNamespace(uidMap: string): boolean {
+  const lines = uidMap.split("\n").map((l) => l.trim().split(/\s+/).join(" ")).filter((l) => l !== "");
+  return lines.length === 1 && lines[0] === "0 0 4294967295";
 }
 
 /**
@@ -184,6 +214,16 @@ export function ancestry(): Ancestry {
       status = readFileSync("/proc/self/status", "utf8");
     } catch {
       // read below
+    }
+    let uidMap = "";
+    try {
+      uidMap = readFileSync("/proc/self/uid_map", "utf8");
+    } catch {
+      // checked below
+    }
+    if (!initialUserNamespace(uidMap)) {
+      why = "it runs in a user namespace (a sandbox or rootless container), where the process tree can't be trusted: pass your person token there";
+      return (cached = "unknown");
     }
     if (nestedPidNamespace(status)) {
       why = "it runs in a container or sandbox with its own process namespace, where an agent outside can't be seen: pass your person token there";

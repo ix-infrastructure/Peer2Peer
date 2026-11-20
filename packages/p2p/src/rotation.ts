@@ -245,6 +245,10 @@ async function appAt(app: App, home: string): Promise<App> {
  * `<home>/rotated/<tag>/`, `src`'s take their place.
  */
 async function moveHomes(home: string, src: string, tag: string): Promise<string> {
+  // Only folders a follow or rotation made: a link (to another home's state) is never moved into this one.
+  for (const p of [src, join(src, "cli"), join(src, "v3"), join(src, "cursors")]) {
+    if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
+  }
   const archive = join(home, "rotated", tag);
   await mkdir(archive, { recursive: true, mode: 0o700 });
   const srcHasState = await exists(join(src, "cli"));
@@ -258,6 +262,16 @@ async function moveHomes(home: string, src: string, tag: string): Promise<string
   // A lock something still held when its directory moved belongs to nobody now.
   for (const d of ["cli", "v3"]) await rm(join(archive, d, ".lock"), { force: true });
   return archive;
+}
+
+/**
+ * After a swap: the home must now hold the identity the link joined. Anything else (files changed
+ * under the swap) keeps no person token and stops the command.
+ */
+export function assertAdopted(app: App, userId: string): void {
+  if (app.userId === userId) return;
+  app.front = false;
+  throw new CliError("wrong_identity", `after the move this home holds ${app.userId}, not ${userId}: it stopped here`);
 }
 
 /**
@@ -2337,6 +2351,7 @@ export async function followHeld(app: App, idOrItem: string | HeldItem): Promise
     await writeFile(join(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 0o600 });
     await adoptHome(app, tmp, tag);
     await reload(app);
+    assertAdopted(app, res.userId);
     app.io.err(`this device moved with your identity: it is now ${res.address} (${res.did})`);
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
@@ -2427,6 +2442,7 @@ export async function relinkRotated(app: App, code: string, opts: { label?: stri
       await writeFile(join(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 0o600 });
       await adoptHome(app, tmp, tag);
       await reload(app);
+      assertAdopted(app, res.userId);
       return { ...res, from: old };
     },
   };

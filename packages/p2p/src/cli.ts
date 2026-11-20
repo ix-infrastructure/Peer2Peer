@@ -163,7 +163,7 @@ const PERSON_ONLY = new Map<string, string>([
 ]);
 
 /** `identity rotate` options that do something beyond making or showing the plan. */
-const ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes"] as const;
+const ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes", "branch"] as const;
 
 /**
  * The person-only command `cmd` is ({what, why}), or undefined. Reads stay open: a bare

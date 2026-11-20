@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "../app.js";
 import { main, type ProgramDeps } from "../cli.js";
 import { homeFilesOwn, identityHere, personToken, personTokenFile, personTokenOk, personSaltFile } from "../projects.js";
+import { adoptHome, assertAdopted } from "../rotation.js";
 import { maintain } from "../watch.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
@@ -24,6 +25,7 @@ const R = "wss://relay-person-only.test/v3";
 const R2 = "wss://relay-person-only-2.test/v3";
 const R3 = "wss://relay-person-only-3.test/v3";
 const R4 = "wss://relay-person-only-4.test/v3";
+const R5 = "wss://relay-person-only-5.test/v3";
 
 type How = "agent" | "token" | "yes" | "no";
 
@@ -95,6 +97,7 @@ describe("person-only commands", () => {
     { argv: ["identity", "rotate", "--cancel"] },
     { argv: ["identity", "rotate", "--yes", "--backup-file", join(tmpdir(), "po-never-written.txt")] },
     { argv: ["identity", "rotate", "--resend"] },
+    { argv: ["identity", "rotate", "--plan", "--branch", "abcdef"] },
     { argv: ["identity", "republish"] },
     { argv: ["identity", "dispute", "nope", "--neither"] },
     { argv: ["devices", "revoke", "d_nope"] },
@@ -553,5 +556,86 @@ describe("a token checked at the start never carries over to a home that changes
       throw new real.OtherUsersProcess();
     };
     expect(real.walkAncestry(30, read)).toBe("none");
+  });
+});
+
+describe("third pass: plan shaping, swaps of links, namespaces, and a parent gone mid-walk", () => {
+  let relay: TestRelay;
+  let ann: User;
+  const dirs: string[] = [];
+  beforeAll(async () => {
+    relay = await startRelay(R5, { limits: { identityPublishPerIpPerHour: 100_000, newDevicesPerIpPerDay: 100_000, newDevicesPerIpv4PerDay: 100_000 } });
+    ann = new User("po5-ann", { [R5]: `ws://127.0.0.1:${relay.port}/v3` }, { P2P_DEFAULT_RELAYS: R5 });
+    await ann.ok(["init", "--name", "ann", "--relay", R5, "--yes"]);
+  }, 60_000);
+  afterAll(async () => {
+    await relay?.close();
+    ann?.cleanup();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("`identity rotate --plan --branch` shapes the plan: refused for an agent, a bare --plan isn't", async () => {
+    const out: string[] = [];
+    const env = { ...ann.env, P2P_PERSON_TOKEN: "", CLAUDECODE: "1" };
+    await main(["identity", "rotate", "--plan", "--branch", "abcdef", "--json"], { env, io: { out: (l) => out.push(l), err: () => {} }, confirmTty: async () => true });
+    process.exitCode = 0;
+    expect(JSON.parse(out.at(-1) ?? "{}").error).toBe("refused");
+  });
+
+  it("a swap never moves a symbolic link into the home, and a swap that ends on another identity keeps no token", async () => {
+    const victim = mkdtempSync(join(tmpdir(), "po-victim-"));
+    dirs.push(victim);
+    mkdirSync(join(victim, "cli"), { recursive: true });
+    const src = join(ann.home, "rotation", "follow-test");
+    mkdirSync(src, { recursive: true });
+    symlinkSync(join(victim, "cli"), join(src, "cli"));
+    const app = await ann.app();
+    try {
+      await app.load();
+      await expect(adoptHome(app, src, "t1")).rejects.toMatchObject({ code: "refused" });
+    } finally {
+      await app.close();
+    }
+    // The home's own identity is still there.
+    expect(identityHere(ann.home)).toBe(true);
+    const again = await ann.app();
+    try {
+      await again.load();
+      again.front = true;
+      expect(() => assertAdopted(again, again.userId)).not.toThrow();
+      expect(() => assertAdopted(again, "u_someone-else")).toThrow(/stopped here/);
+      expect(again.front).toBe(false);
+    } finally {
+      await again.close();
+    }
+  });
+
+  it("ancestry: only the initial user namespace is trusted; a parent gone mid-walk is unknown, a hidden one is none", async () => {
+    const real = await vi.importActual<typeof import("../ancestry.js")>("../ancestry.js");
+    expect(real.initialUserNamespace("         0          0 4294967295\n")).toBe(true);
+    expect(real.initialUserNamespace("0 1000 1\n")).toBe(false);
+    expect(real.initialUserNamespace("0 0 4294967295\n1 1 1\n")).toBe(false);
+    expect(real.initialUserNamespace("")).toBe(false);
+    // Our own process 30 (child of us, 31) has parent 20, which /proc hides.
+    let parentOf30 = 20;
+    const read = (pid: number) => {
+      if (pid === 31) return { ppid: 30, comm: "node", args: () => "" };
+      if (pid === 30) return { ppid: parentOf30, comm: "bash", args: () => "" };
+      throw new real.OtherUsersProcess(true);
+    };
+    // 30 still names 20 as its parent: 20 is there, only hidden (another user's): the end of our tree.
+    expect(real.walkAncestry(30, read, 31)).toBe("none");
+    // 20 exited while the walk read it (30 was reparented): not the end of anything.
+    let calls = 0;
+    const racing = (pid: number) => {
+      if (pid === 30) {
+        calls++;
+        parentOf30 = calls === 1 ? 20 : 1;
+      }
+      return read(pid);
+    };
+    expect(real.walkAncestry(30, racing, 31)).toBe("unknown");
+    // Visible but another user's: none, at once.
+    expect(real.walkAncestry(30, (pid) => (pid === 30 ? { ppid: 20, comm: "bash", args: () => "" } : (() => { throw new real.OtherUsersProcess(false); })()), 31)).toBe("none");
   });
 });
