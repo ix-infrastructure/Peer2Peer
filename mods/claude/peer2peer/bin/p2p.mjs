@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.3 78a231532d30e0f5
+// @peer2peer/core 0.1.3 5e9a9334dbf54077
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -7194,17 +7194,21 @@ var init_identitydoc = __esm({
             c.anchorFrom.set(a.hash, sendersOf(s2.walkAnchorRelays?.[a.hash]));
         }
         const dropped = /* @__PURE__ */ new Set();
+        const offChain = /* @__PURE__ */ new Set();
         const stored2 = new Map(docs.map((d) => [d.hash, d]));
-        const drop = (d) => {
+        const drop = (d, broken = false) => {
           dropped.add(d.hash);
-          for (const x of validRevokedStep(d, (h) => stored2.get(h)))
-            c.denied.add(x);
+          if (broken)
+            offChain.add(d.hash);
+          else
+            for (const x of validRevokedStep(d, (h) => stored2.get(h)))
+              c.denied.add(x);
         };
         for (const d of docs) {
           if (d.iss !== s2.iss)
             fail("issuer-mismatch", "stored version of another identity");
           if (d.prev !== null && dropped.has(d.prev) || d.merge !== void 0 && dropped.has(d.merge)) {
-            drop(d);
+            drop(d, d.prev !== null && offChain.has(d.prev) || d.merge !== void 0 && offChain.has(d.merge));
             continue;
           }
           const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === void 0 || c.versions.has(d.merge));
@@ -7212,6 +7216,13 @@ var init_identitydoc = __esm({
             const parent = c.versions.get(d.prev);
             try {
               checkLink(parent, d, d.merge !== void 0 ? c.versions.get(d.merge) : void 0);
+            } catch (e) {
+              if (!(e instanceof P2PError))
+                throw e;
+              drop(d, true);
+              continue;
+            }
+            try {
               if (d.merge === void 0)
                 c.checkNoReturn(d, parent);
             } catch (e) {
@@ -7720,7 +7731,7 @@ var init_identitydoc = __esm({
           }
         }
         if (bad.length > 0)
-          this.dropWithDescendants(bad);
+          this.dropWithDescendants(bad, { offChain: true });
         this.put(doc);
         if (this.childrenOf(doc.hash).length === 0)
           return;
@@ -7753,7 +7764,7 @@ var init_identitydoc = __esm({
           this.dropWithDescendants(violators);
       }
       /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
-      dropWithDescendants(docs) {
+      dropWithDescendants(docs, opts = {}) {
         const doomed = /* @__PURE__ */ new Set();
         const stack = docs.map((d) => d.hash);
         while (stack.length > 0) {
@@ -7763,6 +7774,11 @@ var init_identitydoc = __esm({
           doomed.add(h);
           for (const c of this.childrenOf(h))
             stack.push(c.hash);
+        }
+        if (opts.offChain) {
+          for (const h of doomed)
+            this.versions.delete(h);
+          return;
         }
         for (const h of doomed)
           for (const d of validRevokedStep(this.versions.get(h), (x) => this.versions.get(x)))
