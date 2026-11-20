@@ -112,6 +112,9 @@ export function user(name: string, port: number, extraEnv: Record<string, string
   const home = o.home ?? mkdtempSync(join(tmpdir(), `p2p-mod-${name}-`))
   const token = o.token === false ? '' : modPersonToken(home)
   const exec = nodeExec({
+    // A home folder of the test's own: the CLI reads Claude Code's and Codex's config from there
+    // (`p2p sandbox notice`), never the person's real ones.
+    HOME: home,
     P2P_HOME: home,
     CLAUDECODE: '1',
     ...(token ? { P2P_PERSON_TOKEN: token } : {}),

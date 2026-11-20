@@ -1813,6 +1813,17 @@ const onEvent = async (S: Sess, $: EngineInterface, current: Run, event: P2PEven
 
 // ── lifecycle ───────────────────────────────────────────────────────────────
 
+/**
+ * Once per device: when Claude Code's sandbox doesn't keep its commands out of P2P_HOME, a toast
+ * tells the person (never the model) the command to run in their own terminal. The mod never writes
+ * the settings itself, and `p2p sandbox enable` refuses inside this session.
+ */
+const sandboxNotice = async (S: Sess, $: EngineInterface) => {
+  const r = await (await client(S, $)).sandboxNotice()
+  const notice = r.ok && typeof r.value.notice === 'string' ? r.value.notice : undefined
+  if (notice) $.ui.toast(`Peer2Peer: ${inert(notice)}`)
+}
+
 /** The model's tool for sharing ix items (when ext-ix is loaded); see IX_TOOL in lib. */
 const detectIx = async (S: Sess, $: EngineInterface) => {
   const r = await (await client(S, $)).extensions()
@@ -1900,6 +1911,7 @@ const startNetwork = async (S: Sess, $: EngineInterface, current: Run) => {
   bg(writeBoard($, current))
   bg(refreshAutoDeliver(S, $))
   bg(detectIx(S, $))
+  bg(sandboxNotice(S, $))
   announce(S, $, current)
   bg(refreshPeers(S, $))
   bg(refreshSocial(S, $))

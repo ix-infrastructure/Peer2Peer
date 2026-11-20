@@ -2,6 +2,19 @@
 
 All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`) and the Claude Code mod are released together and always carry the same version. [docs/releasing.md](docs/releasing.md) describes how a release is made.
 
+## Unreleased
+
+### Security
+
+- **Your agents' sandboxes now keep them out of `P2P_HOME`, offered by default.** An agent runs as you, so it could read `~/.p2p` (your identity key, the person token, `config.json`'s trust) directly; the CLI's gates and the front ends' guards only stop it running `p2p`. The OS sandbox is the boundary, and it is now set up with your consent instead of by hand:
+  - `p2p setup`, in your own terminal, shows exactly what it would add to each installed agent's own config and asks `Add these? [Y/n]` (default Yes); `p2p codex install --write` asks the same for Codex. A no is remembered (`"sandboxDeclined": true` in config.json); `p2p sandbox enable [--claude] [--codex] [--yes]` asks again, and `p2p sandbox` shows where things stand.
+  - **Claude Code** (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR`): `sandbox.enabled: true`, `sandbox.allowUnsandboxedCommands: false`, `P2P_HOME` in `sandbox.filesystem.denyRead` and `denyWrite` (enforced by Seatbelt or bubblewrap on Bash commands and everything they start), and `Read(…/**)`/`Edit(…/**)` deny rules for Claude's own file tools. Turning the sandbox on also confines those commands' writes to the project and their network to hosts you allow.
+  - **Codex** (`config.toml`): a permissions profile, `peer2peer`, that extends the sandbox you use now (`:workspace` or `:read-only`) and denies `P2P_HOME`, made the default; a `sandbox_mode` line is commented out (Codex ignores profiles while it is set), and `[sandbox_workspace_write]`'s `writable_roots` and `network_access` are carried over. A profile of your own that is already the default gets the deny line instead. Checked with `codex sandbox` (codex-cli 0.156.1, macOS): a read and a write under the denied folder fail.
+  - Each file is backed up first (`<file>.p2p-backup-<time>`), everything else in it is kept (other keys and indentation in JSON; every other line and comment in TOML), and a second run changes nothing. What can't be edited safely is left alone, with the lines to add printed.
+  - Only you change it, in your own terminal: refused inside an agent's session, when the process tree can't be read, and from a front end even with its token. The Claude Code mod never edits your settings; it tells you once, in a toast, to run `p2p sandbox enable`.
+  - `p2p doctor` (`/peers doctor`) has a line for each installed agent: whether its sandbox denies `P2P_HOME`, what is missing, and the fix.
+  - The front ends keep working: what a mod starts, hooks and MCP servers run outside the agents' sandboxes, so the mod's and the bridge's own `p2p` runs read `P2P_HOME` as before. The agent's own shell can't run `p2p` any more (not even a read); it uses the front end's tools. What the sandbox doesn't cover (excluded commands, approved escalations, a project's own settings, native Windows) is in [docs/security/threat-model.md](docs/security/threat-model.md#the-hard-barrier-sandbox-your-agents).
+
 ## 0.1.3
 
 A security release. Nothing changes on the wire: 0.1.3 clients interoperate in both directions with 0.1.2 and 0.1.1, which the cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks against the previous two releases, as committed at their tags and as npm installs them.

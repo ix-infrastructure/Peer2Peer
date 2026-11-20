@@ -311,6 +311,103 @@ export function readTomlTable(text: string, table: string[], touched?: () => voi
 }
 
 /**
+ * One line of a TOML document, as scanTomlLines reads it: a blank or comment line, a table header,
+ * a `key = value` line (under the table in force; `value` is the scalar, null for an array, an
+ * inline table or a multi-line value, and `list` the strings of a one-line array of strings), or a
+ * line inside a value that spans lines.
+ */
+export type TomlLine =
+  | { kind: "blank" }
+  | { kind: "header"; table: string[]; array: boolean }
+  | { kind: "kv"; table: string[]; key: string[]; value: string | null; list?: string[] }
+  | { kind: "cont" };
+
+/** The strings of a one-line array of strings (`["a", 'b']`), or undefined for anything else. */
+function readStringList(sc: Scanner): string[] | undefined {
+  if (sc.s[sc.i] !== "[") return undefined;
+  sc.i++;
+  const out: string[] = [];
+  for (;;) {
+    skipWs(sc);
+    if (sc.s[sc.i] === "]") {
+      sc.i++;
+      return out;
+    }
+    const c = sc.s[sc.i];
+    if (c !== '"' && c !== "'") return undefined;
+    if (sc.s.startsWith('"""', sc.i) || sc.s.startsWith("'''", sc.i)) return undefined;
+    const v = readString(sc);
+    if (v === null) return undefined;
+    out.push(v);
+    skipWs(sc);
+    if (sc.s[sc.i] === ",") sc.i++;
+    else if (sc.s[sc.i] !== "]") return undefined;
+  }
+}
+
+/**
+ * The document line by line (split on LF or CRLF, so line i is the i-th line of the text), or null
+ * when it can't be read with confidence (a malformed key, header or string). Values that span lines
+ * are skipped whole: their inner lines are "cont", never read as keys or headers.
+ */
+export function scanTomlLines(text: string): TomlLine[] | null {
+  const out: TomlLine[] = [];
+  let current: string[] = [];
+  let tail: Tail = { depth: 0, quote: null, bad: false };
+  for (const raw of text.split(/\r?\n/)) {
+    if (isOpen(tail)) {
+      tail = scanTail(raw, tail);
+      if (tail.bad || tail.depth < 0) return null;
+      out.push({ kind: "cont" });
+      continue;
+    }
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) {
+      out.push({ kind: "blank" });
+      continue;
+    }
+    if (line.startsWith("[")) {
+      const isArray = line.startsWith("[[");
+      const hsc: Scanner = { s: line, i: isArray ? 2 : 1 };
+      const key = readKey(hsc);
+      if (!key || !line.slice(hsc.i).startsWith(isArray ? "]]" : "]")) return null;
+      const after = scanTail(line.slice(hsc.i + (isArray ? 2 : 1)), tail);
+      if (after.bad || after.depth !== 0 || after.quote !== null) return null;
+      current = key;
+      out.push({ kind: "header", table: key, array: isArray });
+      continue;
+    }
+    const sc: Scanner = { s: raw, i: 0 };
+    const key = readKey(sc);
+    if (!key) return null;
+    skipWs(sc);
+    if (sc.s[sc.i] !== "=") return null;
+    sc.i++;
+    skipWs(sc);
+    const valueAt = sc.i;
+    const rest = scanTail(sc.s.slice(valueAt), tail);
+    if (rest.bad || rest.depth < 0) return null;
+    if (isOpen(rest)) {
+      tail = rest;
+      out.push({ kind: "kv", table: current, key, value: null });
+      continue;
+    }
+    if (sc.s.startsWith('"""', valueAt) || sc.s.startsWith("'''", valueAt) || sc.s[valueAt] === "{") {
+      out.push({ kind: "kv", table: current, key, value: null });
+      continue;
+    }
+    if (sc.s[valueAt] === "[") {
+      const list = readStringList(sc);
+      out.push({ kind: "kv", table: current, key, value: null, ...(list ? { list } : {}) });
+      continue;
+    }
+    out.push({ kind: "kv", table: current, key, value: readScalar(sc) });
+  }
+  if (isOpen(tail)) return null;
+  return out;
+}
+
+/**
  * Whether a TOML document sets anything under `table` (a header, a key, an
  * inline table, a value spanning lines), matched on decoded keys (quoted,
  * literal and \u-escaped spellings alike). Fails closed: true whenever the

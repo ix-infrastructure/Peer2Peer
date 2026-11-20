@@ -161,9 +161,18 @@ None of these can stop an agent that runs as you and wants past them. A pseudo-t
 
 ### The hard barrier: sandbox your agents
 
-Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), with no way to step outside the sandbox. The token, the keys, the policies and the CLI's state are then out of the agent's reach, and Peer2Peer's checks hold. That state includes three things the hold rule rests on: `config.json` (`trust`, and `ownAgentsDeliver`/`ownDevicesDeliver` from `p2p own-agents`), the person token, and the CLI's `localSends` record (which session on this device sent each same-device message, and whether the person did). An agent that can write any of them can make its own messages look like the person's. The configurations below were checked against the vendors' documentation on 2026-11-04. The Codex one was also run with codex-cli 0.156.1 on macOS (a read and a write under the denied folder failed with "Operation not permitted"; the workspace stayed readable).
+Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by default), with no way to step outside the sandbox. The token, the keys, the policies and the CLI's state are then out of the agent's reach, and Peer2Peer's checks hold. That state includes three things the hold rule rests on: `config.json` (`trust`, and `ownAgentsDeliver`/`ownDevicesDeliver` from `p2p own-agents`), the person token, and the CLI's `localSends` record (which session on this device sent each same-device message, and whether the person did). An agent that can write any of them can make its own messages look like the person's. The configurations below were checked against the vendors' documentation on 2026-11-19. The Codex one was also run with codex-cli 0.156.1 on macOS through `codex sandbox` (a read and a write under the denied folder failed with "Operation not permitted"; the workspace stayed readable; `P2P_CODEX_SANDBOX=1 npm test` in `packages/codex-bridge` repeats it).
 
-**Claude Code** (`settings.json`). Sources: [sandboxing](https://code.claude.com/docs/en/sandboxing) and [permissions](https://code.claude.com/docs/en/permissions).
+**Offered by default.** You don't have to write these by hand:
+
+- `p2p setup`, run in your own terminal, offers to add them to your agents' own config, for each agent that is installed (its config folder exists): it shows exactly what it would write and asks `Add these? [Y/n]` (default Yes). `p2p codex install --write` makes the same offer for Codex.
+- A no is remembered (`"sandboxDeclined": true` in `config.json`) and never asked again; `p2p sandbox enable` asks again (`--claude`, `--codex` for one; `--yes` for a script of yours). `p2p sandbox` shows where things stand.
+- Each file is backed up first (`<file>.p2p-backup-<time>`) and written atomically (a symbolic link is written through), with everything else in it kept: other keys, the order of keys and the indentation in `settings.json`; every other line and comment in `config.toml`, where the top-level lines it changes carry a `# p2p sandbox` comment and the profile it adds sits in a marked block. Running it again changes nothing. What it can't edit safely (invalid JSON, a profile written as an inline table, a multi-line `writable_roots`, `exclude_slash_tmp`, `danger-full-access`) it leaves alone and prints the lines to add.
+- **Only the person changes it, outside every agent's session.** `p2p sandbox enable` and the offers are refused inside an agent's session (its variables, or a Claude Code or Codex ancestor), when the process tree can't be read (fail closed), and from a front end even with the person token: a front end changing its own agent's sandbox is what this is about. The Claude Code mod never writes your settings: when its sandbox doesn't deny `P2P_HOME`, it tells you once (a toast, to you, not to the model) to run `p2p sandbox enable` in your own terminal.
+- **`p2p doctor`** (`/peers doctor`) has a line for each installed agent: does its sandbox deny `P2P_HOME`, and if not, what is missing and the fix. It reads your user settings (and, for Claude Code, the managed settings file); it never shows their contents.
+- **The front ends keep working.** Claude Code's sandbox covers the commands its Bash tool runs and their children; "a process that a mod starts runs outside it", and so do hooks and MCP servers. Codex's permission profiles govern "sandboxed local commands"; MCP servers and hooks "use their own controls", and Codex runs hooks as plain processes. So the mod's and the bridge's own `p2p` runs read `P2P_HOME` as before. The agent's own shell can't run `p2p` any more, not even a read (the CLI needs `P2P_HOME`): it uses the front end's tools (ListAgents and SendMessage, `p2p_list_peers` and `p2p_send`).
+
+**Claude Code** (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`). Sources: [sandboxing](https://code.claude.com/docs/en/sandboxing), [settings](https://code.claude.com/docs/en/settings-reference) and [permissions](https://code.claude.com/docs/en/permissions). What `p2p sandbox enable` writes:
 
 ```json
 {
@@ -181,33 +190,45 @@ Deny the agent's commands read and write access to `P2P_HOME` (`~/.p2p` by defau
 }
 ```
 
+- **What it enforces.** `denyRead`/`denyWrite` are enforced by the OS (Seatbelt on macOS, bubblewrap on Linux and WSL2) on Bash commands and every process they start, however the command spells the path. Lists merge across settings files, so a project's settings can't remove the entries. The `Read`/`Edit` deny rules cover Claude Code's own file tools, which the sandbox doesn't ("A `denyRead` entry doesn't stop the Read tool"); Claude Code applies `Read` deny rules to Grep and Glob on a best-effort basis. A P2P_HOME outside your home folder is written as an absolute path (`//abs/**` in a rule).
+- **`enabled: true`** turns the sandbox on for every project. Its other defaults then apply too: commands write only in the working directory (and folders you allow) and reach only network hosts you approve.
 - **`allowUnsandboxedCommands: false`.** Without it, a command that fails in the sandbox may be retried with `dangerouslyDisableSandbox`. The docs: "You can disable the unsandboxed retry by setting `"allowUnsandboxedCommands": false` … With the retry disabled, Claude Code ignores the `dangerouslyDisableSandbox` parameter." In `bypassPermissions` mode such a retry "runs without a prompt".
-- **`excludedCommands`.** Commands listed in `sandbox.excludedCommands` run outside the sandbox, "which means no filesystem restrictions", and in `bypassPermissions` mode "without a prompt unless an ask rule matches it". Keep that list empty, or limited to tools you'd trust with `P2P_HOME`.
-- **`bypassPermissions` mode** (`--dangerously-skip-permissions`) approves everything the sandbox lets out. Don't combine it with this barrier unless both settings above are in place.
-- **The file tools.** The sandbox covers Bash and its children, not Claude Code's built-in file tools ("A `denyRead` entry doesn't stop the Read tool"). The `Read`/`Edit` deny rules cover those.
-- **Other homes.** Use your own `P2P_HOME` if you moved it. The mod's own `p2p` runs aren't the agent's commands, so they still work.
+- **What it doesn't cover:**
+  - **`excludedCommands`.** Commands listed in `sandbox.excludedCommands` run outside the sandbox, "which means no filesystem restrictions", and in `bypassPermissions` mode "without a prompt unless an ask rule matches it". Keep that list empty, or limited to tools you'd trust with `P2P_HOME`; `p2p doctor` notes a non-empty one.
+  - **`bypassPermissions` mode** (`--dangerously-skip-permissions`) approves everything the sandbox lets out. Don't combine it with this barrier unless both settings above are in place.
+  - **A project can turn the sandbox off for itself.** `sandbox.enabled` is a Boolean, and a project's `.claude/settings.json` sits above your user settings. Sandboxed commands can't write the `.claude` settings files (Claude Code's protected paths), but a repository you clone can carry one. Managed settings (`sandbox.enabled` and `sandbox.failIfUnavailable` set by an administrator) can't be overridden.
+  - **Where the sandbox doesn't run.** Native Windows has no sandbox (`p2p doctor` says so; use WSL2). When the sandbox can't start (bubblewrap missing on Linux), Claude Code runs commands unsandboxed unless `failIfUnavailable` is set. On Linux an entry for a folder that doesn't exist yet has no effect: run `p2p setup` first.
+  - **Outside the sandbox anyway:** commands you type at the `!` prompt, hooks, MCP servers, status line commands and what mods start, the mod included. They run as you.
+  - A narrower `allowRead` or `allowWrite` inside `P2P_HOME` opens it again ("the rule with the narrower path applies"); `p2p doctor` flags one.
+- **Other homes.** `p2p sandbox enable` denies the `P2P_HOME` in its environment (and its real path, when a symbolic link leads there). Run it again with the same `P2P_HOME` as your agents if you move it.
 
-**Codex** (`config.toml`). Sources: [permissions](https://developers.openai.com/codex/permissions) and agent approvals & security, both now served from learn.chatgpt.com/docs.
+**Codex** (`config.toml` in `CODEX_HOME`, else `~/.codex`). Sources: [permissions](https://learn.chatgpt.com/docs/permissions) and agent approvals & security.
 
 - The legacy `sandbox_mode` and `[sandbox_workspace_write]` settings can't deny reads. A named permission profile can. The docs: "`deny`: Denies both reads and writes under the path."
-- Permission profiles don't combine with `sandbox_mode`. The docs: "Permission profiles do not compose with the older sandbox settings."
-- Use an absolute path:
+- Permission profiles don't combine with `sandbox_mode`. The docs: "If `sandbox_mode` appears in any loaded config file, you pass `--sandbox`, or the selected config profile sets `sandbox_mode`, Codex uses those older sandbox settings instead of `default_permissions`."
+
+What `p2p sandbox enable` writes, on a config with `sandbox_mode = "workspace-write"` (`:read-only` for `read-only`; a profile of your own that is already the default gets the `deny` line in its `filesystem` table instead):
 
 ```toml
-default_permissions = "p2p-safe"
-# No approval prompts, so no escalation out of the sandbox is offered (the docs: "You can disable
-# approval prompts with --ask-for-approval never").
-approval_policy = "never"
+# sandbox_mode = "workspace-write" # p2p sandbox: replaced by default_permissions = "peer2peer" (profiles don't combine with sandbox_mode)
+default_permissions = "peer2peer" # p2p sandbox
 
-[permissions.p2p-safe.filesystem]
-":minimal" = "read"
-"/Users/you/.p2p" = "deny"
+# >>> peer2peer sandbox (added by `p2p sandbox enable`: Codex's sandbox denies P2P_HOME) >>>
+[permissions.peer2peer]
+description = "Codex's sandbox, with Peer2Peer's keys (P2P_HOME) denied to its commands"
+extends = ":workspace"
 
-[permissions.p2p-safe.filesystem.":workspace_roots"]
-"." = "write"
+[permissions.peer2peer.filesystem]
+"~/.p2p" = "deny"
+# <<< peer2peer sandbox <<<
 ```
 
-Administrators can enforce the same with `[permissions.filesystem] deny_read = ["…/.p2p"]` in Codex's `requirements.toml`.
+- **What it enforces.** Extending `:workspace` keeps the sandbox you had (writes in the workspace and temp folders, `.git` and `.codex` read-only), and the `deny` entry, more specific than any grant above it, keeps the commands Codex runs out of `P2P_HOME`, enforced by the OS (Seatbelt on macOS, bubblewrap on Linux and WSL). `writable_roots` and `network_access` from `[sandbox_workspace_write]` are carried over as `"write"` entries and `[permissions.peer2peer.network] enabled = true`.
+- **What it doesn't cover:**
+  - **Approved escalations.** Under `on-request` or `untrusted` approvals, Codex can ask you to run a command outside the sandbox; that is your decision, per command. `approval_policy = "never"` removes the question (and the escalation with it). The edit doesn't change your approval policy.
+  - **A run that picks other sandbox settings:** `--sandbox`, `--dangerously-bypass-approvals-and-sandbox`, a config profile (`codex --profile <name>`) that sets `sandbox_mode` (`p2p doctor` names those), or a trusted project's `.codex/config.toml` that sets `sandbox_mode` or `default_permissions`.
+  - **Outside the sandbox anyway:** MCP servers (the bridge included), hooks, and connectors. They run as you.
+- Administrators can enforce the same with `[permissions.filesystem] deny_read = ["…/.p2p"]` in Codex's `requirements.toml`.
 
 ### What it can't do
 

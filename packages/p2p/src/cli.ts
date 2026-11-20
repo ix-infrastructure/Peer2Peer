@@ -32,6 +32,7 @@ import * as sessions from "./sessions.js";
 import * as projects from "./projects.js";
 import { isDid } from "@peer2peer/core/v3";
 import * as ixLocal from "./ix-local.js";
+import * as sandbox from "./sandbox.js";
 import * as history from "./history.js";
 import { confirmOnTty } from "./tty-confirm.js";
 import * as social from "./social.js";
@@ -375,6 +376,30 @@ export function buildProgram(deps: ProgramDeps): Command {
     return a === "y" || a === "yes";
   };
 
+  /** A question whose answer defaults to Yes (Enter): only ever for what tightens, such as the sandbox offer. */
+  const confirmDefaultYes = (q: string): Promise<boolean> => askDefaultYes(io, q);
+
+  /**
+   * The sandbox offer (sandbox.ts): every installed front end whose sandbox doesn't deny P2P_HOME,
+   * with exactly what would be written, asked once (default Yes). A "no" is remembered. The caller
+   * has checked that the person is here (sandbox.assertPersonOutsideAgents) and can be asked.
+   */
+  const offerSandbox = async (env: Env, home: string, only?: ("claude" | "codex")[]): Promise<string[]> => {
+    const plans = sandbox.offerablePlans(env, only);
+    if (plans.length === 0) return [];
+    io.out(`\n${sandbox.previewText(plans, home)}`);
+    if (!(await confirmDefaultYes("Add these?"))) {
+      sandbox.setSandboxDeclined(home, true);
+      return ["  sandbox not changed. You won't be asked again; `p2p sandbox enable` adds it any time (`p2p sandbox` shows where things stand)"];
+    }
+    const done = sandbox.applyPlans(plans);
+    if (sandbox.declinedHere(env)) sandbox.setSandboxDeclined(home, false);
+    return [
+      ...done.map((d) => `  sandbox wrote ${d.path}${d.backup ? ` (backup: ${d.backup})` : ""}`),
+      ...(plans.some((f) => f.front === "codex") ? ["  sandbox Codex reads config.toml when it starts: restart open Codex sessions"] : []),
+    ];
+  };
+
   /** The command whose options `o` are (commander passes the same object it keeps). */
   const cmdOf = (o: object): Command => ({ opts: () => o }) as unknown as Command;
   // ── pickers (prompt/): only with io.select, never with --json or --yes ──
@@ -570,11 +595,12 @@ export function buildProgram(deps: ProgramDeps): Command {
     .option("--print-backup", "Print the backup phrase (in --json, as backup.phrase)")
     .option("--no-backup", "Don't save or print the backup phrase now")
     .option("--ix", "Offer Ix again after an earlier no (optional; Peer2Peer never installs it), and with Ix installed, offer to turn on the Ix extension")
+    .option("--sandbox", "Offer again to deny P2P_HOME to your agents' sandboxes (Claude Code, Codex) after an earlier no")
     .option("--allow-private-relay", "Linking or joining: accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)")
     .option("--json", "JSON output")
     .action(
       run(
-        async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; allowPrivateRelay?: boolean; json?: boolean }) => {
+        async (app, o: { name?: string; relay?: string[]; backupFile?: string | true; printBackup?: boolean; backup?: boolean; ix?: boolean; sandbox?: boolean; allowPrivateRelay?: boolean; json?: boolean }) => {
           let mode: identity.BackupMode | undefined = o.backupFile !== undefined ? "file" : o.printBackup ? "print" : o.backup === false ? "none" : undefined;
           const existed = await app.load(false);
           // On a home that already holds an identity, setup's backup options reveal the existing key's
@@ -692,6 +718,22 @@ export function buildProgram(deps: ProgramDeps): Command {
               lines.push("  ix      not installing Ix. You won't be asked again; `p2p setup --ix` offers it again");
             }
           }
+          // The agents' sandboxes keep them out of P2P_HOME (sandbox.ts): offered once to the person at a
+          // terminal (default Yes), showing exactly what is written. Never with --json, in CI, without a
+          // terminal, from a front end, or inside an agent's session; a "no" is remembered.
+          const sandboxHere = (() => {
+            try {
+              sandbox.assertPersonOutsideAgents(app, "setup");
+              return true;
+            } catch {
+              return false;
+            }
+          })();
+          if (!o.json && Boolean(io.prompt || io.select) && !ixLocal.ciEnv(app.env) && sandboxHere && (o.sandbox === true || !sandbox.declinedHere(app.env))) {
+            io.out(lines.join("\n"));
+            lines.length = 0;
+            lines.push(...(await offerSandbox(app.env, app.home)));
+          }
           lines.push("", "Invite someone: p2p invite <their name>    Join with a code: p2p join <code>");
           return { json: r, human: lines.join("\n") };
         },
@@ -700,6 +742,85 @@ export function buildProgram(deps: ProgramDeps): Command {
       ),
     );
 
+
+  const sb = program
+    .command("sandbox")
+    .description("Whether your agents' sandboxes (Claude Code, Codex) keep them out of P2P_HOME; `sandbox enable` adds the deny to their config")
+    .option("--json", "JSON output")
+    .action(
+      run(
+        async (app) => {
+          const r = sandbox.sandboxReport(app.env);
+          return { json: r, human: sandbox.sandboxHuman(r, projects.personHere(app)) };
+        },
+        { requireIdentity: false, readOnly: true },
+      ),
+    );
+  sb.command("enable")
+    .description("Add the deny on P2P_HOME to your Claude Code settings and Codex config.toml (shows the changes and asks first; backs each file up)")
+    .option("--claude", "Only Claude Code (~/.claude/settings.json, or $CLAUDE_CONFIG_DIR), even if it isn't set up yet")
+    .option("--codex", "Only Codex (config.toml in CODEX_HOME, else ~/.codex), even if it isn't set up yet")
+    .option("--yes", "Don't ask (in your own terminal or a script of yours; never inside an agent's session)")
+    .option("--json", "JSON output (needs --yes)")
+    .action(
+      run(
+        async (app, o: { claude?: boolean; codex?: boolean; yes?: boolean; json?: boolean }) => {
+          sandbox.assertPersonOutsideAgents(app, "sandbox enable");
+          const only = o.claude || o.codex ? ([...(o.claude ? ["claude"] : []), ...(o.codex ? ["codex"] : [])] as ("claude" | "codex")[]) : undefined;
+          const fronts = (only ?? (["claude", "codex"] as const)).map((f) => sandbox.planFront(f, app.env)).filter((f) => only !== undefined || f.present);
+          const name = (f: sandbox.FrontPlan) => (f.front === "claude" ? "Claude Code" : "Codex");
+          const lines: string[] = [];
+          if (fronts.length === 0) {
+            lines.push(`Neither Claude Code (${sandbox.claudeSettingsPath(app.env)}) nor Codex (${sandbox.codexConfigPath(app.env)}) is set up here: nothing to change. --claude or --codex writes the config anyway.`);
+          }
+          for (const f of fronts) {
+            if (f.plan.kind === "already") lines.push(`${name(f)}: already denies P2P_HOME (${f.path})`);
+            else if (f.plan.kind === "unavailable") lines.push(`${name(f)}: ${f.status.detail}`);
+            else if (f.plan.kind === "manual") lines.push(`${name(f)}: not changed: ${f.plan.reason}.${f.plan.snippet ? ` Add this to ${f.path} yourself:\n\n${f.plan.snippet}\n` : ""}`);
+          }
+          const edits = fronts.filter((f) => f.plan.kind === "edit");
+          let written: { path: string; backup?: string }[] = [];
+          if (edits.length > 0) {
+            let yes = o.yes === true;
+            if (!yes) {
+              if (o.json || !(io.prompt || io.select)) {
+                throw new CliError("usage", "nothing was changed: run `p2p sandbox enable` at your terminal to see the changes and be asked, or add --yes");
+              }
+              io.out(sandbox.previewText(edits, app.home));
+              yes = await confirmDefaultYes("Add these?");
+            }
+            if (!yes) {
+              sandbox.setSandboxDeclined(app.home, true);
+              lines.push("Nothing was changed. `p2p setup` won't offer it again; `p2p sandbox enable` does.");
+            } else {
+              written = sandbox.applyPlans(edits);
+              if (sandbox.declinedHere(app.env)) sandbox.setSandboxDeclined(app.home, false);
+              for (const w of written) lines.push(`Wrote ${w.path}${w.backup ? ` (backup: ${w.backup})` : ""}`);
+              if (edits.some((f) => f.front === "codex")) lines.push("Codex reads config.toml when it starts: restart open Codex sessions.");
+              if (edits.some((f) => f.front === "claude")) lines.push("Claude Code applies settings changes to open sessions at their next command.");
+            }
+          }
+          return {
+            json: { written, fronts: fronts.map((f) => ({ front: f.front, path: f.path, plan: f.plan.kind, ...(f.plan.kind === "manual" ? { reason: f.plan.reason } : {}) })) },
+            human: lines.join("\n"),
+          };
+        },
+        { requireIdentity: false, noDeadline: true },
+      ),
+    );
+  sb.command("notice")
+    .description("For a front end: the one-time notice for its person when its agent's sandbox doesn't deny P2P_HOME")
+    .option("--front <name>", "claude or codex", "claude")
+    .option("--json", "JSON output")
+    .action(
+      run(
+        async (app, o: { front?: string }) => {
+          const notice = await sandbox.sandboxNotice(app, o.front === "codex" ? "codex" : "claude").catch(() => undefined);
+          return { json: notice ? { notice } : {}, human: notice ?? "" };
+        },
+        { requireIdentity: false },
+      ),
+    );
 
   program
     .command("whoami")
@@ -2108,6 +2229,18 @@ export function buildProgram(deps: ProgramDeps): Command {
   return program;
 }
 
+/** A question whose answer defaults to Yes (Enter): only ever for what tightens, such as the sandbox offer. */
+async function askDefaultYes(io: Io, q: string): Promise<boolean> {
+  if (io.select) {
+    const lines = q.split("\n");
+    const r = await io.select({ intro: lines.slice(0, -1), message: lines[lines.length - 1] || "Continue?", choices: [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }], initial: "yes" });
+    return r?.[0] === "yes";
+  }
+  if (!io.prompt) return false;
+  const a = (await io.prompt(`${q} [Y/n] `)).trim().toLowerCase();
+  return a === "" || a === "y" || a === "yes";
+}
+
 /** The running `p2p` script (the bundled p2p.mjs, or dist/bin.js), for Codex to start. */
 function selfScript(deps: ProgramDeps): string {
   const p = deps.scriptPath ?? process.argv[1] ?? "";
@@ -2147,6 +2280,28 @@ function codexCommands(program: Command, deps: ProgramDeps, io: Io): void {
       try {
         const script = selfScript(deps);
         out(Boolean(o.json), codex.installCommand({ env: deps.env, node: deps.nodeCommand ?? process.execPath, script, ...(o.codexHome ? { codexHome: resolve(o.codexHome) } : {}), write: o.write, remove: o.remove }));
+        // Then the sandbox offer for Codex (sandbox.ts), once, to the person at a terminal (default Yes).
+        if (o.write && !o.remove && !o.json && (io.prompt || io.select) && !ixLocal.ciEnv(deps.env)) {
+          const env = o.codexHome ? { ...deps.env, CODEX_HOME: resolve(o.codexHome) } : deps.env;
+          let here = true;
+          try {
+            sandbox.assertPersonOutsideAgents({ env }, "codex install --write");
+          } catch {
+            here = false;
+          }
+          const plans = here && !sandbox.declinedHere(env) ? sandbox.offerablePlans(env, ["codex"]) : [];
+          if (plans.length > 0) {
+            const home = resolveHome(env);
+            io.out(`\n${sandbox.previewText(plans, home)}`);
+            if (await askDefaultYes(io, "Add these?")) {
+              for (const d of sandbox.applyPlans(plans)) io.out(`Wrote ${d.path}${d.backup ? ` (backup: ${d.backup})` : ""}`);
+              if (sandbox.declinedHere(env)) sandbox.setSandboxDeclined(home, false);
+            } else {
+              sandbox.setSandboxDeclined(home, true);
+              io.out("Sandbox not changed. You won't be asked again; `p2p sandbox enable` adds it any time.");
+            }
+          }
+        }
       } catch (e) {
         fail(Boolean(o.json), e);
       }

@@ -694,3 +694,23 @@ describe('invite links and agents', () => {
     expect(ran(w, 'join')).toEqual([])
   })
 })
+
+describe('sandbox notice', () => {
+  test("the CLI's one-time sandbox notice reaches the person as a toast, never the model; the mod writes no settings", async ($, on) => {
+    const w = world(on)
+    w.cli['sandbox notice'] = { body: { notice: "Claude Code's sandbox doesn't keep its commands out of ~/.p2p. In your own terminal (not inside Claude Code), run `p2p sandbox enable`." } }
+    await start($, w)
+    await settle(w, () => w.toasts.some(t => t.includes('p2p sandbox enable')))
+    expect(w.toasts.filter(t => t.startsWith("Peer2Peer: Claude Code's sandbox")).length).toBe(1)
+    expect(w.runs.some(r => r.argv.join(' ').includes('sandbox notice --front=claude'))).toBe(true)
+    // It only ever asks for the notice: never `sandbox enable`.
+    expect(w.runs.some(r => r.argv.includes('enable') && r.argv.includes('sandbox'))).toBe(false)
+  })
+
+  test('no notice from the CLI, no toast', async ($, on) => {
+    const w = world(on)
+    await start($, w)
+    await settle(w, () => w.runs.some(r => r.argv.join(' ').includes('sandbox notice')))
+    expect(w.toasts.some(t => t.includes('sandbox'))).toBe(false)
+  })
+})

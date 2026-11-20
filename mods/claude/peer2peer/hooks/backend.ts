@@ -175,6 +175,15 @@ export class P2P {
     return this.call(['extensions'])
   }
 
+  /**
+   * `p2p sandbox notice`: the one-time notice for the person when Claude Code's sandbox doesn't deny
+   * P2P_HOME (the CLI decides, and remembers it was shown). The mod never edits the person's settings
+   * itself: an agent's front end changing its own sandbox is what the deny is about.
+   */
+  sandboxNotice(): Promise<Outcome<{ notice?: string }>> {
+    return this.call<{ notice?: string }>(['sandbox', 'notice', '--front=claude'])
+  }
+
   /** x:ix.* items peers sent (`p2p ix inbox`): ids, kinds, senders and framed digests. */
   async ixInbox(): Promise<Outcome<IxInboxItem[]>> {
     const r = await this.call<{ events: IxInboxItem[] }>(['ix', 'inbox'])

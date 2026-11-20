@@ -63,6 +63,7 @@ import { EVENT_RETENTION_MS, type PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
 import { extIxInstalled, ixBinary, ixDeclined, IX_INSTALL_URL, ixInstallLine, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
 import { personHere } from "./projects.js";
+import { sandboxFix, sandboxReport } from "./sandbox.js";
 import { graphMemoryReport, type GraphMemoryDoc } from "./graph-memory.js";
 import { graphMemoryEnabled } from "./config.js";
 import { historySettings } from "./history.js";
@@ -681,6 +682,7 @@ async function deviceChecks(c: Checks, app: App, o: DoctorOptions, ms: number, r
     );
   }
 
+  sandboxChecks(c, app);
   const ix = await ixChecks(c, app, ms);
   await versionCheck(c, app, o, ms);
   return dataFlowOf(app, ix);
@@ -697,6 +699,36 @@ export function dataFlowOf(app: Pick<App, "env" | "home">, ix: Pick<DataFlow, "g
   };
 }
 
+
+// ---------------------------------------------------------------------------
+// The agents' sandboxes (sandbox.ts): whether Claude Code's and Codex's deny P2P_HOME
+
+/**
+ * One line per installed front end: does its agent's sandbox deny its commands read and write
+ * access to P2P_HOME? That is the boundary the CLI's own gates rest on (an agent running as you can
+ * otherwise read the key files). Read from the person's config files; nothing is written, and
+ * nothing of their contents is shown.
+ */
+export function sandboxChecks(c: Checks, app: App): void {
+  let r: ReturnType<typeof sandboxReport>;
+  try {
+    r = sandboxReport(app.env);
+  } catch {
+    return;
+  }
+  const fix = sandboxFix(personHere(app));
+  const rows = [
+    ["sandbox-claude", "Claude Code sandbox", r.claude] as const,
+    ["sandbox-codex", "Codex sandbox", r.codex] as const,
+  ];
+  for (const [id, title, s] of rows) {
+    if (!s.present && s.state !== "on") continue;
+    const notes = s.notes.length > 0 ? ` (${s.notes.join("; ")})` : "";
+    if (s.state === "on") c.add(id, s.notes.length > 0 ? "unknown" : "ok", title, `${s.detail}${notes}`, s.notes.length > 0 ? "see the note: it lets some commands past the deny" : undefined);
+    else if (s.state === "off") c.add(id, "fail", title, `${s.detail}${notes}`, `${fix}${r.declined ? " (you said no when `p2p setup` offered it)" : ""}`);
+    else c.add(id, "unknown", title, `${s.detail}${notes}`, s.state === "unavailable" ? "run your agent where its sandbox works (macOS, Linux, WSL2)" : `check ${s.settings}, then \`p2p sandbox\``);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Ix (epic #41): the local CLI, its backend, this checkout's map, and each project's graph target
@@ -1038,6 +1070,7 @@ export async function doctor(app: App, o: DoctorOptions): Promise<DoctorResult> 
     if (relays.length === 0) c.add("relays", "unknown", "relays", "no relays configured yet", "`p2p setup --relay <wss://…>` picks one");
     else relayChecks(c, app, await probeRelays(app, relays, ms, false), undefined);
     await versionCheck(c, app, o, ms);
+    if (scope === "device") sandboxChecks(c, app);
     return { scope, version: o.version, ...(o.user !== undefined ? { user: { input: o.user } } : {}), checks: c.list, summary: summarize(c.list) };
   }
   const reports = await probeRelays(app, app.relays, ms, true, app.userId);
