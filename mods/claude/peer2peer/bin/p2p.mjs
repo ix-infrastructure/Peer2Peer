@@ -23543,11 +23543,7 @@ async function rotate(app, opts = {}) {
     if (!prior || prior.step === "done") throw new CliError("no_rotation", "there is no rotation in progress here to resume");
     st = prior;
     assertSameBranch(st, opts);
-    if (opts.contest && !st.contest) {
-      if ((await foreignRotations(app)).length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
-      st.contest = true;
-      await saveState(app.home, st);
-    }
+    if (opts.contest && !st.contest) await contestOnResume(app, st, opts);
   } else {
     if (prior && prior.step !== "done") throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is in progress: finish it with \`p2p identity rotate --resume\``);
     st = await begin(app, opts);
@@ -24024,7 +24020,7 @@ async function publishFinal(app, st) {
       if (!(e instanceof CliError)) throw e;
       const foreign = await foreignRotations(app);
       if (foreign.length === 0) throw e;
-      throw rotatedMeanwhile(foreign, e);
+      throw await rotatedMeanwhile(app, foreign, e);
     }
   }
   if (mine) {
@@ -24051,12 +24047,44 @@ async function publishFinal(app, st) {
   }
   return { ver: base.ver + 1, ...r };
 }
-function rotatedMeanwhile(foreign, cause) {
+async function contestOnResume(app, st, opts) {
+  const foreign = await foreignRotations(app);
+  if (foreign.length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
+  if (st.step === "created" && !st.accepted) {
+    throw new CliError(
+      "usage",
+      "this rotation plan was made before the rotation you want to contest, without dropping the devices that could have published it: drop it (`p2p identity rotate --cancel`), then contest with `p2p identity rotate --contest`"
+    );
+  }
+  const chain = await ownChain(app);
+  const signers = new Set(foreign.map((f) => chain?.get(f.hash)?.by).filter((d) => d !== void 0 && d !== app.did));
+  const whyOf = (did, d) => signers.has(did) ? "signed the rotation you are contesting" : d.keyholder ? "holds your identity key, so it could have published the rotation you are contesting" : void 0;
+  const suspects = Object.entries(st.devices).filter(([did, d]) => d.status !== "excluded" && d.status !== "aborted" && whyOf(did, d) !== void 0);
+  const named = [];
+  for (const [did, d] of suspects) {
+    if (!after(st, "devices") && d.status === "pending" && !(opts.keep ?? []).includes(did)) {
+      d.status = "excluded";
+      d.why = whyOf(did, d);
+    } else {
+      named.push(`${did}${d.label ? ` (${sanitizePeerText(d.label, 64)})` : ""}${d.newDid ? `, now ${d.newDid}` : ""}: ${whyOf(did, d)}`);
+    }
+  }
+  st.contest = true;
+  await saveState(app.home, st);
+  if (named.length > 0) {
+    app.warn(
+      `these devices of yours follow this rotation (or were sent its link code) and could have published the rotation you are contesting: ${named.join("; ")}. If one is lost or stolen, revoke it on your new identity (\`p2p devices revoke <did>\`)`
+    );
+  }
+}
+async function rotatedMeanwhile(app, foreign, cause) {
   const to = [...new Set(foreign.map((f) => f.rotation.to))];
+  const chain = await ownChain(app);
+  const by = [...new Set(foreign.map((f) => chain?.get(f.hash)?.by).filter((d) => d !== void 0 && isDid(d)))];
   return new CliError(
     "identity_rotated",
-    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
-    { to }
+    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}${by.length > 0 ? ` (signed by your device ${by.join(" and ")})` : ""}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
+    { to, by }
   );
 }
 async function publishOwnBranchFinal(app, ik, st, own, pinned) {
@@ -29312,15 +29340,27 @@ var init_app = __esm({
       /**
        * #79, #92 follow-up: the relays core held a refresh of our own identity back for (`by`, they sent a head that
        * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
-       * (a rotation sets them aside, the hint names them) only when one of `left` is a version our own devices published
-       * (the publish log): our own current tip against a key thief's head, the case this exists for. Otherwise none: a
-       * relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set aside,
-       * and a relay that really holds the owner up can still be removed (`p2p relays remove`).
+       * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
+       * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
+       * that our devices published (the publish log) or that a device a version in the publish log lists published
+       * (another owner device whose versions haven't reached this device's log yet, the provenance rule of ownBranchTip
+       * in rotation.ts). That is the case this exists for: our own current tip against a key thief's head. Otherwise
+       * none: a relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set
+       * aside, and a relay that really holds the owner up can still be removed (`p2p relays remove`).
        */
       async ownHeldBack(by, left) {
-        if (by.length === 0 || left.length === 0) return [];
+        if (by.length === 0 || left.length === 0 || !this.keys) return [];
+        const stored2 = await this.store.getIdentity(this.keys.userId);
+        if (!stored2 || stored2.versions.length === 0) return [];
+        const chain = IdentityChain.fromStored({ ...stored2, pendingHeads: [], leftOut: [] });
+        const tips = new Set(chain.tips().map((t2) => t2.hash));
         const published = new Set((await this.store.getPublishLog()).published);
-        return left.some((h) => published.has(h)) ? [...by] : [];
+        const trusted = /* @__PURE__ */ new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]);
+        const own = left.some((h) => {
+          const v = tips.has(h) ? chain.get(h) : void 0;
+          return v !== void 0 && (published.has(h) || trusted.has(v.by));
+        });
+        return own ? [...by] : [];
       }
       /**
        * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays

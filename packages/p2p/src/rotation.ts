@@ -95,6 +95,7 @@ import {
   recordOwnLeave,
   rotationConflicts,
   rotationKey,
+  sanitizePeerText,
   sealLinkResponse,
   selectLinkRequest,
   storeOfferedCircle,
@@ -779,11 +780,7 @@ export async function rotate(app: App, opts: RotateOptions = {}): Promise<Rotate
     assertSameBranch(st, opts);
     // #91: `--resume --contest`: a rotation of this identity this device didn't publish came out while this one was
     // under way (publishFinal points here): this one goes on as a competing one, so friends see a conflict.
-    if (opts.contest && !st.contest) {
-      if ((await foreignRotations(app)).length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
-      st.contest = true;
-      await saveState(app.home, st);
-    }
+    if (opts.contest && !st.contest) await contestOnResume(app, st, opts);
   } else {
     if (prior && prior.step !== "done") throw new CliError("rotation_in_progress", `a rotation to ${prior.to} is in progress: finish it with \`p2p identity rotate --resume\``);
     st = await begin(app, opts);
@@ -1368,7 +1365,7 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
       if (!(e instanceof CliError)) throw e;
       const foreign = await foreignRotations(app);
       if (foreign.length === 0) throw e;
-      throw rotatedMeanwhile(foreign, e);
+      throw await rotatedMeanwhile(app, foreign, e);
     }
   }
   if (mine) {
@@ -1397,13 +1394,53 @@ async function publishFinal(app: App, st: RotationState): Promise<{ ver: number;
   return { ver: base.ver + 1, ...r };
 }
 
+/**
+ * #91: `--resume --contest`. A plan not yet accepted was made without the contest's drops (begin: the device that
+ * signed the contested rotation, and every other key holder): refused, the user drops it and makes a contest's plan.
+ * Past acceptance, those devices are dropped if no link code went out yet (unless kept, `--keep`); after that,
+ * the ones that follow (or were sent a code) are named, so the user can revoke them on the new identity.
+ */
+async function contestOnResume(app: App, st: RotationState, opts: RotateOptions): Promise<void> {
+  const foreign = await foreignRotations(app);
+  if (foreign.length === 0) throw new CliError("usage", "no rotation of your identity to contest: --contest answers one this device didn't publish");
+  if (st.step === "created" && !st.accepted) {
+    throw new CliError(
+      "usage",
+      "this rotation plan was made before the rotation you want to contest, without dropping the devices that could have published it: drop it (`p2p identity rotate --cancel`), then contest with `p2p identity rotate --contest`",
+    );
+  }
+  const chain = await ownChain(app);
+  const signers = new Set(foreign.map((f) => chain?.get(f.hash)?.by).filter((d): d is string => d !== undefined && d !== app.did));
+  const whyOf = (did: string, d: RotationDeviceRec) =>
+    signers.has(did) ? "signed the rotation you are contesting" : d.keyholder ? "holds your identity key, so it could have published the rotation you are contesting" : undefined;
+  const suspects = Object.entries(st.devices).filter(([did, d]) => d.status !== "excluded" && d.status !== "aborted" && whyOf(did, d) !== undefined);
+  const named: string[] = [];
+  for (const [did, d] of suspects) {
+    if (!after(st, "devices") && d.status === "pending" && !(opts.keep ?? []).includes(did)) {
+      d.status = "excluded";
+      d.why = whyOf(did, d);
+    } else {
+      named.push(`${did}${d.label ? ` (${sanitizePeerText(d.label, 64)})` : ""}${d.newDid ? `, now ${d.newDid}` : ""}: ${whyOf(did, d)}`);
+    }
+  }
+  st.contest = true;
+  await saveState(app.home, st);
+  if (named.length > 0) {
+    app.warn(
+      `these devices of yours follow this rotation (or were sent its link code) and could have published the rotation you are contesting: ${named.join("; ")}. If one is lost or stolen, revoke it on your new identity (\`p2p devices revoke <did>\`)`,
+    );
+  }
+}
+
 /** #91: the error when a rotation this device didn't publish is out and the relays refuse our own final version. */
-function rotatedMeanwhile(foreign: readonly { rotation: VerifiedRotation }[], cause: CliError): CliError {
+async function rotatedMeanwhile(app: App, foreign: readonly { hash: string; rotation: VerifiedRotation }[], cause: CliError): Promise<CliError> {
   const to = [...new Set(foreign.map((f) => f.rotation.to))];
+  const chain = await ownChain(app);
+  const by = [...new Set(foreign.map((f) => chain?.get(f.hash)?.by).filter((d): d is string => d !== undefined && isDid(d)))];
   return new CliError(
     "identity_rotated",
-    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
-    { to },
+    `no relay took your old identity's final version (${cause.message}): this identity was already rotated to ${to.join(" and ")}${by.length > 0 ? ` (signed by your device ${by.join(" and ")})` : ""}, and this device didn't publish that. If you didn't start it, someone holds your identity key: contest it with \`p2p identity rotate --resume --contest\` (your friends then see a conflict and apply neither)`,
+    { to, by },
   );
 }
 

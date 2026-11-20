@@ -678,15 +678,27 @@ export class App {
   /**
    * #79, #92 follow-up: the relays core held a refresh of our own identity back for (`by`, they sent a head that
    * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
-   * (a rotation sets them aside, the hint names them) only when one of `left` is a version our own devices published
-   * (the publish log): our own current tip against a key thief's head, the case this exists for. Otherwise none: a
-   * relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set aside,
-   * and a relay that really holds the owner up can still be removed (`p2p relays remove`).
+   * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
+   * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
+   * that our devices published (the publish log) or that a device a version in the publish log lists published
+   * (another owner device whose versions haven't reached this device's log yet, the provenance rule of ownBranchTip
+   * in rotation.ts). That is the case this exists for: our own current tip against a key thief's head. Otherwise
+   * none: a relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set
+   * aside, and a relay that really holds the owner up can still be removed (`p2p relays remove`).
    */
   private async ownHeldBack(by: readonly string[], left: readonly string[]): Promise<string[]> {
-    if (by.length === 0 || left.length === 0) return [];
+    if (by.length === 0 || left.length === 0 || !this.keys) return [];
+    const stored = await this.store.getIdentity(this.keys.userId);
+    if (!stored || stored.versions.length === 0) return [];
+    const chain = IdentityChain.fromStored({ ...stored, pendingHeads: [], leftOut: [] });
+    const tips = new Set(chain.tips().map((t) => t.hash));
     const published = new Set((await this.store.getPublishLog()).published);
-    return left.some((h) => published.has(h)) ? [...by] : [];
+    const trusted = new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]);
+    const own = left.some((h) => {
+      const v = tips.has(h) ? chain.get(h) : undefined;
+      return v !== undefined && (published.has(h) || trusted.has(v.by));
+    });
+    return own ? [...by] : [];
   }
 
   /**
