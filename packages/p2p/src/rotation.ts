@@ -768,7 +768,49 @@ export async function rotateCancel(app: App): Promise<{ cancelled: boolean; to?:
   return { cancelled: true, to: st.to };
 }
 
+/** #91 review: where a running `rotate` records its process id (one run per home at a time). */
+export const rotationLockOf = (home: string) => join(home, "rotation.lock");
+
+/**
+ * #91 review: one `p2p identity rotate` run per home at a time, so a second run (`--resume --contest` while the
+ * first is in followers()) can't have its state overwritten by the first's saves. A lock left by a process that no
+ * longer runs is taken over.
+ */
+async function withRotationLock<T>(app: App, fn: () => Promise<T>): Promise<T> {
+  const file = rotationLockOf(app.home);
+  const take = () => writeFile(file, `${process.pid}\n`, { mode: 0o600, flag: "wx" });
+  try {
+    await take();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    const pid = Number.parseInt((await readFile(file, "utf8").catch(() => "")).trim(), 10);
+    if (Number.isSafeInteger(pid) && pid > 0 && running(pid)) {
+      throw new CliError("rotation_in_progress", "another `p2p identity rotate` run is in progress for this identity: wait for it to finish, then try again");
+    }
+    await rm(file, { force: true });
+    await take();
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm(file, { force: true }).catch(() => undefined);
+  }
+}
+
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export async function rotate(app: App, opts: RotateOptions = {}): Promise<RotateResult> {
+  return withRotationLock(app, () => rotateLocked(app, opts));
+}
+
+async function rotateLocked(app: App, opts: RotateOptions): Promise<RotateResult> {
   const prior = await readRotationState(app.home);
   const recovered = await loadOrRecover(app, prior, opts);
   if (recovered) return recovered;

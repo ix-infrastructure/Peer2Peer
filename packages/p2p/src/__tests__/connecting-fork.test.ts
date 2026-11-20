@@ -16,7 +16,8 @@
 // re-plan doesn't ignore a new --branch; a thief's rotation out meanwhile points a resume to the contest; what the
 // branch summaries print is checked again (relay URLs and device ids only).
 
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addIdentityVersion, b64uDecode, createDeviceCert, createIdentityDoc, generateDeviceKeysV3, identityKeyFromSeed, jwsHash, mergePrevTip, nowSec, peekIdentityDoc } from "@peer2peer/core/v3";
@@ -24,7 +25,7 @@ import { formatRotationPlan } from "../format.js";
 import { linkJoin, linkStart } from "../identity.js";
 import { receiving } from "../inbound.js";
 import { publishOver, RelayConnection } from "../relay-client.js";
-import { branchSummary, readRotationState, rotate } from "../rotation.js";
+import { branchSummary, readRotationState, rotate, rotationLockOf } from "../rotation.js";
 import { startRelay, User, type TestRelay } from "./harness.js";
 
 const R1 = "wss://relay-fork-one.test/v3";
@@ -476,6 +477,56 @@ describe("#91: --resume --contest on a plan not yet accepted", () => {
     const contest = await mia.run(["identity", "rotate", "--contest", "--yes", "--wait", "1", "--backup-file"]);
     expect(contest.code, `${contest.out}\n${contest.err}`).toBe(0);
     expect(contest.json).toMatchObject({ contest: true, step: "done" });
+  }, 240_000);
+});
+
+describe("#91 review: --resume --contest past acceptance, before any link code went out", () => {
+  it("drops the key holders that could have published the contested rotation (no code goes to them); one run at a time", async () => {
+    const nia = user("nia");
+    const nia2 = user("nia2");
+    const nia3 = user("nia3");
+    await init(nia);
+    await link(nia, nia2, "stolen", true);
+    await link(nia, nia3, "tablet", true);
+    const nia2Did = keysOf(nia2).did;
+    const nia3Did = keysOf(nia3).did;
+    await nia.ok(["devices", "revoke", nia2Did]);
+    await connectingFork(nia, { devices: [nia2Did] });
+    {
+      const app = await nia.app();
+      await app.load();
+      receiving(app);
+      await expect(rotate(app, { yes: true, backupFileDefault: true, waitSec: 1, stopAfter: "published" })).rejects.toThrow(/stopped after published/);
+      await app.close();
+    }
+    expect((await readRotationState(nia.home))!.devices[nia3Did]?.status).toBe("pending");
+    const thief = await nia2.run(["identity", "rotate", "--yes", "--wait", "1", "--backup-file"]);
+    expect(thief.code, `${thief.out}\n${thief.err}`).toBe(0);
+    {
+      const app = await nia.app();
+      await app.load();
+      await app.refreshIdentity(app.userId, app.relays, { force: true, quiet: true });
+      await app.close();
+    }
+    // Another run holds the rotation lock (a live process): refused, nothing changed.
+    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    try {
+      writeFileSync(rotationLockOf(nia.home), `${other.pid}\n`);
+      const busy = await nia.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+      expect(busy.json.error, busy.err).toBe("rotation_in_progress");
+      expect(busy.json.reason).toMatch(/another .* run is in progress/);
+      expect((await readRotationState(nia.home))!.contest).toBeUndefined();
+    } finally {
+      other.kill();
+    }
+    await new Promise((r) => other.once("exit", r));
+    // That process is gone: its lock is taken over.
+    const contest = await nia.run(["identity", "rotate", "--resume", "--contest", "--yes", "--wait", "1"]);
+    expect(contest.code, `${contest.out}\n${contest.err}`).toBe(0);
+    expect(contest.json).toMatchObject({ contest: true, step: "done" });
+    expect(contest.json.devices.excluded.map((x: any) => x.did)).toContain(nia3Did);
+    expect(contest.json.devices.followed.map((x: any) => x.did)).not.toContain(nia3Did);
+    expect(contest.json.devices.offline.map((x: any) => x.did)).not.toContain(nia3Did);
   }, 240_000);
 });
 

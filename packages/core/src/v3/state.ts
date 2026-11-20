@@ -145,7 +145,19 @@ export type RefreshedView = IdentityView & {
    * follow-up): its own current tip against a key thief's head.
    */
   heldBackFor?: string[];
+  /**
+   * With heldBackBy: the head those relays sent, that the refresh was held back for (its jwsHash and key holders). The
+   * owner's client trusts a left-out version by its publisher's provenance only when that head leaves its own device
+   * out as a key holder (#79: a thief's head against the owner's devices, not the owner revoking another device).
+   */
+  heldBackHead?: HeldBackHead;
 };
+
+/** RefreshedView.heldBackHead. */
+export interface HeldBackHead {
+  hash: string;
+  keyholders: string[];
+}
 
 /** A verified version a refresh left unconnected above the held head, and the relays that sent it (#67). */
 export interface UnconnectedVersion {
@@ -171,10 +183,28 @@ export function heldBackForOf(e: unknown): string[] {
   return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
 }
 
+/** The head a `chain-broken` refresh of our own identity was held back for (RefreshedView.heldBackHead), or undefined. */
+export function heldBackHeadOf(e: unknown): HeldBackHead | undefined {
+  const h = (e as { heldBackHead?: unknown } | null)?.heldBackHead as { hash?: unknown; keyholders?: unknown } | undefined;
+  if (!h || typeof h.hash !== "string" || !Array.isArray(h.keyholders)) return undefined;
+  return { hash: h.hash, keyholders: h.keyholders.filter((x): x is string => typeof x === "string") };
+}
+
 /** The relays a failed refresh names as having sent versions it couldn't connect (#67); empty when none or not such a failure. */
 export function unconnectedRelaysOf(e: unknown): string[] {
   const r = (e as { unconnectedRelays?: unknown } | null)?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
+}
+
+/** #79: what a refresh of our own identity was held back for (RefreshedView.heldBackBy, heldBackFor, heldBackHead). */
+interface HeldBack {
+  by: string[];
+  for: string[];
+  head: HeldBackHead;
+}
+
+function heldBackFields(h: HeldBack | undefined): Pick<RefreshedView, "heldBackBy" | "heldBackFor" | "heldBackHead"> {
+  return h ? { heldBackBy: h.by, heldBackFor: h.for, heldBackHead: h.head } : {};
 }
 
 function forRelay(result: FetchResult | undefined, relay: string): readonly string[] {
@@ -756,9 +786,9 @@ export async function refreshIdentity(
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg: string, held: { by: string[]; for: string[] } = { by: [], for: [] }): never => {
+  const broken = (msg: string, held?: HeldBack): never => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...(held.by.length > 0 ? { heldBackBy: held.by, heldBackFor: held.for } : {}) });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...heldBackFields(held) });
     throw e;
   };
   // Counted over the relays the held view lists (re-review R2): a caller may add relays from an unverified
@@ -792,9 +822,9 @@ export async function refreshIdentity(
    * #79, own identity only: the relays that sent `head` and none of `left` (RefreshedView.heldBackBy), and the
    * versions in `left` (heldBackFor).
    */
-  const heldBackOf = (head: VerifiedIdentityDoc, left: readonly VerifiedIdentityDoc[]) => {
+  const heldBackOf = (head: VerifiedIdentityDoc, left: readonly VerifiedIdentityDoc[]): HeldBack | undefined => {
     const by = opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
-    return { by, for: by.length > 0 ? left.map((e) => e.hash) : [] };
+    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders] } } : undefined;
   };
 
   // The newest version the relays returned that the chain rules didn't reject.
@@ -839,7 +869,7 @@ export async function refreshIdentity(
   /** #92: the versions held back for (leftOut) that aren't held, at or below the head: see IdentityChain.noteLeftOut. */
   let leftOutDocs: VerifiedIdentityDoc[] = [];
   /** #79: see RefreshedView.heldBackBy and heldBackFor. */
-  let heldBack: { by: string[]; for: string[] } = { by: [], for: [] };
+  let heldBack: HeldBack | undefined;
   // #92: on unanchored history, a current tip a relay served BELOW the head, left on a gap, whose ancestry this
   // refresh fetched (the walk asked for its parent like any gap's) is placed as another unanchored root with
   // that ancestry under it, when the ancestry proves it is a fork: a device every held tip lists was revoked on
@@ -1010,7 +1040,7 @@ export async function refreshIdentity(
       answeredRelays: answered,
       unconnectedRelays: unconnectedRelays(),
       unconnectedVersions: unconnectedVersions(),
-      ...(heldBack.by.length > 0 ? { heldBackBy: heldBack.by, heldBackFor: heldBack.for } : {}),
+      ...heldBackFields(heldBack),
     };
   }
   await store.deleteProvisional(userId);

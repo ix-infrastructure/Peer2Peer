@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.3 ad8687faf8cb39f1
+// @peer2peer/core 0.1.3 8abe37eb90772e62
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -11027,9 +11027,18 @@ function heldBackForOf(e) {
   const r = e?.heldBackFor;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
 }
+function heldBackHeadOf(e) {
+  const h = e?.heldBackHead;
+  if (!h || typeof h.hash !== "string" || !Array.isArray(h.keyholders))
+    return void 0;
+  return { hash: h.hash, keyholders: h.keyholders.filter((x) => typeof x === "string") };
+}
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
   return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+}
+function heldBackFields(h) {
+  return h ? { heldBackBy: h.by, heldBackFor: h.for, heldBackHead: h.head } : {};
 }
 function forRelay(result, relay) {
   if (result === void 0)
@@ -11365,9 +11374,9 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
     const headVer = chain.size > 0 ? chain.view().head.ver : -Infinity;
     return gaps.filter((g) => g.d.ver > headVer).map((g) => ({ ver: g.d.ver, relays: relays.filter((r) => sentBy.get(r)?.has(g.d.hash)) }));
   };
-  const broken = (msg, held2 = { by: [], for: [] }) => {
+  const broken = (msg, held2) => {
     const e = new P2PError("chain-broken", msg);
-    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...held2.by.length > 0 ? { heldBackBy: held2.by, heldBackFor: held2.for } : {} });
+    Object.assign(e, { unconnectedRelays: unconnectedRelays(), unconnectedVersions: unconnectedVersions(), ...heldBackFields(held2) });
     throw e;
   };
   const listed = before && relays.some((r) => before.relays.includes(r)) ? before.relays : relays;
@@ -11379,7 +11388,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const heldBackOf = (head, left) => {
     const by = opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
-    return { by, for: by.length > 0 ? left.map((e) => e.hash) : [] };
+    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders] } } : void 0;
   };
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
@@ -11396,7 +11405,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   }
   const besideHead = [];
   let leftOutDocs = [];
-  let heldBack = { by: [], for: [] };
+  let heldBack;
   const forkRoots = /* @__PURE__ */ new Map();
   if (!exhausted && chain.size > 0 && !chain.anchored) {
     begin2();
@@ -11543,7 +11552,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
       answeredRelays: answered,
       unconnectedRelays: unconnectedRelays(),
       unconnectedVersions: unconnectedVersions(),
-      ...heldBack.by.length > 0 ? { heldBackBy: heldBack.by, heldBackFor: heldBack.for } : {}
+      ...heldBackFields(heldBack)
     };
   }
   await store2.deleteProvisional(userId);
@@ -23211,6 +23220,7 @@ __export(rotation_exports, {
   rotatePlan: () => rotatePlan,
   rotateResend: () => rotateResend,
   rotationConflict: () => rotationConflict,
+  rotationLockOf: () => rotationLockOf,
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
@@ -23533,7 +23543,39 @@ async function rotateCancel(app) {
   if (st.backupFile) app.warn(`the backup phrase of the key that wasn't used is still in ${st.backupFile}: delete it`);
   return { cancelled: true, to: st.to };
 }
+async function withRotationLock(app, fn) {
+  const file = rotationLockOf(app.home);
+  const take2 = () => writeFile3(file, `${process.pid}
+`, { mode: 384, flag: "wx" });
+  try {
+    await take2();
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    const pid = Number.parseInt((await readFile4(file, "utf8").catch(() => "")).trim(), 10);
+    if (Number.isSafeInteger(pid) && pid > 0 && running(pid)) {
+      throw new CliError("rotation_in_progress", "another `p2p identity rotate` run is in progress for this identity: wait for it to finish, then try again");
+    }
+    await rm2(file, { force: true });
+    await take2();
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm2(file, { force: true }).catch(() => void 0);
+  }
+}
+function running(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
 async function rotate(app, opts = {}) {
+  return withRotationLock(app, () => rotateLocked(app, opts));
+}
+async function rotateLocked(app, opts) {
   const prior = await readRotationState(app.home);
   const recovered = await loadOrRecover(app, prior, opts);
   if (recovered) return recovered;
@@ -24916,7 +24958,7 @@ async function relinkRotated(app, code2, opts = {}) {
     }
   };
 }
-var STEPS, PRINTABLE_ASCII, rotationDir, newHomeOf, followHomeOf, after, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
+var STEPS, PRINTABLE_ASCII, rotationDir, newHomeOf, followHomeOf, after, rotationLockOf, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
 var init_rotation = __esm({
   "packages/p2p/src/rotation.ts"() {
     "use strict";
@@ -24938,6 +24980,7 @@ var init_rotation = __esm({
     newHomeOf = (home) => join20(rotationDir(home), "new");
     followHomeOf = (home) => join20(rotationDir(home), "follow");
     after = (s2, step2) => STEPS.indexOf(s2.step) >= STEPS.indexOf(step2);
+    rotationLockOf = (home) => join20(home, "rotation.lock");
     DEVICE_SEEN_WINDOW_SEC = 30 * 86400;
     RESEND_PER_HOUR = 50;
     MAX_ROTATION_RECORDS = 256;
@@ -25235,7 +25278,7 @@ import { randomBytes as randomBytes11 } from "node:crypto";
 import { hostname as hostname2 } from "node:os";
 async function abandonInFlight(app) {
   let n = 0;
-  for (const [token, a] of running) {
+  for (const [token, a] of running2) {
     if (a.app !== app || abandoned.has(token)) continue;
     abandoned.add(token);
     n++;
@@ -25272,10 +25315,10 @@ function makeEvent(env, kind, at, data, extra = {}, salt = "") {
 async function processEnvelope(app, env, relay) {
   const token = `${PROCESS_TOKEN}.${++attempts}`;
   inFlight.add(token);
-  running.set(token, { app, env });
+  running2.set(token, { app, env });
   const work = processClaimed(app, env, relay, token).finally(() => {
     inFlight.delete(token);
-    running.delete(token);
+    running2.delete(token);
     abandoned.delete(token);
   });
   const limit = Number(app.env.P2P_ENVELOPE_TIMEOUT_MS ?? "") || ENVELOPE_TIMEOUT_MS;
@@ -25388,7 +25431,7 @@ function receiving(app) {
   app.onAbandon = () => abandonInFlight(app);
   return app;
 }
-var DUPLICATE, HOST, STARTED2, START_SLACK_MS2, PROCESS_TOKEN, attempts, inFlight, running, abandoned, ENVELOPE_TIMEOUT_MS;
+var DUPLICATE, HOST, STARTED2, START_SLACK_MS2, PROCESS_TOKEN, attempts, inFlight, running2, abandoned, ENVELOPE_TIMEOUT_MS;
 var init_inbound = __esm({
   "packages/p2p/src/inbound.ts"() {
     "use strict";
@@ -25412,7 +25455,7 @@ var init_inbound = __esm({
     PROCESS_TOKEN = randomBytes11(9).toString("base64url");
     attempts = 0;
     inFlight = /* @__PURE__ */ new Set();
-    running = /* @__PURE__ */ new Map();
+    running2 = /* @__PURE__ */ new Map();
     abandoned = /* @__PURE__ */ new Set();
     ENVELOPE_TIMEOUT_MS = 8e3;
   }
@@ -29307,7 +29350,7 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e)) : []])];
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e), heldBackHeadOf(e)) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
             if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
@@ -29325,7 +29368,7 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? []) : []])];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? [], v.heldBackHead) : []])];
           const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
           if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
           named = unconnected;
@@ -29342,20 +29385,24 @@ var init_app = __esm({
        * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
        * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
        * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
-       * that our devices published (the publish log) or that a device a version in the publish log lists published
-       * (another owner device whose versions haven't reached this device's log yet, the provenance rule of ownBranchTip
-       * in rotation.ts). That is the case this exists for: our own current tip against a key thief's head. Otherwise
-       * none: a relay replaying an old version (history pruned past what the relays keep) can't get an honest relay set
-       * aside, and a relay that really holds the owner up can still be removed (`p2p relays remove`).
+       * that our devices published (the publish log), or, when the head held back for (`head`) leaves this device out as
+       * a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
+       * published (another owner device whose versions haven't reached this device's log yet, the provenance rule of
+       * ownBranchTip in rotation.ts). That provenance alone never counts against a head that still lists this device: the
+       * devices a logged version lists include ones the owner revoked since, and a version such a device signed, held
+       * here, must not get the relays serving the owner's revocation set aside. Otherwise none: a relay replaying an old
+       * version (history pruned past what the relays keep) can't get an honest relay set aside, and a relay that really
+       * holds the owner up can still be removed (`p2p relays remove`).
        */
-      async ownHeldBack(by, left) {
+      async ownHeldBack(by, left, head) {
         if (by.length === 0 || left.length === 0 || !this.keys) return [];
         const stored2 = await this.store.getIdentity(this.keys.userId);
         if (!stored2 || stored2.versions.length === 0) return [];
         const chain = IdentityChain.fromStored({ ...stored2, pendingHeads: [], leftOut: [] });
         const tips = new Set(chain.tips().map((t2) => t2.hash));
         const published = new Set((await this.store.getPublishLog()).published);
-        const trusted = /* @__PURE__ */ new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]);
+        const headLeavesMeOut = head !== void 0 && !head.keyholders.includes(this.did);
+        const trusted = headLeavesMeOut ? /* @__PURE__ */ new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]) : /* @__PURE__ */ new Set();
         const own = left.some((h) => {
           const v = tips.has(h) ? chain.get(h) : void 0;
           return v !== void 0 && (published.has(h) || trusted.has(v.by));
