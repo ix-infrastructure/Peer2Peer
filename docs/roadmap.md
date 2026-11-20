@@ -6,7 +6,7 @@ Each item has an issue labelled `roadmap`: [roadmap issues](https://github.com/i
 
 ## Where we are today ✅
 
-- **Released on npm:** `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, **v0.1.0**, **v0.1.1** and **v0.1.2**, published with provenance and always at the same version ([CHANGELOG](../CHANGELOG.md), [releasing.md](releasing.md)). One-line installers for the client are live: `curl -fsSL https://ix-infra.com/p2p/install.sh | sh` (macOS and Linux) and `irm https://ix-infra.com/p2p/install.ps1 | iex` (Windows). They install `@peer2peer/cli` and `@peer2peer/ext-ix` at one pinned version without sudo or Administrator rights, and never install Ix ([getting-started.md](getting-started.md)). The relay install scripts are pinned to the v0.1.2 source.
+- **Released on npm:** `@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ext-ix`, **v0.1.0** through **v0.1.3**, published with provenance and always at the same version ([CHANGELOG](../CHANGELOG.md), [releasing.md](releasing.md)). One-line installers for the client are live: `curl -fsSL https://ix-infra.com/p2p/install.sh | sh` (macOS and Linux) and `irm https://ix-infra.com/p2p/install.ps1 | iex` (Windows). They install `@peer2peer/cli` and `@peer2peer/ext-ix` at one pinned version without sudo or Administrator rights, and never install Ix ([getting-started.md](getting-started.md)). The relay install scripts are pinned to the v0.1.2 source.
 - Protocol **v3, draft 3**: identities, devices, rotation, friends, circles (including open circles), rosters, envelopes, open relays, short-code invites, profiles, proofs, status `caps` and `agents`.
 - The `p2p` CLI, the open relay, the Claude Code mod, the Codex bridge and the optional Ix extension, working end to end with integration tests over real relays.
 - **Invite links** that make someone a friend and join them to the circles you chose, in one step.
@@ -25,6 +25,11 @@ New in **v0.1.1**:
 - **Shares that cover subfolders** (`p2p project share --subfolders`, opt-in) and **`p2p session show`**, which says what a session is bound to, who it reaches and why it is private.
 - **An Ix section in `p2p doctor`**, and `p2p setup` turning on the `ix` extension, with your consent, when Ix and `@peer2peer/ext-ix` are already installed.
 - **Local graph memory:** with the Ix extension enabled, your own sessions in shared projects are recorded into your **local** Ix graph as they run. Every Ix call goes through one graph-target chokepoint, which today is always local.
+
+New in **v0.1.3** (a security release):
+
+- **The CLI itself keeps your identity key and document yours:** backups, rotation, relays, profile and the commands that narrow who reaches you are refused inside an agent's session unless a front end passes your token, however the command line is spelled. The person token is derived from the device key, so a planted one never works. The Codex bridge's guard now matches the Claude Code mod's, pinned by one shared test list.
+- **Identity histories hold up against a stolen key:** the owner can rotate after a key holder's connecting fork; a thief's higher branch can't drop the owner's revoking version at first contact; edits never build on a stale head while the up-to-date relay is silent; pruned long histories no longer stall refreshes.
 
 New in **v0.1.2**:
 

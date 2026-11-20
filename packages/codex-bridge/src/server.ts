@@ -21,7 +21,7 @@ import { lineFeeder, McpServer } from "./mcp.js";
 import { nodeExec, P2P } from "./p2p.js";
 import { makeTools, refuseMutating, serverInstructions } from "./tools.js";
 
-export const BRIDGE_VERSION = "0.1.2";
+export const BRIDGE_VERSION = "0.1.3";
 
 export type Env = Record<string, string | undefined>;
 

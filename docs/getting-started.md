@@ -1,6 +1,6 @@
 # Getting started
 
-> **Early release:** the npm packages are published (v0.1.2; see the [CHANGELOG](../CHANGELOG.md)). The steps below also work from a checkout of this repository.
+> **Early release:** the npm packages are published (v0.1.3; see the [CHANGELOG](../CHANGELOG.md)). The steps below also work from a checkout of this repository.
 
 Peer2Peer has no public relay and no central server. Your group brings its own relay: someone runs one (a single Docker container), or you use one a friend runs. Everyone then sets up with that relay, and invite codes carry it to the people you invite.
 
