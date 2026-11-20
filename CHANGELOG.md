@@ -19,6 +19,11 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
   - When even that version's parent is gone, a version the refresh held back for now narrows the view while it is current, as a pending head does above the head (never for your own identity, and cleared by the next complete refresh a majority of the relays answered).
   - From #87's review: a key holder filling the side-root slots with same-ver forks no longer keeps your same-ver tip out, since a tip that leaves out a device or key holder every tip lists is placed past the cap (it only narrows). A version dropped because its link to its parent is broken no longer gets what it left out of that parent denied for good.
 
+### Fixes
+
+- **The Codex bridge reads newer Codex rollouts.** Codex 0.169.0 stopped writing `sandbox_policy` into a session's turn context and writes only `permission_profile`, so on those versions the bridge saw no sandbox at all: the mode stayed unknown, every message from another person was held and every release refused. It now reads `permission_profile` too: no write grants is `read-only` (`:read-only`, or a profile extending it with deny entries, like the `peer2peer` one `p2p sandbox enable --codex` writes), any write grant is `workspace-write` with those folders as the writable roots, a disabled sandbox or unrestricted file system is `danger-full-access`. Where a turn context has both fields (Codex 0.130 to 0.168), `sandbox_policy` still decides and the profile can only widen it; a profile whose writable folders can't be read makes them unknown even then. A turn context with neither, either one present but unreadable, or a shape it doesn't recognise still counts as unknown: held, releases refused.
+- **A turn context too long to read no longer leaves the previous mode in force.** The bridge skips rollout lines over 1 MiB; when a skipped line is a turn context (told from its first bytes), the rollout is no longer trusted: held, releases refused.
+
 ## 0.1.3
 
 A security release. Nothing changes on the wire: 0.1.3 clients interoperate in both directions with 0.1.2 and 0.1.1, which the cross-version matrix ([docs/compatibility.md](docs/compatibility.md)) checks against the previous two releases, as committed at their tags and as npm installs them.
