@@ -296,6 +296,28 @@ describe("#92 follow-ups from #87's review", () => {
     expect(loaded.toStored().denied ?? []).not.toContain(keep.did);
   });
 
+  it("a valid child hung under the malformed version, dropping the owner's device: dropping both denies nothing", () => {
+    const u = makeUser("alice");
+    const keep = u.addDevice({ keyholder: false });
+    u.publish({ iat: NOW - 900 }); // v2 [dev, keep]
+    const v2 = u.doc;
+    // X: ver 4 naming v2 (broken), still listing `keep`; Y: a valid ver 5 under X that drops `keep`.
+    const x = verifyIdentityDocSignature(
+      createIdentityDoc(u.ik, { ver: 4, prev: v2.hash, name: u.name, relays: u.relays, devices: [u.dev.did, keep.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 650 }),
+    );
+    const y = createIdentityDoc(u.ik, { ver: 5, prev: x.hash, name: u.name, relays: u.relays, devices: [u.dev.did], keyholders: [u.dev.did], by: u.dev.did, iat: NOW - 640 });
+    const c = new IdentityChain(u.userId);
+    c.add(x.jws, { now: NOW });
+    expect(c.add(y, { now: NOW }).status).toBe("accepted");
+    for (const d of u.docs) c.add(d.jws, { now: NOW });
+    expect([c.has(x.hash), c.has(verifyIdentityDocSignature(y).hash)]).toEqual([false, false]);
+    expect(c.view().devices).toContain(keep.did);
+    expect(c.toStored().denied ?? []).not.toContain(keep.did);
+    const loaded = IdentityChain.fromStored({ iss: u.userId, versions: [...u.docs.map((d) => d.jws), x.jws, y] }, { now: NOW });
+    expect(loaded.view().devices).toContain(keep.did);
+    expect(loaded.toStored().denied ?? []).not.toContain(keep.did);
+  });
+
   it("a child dropped for no-return (its link valid) still has its revocations denied, as before", () => {
     const u = makeUser("alice");
     const d = u.addDevice({ keyholder: false });

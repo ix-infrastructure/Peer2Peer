@@ -815,17 +815,20 @@ export class IdentityChain {
     // before add() checked versions placed ahead of their parent) is dropped with what was placed on it, as
     // add() now does, instead of making every load fail.
     // What each dropped version revoked relative to its stored parent(s) is denied, so dropping only narrows.
+    // #92: only for a version dropped for no-return (its link valid) and what was placed on it. A version whose
+    // link to its parent is broken, and everything placed on it, is off valid history: it revoked nothing.
     const dropped = new Set<string>();
+    const offChain = new Set<string>();
     const stored = new Map(docs.map((d) => [d.hash, d]));
-    const drop = (d: VerifiedIdentityDoc) => {
+    const drop = (d: VerifiedIdentityDoc, broken = false) => {
       dropped.add(d.hash);
-      // Only across a valid link (#92): a version whose link to its parent is broken revoked nothing relative to it.
-      for (const x of validRevokedStep(d, (h) => stored.get(h))) c.denied.add(x);
+      if (broken) offChain.add(d.hash);
+      else for (const x of validRevokedStep(d, (h) => stored.get(h))) c.denied.add(x);
     };
     for (const d of docs) {
       if (d.iss !== s.iss) fail("issuer-mismatch", "stored version of another identity");
       if ((d.prev !== null && dropped.has(d.prev)) || (d.merge !== undefined && dropped.has(d.merge))) {
-        drop(d);
+        drop(d, (d.prev !== null && offChain.has(d.prev)) || (d.merge !== undefined && offChain.has(d.merge)));
         continue;
       }
       const parentsHeld = (d.prev === null || c.versions.has(d.prev)) && (d.merge === undefined || c.versions.has(d.merge));
@@ -834,6 +837,12 @@ export class IdentityChain {
         const parent = c.versions.get(d.prev!)!;
         try {
           checkLink(parent, d, d.merge !== undefined ? c.versions.get(d.merge) : undefined);
+        } catch (e) {
+          if (!(e instanceof P2PError)) throw e;
+          drop(d, true);
+          continue;
+        }
+        try {
           if (d.merge === undefined) c.checkNoReturn(d, parent);
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
@@ -1332,7 +1341,7 @@ export class IdentityChain {
         bad.push(child);
       }
     }
-    if (bad.length > 0) this.dropWithDescendants(bad);
+    if (bad.length > 0) this.dropWithDescendants(bad, { offChain: true });
     this.put(doc);
     // No-return along the links now known (#79 re-review): a held version re-listing a device revoked on its
     // ancestry, now that the ancestry reaches further down, is what add() would refuse in the other order. It
@@ -1364,7 +1373,7 @@ export class IdentityChain {
   }
 
   /** Removes `docs` and every held version placed on them (prev or merge), as if never accepted. */
-  private dropWithDescendants(docs: readonly VerifiedIdentityDoc[]): void {
+  private dropWithDescendants(docs: readonly VerifiedIdentityDoc[], opts: { offChain?: boolean } = {}): void {
     const doomed = new Set<string>();
     const stack = docs.map((d) => d.hash);
     while (stack.length > 0) {
@@ -1375,9 +1384,14 @@ export class IdentityChain {
     }
     // Dropping only ever narrows (#79 fourth review): what each dropped version revoked relative to its held
     // parent(s) goes on the denylist first, as a replacement carries a replaced branch's revocations (R1).
-    // #92: only across a valid link: a child dropped because its link to its parent is broken revoked nothing
-    // relative to that parent (a key holder naming a genuine version as a malformed child's parent can't get a
-    // device denied for good).
+    // #92: only for a no-return drop (a valid link) and what was placed on it. `offChain`: `docs` were dropped
+    // because their links to their parents are broken, so they and everything placed on them are off valid
+    // history and revoked nothing (a key holder hanging a valid child under a malformed version can't get the
+    // owner's devices denied for good).
+    if (opts.offChain) {
+      for (const h of doomed) this.versions.delete(h);
+      return;
+    }
     for (const h of doomed) for (const d of validRevokedStep(this.versions.get(h)!, (x) => this.versions.get(x))) this.denied.add(d);
     for (const h of doomed) this.versions.delete(h);
   }
