@@ -85,8 +85,8 @@ function Install-P2PRelay {
     # never used.
     # TODO: once releases publish a multi-arch image
     # (for example on GHCR), pull it by digest instead of building locally.
-    $RelayVersion = '0.1.2'
-    $RelaySourceSha256 = 'bc9e4e1f37c7d5a776abf64ca9c2630dd54d3926ccb181cc885cac992c5405b6'
+    $RelayVersion = '0.1.3'
+    $RelaySourceSha256 = '520a8523b6ad0a1de6e908b93725362f6aae80ec57f7fff0ecce7863a185af35'
     $RelaySourceUrlBase = 'https://github.com/ix-infrastructure/Peer2Peer/releases/download'
 
     $image = 'peer2peer/relay:local'

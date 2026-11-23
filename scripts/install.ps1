@@ -56,7 +56,7 @@ if ($true) {
     $ErrorActionPreference = 'Stop'
 
     # The release these scripts install; bumped after each release (docs/releasing.md, step 5).
-    $P2PVersion = '0.1.2'
+    $P2PVersion = '0.1.3'
     $packages = @('@peer2peer/cli', '@peer2peer/ext-ix')
     $minNode = [version]'22.0.0'
     $testing = $env:P2P_INSTALL_TEST -eq '1'
