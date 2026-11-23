@@ -31,7 +31,7 @@ All five npm packages (`@peer2peer/core`, `relay`, `codex-bridge`, `cli` and `ex
   - No native module: the OS tool runs by its absolute path, and keys travel over its stdin, never in a command line or an error. Each home has its own item (`peer2peer-keys-` plus a hash of its real path; account: the device id), and `P2P_HOME/keystore.json` records the choice.
   - A move stores the keys, reads them back and compares them byte for byte before `keys.json` loses them (its old bytes overwritten), and finishes when run again (or by the next command) if it was interrupted. Keys read from the keychain are checked against the device id and userId they belong to.
   - Fail closed: a locked keychain, a missing tool or item, another device's item, or a home copied from elsewhere stops every command that needs the keys with a clear error; nothing makes new keys in their place. `p2p doctor` has a key storage line (where, and whether they can be read), and still diagnoses a home whose keys can't be read.
-  - An agent sandbox that denies `P2P_HOME` doesn't cover the keychain: the Claude Code mod's guard refuses keychain tools naming p2p's items or dumping the keychain (best effort). See [docs/security/threat-model.md](docs/security/threat-model.md#keys-in-the-os-keychain).
+  - An agent sandbox that denies `P2P_HOME` doesn't cover the keychain, and anything running as you can also delete or overwrite the item (on a key holder, then only the backup phrase brings the identity key back: save it before moving). The Claude Code mod's guard refuses keychain tools naming p2p's items or a device id, or dumping the keychain (best effort only). See [docs/security/threat-model.md](docs/security/threat-model.md#keys-in-the-os-keychain).
 
 ### Fixes
 

@@ -26,6 +26,10 @@ import {
   useKeychainForTests,
   windowsKeychain,
   WINDOWS_SCRIPT,
+  WINDOWS_CSHARP,
+  WINDOWS_POWERSHELL,
+  powershellPath,
+  LABEL,
   SECURITY,
   KeychainError,
   type RunResult,
@@ -116,6 +120,7 @@ describe("the OS tools: secrets over stdin, never in a command line", () => {
     expect(fake.calls[0].input).toContain(`-w ${secret}`);
     // The access list: the security tool alone.
     expect(fake.calls[0].input).toContain(`-T ${SECURITY}`);
+    expect(LABEL).toContain("peer2peer-keys");
     expect(fake.calls.every((c) => c.file === SECURITY)).toBe(true);
     expectNoSecretsIn(fake.argv(), [secret, "c2VjcmV0"]);
   });
@@ -174,13 +179,15 @@ describe("the OS tools: secrets over stdin, never in a command line", () => {
     const store = new Map<string, string>();
     const run: Runner = (file, args, input) => {
       calls.push({ file, args, input });
-      const req = JSON.parse(input) as Record<string, string>;
+      const [op, target, account, label, sec] = input.split("\n");
+      const req = { op, target, account, label, secret: sec };
       if (req.op === "set") store.set(req.target, req.secret);
       if (req.op === "get") return store.has(req.target) ? { status: 0, stdout: store.get(req.target)!, stderr: "" } : { status: 3, stdout: "", stderr: "" };
       if (req.op === "delete") return store.delete(req.target) ? { status: 0, stdout: "", stderr: "" } : { status: 3, stdout: "", stderr: "" };
       return { status: 0, stdout: "", stderr: "" };
     };
     const kc = windowsKeychain(run, { exists: () => true, env: { SystemRoot: "C:\\Windows" } });
+    expect(kc.unavailable()).toBeUndefined();
     kc.set("peer2peer-keys-abc", "d_x", "Peer2Peer-device-keys", secret);
     expect(kc.get("peer2peer-keys-abc", "d_x")).toBe(secret);
     expect(kc.get("peer2peer-keys-abc", "d_y")).toBeUndefined();
@@ -189,6 +196,8 @@ describe("the OS tools: secrets over stdin, never in a command line", () => {
     const script = Buffer.from(calls[0].args[calls[0].args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
     expect(script).toBe(WINDOWS_SCRIPT);
     expect(script).toContain("c.Persist = 2");
+    expect(calls[0].args).toContain("-NoProfile");
+    expect(script).toContain("$PSModuleAutoloadingPreference = 'None'");
     expectNoSecretsIn(
       calls.map((c) => [c.file, ...c.args, Buffer.from(c.args.at(-1)!, "base64").toString("utf16le")].join(" ")),
       [secret, "c2VjcmV0"],
@@ -199,12 +208,41 @@ describe("the OS tools: secrets over stdin, never in a command line", () => {
     expect(calls.at(-1)!.file).toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   });
 
+  it("Windows: the fixed PowerShell path first; %SystemRoot% only when it is a drive's Windows folder, never a user profile", () => {
+    const only = (p: string) => (q: string) => q === p;
+    expect(powershellPath({ SystemRoot: "D:\\Users\\sam\\evil" }, () => true)).toBe(WINDOWS_POWERSHELL);
+    expect(powershellPath({ SystemRoot: "D:\\Windows" }, only("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"))).toBe("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    for (const root of ["C:\\Users\\sam\\Windows", "D:\\Users\\sam", "\\\\server\\Windows", "D:\\Windows\\..\\Users\\sam"]) {
+      expect(powershellPath({ SystemRoot: root, windir: root }, () => false), root).toBeUndefined();
+      expect(powershellPath({ SystemRoot: root }, (q) => q.startsWith(root)), root).toBeUndefined();
+    }
+    const none = windowsKeychain(() => ({ status: 0, stdout: "", stderr: "" }), { exists: () => false, env: { SystemRoot: "C:\\Users\\x" } });
+    expect(none.unavailable()).toMatch(/isn't at/);
+    expect(() => none.get("peer2peer-keys-abc", "d_x")).toThrow(KeychainError);
+  });
+
+  it("Windows (M1): the secret never passes through a cmdlet or a PowerShell variable: only the C# reads stdin and writes the answer", () => {
+    const ps = WINDOWS_SCRIPT.replace(WINDOWS_CSHARP, "");
+    expect(WINDOWS_SCRIPT).toContain(WINDOWS_CSHARP);
+    // No cmdlet at all in the loader (Verb-Noun), not even Add-Type, and no pipeline.
+    expect(ps).not.toMatch(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/);
+    expect(ps).not.toMatch(/\|/);
+    expect(ps).not.toMatch(/ConvertFrom-Json|Add-Type|ReadToEnd|\[Console\]::In|\$req|secret/i);
+    // The C# reads the request and writes the secret itself.
+    expect(WINDOWS_CSHARP).toContain("Console.In.ReadToEnd()");
+    expect(WINDOWS_CSHARP).toContain("Console.Out.Write(s)");
+  });
+
   it("item names and secrets outside the narrow alphabet are refused before any tool runs", () => {
     const fake = new FakeSecurity();
     const kc = macosKeychain(fake.run, { exists: () => true });
     expect(() => kc.set("svc -w x", "d_x", "l", secret)).toThrow();
     expect(() => kc.set("svc", "d_x", "l", "-w injected")).toThrow();
     expect(() => kc.get("svc\nfind", "d_x")).toThrow();
+    // I1: nothing that could be read as an option.
+    expect(() => kc.get("-svc", "d_x")).toThrow(KeychainError);
+    expect(() => kc.get("svc", "-a")).toThrow(KeychainError);
+    expect(() => kc.set("svc", "d_x", "-T", secret)).toThrow(KeychainError);
     expect(fake.calls).toHaveLength(0);
   });
 
@@ -294,6 +332,79 @@ describe("the key store: moves, read-back, fail closed", () => {
     expect((await moveKeysToKeychain(st.keyStore)).moved).toBe(false);
   });
 
+  it("L3: a move that stopped before keys.json was sealed, then `keys backend file`: the copy in the keychain is deleted", async () => {
+    const home = tmpHome();
+    const st = new CliState(home);
+    const keys = makeKeys();
+    await st.put("keys", keys);
+    // The move stored the item and wrote the marker, then stopped.
+    fake.items.set(`${serviceFor(home)}|${keys.did}`, "p2p1.left-over");
+    writeFileSync(markerFile(home), JSON.stringify({ v: 1, backend: "keychain" }));
+    const r = await moveKeysToFiles(st.keyStore);
+    expect(r).toMatchObject({ backend: "file", moved: false });
+    expect(fake.items.size).toBe(0);
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8"))).toEqual(keys);
+    // Not when keys.json's keys aren't this device's (a damaged file): the item stays.
+    const st2 = new CliState(tmpHome());
+    const k2 = makeKeys();
+    await st2.put("keys", { ...k2, spk: makeKeys().spk });
+    fake.items.set(`${serviceFor(st2.dir)}|${k2.did}`, "p2p1.keep");
+    await moveKeysToFiles(st2.keyStore);
+    expect(fake.items.get(`${serviceFor(st2.dir)}|${k2.did}`)).toBe("p2p1.keep");
+  });
+
+  it("L4: sealed keys stay in the keychain when keystore.json is missing or says files: an ordinary write never unseals them", async () => {
+    const home = tmpHome();
+    const st = new CliState(home);
+    const keys = makeKeys();
+    await st.put("keys", keys);
+    await moveKeysToKeychain(st.keyStore);
+    for (const marker of [undefined, JSON.stringify({ v: 1, backend: "file" })]) {
+      if (marker === undefined) rmSync(markerFile(home));
+      else writeFileSync(markerFile(home), marker);
+      // A renewed certificate.
+      await new CliState(home).put("keys", { ...keys, cert: keys.cert });
+      const onDisk = JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
+      expect(onDisk.spk).toBeUndefined();
+      expect(onDisk.store).toBe("keychain");
+      expect(await new CliState(home).get("keys")).toEqual(keys);
+      expect(keyStoreStatus(home)).toMatchObject({ keys: "keychain", readable: true, problem: expect.stringMatching(/stay in the keychain/) });
+    }
+    // And with the keychain locked, the write fails instead of falling back to the file.
+    fake.locked = true;
+    useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
+    await expect(new CliState(home).put("keys", keys)).rejects.toThrow();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+  });
+
+  it("I2: an item whose agreement key isn't the certificate's, or an identity key in keys.json that isn't this identity's, is refused", async () => {
+    const home = tmpHome();
+    const st = new CliState(home);
+    const keys = makeKeys();
+    await st.put("keys", keys);
+    await moveKeysToKeychain(st.keyStore);
+    const key = `${serviceFor(home)}|${keys.did}`;
+    const good = fake.items.get(key)!;
+    const body = JSON.parse(Buffer.from(good.slice(5), "base64url").toString("utf8")) as Record<string, unknown>;
+    const enc = (o: unknown) => `p2p1.${Buffer.from(JSON.stringify(o)).toString("base64url")}`;
+    fake.items.set(key, enc({ ...body, kpk: makeKeys().kpk }));
+    useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
+    await expect(new CliState(home).get("keys")).rejects.toMatchObject({ code: "keychain_mismatch" });
+    // An item without the identity key, and keys.json carrying another identity's: refused.
+    const { ik: _ik, ...noIk } = body;
+    void _ik;
+    fake.items.set(key, enc(noIk));
+    const sealed = JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(home, "cli", "keys.json"), JSON.stringify({ ...sealed, ik: makeKeys().ik }));
+    useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
+    await expect(new CliState(home).get("keys")).rejects.toMatchObject({ code: "keychain_mismatch" });
+    // This identity's own one in keys.json is taken.
+    writeFileSync(join(home, "cli", "keys.json"), JSON.stringify({ ...sealed, ik: keys.ik }));
+    useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
+    expect(await new CliState(home).get("keys")).toEqual(keys);
+    fake.items.set(key, good);
+  });
+
   it("fails closed: locked, item gone, another device's item, a copied home; never new keys", async () => {
     const home = tmpHome();
     const st = new CliState(home);
@@ -349,8 +460,14 @@ describe("the key store: moves, read-back, fail closed", () => {
     await st.put("keys", keys);
     expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
     expect(await st.get("keys")).toEqual(keys);
+    // Sealed keys stay sealed whatever the marker holds; keys in a file aren't written past a damaged one.
     writeFileSync(markerFile(home), "{not json");
-    await expect(st.put("keys", keys)).rejects.toMatchObject({ code: "keystore_unreadable" });
+    await st.put("keys", keys);
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    const plain = new CliState(tmpHome());
+    await plain.put("keys", keys);
+    writeFileSync(markerFile(plain.dir), "{not json");
+    await expect(plain.put("keys", keys)).rejects.toMatchObject({ code: "keystore_unreadable" });
   });
 });
 

@@ -854,7 +854,7 @@ export function buildProgram(deps: ProgramDeps): Command {
           const head = r.moved ? `Moved this device's keys to ${r.where}.` : `Keys are kept in ${r.where}.`;
           const note =
             backend === "keychain"
-              ? "\nNote: an agent sandbox that denies P2P_HOME doesn't cover the keychain, and anything running as you can ask it for the keys (docs/security/threat-model.md, \"Keys in the OS keychain\")."
+              ? "\nNote: an agent sandbox that denies P2P_HOME doesn't cover the keychain. Anything running as you (an agent too) can ask it for the keys, and can delete or overwrite the item: on a key holder that can destroy the only copy of your identity key, and only your backup phrase brings it back. Have it saved first (`p2p backup show`). See docs/security/threat-model.md, \"Keys in the OS keychain\"."
               : "";
           return { json: { ...r, status: s }, human: `${head}\n${say(s)}${note}` };
         },

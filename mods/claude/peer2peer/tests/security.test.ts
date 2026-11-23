@@ -690,9 +690,24 @@ describe('pre-release review: the home folder as a last word, globs at its name,
       'secret-tool search --all service x',
       'powershell -c "[P2PCred]::Read(\'peer2peer-keys-0123/d_x\')"',
       'python3 -c "import keyring; keyring.get_password(\'peer2peer-keys-0123\', \'d_x\')"',
+      // By the label, or by the device id as the account, without the service.
+      'security find-generic-password -l peer2peer-keys-device -w',
+      `security find-generic-password -a d_${'a'.repeat(26)} -w`,
+      `secret-tool lookup account d_${'b'.repeat(26)}`,
+      `cd /tmp && sudo security delete-generic-password -a d_${'c'.repeat(26)}`,
+      `echo x; /usr/bin/secret-tool clear service peer2peer-keys-0123 account d_x`,
     ]
     for (const command of refused) expect(touchesBackupFile({ tool: 'Bash', command }, [], [home]), command).toBe(true)
-    const fine = ['security find-generic-password -s github.com -w', 'secret-tool lookup service other', 'grep -rn peer2peer-keys packages/p2p/src', 'security list-keychains']
+    const fine = [
+      'security find-generic-password -s github.com -w',
+      'secret-tool lookup service other',
+      'grep -rn peer2peer-keys packages/p2p/src',
+      'security list-keychains',
+      'grep -n dump-keychain docs/security/threat-model.md',
+      'node scripts/x.mjs && rg peer2peer-keys src',
+      `cat docs/security/notes.md | grep d_${'a'.repeat(26)}`,
+      'python3 scripts/check.py peer2peer-keys',
+    ]
     for (const command of fine) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
   })
 

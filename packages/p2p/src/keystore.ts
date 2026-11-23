@@ -30,7 +30,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { b64uDecode, deviceKeysV3FromSecrets, identityKeyFromSeed } from "@peer2peer/core/v3";
+import { b64uDecode, b64uEncode, decodeTyped, deviceKeysV3FromSecrets, identityKeyFromSeed, TYP3 } from "@peer2peer/core/v3";
 import { CliError } from "./errors.js";
 
 export type KeyBackend = "file" | "keychain";
@@ -83,8 +83,8 @@ export interface Keychain {
   remove(service: string, account: string): boolean;
 }
 
-/** Service names, accounts and labels go into command lines and the tools' own parsers: a narrow alphabet. */
-const SAFE_ARG = /^[A-Za-z0-9_.-]{1,128}$/;
+/** Service names, accounts and labels go into command lines and the tools' own parsers: a narrow alphabet, never starting with `-` (never an option). */
+const SAFE_ARG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 /** Secrets are `p2p1.` + base64url: never an option (no leading `-`), nothing a parser splits. */
 const SAFE_SECRET = /^p2p1\.[A-Za-z0-9_-]{1,4096}$/;
 
@@ -218,14 +218,14 @@ export function libsecretKeychain(run: Runner = realRunner, opts: { exists?: (p:
 // Windows: Credential Manager (CredWriteW / CredReadW / CredDeleteW) through Windows PowerShell
 
 /**
- * The script PowerShell runs (passed as -EncodedCommand: no secret in it). The request, the secret
- * included, comes as one JSON line on stdin. Credentials are generic ones persisted on this machine
- * only (CRED_PERSIST_LOCAL_MACHINE: never roamed to other machines). Exit 3: no such credential.
+ * The C# that does the work on Windows. It reads the request from stdin itself and writes the answer
+ * to stdout itself, so the secret never passes through a PowerShell cmdlet, pipeline or variable
+ * (with PowerShell module or script block logging on, those are recorded in the event log). The
+ * request: one field per line, `op`, `target`, `account`, `label`, `secret` (each in the narrow
+ * alphabets above: no line breaks). Credentials are generic ones persisted on this machine only
+ * (CRED_PERSIST_LOCAL_MACHINE: never roamed). Exit 3: no such credential.
  */
-export const WINDOWS_SCRIPT = String.raw`$ErrorActionPreference = 'Stop'
-$req = [Console]::In.ReadToEnd() | ConvertFrom-Json
-Add-Type -TypeDefinition @'
-using System;
+export const WINDOWS_CSHARP = String.raw`using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class P2PCred {
@@ -240,7 +240,7 @@ public static class P2PCred {
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CredReadW(string target, int type, int flags, out IntPtr c);
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CredDeleteW(string target, int type, int flags);
   [DllImport("advapi32.dll")] static extern void CredFree(IntPtr p);
-  public static int Write(string target, string user, string label, string secret) {
+  static int Write(string target, string user, string label, string secret) {
     byte[] b = Encoding.UTF8.GetBytes(secret);
     IntPtr p = Marshal.AllocHGlobal(b.Length);
     try {
@@ -256,7 +256,7 @@ public static class P2PCred {
       Array.Clear(b, 0, b.Length);
     }
   }
-  public static string Read(string target, out int err) {
+  static string Read(string target, out int err) {
     IntPtr p;
     err = 0;
     if (!CredReadW(target, 1, 0, out p)) { err = Marshal.GetLastWin32Error(); return null; }
@@ -267,57 +267,94 @@ public static class P2PCred {
       return Encoding.UTF8.GetString(b);
     } finally { CredFree(p); }
   }
-  public static int Delete(string target) {
-    if (!CredDeleteW(target, 1, 0)) return Marshal.GetLastWin32Error();
-    return 0;
+  static string Field(string[] f, int i) { return i < f.Length ? f[i].Trim() : ""; }
+  public static int Run() {
+    string[] f = Console.In.ReadToEnd().Split('
+');
+    string op = Field(f, 0), target = Field(f, 1);
+    if (target.Length == 0) return 4;
+    int e;
+    if (op == "set") {
+      e = Write(target, Field(f, 2), Field(f, 3), Field(f, 4));
+      if (e != 0) { Console.Error.WriteLine("CredWrite failed: Win32 error " + e); return 2; }
+      return 0;
+    }
+    if (op == "get") {
+      string s = Read(target, out e);
+      if (e == 1168) return 3;
+      if (e != 0) { Console.Error.WriteLine("CredRead failed: Win32 error " + e); return 2; }
+      Console.Out.Write(s);
+      Console.Out.Flush();
+      return 0;
+    }
+    if (op == "delete") {
+      if (CredDeleteW(target, 1, 0)) return 0;
+      e = Marshal.GetLastWin32Error();
+      if (e == 1168) return 3;
+      Console.Error.WriteLine("CredDelete failed: Win32 error " + e);
+      return 2;
+    }
+    return 4;
   }
 }
-'@
-$target = [string]$req.target
-if ($req.op -eq 'set') {
-  $e = [P2PCred]::Write($target, [string]$req.account, [string]$req.label, [string]$req.secret)
-  if ($e -ne 0) { [Console]::Error.WriteLine("CredWrite failed: Win32 error $e"); exit 2 }
-  exit 0
-}
-if ($req.op -eq 'get') {
-  $e = 0
-  $s = [P2PCred]::Read($target, [ref]$e)
-  if ($e -eq 1168) { exit 3 }
-  if ($e -ne 0) { [Console]::Error.WriteLine("CredRead failed: Win32 error $e"); exit 2 }
-  [Console]::Out.Write($s)
-  exit 0
-}
-if ($req.op -eq 'delete') {
-  $e = [P2PCred]::Delete($target)
-  if ($e -eq 1168) { exit 3 }
-  if ($e -ne 0) { [Console]::Error.WriteLine("CredDelete failed: Win32 error $e"); exit 2 }
-  exit 0
-}
-exit 4
 `;
 
-/** Windows PowerShell 5.1, which every supported Windows has, by its absolute path. */
-export function powershellPath(env: Record<string, string | undefined> = process.env): string {
-  const root = env.SystemRoot ?? env.windir ?? "";
-  const base = /^[A-Za-z]:\\[^"<>|?*\r\n]*$/.test(root) ? root.replace(/\\+$/, "") : "C:\\Windows";
-  return `${base}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+/**
+ * The PowerShell that runs it (passed as -EncodedCommand: no secret in it): a static loader that
+ * compiles the C# above with the .NET compiler directly and calls it. No cmdlet runs (not even
+ * Add-Type), no module is loaded (autoloading off: nothing from a user-writable PSModulePath), and
+ * nothing reads stdin but the C#.
+ */
+export const WINDOWS_SCRIPT = `$ErrorActionPreference = 'Stop'
+$PSModuleAutoloadingPreference = 'None'
+$src = @'
+${WINDOWS_CSHARP}'@
+$cp = [System.CodeDom.Compiler.CompilerParameters]::new()
+$cp.GenerateInMemory = $true
+[void]$cp.ReferencedAssemblies.Add('System.dll')
+$res = [Microsoft.CSharp.CSharpCodeProvider]::new().CompileAssemblyFromSource($cp, $src)
+if ($res.Errors.HasErrors) { [Console]::Error.WriteLine('the credential helper did not compile'); exit 5 }
+exit [int]$res.CompiledAssembly.GetType('P2PCred').GetMethod('Run').Invoke($null, $null)
+`;
+
+/** The fixed path of Windows PowerShell 5.1, which every supported Windows has. */
+export const WINDOWS_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+/**
+ * Windows PowerShell by its absolute path: the fixed `C:\\Windows` one when it is there. Otherwise
+ * %SystemRoot% (or %windir%) only when it is a drive's own Windows folder (`D:\\Windows`, `D:\\WINNT`),
+ * never anything else the environment names (a folder in a user profile). Undefined: none to trust.
+ */
+export function powershellPath(env: Record<string, string | undefined> = process.env, exists: (p: string) => boolean = existsSync): string | undefined {
+  if (exists(WINDOWS_POWERSHELL)) return WINDOWS_POWERSHELL;
+  for (const root of [env.SystemRoot, env.windir]) {
+    const r = (root ?? "").replace(/\\+$/, "");
+    if (/^[A-Za-z]:\\(?:Windows|WINNT)$/i.test(r)) {
+      const exe = `${r}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+      if (exists(exe)) return exe;
+    }
+  }
+  return undefined;
 }
 
 export function windowsKeychain(run: Runner = realRunner, opts: { exists?: (p: string) => boolean; env?: Record<string, string | undefined> } = {}): Keychain {
-  const exe = powershellPath(opts.env);
   const exists = opts.exists ?? existsSync;
   const encoded = Buffer.from(WINDOWS_SCRIPT, "utf16le").toString("base64");
-  const call = (req: Record<string, string>, secret?: string) => {
-    const r = run(exe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], `${JSON.stringify(req)}\n`);
+  const call = (req: { op: string; target: string; account?: string; label?: string; secret?: string }) => {
+    const exe = powershellPath(opts.env, exists);
+    if (!exe) throw new KeychainError("Windows PowerShell isn't in the Windows folder");
+    // One field per line; every field is in a narrow alphabet (checked by the callers), so none holds a line break.
+    const input = [req.op, req.target, req.account ?? "", req.label ?? "", req.secret ?? ""].join("\n") + "\n";
+    const r = run(exe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], input);
     const p = spawnProblem(r, "PowerShell");
     if (p) throw new KeychainError(p);
-    return { ...r, stderr: toolMessage(r.stderr, secret) };
+    return { ...r, stderr: toolMessage(r.stderr, req.secret) };
   };
   const target = (service: string, account: string) => `${service}/${account}`;
   return {
     kind: "windows",
     label: "the Windows Credential Manager",
-    unavailable: () => (exists(exe) ? undefined : `${exe} isn't there`),
+    unavailable: () => (powershellPath(opts.env, exists) ? undefined : `Windows PowerShell isn't at ${WINDOWS_POWERSHELL}`),
     get(service, account) {
       checkArgs(service, account);
       const r = call({ op: "get", target: target(service, account) });
@@ -328,7 +365,7 @@ export function windowsKeychain(run: Runner = realRunner, opts: { exists?: (p: s
     set(service, account, label, secret) {
       checkArgs(service, account, label);
       if (!SAFE_SECRET.test(secret)) throw new KeychainError("a secret in an unexpected form");
-      const r = call({ op: "set", target: target(service, account), account, label, secret }, secret);
+      const r = call({ op: "set", target: target(service, account), account, label, secret });
       if (r.status !== 0) throw new KeychainError(`the Credential Manager couldn't store the item (exit ${r.status}${r.stderr ? `: ${r.stderr}` : ""})`);
     },
     remove(service, account) {
@@ -365,7 +402,8 @@ export function platformKeychain(platform: NodeJS.Platform = process.platform): 
 // The home's choice and the item's name
 
 export const SERVICE_PREFIX = "peer2peer-keys-";
-const LABEL = "Peer2Peer-device-keys";
+/** Contains the service prefix, so a guard looking for p2p's items also sees a lookup by label. */
+export const LABEL = "peer2peer-keys-device";
 
 /** The home as the keychain item names it: its real path when it exists (a symlinked P2P_HOME is the same home). */
 export function canonicalHome(home: string): string {
@@ -492,7 +530,11 @@ function openPayload(secret: string, pub: SealedKeys, where: string): { spk: str
   const { spk, kpk, ik } = body;
   if (typeof spk !== "string" || typeof kpk !== "string" || (ik !== undefined && typeof ik !== "string")) throw bad("isn't one p2p wrote");
   try {
-    if (deviceKeysV3FromSecrets(pub.userId, b64uDecode(spk, 32), b64uDecode(kpk, 32)).did !== pub.did) throw bad("holds another device's keys");
+    const dk = deviceKeysV3FromSecrets(pub.userId, b64uDecode(spk, 32), b64uDecode(kpk, 32));
+    if (dk.did !== pub.did) throw bad("holds another device's keys");
+    // The agreement key too: the certificate in keys.json names its public half.
+    const cert = decodeTyped(pub.cert, TYP3.device).payload as { did?: unknown; spk?: unknown; kpk?: unknown };
+    if (cert.did !== pub.did || cert.spk !== b64uEncode(dk.signingPublicKey) || cert.kpk !== b64uEncode(dk.agreementPublicKey)) throw bad("holds keys this device's certificate doesn't name");
     if (typeof ik === "string" && identityKeyFromSeed(b64uDecode(ik, 32)).userId !== pub.userId) throw bad("holds another identity's key");
   } catch (e) {
     if (e instanceof CliError) throw e;
@@ -540,6 +582,16 @@ function unseal(home: string, raw: SealedKeys): FullKeys {
     }
   }
   const secrets = openPayload(secret, raw, `${service}, account ${raw.did}`);
+  // An identity seed in keys.json itself (p2p never writes one there when sealed) counts only if it is this identity's.
+  if (secrets.ik === undefined && raw.ik !== undefined) {
+    let ok: boolean;
+    try {
+      ok = typeof raw.ik === "string" && identityKeyFromSeed(b64uDecode(raw.ik, 32)).userId === raw.userId;
+    } catch {
+      ok = false;
+    }
+    if (!ok) throw new CliError("keychain_mismatch", `${join(home, "cli", "keys.json")} holds an identity key that isn't this identity's: this device's keys can't be loaded. Nothing was changed, and no new keys were made`);
+  }
   cache.set(key, secret);
   return { ...(without(raw, SEAL_FIELDS) as Omit<FullKeys, "spk" | "kpk">), ...secrets } as FullKeys;
 }
@@ -702,9 +754,12 @@ export class KeyStoreBackend implements DocStore {
   async write(name: string, value: unknown): Promise<void> {
     if (name !== "keys" || value === null || value === undefined || this.opts.memoryOnly) return this.inner.write(name, value);
     const k = asFull(value);
-    if (configuredBackend(this.home) === "keychain") {
+    const sealed = isSealed(await this.inner.read("keys"));
+    // Keys sealed in the keychain stay there whatever keystore.json says (missing, or "file"): only
+    // `p2p keys backend file` moves them out, never an ordinary write (a renewed certificate).
+    if (sealed || configuredBackend(this.home) === "keychain") {
       // Replacing an item is only for keys that aren't sealed already (then the item may be their only copy).
-      storeAndVerify(keychainOrThrow(), this.home, k, !isSealed(await this.inner.read("keys")));
+      storeAndVerify(keychainOrThrow(), this.home, k, !sealed);
       return replaceKeysFile(this.inner, this.home, sealedOf(this.home, k));
     }
     return this.inner.write(name, k);
@@ -758,6 +813,7 @@ export function keyStoreStatus(home: string): KeyStoreStatus {
   }
   if (isSealed(raw)) {
     const item = { service: String(raw.service), account: String(raw.did) };
+    if (configured !== "keychain" && !problem) problem = `the keys are in the keychain, but ${markerFile(home)} is missing or says files: they stay in the keychain (\`p2p keys backend keychain\` records it again; \`p2p keys backend file\` moves them out)`;
     try {
       unseal(home, raw);
       return { configured, keys: "keychain", readable: true, ...(problem ? { problem } : {}), keychain, item };
@@ -823,6 +879,9 @@ export async function moveKeysToFiles(store: KeyStoreBackend): Promise<MoveResul
     const warnings: string[] = [];
     if (raw === undefined || !isSealed(raw)) {
       writeMarker(home, "file");
+      // A move into the keychain that stopped before keys.json was sealed leaves a copy there: deleted,
+      // once keys.json is known to hold this device's keys.
+      if (raw !== undefined && holdsSecrets(raw)) forgetLeftover(home, asFull(raw), warnings);
       return { backend: "file", moved: false, where: raw === undefined ? `${where}: no keys here yet` : `${where} (they were there already)`, warnings };
     }
     const k = unseal(home, raw);
@@ -863,6 +922,24 @@ export async function finishPendingMove(store: KeyStoreBackend): Promise<string 
     return undefined;
   } catch (e) {
     return `this device's keys are still in ${join(store.home, "cli", "keys.json")}, not in the keychain this home chose: ${(e as Error).message}`;
+  }
+}
+
+/** Deletes this home's keychain item for the keys `k` (which keys.json holds) when there is one; a warning when it can't. */
+function forgetLeftover(home: string, k: FullKeys, warnings: string[]): void {
+  try {
+    if (deviceKeysV3FromSecrets(k.userId, b64uDecode(k.spk, 32), b64uDecode(k.kpk, 32)).did !== k.did) return;
+  } catch {
+    return;
+  }
+  const kc = platformKeychain();
+  if (!kc || kc.unavailable()) return;
+  const service = serviceFor(home);
+  try {
+    kc.remove(service, k.did);
+    cache.delete(`${service}|${k.did}`);
+  } catch (e) {
+    warnings.push(`a copy of the keys may still be in ${kc.label} (item ${service}, account ${k.did}) from a move that didn't finish, and it couldn't be deleted (${e instanceof KeychainError ? e.reason : "error"}): delete it yourself`);
   }
 }
 

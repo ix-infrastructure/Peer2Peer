@@ -3902,14 +3902,24 @@ function homeAccessIn(text: string, isReading: boolean, homes: readonly string[]
   if (/(?:~|\$\{?home\}?|\/(?:home|users)\/[^/\s]+)\/\.[^/\s]*[*?[{]/.test(text)) return 'keys'
   if (/(?:^|[\s:;|&(])\.[^/\s]*[*?[{][^/\s]*\/(?:cli|v3|ext|config|backup)/.test(text)) return 'keys'
   // The keys in the OS keychain (`p2p keys backend keychain`): a keychain tool naming p2p's items
-  // (`peer2peer-keys-<hash>`), or dumping every item.
-  if (KEYCHAIN_TOOL.test(text) && (/peer2peer-keys/.test(text) || KEYCHAIN_DUMP.test(text))) return 'keys'
+  // (`peer2peer-keys-…`, the service and the label), a device id as the account, or dumping every item.
+  // Best effort: a name built at run time, or a script, gets past it.
+  if (KEYCHAIN_TOOL.test(text) && (/peer2peer-keys/.test(text) || KEYCHAIN_DEVICE.test(text) || KEYCHAIN_DUMP.test(text))) return 'keys'
 
   return null
 }
 
-/** The OS keychain tools: macOS `security`, libsecret's `secret-tool`, Windows' credential tools and APIs. */
-const KEYCHAIN_TOOL = /(?:^|[\s;|&(:/\\])(?:security|secret-tool|cmdkey|vaultcmd|powershell|pwsh|python3?|node|osascript)(?:\.exe)?\b|credread|get-storedcredential|passwordvault|secretstorage|keyring\b/
+/**
+ * A keychain tool in command position (the start of a command, or after `;`, `|`, `&`, `(`, `$(`,
+ * a backtick, a newline, or a `sudo`/`env`/`command`/`exec` prefix): macOS `security` (bare or
+ * `/usr/bin/security`), libsecret's `secret-tool`, Windows' `cmdkey`; or the credential APIs a script
+ * calls by name. A `docs/security/…` path or a `node` script is not one.
+ */
+const KEYCHAIN_TOOL =
+  /(?:^|command:|[;|&(\n`]|\$\()\s*(?:(?:sudo|doas|env|command|exec|nohup|time)\s+(?:-\S+\s+|[a-z_][a-z0-9_]*=\S*\s+)*)*(?:(?:\/usr\/bin\/)?security|(?:\/(?:usr\/)?bin\/|\/run\/current-system\/sw\/bin\/)?secret-tool|cmdkey(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?)(?=[\s,}]|$)|credread|p2pcred|get-storedcredential|passwordvault|secretstorage|\bkeyring\.get_password/
+
+/** A lookup of an item by a device id (`d_` + 26 base32), the account p2p's items carry: `-a d_…`, `account d_…`. */
+const KEYCHAIN_DEVICE = /(?:\s-a\s*|\saccount\s+)d_[a-z2-7]{26}\b/
 
 /** Reading every item at once: `security dump-keychain`, `secret-tool search --all`. */
 const KEYCHAIN_DUMP = /dump-keychain|secret-tool\s+search\b[^\n;|&]*--all/
