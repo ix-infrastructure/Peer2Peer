@@ -6,7 +6,7 @@
 // platform can't say cheaply: the caller then keeps going by the pid alone.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 let bootMs: number | undefined;
 
@@ -24,9 +24,16 @@ function linuxStartMs(pid: number): number | undefined {
   return bootMs + (ticks / 100) * 1000;
 }
 
+/** ps by absolute path (#99 review): never whatever `ps` comes first on PATH. */
+const PS = ["/bin/ps", "/usr/bin/ps"].find((p) => existsSync(p));
+
 function psStartMs(pid: number): number | undefined {
-  const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", PATH: process.env.PATH ?? "" } }).trim();
-  const t = Date.parse(out);
+  if (!PS) return undefined;
+  // TZ=UTC, and read back as UTC (#99 review): lstart prints local time without a zone, so a time zone change
+  // between two processes (automatic time zone, travel) would otherwise move every answer by hours.
+  const out = execFileSync(PS, ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", TZ: "UTC" } }).trim();
+  if (!out) return undefined;
+  const t = Date.parse(`${out} GMT`);
   return Number.isFinite(t) ? t : undefined;
 }
 

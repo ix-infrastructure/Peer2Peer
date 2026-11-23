@@ -11287,8 +11287,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
-  const pick = (open3) => {
-    const live = open3.filter((g) => !dead.has(g.need));
+  const pick = (open4) => {
+    const live = open4.filter((g) => !dead.has(g.need));
     const owners = relays.length + 1;
     for (let i = 0; i < owners; i++) {
       const o = (turn + i) % owners;
@@ -11310,17 +11310,17 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    let open3 = frontier();
-    let next = pick(open3);
+    let open4 = frontier();
+    let next = pick(open4);
     if (!next) {
-      open3 = roots();
-      next = pick(open3);
+      open4 = roots();
+      next = pick(open4);
       if (next && anchoredBeforeRoots === void 0)
         anchoredBeforeRoots = chain.anchored;
     }
     if (!next)
       break;
-    wanted = new Set(open3.map((g) => g.need));
+    wanted = new Set(open4.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
       if (lastAsked === 0)
@@ -12796,7 +12796,7 @@ var init_transient = __esm({
 
 // packages/p2p/src/procstart.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync9 } from "node:fs";
 function linuxStartMs(pid) {
   const stat3 = readFileSync9(`/proc/${pid}/stat`, "utf8");
   const fields = stat3.slice(stat3.lastIndexOf(")") + 2).split(" ");
@@ -12810,8 +12810,10 @@ function linuxStartMs(pid) {
   return bootMs + ticks / 100 * 1e3;
 }
 function psStartMs(pid) {
-  const out = execFileSync3("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", PATH: process.env.PATH ?? "" } }).trim();
-  const t2 = Date.parse(out);
+  if (!PS) return void 0;
+  const out = execFileSync3(PS, ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", TZ: "UTC" } }).trim();
+  if (!out) return void 0;
+  const t2 = Date.parse(`${out} GMT`);
   return Number.isFinite(t2) ? t2 : void 0;
 }
 function processStartMs(pid) {
@@ -12833,10 +12835,11 @@ function lookup(pid) {
   }
   return void 0;
 }
-var bootMs, CACHE_MS, CACHE_MAX, cache;
+var bootMs, PS, CACHE_MS, CACHE_MAX, cache;
 var init_procstart = __esm({
   "packages/p2p/src/procstart.ts"() {
     "use strict";
+    PS = ["/bin/ps", "/usr/bin/ps"].find((p) => existsSync3(p));
     CACHE_MS = 5e3;
     CACHE_MAX = 256;
     cache = /* @__PURE__ */ new Map();
@@ -13680,7 +13683,7 @@ var init_outbox = __esm({
 });
 
 // packages/p2p/src/extensions.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync7, readFileSync as readFileSync11, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute8, join as join15, relative, resolve as resolvePath, sep as sep3 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 function extensionPackageName(ns) {
@@ -13766,7 +13769,7 @@ function extensionDirs(env, selfUrl) {
 }
 function resolveIn(nodeModules, name2) {
   const pkgDir = join15(nodeModules, ...name2.split("/"));
-  if (!existsSync3(join15(pkgDir, "package.json"))) return void 0;
+  if (!existsSync4(join15(pkgDir, "package.json"))) return void 0;
   let pkg;
   try {
     pkg = JSON.parse(readFileSync11(join15(pkgDir, "package.json"), "utf8"));
@@ -13798,7 +13801,7 @@ function firstFromHere(home, ns, file) {
   }
   if (seen[ns] === file) return false;
   try {
-    if (existsSync3(home)) {
+    if (existsSync4(home)) {
       const tmp = `${p}.${process.pid}.tmp`;
       writeFileSync7(tmp, JSON.stringify({ ...seen, [ns]: file }), { mode: 384 });
       renameSync5(tmp, p);
@@ -13854,7 +13857,7 @@ function setExtensionEnabled(home, ns, on) {
   if (!KNOWN_EXTENSIONS.includes(ns)) throw new Error(`${ns} is not a registered extension namespace (${KNOWN_EXTENSIONS.join(", ")})`);
   const p = join15(home, "config.json");
   let cfg = {};
-  if (existsSync3(p)) {
+  if (existsSync4(p)) {
     const v = JSON.parse(readFileSync11(p, "utf8"));
     if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("config.json must hold a JSON object");
     cfg = v;
@@ -14985,8 +14988,8 @@ function asSenderDoc(v, own) {
   return x && x.own === own && typeof x.recs === "object" && x.recs !== null ? { own, recs: { ...x.recs }, rate: { ...x.rate ?? {} }, ...x.all ? { all: x.all } : {} } : { own, recs: {}, rate: {} };
 }
 function liveWindows(rate, now) {
-  const open3 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
-  return Object.fromEntries(open3);
+  const open4 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
+  return Object.fromEntries(open4);
 }
 async function writeSender(backend, name2, doc, now) {
   const rate = liveWindows(doc.rate, now);
@@ -19349,7 +19352,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open3() {
+          ws.once("open", function open4() {
             duplex._final(callback);
           });
           return;
@@ -19370,7 +19373,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open3() {
+          ws.once("open", function open4() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -21204,8 +21207,8 @@ async function completeCodeJoin(app, entry, item, opts) {
     await dropHeld(app, (h) => h.id === item.id);
     let isDefault = app.self?.defaultCircle === entry.cid;
     const joined = await loadCircle(app.store, entry.cid);
-    const open3 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
-    if (!app.self?.defaultCircle && entry.first !== false && !open3) {
+    const open4 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
+    if (!app.self?.defaultCircle && entry.first !== false && !open4) {
       await setDefaultCircle(app, entry.cid, { byJoin: true });
       isDefault = true;
     }
@@ -21397,11 +21400,35 @@ var init_codes = __esm({
 });
 
 // packages/p2p/src/rotation-lock.ts
-import { execFile as execFile4 } from "node:child_process";
-import { createHash as createHash6, randomBytes as randomBytes11 } from "node:crypto";
-import { readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { randomBytes as randomBytes11, createHash as createHash6 } from "node:crypto";
+import { constants } from "node:fs";
+import { open as open3, readdir as readdir2, rm, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join18 } from "node:path";
-import { promisify } from "node:util";
+async function readLock2(file) {
+  let fh;
+  try {
+    fh = await open3(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e.code === "ENOENT") return { kind: "gone" };
+    throw lockError(file, `${file} couldn't be read (${e.code ?? e.message})`);
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw lockError(file, `${file} isn't a regular file`);
+    if (st.size > MAX_LOCK_BYTES) throw lockError(file, `${file} is larger than a rotation lock`);
+    const buf = Buffer.alloc(MAX_LOCK_BYTES + 1);
+    let n = 0;
+    for (; ; ) {
+      const { bytesRead } = await fh.read(buf, n, buf.length - n, null);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+      if (n > MAX_LOCK_BYTES) throw lockError(file, `${file} is larger than a rotation lock`);
+    }
+    return { kind: "read", raw: buf.subarray(0, n).toString("utf8"), mtimeMs: st.mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
 function parseLock2(raw) {
   const t2 = raw.trim();
   if (/^[0-9]{1,10}$/.test(t2)) {
@@ -21411,31 +21438,7 @@ function parseLock2(raw) {
   try {
     const o = JSON.parse(t2);
     if (!o || typeof o !== "object" || typeof o.pid !== "number" || !Number.isSafeInteger(o.pid) || o.pid <= 0) return void 0;
-    return {
-      pid: o.pid,
-      ...typeof o.start === "string" ? { start: o.start } : {},
-      ...typeof o.run === "string" ? { run: o.run } : {},
-      ...typeof o.at === "number" ? { at: o.at } : {}
-    };
-  } catch {
-    return void 0;
-  }
-}
-async function processStart(pid) {
-  if (process.platform === "linux") {
-    try {
-      const stat3 = await readFile3(`/proc/${pid}/stat`, "utf8");
-      const f = stat3.slice(stat3.lastIndexOf(")") + 2).split(" ");
-      return f[19] ? `linux:${f[19]}` : void 0;
-    } catch {
-      return void 0;
-    }
-  }
-  if (process.platform === "win32") return void 0;
-  try {
-    const { stdout } = await execFileP("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 5e3, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" } });
-    const t2 = stdout.trim();
-    return t2 ? `ps:${t2}` : void 0;
+    return { pid: o.pid, ...typeof o.started === "number" && Number.isFinite(o.started) ? { started: o.started } : {} };
   } catch {
     return void 0;
   }
@@ -21448,11 +21451,14 @@ function running(pid) {
     return e.code === "EPERM";
   }
 }
-async function lockLive(rec2) {
+function lockLive(rec2) {
   if (!running(rec2.pid)) return false;
-  if (rec2.start === void 0) return true;
-  const now = await processStart(rec2.pid);
-  return now === void 0 || now === rec2.start;
+  if (rec2.started === void 0) return true;
+  const now = processStartMs(rec2.pid);
+  return now === void 0 || Math.abs(now - rec2.started) < START_SLACK_MS2;
+}
+function lockError(file, why2) {
+  return new CliError("rotation_in_progress", `${why2}, so \`p2p identity rotate\` can't tell whether another run is in progress. ${deleteHint(file)}`);
 }
 async function createExclusive(file, content) {
   try {
@@ -21463,48 +21469,62 @@ async function createExclusive(file, content) {
     throw e;
   }
 }
+async function sweepMarkers(home) {
+  const names = await readdir2(home).catch(() => []);
+  await Promise.all(names.filter((n) => MARKER_RE.test(n)).map((n) => rm(join18(home, n), { force: true }).catch(() => void 0)));
+}
 async function withRotationLock(home, fn) {
   const file = rotationLockOf(home);
-  const start = await processStart(process.pid);
-  const mine = `${JSON.stringify({ pid: process.pid, ...start !== void 0 ? { start } : {}, run: randomBytes11(16).toString("hex"), at: Date.now() })}
+  const started = processStartMs(process.pid) ?? Math.round(Date.now() - process.uptime() * 1e3);
+  const mine = `${JSON.stringify({ pid: process.pid, started, run: randomBytes11(16).toString("hex"), at: Date.now() })}
 `;
   if (!await createExclusive(file, mine)) {
-    const raw = await readFile3(file, "utf8").catch((e) => {
-      if (e.code === "ENOENT") return void 0;
-      throw e;
-    });
-    if (raw === void 0) {
+    const cur = await readLock2(file);
+    if (cur.kind === "gone") {
       if (!await createExclusive(file, mine)) throw lockBusy(file);
     } else {
-      const rec2 = parseLock2(raw);
-      if (!rec2 || await lockLive(rec2)) throw lockBusy(file);
+      const { raw } = cur;
+      if (raw.trim() === "") {
+        if (Date.now() - cur.mtimeMs < EMPTY_STALE_MS) throw lockBusy(file);
+      } else {
+        const rec2 = parseLock2(raw);
+        if (!rec2) throw lockError(file, `${file} doesn't hold a rotation lock this build can read`);
+        if (lockLive(rec2)) throw lockBusy(file);
+      }
       const marker = markerOf(file, raw);
-      if (!await createExclusive(marker, mine)) throw lockBusy(file);
+      if (!await createExclusive(marker, mine)) {
+        throw new CliError("rotation_in_progress", `another \`p2p identity rotate\` run is taking over a stale rotation lock: try again. ${deleteHint(file)}`);
+      }
       try {
-        if (await readFile3(file, "utf8").catch(() => void 0) === raw) await rm(file, { force: true });
+        const now = await readLock2(file);
+        if (now.kind === "read" && now.raw === raw) await rm(file, { force: true });
         if (!await createExclusive(file, mine)) throw lockBusy(file);
       } finally {
         await rm(marker, { force: true }).catch(() => void 0);
       }
     }
   }
+  await sweepMarkers(home);
   try {
     return await fn();
   } finally {
-    if (await readFile3(file, "utf8").catch(() => void 0) === mine) await rm(file, { force: true }).catch(() => void 0);
+    const now = await readLock2(file).catch(() => void 0);
+    if (now?.kind === "read" && now.raw === mine) await rm(file, { force: true }).catch(() => void 0);
   }
 }
-var execFileP, rotationLockOf, lockBusy, markerOf;
+var rotationLockOf, START_SLACK_MS2, MAX_LOCK_BYTES, EMPTY_STALE_MS, MARKER_RE, deleteHint, lockBusy, markerOf;
 var init_rotation_lock = __esm({
   "packages/p2p/src/rotation-lock.ts"() {
     "use strict";
     init_errors2();
-    execFileP = promisify(execFile4);
+    init_procstart();
     rotationLockOf = (home) => join18(home, "rotation.lock");
-    lockBusy = (file) => new CliError(
-      "rotation_in_progress",
-      `another \`p2p identity rotate\` run is in progress for this identity: wait for it to finish, then try again. If nothing is rotating here (a run was killed and its process id is in use again), delete ${file}`
-    );
+    START_SLACK_MS2 = 2500;
+    MAX_LOCK_BYTES = 4096;
+    EMPTY_STALE_MS = 6e4;
+    MARKER_RE = /^rotation\.lock\.[0-9a-f]{32}\.takeover$/;
+    deleteHint = (file) => `If nothing is rotating here (a run was killed, or its process id is in use again), delete ${file}`;
+    lockBusy = (file) => new CliError("rotation_in_progress", `another \`p2p identity rotate\` run is in progress for this identity: wait for it to finish, then try again. ${deleteHint(file)}`);
     markerOf = (file, raw) => `${file}.${createHash6("sha256").update(raw).digest("hex").slice(0, 32)}.takeover`;
   }
 });
@@ -22420,8 +22440,8 @@ var init_format = __esm({
 });
 
 // packages/p2p/src/ix-local.ts
-import { execFile as execFile5 } from "node:child_process";
-import { accessSync, constants, statSync as statSync4 } from "node:fs";
+import { execFile as execFile4 } from "node:child_process";
+import { accessSync, constants as constants2, statSync as statSync4 } from "node:fs";
 import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join19 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
@@ -22450,7 +22470,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
   const runnable = (p) => {
     try {
       if (!statSync4(p).isFile()) return false;
-      if (platform !== "win32") accessSync(p, constants.X_OK);
+      if (platform !== "win32") accessSync(p, constants2.X_OK);
       return true;
     } catch {
       return false;
@@ -22495,7 +22515,7 @@ function absolutePath(v, platform = process.platform) {
 }
 function runIx(bin, argv, o) {
   return new Promise((resolve7) => {
-    execFile5(bin, [...argv], { cwd: o.cwd, env: ixChildEnv(o.env, o.target), timeout: o.timeoutMs, killSignal: "SIGKILL", maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
+    execFile4(bin, [...argv], { cwd: o.cwd, env: ixChildEnv(o.env, o.target), timeout: o.timeoutMs, killSignal: "SIGKILL", maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
       const e = err;
       resolve7({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
     });
@@ -22614,7 +22634,7 @@ __export(identity_exports, {
   setup: () => setup,
   whoami: () => whoami
 });
-import { chmod, readFile as readFile4, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { chmod, readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join20 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 function p2pCommand(platform = process.platform) {
@@ -23136,7 +23156,7 @@ async function restoreInto(app, phrase, opts) {
 function lostKeyholderWarning(n) {
   return `${n === 1 ? "a revoked device was a key holder: it" : `${n} revoked devices were key holders: they`} still hold your identity key and could publish new versions, and occupy the relays' restricted connection slots for your identity. Only identity rotation neutralises a lost key holder: run \`p2p identity rotate\` (§2.8) from a key holder you still have`;
 }
-async function avatarValue(input, read2 = (p) => readFile4(p)) {
+async function avatarValue(input, read2 = (p) => readFile3(p)) {
   if (/^https:\/\//i.test(input) || input.startsWith("data:")) return input;
   let bytes2;
   try {
@@ -23338,7 +23358,7 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, lstat, mkdir as mkdir2, readFile as readFile5, rename, rm as rm3, stat, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
+import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm3, stat, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
 import { join as join21 } from "node:path";
 function branchSummary(hash, ver, by, relays) {
   return {
@@ -23995,7 +24015,7 @@ async function followers(app, napp, st, opts) {
   const pool = await napp.connect();
   const relay = napp.relays[0];
   const conn = await pool.ensure(relay);
-  const open3 = [];
+  const open4 = [];
   for (const [did, d] of pending) {
     const s2 = newLinkSecret();
     const lid = linkId(s2);
@@ -24015,22 +24035,22 @@ async function followers(app, napp, st, opts) {
     } catch (e) {
       app.io.err(`couldn't reach your device ${did}: ${e.message}`);
     }
-    if (reached) open3.push({ did, s: s2, lid, keyholder });
+    if (reached) open4.push({ did, s: s2, lid, keyholder });
     else d.status = "offline";
   }
   await saveState(app.home, st);
   const waitSec = Math.max(0, Math.min(opts.waitSec ?? LINK_TTL_SEC, LINK_TTL_SEC));
-  if (open3.length > 0) {
-    app.io.err(`waiting up to ${waitSec}s for ${open3.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
+  if (open4.length > 0) {
+    app.io.err(`waiting up to ${waitSec}s for ${open4.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
   }
   const deadline = Date.now() + waitSec * 1e3;
-  while (open3.length > 0 && Date.now() < deadline) {
-    for (const o of [...open3]) {
+  while (open4.length > 0 && Date.now() < deadline) {
+    for (const o of [...open4]) {
       const entries = await linkGet(conn, o.lid, "req");
       const rec2 = st.devices[o.did];
       if (entries === void 0) {
         rec2.status = "offline";
-        open3.splice(open3.indexOf(o), 1);
+        open4.splice(open4.indexOf(o), 1);
         continue;
       }
       let req;
@@ -24040,7 +24060,7 @@ async function followers(app, napp, st, opts) {
         if (e instanceof P2PError && e.reason === "link-multiple-requests") {
           app.warn(`more than one device answered the code sent to ${o.did}: not linking it (re-link it by hand)`);
           rec2.status = "aborted";
-          open3.splice(open3.indexOf(o), 1);
+          open4.splice(open4.indexOf(o), 1);
           continue;
         }
         throw e;
@@ -24058,12 +24078,12 @@ async function followers(app, napp, st, opts) {
       await linkPut(conn, o.lid, "resp", JSON.stringify(frame));
       rec2.status = "followed";
       rec2.newDid = req.did;
-      open3.splice(open3.indexOf(o), 1);
+      open4.splice(open4.indexOf(o), 1);
       await saveState(app.home, st);
     }
-    if (open3.length > 0) await sleep2(napp.tun.linkPollMs);
+    if (open4.length > 0) await sleep2(napp.tun.linkPollMs);
   }
-  for (const o of open3) st.devices[o.did].status = "offline";
+  for (const o of open4) st.devices[o.did].status = "offline";
 }
 async function inviteFriend(app, napp, peer2, statement) {
   try {
@@ -24997,7 +25017,7 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile5(join21(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile4(join21(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
@@ -25394,11 +25414,11 @@ function pidAlive2(pid) {
 }
 function claimAlive(c) {
   if (c.host !== HOST) return void 0;
-  if (c.pid === process.pid && (c.started === void 0 || Math.abs(c.started - STARTED2) < START_SLACK_MS2)) return inFlight.has(c.token);
+  if (c.pid === process.pid && (c.started === void 0 || Math.abs(c.started - STARTED2) < START_SLACK_MS3)) return inFlight.has(c.token);
   if (!pidAlive2(c.pid)) return false;
   if (c.started === void 0) return true;
   const started = processStartMs(c.pid);
-  return started === void 0 ? true : Math.abs(started - c.started) < START_SLACK_MS2;
+  return started === void 0 ? true : Math.abs(started - c.started) < START_SLACK_MS3;
 }
 async function fromOf(app, r) {
   return { userId: r.envelope.from, did: r.envelope.fdid, address: await app.addressOf(r.envelope.from), self: r.envelope.from === app.userId };
@@ -25525,7 +25545,7 @@ function receiving(app) {
   app.onAbandon = () => abandonInFlight(app);
   return app;
 }
-var DUPLICATE, HOST, STARTED2, START_SLACK_MS2, PROCESS_TOKEN, attempts, inFlight, running2, abandoned, ENVELOPE_TIMEOUT_MS;
+var DUPLICATE, HOST, STARTED2, START_SLACK_MS3, PROCESS_TOKEN, attempts, inFlight, running2, abandoned, ENVELOPE_TIMEOUT_MS;
 var init_inbound = __esm({
   "packages/p2p/src/inbound.ts"() {
     "use strict";
@@ -25545,7 +25565,7 @@ var init_inbound = __esm({
     DUPLICATE = /* @__PURE__ */ new Set(["replayed-seq", "replayed-nonce"]);
     HOST = hostname2();
     STARTED2 = Math.round(Date.now() - process.uptime() * 1e3);
-    START_SLACK_MS2 = 2500;
+    START_SLACK_MS3 = 2500;
     PROCESS_TOKEN = randomBytes12(9).toString("base64url");
     attempts = 0;
     inFlight = /* @__PURE__ */ new Set();
@@ -27521,7 +27541,7 @@ __export(projects_exports, {
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash9, createHmac, randomBytes as randomBytes15, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync4, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync5, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
 import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join22, resolve as resolve4, sep as sep4 } from "node:path";
 function sessionWorkdir(env) {
@@ -27612,17 +27632,17 @@ function pseudoPath(p) {
   return PSEUDO_ROOTS.slice(1).some(under);
 }
 function braceChoice2(c) {
-  let open3 = false;
+  let open4 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open3 = true;
+      open4 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open3 && choice) return true;
-      open3 = false;
-    } else if (open3 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
+      if (open4 && choice) return true;
+      open4 = false;
+    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
   }
   return false;
 }
@@ -27729,7 +27749,7 @@ ${common}`).slice(0, 24)}`,
     kind: "git",
     root,
     ...remote ? { remote } : {},
-    ...existsSync4(join22(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+    ...existsSync5(join22(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
   };
 }
 function present(p) {
@@ -27768,7 +27788,7 @@ function projectOf(dir, doc) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
         if (m) gitDir = resolve4(cur, m[1]);
       }
-      if (!gitDir || !existsSync4(gitDir)) {
+      if (!gitDir || !existsSync5(gitDir)) {
         return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
@@ -27781,7 +27801,7 @@ function projectOf(dir, doc) {
   const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename5(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
   let marked = false;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (existsSync4(join22(c, PRIVATE_MARKER))) {
+    if (existsSync5(join22(c, PRIVATE_MARKER))) {
       marked = true;
       break;
     }
@@ -27897,11 +27917,11 @@ function nestedBoundaries(root) {
         if (!e.isDirectory() || e.isSymbolicLink()) continue;
         const p = join22(d, e.name);
         if (e.name === ".git") continue;
-        if (existsSync4(join22(p, ".git")) || isBareRepo2(p)) {
+        if (existsSync5(join22(p, ".git")) || isBareRepo2(p)) {
           repos.push(p);
           continue;
         }
-        if (existsSync4(join22(p, PRIVATE_MARKER))) priv.push(p);
+        if (existsSync5(join22(p, PRIVATE_MARKER))) priv.push(p);
         next.push(p);
       }
       if (capped) break;
@@ -27976,7 +27996,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync4(join22(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync5(join22(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -28268,7 +28288,7 @@ function writeWhole(f, text2) {
 function ensureSalt(home) {
   const f = personSaltFile(home);
   if (TOKEN_RE.test(readTrim(f) ?? "")) return;
-  if (!existsSync4(f)) {
+  if (!existsSync5(f)) {
     try {
       writeFileSync10(f, randomBytes15(32).toString("base64url"), { mode: 384, flag: "wx" });
       return;
@@ -28330,7 +28350,7 @@ function isDirectory(p) {
   }
 }
 function identityHere(home) {
-  return existsSync4(join22(home, "cli", "keys.json")) && existsSync4(join22(home, "cli", "self.json"));
+  return existsSync5(join22(home, "cli", "keys.json")) && existsSync5(join22(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -28348,7 +28368,7 @@ function same2(given, t2) {
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
 }
 function healPersonToken(home) {
-  if (!identityHere(home) || !existsSync4(personTokenFile(home))) return;
+  if (!identityHere(home) || !existsSync5(personTokenFile(home))) return;
   try {
     personToken(home);
   } catch {
@@ -29444,10 +29464,11 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e), heldBackHeadOf(e)) : []])];
+            const heldBy = own ? heldBackByOf(e) : [];
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBy, heldBackForOf(e), heldBackHeadOf(e)) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
-            if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
+            if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId, heldBy)}`);
             v = fb;
             named = unconnected;
           } else {
@@ -29462,9 +29483,10 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? [], v.heldBackHead) : []])];
+          const heldBy = own ? v.heldBackBy ?? [] : [];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(heldBy, v.heldBackFor ?? [], v.heldBackHead) : []])];
           const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId, heldBy)}`);
           named = unconnected;
           v = fb;
         }
@@ -29479,8 +29501,8 @@ var init_app = __esm({
        * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
        * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
        * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
-       * that our devices published (the publish log) and that the head held back for (`head`) revoked no device of (#99), or, when the head held back for (`head`) leaves this device out as
-       * a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
+       * that our devices published (the publish log) and that the head held back for (`head`) revoked no device of (#99),
+       * or, when the head held back for (`head`) leaves this device out as a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
        * published (another owner device whose versions haven't reached this device's log yet, the provenance rule of
        * ownBranchTip in rotation.ts). That provenance alone never counts against a head that still lists this device: the
        * devices a logged version lists include ones the owner revoked since, and a version such a device signed, held
@@ -29508,16 +29530,26 @@ var init_app = __esm({
        * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
        * core named (#67 review F1): each sent a version whose missing parent every relay was asked for and none had,
        * so nothing a device of ours published would be there. Otherwise only which relays sent the newer versions.
+       * #99 review: `heldBy`, the relays core held the refresh back for, are named too when they weren't counted
+       * (ownHeldBack refused, as when their head drops a device this device's current version lists), with what to do:
+       * nothing else names them.
        */
-      unconnectedHint(unconnected, versions, userId) {
+      unconnectedHint(unconnected, versions, userId, heldBy = []) {
         if (userId !== this.keys?.userId) return "";
+        const held2 = [...new Set(heldBy)].filter((r) => !unconnected.includes(r));
+        const heldHint = held2.length === 0 ? "" : this.heldBackHint(held2);
         if (unconnected.length > 0) {
           const one = unconnected.length === 1;
-          return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+          return `${heldHint}. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
         }
-        const from = [...new Set(versions.flatMap((x) => x.relays))];
-        if (from.length === 0) return "";
-        return `. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+        const from = [...new Set(versions.flatMap((x) => x.relays))].filter((r) => !held2.includes(r));
+        if (from.length === 0) return heldHint;
+        return `${heldHint}. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+      }
+      /** #99 review: the relays a refresh of our own identity was held back for, not set aside (ownHeldBack refused). */
+      heldBackHint(held2) {
+        const one = held2.length === 1;
+        return `. ${held2.join(", ")} ${one ? "serves" : "serve"} a newer version of your identity, signed with your identity key, that leaves out this device's current version and doesn't connect to it. This device can't tell whether that is a change you made on another device (such as revoking a device there) or someone else holding your identity key, so ${one ? "that relay isn't" : "those relays aren't"} set aside automatically. If no device of yours made that change, remove ${one ? "it" : "them"} (\`p2p relays remove <url>\`: that goes ahead on what your other relays confirm), then rotate your identity (\`p2p identity rotate\`)`;
       }
       /**
        * #67: a strict refresh of our OWN identity couldn't confirm the head over every listed relay. Before an
@@ -31184,9 +31216,9 @@ function shellTokens(command, markLiteral = false, substs, starts, raws) {
       continue;
     }
     if (substs && (c === "$" && command[i + 1] === "(" || c === "`")) {
-      const open3 = c === "`" ? 1 : 2;
+      const open4 = c === "`" ? 1 : 2;
       const end = c === "`" ? closingTick(command, i + 1) : closingParen(command, i + 2);
-      substs.push(command.slice(i + open3, end));
+      substs.push(command.slice(i + open4, end));
       cur += SUBST;
       has = true;
       i = end;
@@ -31351,18 +31383,18 @@ function evalLike(s2) {
   return false;
 }
 function braceChoice(c) {
-  let open3 = false;
+  let open4 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open3 = true;
+      open4 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open3 && choice)
+      if (open4 && choice)
         return true;
-      open3 = false;
-    } else if (open3 && (ch === "," || ch === "." && c[i + 1] === "."))
+      open4 = false;
+    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === "."))
       choice = true;
   }
   return false;
@@ -39892,7 +39924,7 @@ init_ix_local();
 
 // packages/p2p/src/sandbox.ts
 import { randomBytes as randomBytes16 } from "node:crypto";
-import { closeSync as closeSync4, constants as constants2, existsSync as existsSync5, fstatSync as fstatSync2, mkdirSync as mkdirSync12, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync6, renameSync as renameSync10, rmSync as rmSync5, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
+import { closeSync as closeSync4, constants as constants3, existsSync as existsSync6, fstatSync as fstatSync2, mkdirSync as mkdirSync12, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync6, renameSync as renameSync10, rmSync as rmSync5, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname7, isAbsolute as isAbsolute11, join as join25, normalize as normalize3, resolve as resolve5, sep as sep5 } from "node:path";
 init_ancestry();
@@ -39969,7 +40001,7 @@ var MAX_CONFIG_BYTES = 1024 * 1024;
 function readConfigFile(path2) {
   let fd;
   try {
-    fd = openSync4(path2, constants2.O_RDONLY | (constants2.O_NONBLOCK ?? 0));
+    fd = openSync4(path2, constants3.O_RDONLY | (constants3.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
@@ -40012,7 +40044,7 @@ function projectRoots(workdir) {
   const out = [normalize3(workdir)];
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
-    if (existsSync5(join25(d, ".git"))) {
+    if (existsSync6(join25(d, ".git"))) {
       if (!out.includes(d)) out.push(d);
       break;
     }
@@ -40228,7 +40260,7 @@ function codexProjectConfigs(workdir) {
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
     const f = join25(d, ".codex", "config.toml");
-    if (existsSync5(f)) out.push(f);
+    if (existsSync6(f)) out.push(f);
     if (d === top) break;
     const up = dirname7(d);
     if (up === d) break;
@@ -40399,7 +40431,7 @@ function declinedHere(env, front) {
   }
 }
 function frontPresent(front, env) {
-  return existsSync5(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
+  return existsSync6(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
 }
 async function sandboxNotice(app, front) {
   if (app.front !== true && agentContext(app.env)) return void 0;
@@ -40451,7 +40483,7 @@ init_rotation();
 init_outbox();
 init_running();
 import { watch as watchDir } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile6, rename as rename2, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile5 } from "node:fs/promises";
 import { join as join26 } from "node:path";
 
 // packages/p2p/src/graph-memory.ts
@@ -40744,7 +40776,7 @@ function cursorPath(app, sid) {
 }
 async function readCursor(app, sid) {
   try {
-    const v = JSON.parse(await readFile6(cursorPath(app, sid), "utf8"));
+    const v = JSON.parse(await readFile5(cursorPath(app, sid), "utf8"));
     if (typeof v.n === "number" && typeof v.start === "number") return v;
   } catch {
   }
@@ -41014,7 +41046,7 @@ init_extensions();
 init_ix_local();
 init_projects();
 import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
-import { readFile as readFile7, stat as stat2 } from "node:fs/promises";
+import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
 import { dirname as dirname8, join as join27 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
@@ -41176,7 +41208,7 @@ function findModRoot(app, given) {
 var MAX_MOD_FILE_BYTES = 16 * 1024 * 1024;
 async function readSmall2(path2) {
   if ((await stat2(path2)).size > MAX_MOD_FILE_BYTES) throw new Error("too large");
-  return readFile7(path2, "utf8");
+  return readFile6(path2, "utf8");
 }
 async function modVersions(root) {
   const out = {};

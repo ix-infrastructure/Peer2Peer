@@ -1,15 +1,18 @@
 // Copyright 2026 Ix Infrastructure Inc.
 //
-// #99: the rotation lock. A reused pid doesn't hold it for good, a stale lock is taken over by exactly one run, and
-// `--plan` / `--cancel` take it too.
+// #99: the rotation lock. A reused pid doesn't hold it for good, a stale lock is taken over by exactly one run,
+// `--plan` / `--cancel` take it too, and every refusal names the lock file.
 
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { processStart, rotationLockOf, withRotationLock } from "../rotation-lock.js";
+import { build } from "esbuild";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { processStartMs } from "../procstart.js";
+import { rotationLockOf, withRotationLock } from "../rotation-lock.js";
 import { rotateCancel, rotatePlan } from "../rotation.js";
 import type { App } from "../app.js";
 
@@ -23,6 +26,18 @@ afterEach(() => {
   for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
 });
 
+/** The child process, bundled from source here (never a possibly stale dist/). */
+let childDir: string;
+let child: string;
+beforeAll(async () => {
+  childDir = mkdtempSync(join(tmpdir(), "p2p-rotlock-child-"));
+  child = join(childDir, "child.mjs");
+  await build({ entryPoints: [fileURLToPath(new URL("./rotation-lock-child.ts", import.meta.url))], bundle: true, platform: "node", format: "esm", target: "node22", outfile: child, logLevel: "silent" });
+}, 60_000);
+afterAll(() => {
+  rmSync(childDir, { recursive: true, force: true });
+});
+
 /** The pid of a process that has exited. */
 async function deadPid(): Promise<number> {
   const c = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
@@ -31,6 +46,7 @@ async function deadPid(): Promise<number> {
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
+const errOf = (p: Promise<unknown>) => p.then(() => undefined, (e: unknown) => e as { code?: string; message: string });
 
 describe("#99: rotation lock", () => {
   it("records pid, process start time and a run id; removed after the run", async () => {
@@ -40,28 +56,29 @@ describe("#99: rotation lock", () => {
     expect(seen.pid).toBe(process.pid);
     expect(typeof seen.run).toBe("string");
     expect(typeof seen.at).toBe("number");
-    if (process.platform !== "win32") expect(seen.start).toBe(await processStart(process.pid));
+    expect(typeof seen.started).toBe("number");
+    const os = processStartMs(process.pid);
+    if (os !== undefined) expect(Math.abs((seen.started as number) - os)).toBeLessThan(2500);
     expect(existsSync(file)).toBe(false);
   });
 
   it("a live run's lock refuses, naming the lock file and saying to delete it if nothing is rotating", async () => {
     const h = home();
     const file = rotationLockOf(h);
-    let inner: unknown;
+    let inner: { code?: string; message: string } | undefined;
     await withRotationLock(h, async () => {
-      inner = await withRotationLock(h, async () => "ran").catch((e: unknown) => e);
+      inner = await errOf(withRotationLock(h, async () => "ran"));
     });
-    expect((inner as { code?: string }).code).toBe("rotation_in_progress");
-    expect((inner as Error).message).toMatch(/another .* run is in progress/);
-    expect((inner as Error).message).toContain(file);
-    expect((inner as Error).message).toMatch(/delete/);
+    expect(inner?.code).toBe("rotation_in_progress");
+    expect(inner?.message).toMatch(/another .* run is in progress/);
+    expect(inner?.message).toContain(`delete ${file}`);
   });
 
-  it.skipIf(process.platform === "win32")("a lock whose pid now belongs to another process (another start time) is taken over", async () => {
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("a lock whose pid now belongs to another process (another start time) is taken over", async () => {
     const h = home();
     const file = rotationLockOf(h);
     // This process is alive, but the lock records a start time it never had: a dead run whose pid was reused.
-    writeFileSync(file, `${JSON.stringify({ pid: process.pid, start: "ps:Thu Jan  1 00:00:00 1970", run: "0".repeat(32), at: 1 })}\n`);
+    writeFileSync(file, `${JSON.stringify({ pid: process.pid, started: 1, run: "0".repeat(32), at: 1 })}\n`);
     expect(await withRotationLock(h, async () => "ran")).toBe("ran");
     expect(existsSync(file)).toBe(false);
   });
@@ -72,16 +89,66 @@ describe("#99: rotation lock", () => {
     writeFileSync(file, `${await deadPid()}\n`);
     expect(await withRotationLock(h, async () => "ran")).toBe("ran");
     writeFileSync(file, `${process.pid}\n`);
-    await expect(withRotationLock(h, async () => "ran")).rejects.toMatchObject({ code: "rotation_in_progress" });
+    expect((await errOf(withRotationLock(h, async () => "ran")))?.message).toContain(file);
     expect(readFileSync(file, "utf8")).toBe(`${process.pid}\n`);
   });
 
-  it("content no build wrote is left alone", async () => {
+  it("content no build wrote is left alone; the error names the file", async () => {
     const h = home();
     const file = rotationLockOf(h);
     writeFileSync(file, "not a lock\n");
-    await expect(withRotationLock(h, async () => "ran")).rejects.toMatchObject({ code: "rotation_in_progress" });
+    const e = await errOf(withRotationLock(h, async () => "ran"));
+    expect(e?.code).toBe("rotation_in_progress");
+    expect(e?.message).toContain(`delete ${file}`);
     expect(readFileSync(file, "utf8")).toBe("not a lock\n");
+  });
+
+  it("an empty lock (a run that died before writing it) refuses while fresh, and is taken over after a minute", async () => {
+    const h = home();
+    const file = rotationLockOf(h);
+    writeFileSync(file, "");
+    const e = await errOf(withRotationLock(h, async () => "ran"));
+    expect(e?.code).toBe("rotation_in_progress");
+    expect(e?.message).toContain(`delete ${file}`);
+    const old = (Date.now() - 120_000) / 1000;
+    utimesSync(file, old, old);
+    expect(await withRotationLock(h, async () => "ran")).toBe("ran");
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("a symbolic link or a FIFO at the lock's path is never followed or waited on; the error names the file", async () => {
+    const h = home();
+    const file = rotationLockOf(h);
+    const target = join(h, "elsewhere");
+    writeFileSync(target, `${await deadPid()}\n`);
+    symlinkSync(target, file);
+    const e = await errOf(withRotationLock(h, async () => "ran"));
+    expect(e?.code).toBe("rotation_in_progress");
+    expect(e?.message).toContain(`delete ${file}`);
+    expect(readFileSync(target, "utf8")).toMatch(/^\d+\n$/);
+    if (process.platform !== "win32") {
+      rmSync(file);
+      execFileSync("mkfifo", [file]);
+      const f = await errOf(withRotationLock(h, async () => "ran"));
+      expect(f?.code).toBe("rotation_in_progress");
+      expect(f?.message).toContain(`${file} isn't a regular file`);
+    }
+  });
+
+  it("a takeover marker a dead run left behind refuses naming the file, and is swept once the lock is taken", async () => {
+    const h = home();
+    const file = rotationLockOf(h);
+    const stale = `${JSON.stringify({ pid: await deadPid(), run: "a".repeat(32), at: 1 })}\n`;
+    writeFileSync(file, stale);
+    // A run that died mid-takeover of this stale lock: its marker is still there.
+    const marker = `${file}.${createHash("sha256").update(stale).digest("hex").slice(0, 32)}.takeover`;
+    writeFileSync(marker, "{}\n");
+    const e = await errOf(withRotationLock(h, async () => "ran"));
+    expect(e?.message).toContain(`delete ${file}`);
+    // The user deletes the lock as told: the next run takes it and sweeps the marker.
+    rmSync(file);
+    expect(await withRotationLock(h, async () => "ran")).toBe("ran");
+    expect(readdirSync(h)).toEqual([]);
   });
 
   it("concurrent takeovers of a stale lock leave exactly one owner", async () => {
@@ -115,17 +182,19 @@ describe("#99: rotation lock", () => {
     const h = home();
     const file = rotationLockOf(h);
     writeFileSync(file, `${JSON.stringify({ pid: await deadPid(), run: "e".repeat(32), at: 1 })}\n`);
-    // The built module (npm test builds first, as for the dist/bin.js tests).
-    const mod = fileURLToPath(new URL("../../dist/rotation-lock.js", import.meta.url));
-    expect(existsSync(mod), "build p2p first (npm run build)").toBe(true);
-    const log = join(h, "..", `${h.split("/").pop()}-owners.log`);
-    homes.push(log);
-    const child = fileURLToPath(new URL("./rotation-lock-child.mjs", import.meta.url));
+    const logs = home();
+    const log = join(logs, "owners.log");
     const kids = Array.from({ length: 4 }, () => spawn(process.execPath, [child, h, log], { stdio: ["ignore", "ignore", "inherit"] }));
-    const codes = await Promise.all(kids.map((k) => new Promise<number | null>((r) => k.once("exit", r))));
-    expect(codes).toEqual([0, 0, 0, 0]);
-    const lines = readFileSync(log, "utf8").trim().split("\n");
-    expect(lines).toEqual(["in", "out"]);
+    const exits = kids.map((k) => new Promise<number | null>((r) => k.once("exit", r)));
+    // Start barrier: every child is ready before any tries.
+    const deadline = Date.now() + 30_000;
+    while (readdirSync(logs).filter((n) => n.startsWith("owners.log.ready.")).length < kids.length) {
+      if (Date.now() > deadline) throw new Error("children never got ready");
+      await tick();
+    }
+    writeFileSync(`${log}.go`, "");
+    expect(await Promise.all(exits)).toEqual([0, 0, 0, 0]);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["in", "out"]);
     expect(existsSync(file)).toBe(false);
   }, 60_000);
 
