@@ -8743,8 +8743,8 @@ async function verifyInviteV3(jws, ctx, opts = {}) {
 function inviteLink(inviteJws, opts = {}) {
   return (opts.web ? INVITE_WEB_PREFIX : INVITE_LINK_PREFIX) + b64uEncode(utf8(inviteJws));
 }
-function parseInviteLink(link) {
-  const s2 = typeof link === "string" ? link.trim() : "";
+function parseInviteLink(link2) {
+  const s2 = typeof link2 === "string" ? link2.trim() : "";
   const prefix = [INVITE_LINK_PREFIX, INVITE_WEB_PREFIX, ...LEGACY_INVITE_WEB_PREFIXES].find((p) => s2.startsWith(p));
   if (prefix === void 0)
     fail("malformed", "not an invite link");
@@ -9346,8 +9346,8 @@ function circleInviteLink(headJws, opts = {}) {
   parseCircleVersion(headJws);
   return (opts.web ? CIRCLE_WEB_PREFIX : CIRCLE_LINK_PREFIX) + b64uEncode(utf8(headJws));
 }
-function parseCircleInviteLink(link) {
-  const s2 = typeof link === "string" ? link.trim() : "";
+function parseCircleInviteLink(link2) {
+  const s2 = typeof link2 === "string" ? link2.trim() : "";
   const prefix = [CIRCLE_LINK_PREFIX, CIRCLE_WEB_PREFIX, ...LEGACY_CIRCLE_WEB_PREFIXES].find((p) => s2.startsWith(p));
   if (prefix === void 0)
     fail("malformed", "not a circle link");
@@ -10354,8 +10354,8 @@ function parsePlaintextV3(kind, bytes2) {
         const cap2 = optS(o, "cap", "circle");
         if (cap2 !== void 0 && (cap2.length > MAX_JWS_BYTES || cap2.split(".").length !== 3))
           fail("malformed", "circle.cap must be one compact JWS");
-        const link = optS(o, "link", "circle");
-        if (link !== void 0 && !/^[A-Za-z0-9_-]{43}$/.test(link))
+        const link2 = optS(o, "link", "circle");
+        if (link2 !== void 0 && !/^[A-Za-z0-9_-]{43}$/.test(link2))
           fail("malformed", "circle.link must be a version's jwsHash");
         let pow3;
         if (o.pow !== void 0) {
@@ -10370,7 +10370,7 @@ function parsePlaintextV3(kind, bytes2) {
           kind,
           want: { cid: w.cid, fromVer: w.fromVer },
           ...cap2 !== void 0 ? { cap: cap2 } : {},
-          ...link !== void 0 ? { link } : {},
+          ...link2 !== void 0 ? { link: link2 } : {},
           ...pow3 !== void 0 ? { pow: pow3 } : {}
         };
       }
@@ -12456,7 +12456,7 @@ var init_errors2 = __esm({
 import { spawnSync } from "node:child_process";
 import { createHash as createHash3, randomBytes as randomBytes9 } from "node:crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync9, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { open as open2, stat } from "node:fs/promises";
+import { link, open as open2, readdir as readdir2, readFile as readFile3, rm, stat } from "node:fs/promises";
 import { join as join11, resolve as resolve4 } from "node:path";
 function checkArgs(...args) {
   for (const a of args) if (!SAFE_ARG.test(a)) throw new KeychainError("an item name with characters the keychain tools can't be given safely");
@@ -12772,11 +12772,51 @@ function keysUnreadable(home) {
     return true;
   }
 }
+async function zeroAndRemove(path2) {
+  try {
+    const fh = await open2(path2, "r+");
+    try {
+      const { size: size2 } = await fh.stat();
+      if (size2 > 0) {
+        await fh.write(Buffer.alloc(size2, 0), 0, size2, 0);
+        await fh.sync();
+      }
+    } finally {
+      await fh.close().catch(() => {
+      });
+    }
+  } catch {
+  }
+  await rm(path2, { force: true }).catch(() => {
+  });
+}
 async function replaceKeysFile(inner, home, doc) {
-  const path2 = join11(home, "cli", "keys.json");
+  const dir = join11(home, "cli");
+  const path2 = join11(dir, "keys.json");
+  let old;
+  try {
+    old = JSON.parse(await readFile3(path2, "utf8"));
+  } catch {
+    old = void 0;
+  }
+  if (process.platform === "win32") {
+    for (const f of await readdir2(dir).catch(() => [])) if (f.startsWith(WIPE_PREFIX)) await zeroAndRemove(join11(dir, f));
+    let wipe;
+    if (holdsSecrets(old)) {
+      wipe = join11(dir, `${WIPE_PREFIX}${randomBytes9(6).toString("hex")}`);
+      try {
+        await link(path2, wipe);
+      } catch {
+        wipe = void 0;
+      }
+    }
+    await inner.write("keys", doc);
+    if (wipe) await zeroAndRemove(wipe);
+    return;
+  }
   let fh;
   try {
-    fh = await open2(path2, "r+");
+    fh = holdsSecrets(old) ? await open2(path2, "r+") : void 0;
   } catch {
     fh = void 0;
   }
@@ -12989,7 +13029,7 @@ function forgetKeychainItem(home, did) {
   } catch {
   }
 }
-var KEYCHAIN_TIMEOUT_MS, realRunner, KeychainError, SAFE_ARG, SAFE_SECRET, SECURITY, SECRET_TOOL_PATHS, WINDOWS_CSHARP, WINDOWS_SCRIPT, WINDOWS_POWERSHELL, override, SERVICE_PREFIX, LABEL, SECRET_FIELDS, SEAL_FIELDS, isObj, cache, KeyStoreBackend;
+var KEYCHAIN_TIMEOUT_MS, realRunner, KeychainError, SAFE_ARG, SAFE_SECRET, SECURITY, SECRET_TOOL_PATHS, WINDOWS_CSHARP, WINDOWS_SCRIPT, WINDOWS_POWERSHELL, override, SERVICE_PREFIX, LABEL, SECRET_FIELDS, SEAL_FIELDS, isObj, cache, WIPE_PREFIX, KeyStoreBackend;
 var init_keystore = __esm({
   "packages/p2p/src/keystore.ts"() {
     "use strict";
@@ -13109,6 +13149,7 @@ exit [int]$res.CompiledAssembly.GetType('P2PCred').GetMethod('Run').Invoke($null
     SEAL_FIELDS = ["store", "service"];
     isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
     cache = /* @__PURE__ */ new Map();
+    WIPE_PREFIX = ".keys.json.wipe-";
     KeyStoreBackend = class {
       constructor(inner, home, opts = {}) {
         this.inner = inner;
@@ -23247,7 +23288,7 @@ __export(identity_exports, {
   setup: () => setup,
   whoami: () => whoami
 });
-import { chmod, readFile as readFile3, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod, readFile as readFile4, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join20 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 function p2pCommand(platform = process.platform) {
@@ -23674,8 +23715,8 @@ async function backupRestore(app, phrase, opts) {
       );
     }
     forgetKeychainItem(app.home, app.keys?.did);
-    await rm(join20(app.home, "cli"), { recursive: true, force: true });
-    await rm(join20(app.home, "v3"), { recursive: true, force: true });
+    await rm2(join20(app.home, "cli"), { recursive: true, force: true });
+    await rm2(join20(app.home, "v3"), { recursive: true, force: true });
     throw e;
   }
 }
@@ -23770,7 +23811,7 @@ async function restoreInto(app, phrase, opts) {
 function lostKeyholderWarning(n) {
   return `${n === 1 ? "a revoked device was a key holder: it" : `${n} revoked devices were key holders: they`} still hold your identity key and could publish new versions, and occupy the relays' restricted connection slots for your identity. Only identity rotation neutralises a lost key holder: run \`p2p identity rotate\` (§2.8) from a key holder you still have`;
 }
-async function avatarValue(input, read2 = (p) => readFile3(p)) {
+async function avatarValue(input, read2 = (p) => readFile4(p)) {
   if (/^https:\/\//i.test(input) || input.startsWith("data:")) return input;
   let bytes2;
   try {
@@ -23973,7 +24014,7 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm2, stat as stat2, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
+import { copyFile, lstat, mkdir as mkdir2, readFile as readFile5, rename, rm as rm3, stat as stat2, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
 import { join as join21 } from "node:path";
 function branchSummary(hash, ver, by, relays) {
   return {
@@ -23994,8 +24035,8 @@ async function saveState(home, s2) {
   await b.withLock(() => b.write("state", s2));
 }
 async function dropState(home) {
-  await rm2(join21(rotationDir(home), "state.json"), { force: true });
-  await rm2(newHomeOf(home), { recursive: true, force: true });
+  await rm3(join21(rotationDir(home), "state.json"), { force: true });
+  await rm3(newHomeOf(home), { recursive: true, force: true });
 }
 async function isLink(p) {
   try {
@@ -24030,8 +24071,8 @@ async function moveHomes(home, src, tag) {
   for (const d of ["cli", "v3"]) {
     if (await exists(join21(src, d)) && !await exists(join21(home, d))) await rename(join21(src, d), join21(home, d));
   }
-  await rm2(src, { recursive: true, force: true });
-  for (const d of ["cli", "v3"]) await rm2(join21(archive, d, ".lock"), { force: true });
+  await rm3(src, { recursive: true, force: true });
+  for (const d of ["cli", "v3"]) await rm3(join21(archive, d, ".lock"), { force: true });
   return archive;
 }
 function assertAdopted(app, userId) {
@@ -24300,17 +24341,17 @@ async function withRotationLock(app, fn) {
     await take2();
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
-    const pid = Number.parseInt((await readFile4(file, "utf8").catch(() => "")).trim(), 10);
+    const pid = Number.parseInt((await readFile5(file, "utf8").catch(() => "")).trim(), 10);
     if (Number.isSafeInteger(pid) && pid > 0 && running(pid)) {
       throw new CliError("rotation_in_progress", "another `p2p identity rotate` run is in progress for this identity: wait for it to finish, then try again");
     }
-    await rm2(file, { force: true });
+    await rm3(file, { force: true });
     await take2();
   }
   try {
     return await fn();
   } finally {
-    await rm2(file, { force: true }).catch(() => void 0);
+    await rm3(file, { force: true }).catch(() => void 0);
   }
 }
 function running(pid) {
@@ -24509,7 +24550,7 @@ async function begin(app, opts) {
     ...base.profile ? { profile: { ...base.profile } } : {}
   });
   const home = newHomeOf(app.home);
-  await rm2(home, { recursive: true, force: true });
+  await rm3(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
@@ -24561,7 +24602,7 @@ async function begin(app, opts) {
     const file = await writeBackup(app, newIk, opts);
     if (file) st.backupFile = file;
   } catch (e) {
-    await rm2(home, { recursive: true, force: true });
+    await rm3(home, { recursive: true, force: true });
     throw e;
   }
   await saveState(app.home, st);
@@ -25614,7 +25655,7 @@ async function followHeld(app, idOrItem) {
   following = true;
   const tmp = followHomeOf(app.home);
   try {
-    await rm2(tmp, { recursive: true, force: true });
+    await rm3(tmp, { recursive: true, force: true });
     const napp = await appAt(app, tmp);
     let res;
     try {
@@ -25634,7 +25675,7 @@ async function followHeld(app, idOrItem) {
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
   } catch (e) {
-    if (!await exists(join21(tmp, "linked.json"))) await rm2(tmp, { recursive: true, force: true }).catch(() => void 0);
+    if (!await exists(join21(tmp, "linked.json"))) await rm3(tmp, { recursive: true, force: true }).catch(() => void 0);
     if (e instanceof CliError && (e.code === "wrong_identity" || e.code === "keyholder")) throw e;
     throw new CliError(
       "follow_failed",
@@ -25652,7 +25693,7 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile4(join21(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile5(join21(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
@@ -25660,7 +25701,7 @@ async function recoverInterruptedFollow(home) {
     if (await isLink(p)) return false;
   }
   if (!await exists(join21(tmp, "cli")) && await exists(join21(home, "cli"))) {
-    await rm2(tmp, { recursive: true, force: true });
+    await rm3(tmp, { recursive: true, force: true });
     return false;
   }
   await moveHomes(home, tmp, typeof marker.tag === "string" && /^[\w-]{1,80}$/.test(marker.tag) ? marker.tag : `follow-${Date.now()}`);
@@ -25680,7 +25721,7 @@ async function relinkRotated(app, code2, opts = {}) {
   }
   if (targets.size === 0) throw new CliError("not_rotated", "this device's identity hasn't been rotated: --rotated only re-links a device whose identity moved (§2.8)");
   const tmp = followHomeOf(app.home);
-  await rm2(tmp, { recursive: true, force: true });
+  await rm3(tmp, { recursive: true, force: true });
   const napp = await appAt(app, tmp);
   const j = await linkJoin(napp, code2, { label: opts.label ?? (certLabel(app.keys.cert) || defaultLabel()) });
   const old = app.userId;
@@ -25695,7 +25736,7 @@ async function relinkRotated(app, code2, opts = {}) {
         await napp.close();
       }
       if (!targets.has(res.userId)) {
-        await rm2(tmp, { recursive: true, force: true });
+        await rm3(tmp, { recursive: true, force: true });
         throw new CliError("wrong_identity", `that code links to ${res.userId}, which isn't where your identity moved (${[...targets].join(", ")})`);
       }
       const tag = `${old.slice(4, 20)}-${Date.now()}`;
@@ -26845,8 +26886,8 @@ function encodeCircleLink(head, hint, web = false) {
   if (!hint || !hint.doc && !hint.join) return base;
   return `${base}~${b64uEncode(new TextEncoder().encode(JSON.stringify(hint)))}`;
 }
-function parseCircleLink(link) {
-  const s2 = link.trim();
+function parseCircleLink(link2) {
+  const s2 = link2.trim();
   const i = s2.indexOf("~");
   const head = parseCircleInviteLink(i >= 0 ? s2.slice(0, i) : s2);
   if (i < 0) return { head };
@@ -27377,10 +27418,10 @@ async function dropPending(app, cid) {
     await app.revokeCaps(caps).catch(() => 0);
   }
 }
-async function joinFromLink(app, link, opts) {
+async function joinFromLink(app, link2, opts) {
   let parsed;
   try {
-    parsed = parseCircleLink(link);
+    parsed = parseCircleLink(link2);
   } catch (e) {
     if (e instanceof CliError) throw e;
     throw new CliError("usage", "that is not a circle link (p2p://circle/… or https://ix-infra.com/p2p/c#…)");
@@ -35499,8 +35540,8 @@ async function peerPid(conn, run = runOut) {
     if (process.platform === "darwin")
       return parseLsofPeer(await run("lsof", ["-nP", "-U", "-F", "pfdn"]), process.pid, fd);
     if (process.platform === "linux") {
-      const link = await run("readlink", [`/proc/self/fd/${fd}`]);
-      const inode = /socket:\[(\d+)\]/.exec(link)?.[1];
+      const link2 = await run("readlink", [`/proc/self/fd/${fd}`]);
+      const inode = /socket:\[(\d+)\]/.exec(link2)?.[1];
       return inode ? parseSsPeer(await run("ss", ["-xpn"]), inode) : void 0;
     }
   } catch {
@@ -36647,8 +36688,8 @@ function resolveLink(path2) {
   try {
     return realpathSync3(path2);
   } catch {
-    const link = readlinkSync(path2);
-    return isAbsolute6(link) ? link : join9(dirname3(path2), link);
+    const link2 = readlinkSync(path2);
+    return isAbsolute6(link2) ? link2 : join9(dirname3(path2), link2);
   }
 }
 function printedInstructions(plan) {
@@ -41060,7 +41101,7 @@ init_rotation();
 init_outbox();
 init_running();
 import { watch as watchDir } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile6, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join26 } from "node:path";
 
 // packages/p2p/src/graph-memory.ts
@@ -41353,7 +41394,7 @@ function cursorPath(app, sid) {
 }
 async function readCursor(app, sid) {
   try {
-    const v = JSON.parse(await readFile5(cursorPath(app, sid), "utf8"));
+    const v = JSON.parse(await readFile6(cursorPath(app, sid), "utf8"));
     if (typeof v.n === "number" && typeof v.start === "number") return v;
   } catch {
   }
@@ -41624,7 +41665,7 @@ init_ix_local();
 init_projects();
 init_keystore();
 import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
-import { readFile as readFile6, stat as stat3 } from "node:fs/promises";
+import { readFile as readFile7, stat as stat3 } from "node:fs/promises";
 import { dirname as dirname8, join as join27 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
@@ -41786,7 +41827,7 @@ function findModRoot(app, given) {
 var MAX_MOD_FILE_BYTES = 16 * 1024 * 1024;
 async function readSmall2(path2) {
   if ((await stat3(path2)).size > MAX_MOD_FILE_BYTES) throw new Error("too large");
-  return readFile6(path2, "utf8");
+  return readFile7(path2, "utf8");
 }
 async function modVersions(root) {
   const out = {};
@@ -45108,8 +45149,8 @@ Accept it with \`p2p identity rotate --resume\` (add --exclude <did> to drop a d
       return { json: r, human: `This device moved with your identity: it is now ${r.address} (${r.did}).` };
     })
   );
-  const link = program2.command("link").description("Link another device to your identity (§2.4)");
-  link.command("start").description("On a key-holding device: show a one-time link code for the new device").option("--keyholder", "Make the new device key-holding (it gets your identity key)").option("--relay <url>", "Relay for the link mailbox (default: your first relay)").option("--expect-compare <code>", "Proceed only if the answering device's compare code is this (for scripts; read it off the new device)").option("--json", "JSON output").action(
+  const link2 = program2.command("link").description("Link another device to your identity (§2.4)");
+  link2.command("start").description("On a key-holding device: show a one-time link code for the new device").option("--keyholder", "Make the new device key-holding (it gets your identity key)").option("--relay <url>", "Relay for the link mailbox (default: your first relay)").option("--expect-compare <code>", "Proceed only if the answering device's compare code is this (for scripts; read it off the new device)").option("--json", "JSON output").action(
     run(async (app, o) => {
       const expect = o.expectCompare?.trim().toLowerCase();
       if (expect === void 0 && !io2.prompt) throw new CliError("usage", "link start confirms the compare code: run it in a terminal, or pass --expect-compare <code>");
@@ -45136,7 +45177,7 @@ A device "${req.label}" answered. Its compare code: ${req.compareCode}`);
       return { json: { ...r, compareCode: shown }, human: `Linked ${r.did}${r.label ? ` (${r.label})` : ""}${r.keyholder ? " as a key holder" : ""}; your document is now version ${r.ver}.` };
     }, { noDeadline: true })
   );
-  link.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--expect-fingerprint <fingerprint>", "Proceed only if the identity is this one (for scripts; `p2p whoami` on the other device shows it); otherwise you confirm it on your terminal").option("--allow-private-relay", "Accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
+  link2.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--expect-fingerprint <fingerprint>", "Proceed only if the identity is this one (for scripts; `p2p whoami` on the other device shows it); otherwise you confirm it on your terminal").option("--allow-private-relay", "Accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
     run(
       async (app, code2, o) => {
         if (o.rotated) {

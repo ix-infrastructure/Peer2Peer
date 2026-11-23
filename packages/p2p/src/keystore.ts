@@ -28,7 +28,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { link, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { b64uDecode, b64uEncode, decodeTyped, deviceKeysV3FromSecrets, identityKeyFromSeed, TYP3 } from "@peer2peer/core/v3";
 import { CliError } from "./errors.js";
@@ -652,16 +652,63 @@ export interface DocStore {
   withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+/** Overwrites the file at `path` with zeros (its current length), syncs it, and removes it. Best effort. */
+async function zeroAndRemove(path: string): Promise<void> {
+  try {
+    const fh = await open(path, "r+");
+    try {
+      const { size } = await fh.stat();
+      if (size > 0) {
+        await fh.write(Buffer.alloc(size, 0), 0, size, 0);
+        await fh.sync();
+      }
+    } finally {
+      await fh.close().catch(() => {});
+    }
+  } catch {
+    // gone already, or not ours to open
+  }
+  await rm(path, { force: true }).catch(() => {});
+}
+
+const WIPE_PREFIX = ".keys.json.wipe-";
+
 /**
- * Writes `doc` to keys.json, and when the file it replaces held secrets that are no longer in it,
- * overwrites that file's old bytes before they are gone (best effort: on an SSD or a copy-on-write
- * file system the old blocks may still be somewhere; the keychain is the place the keys are kept now).
+ * Writes `doc` to keys.json, and when the file it replaces held secrets, overwrites that file's old
+ * bytes before they are gone (best effort: on an SSD or a copy-on-write file system the old blocks may
+ * still be somewhere; the keychain is the place the keys are kept now). On POSIX the old file stays
+ * open across the rename and is zeroed through that handle. Windows refuses to rename over a file that
+ * is open, so there a second name for the old file (a hard link, `.keys.json.wipe-…`) keeps it while the
+ * new one is renamed in, and is zeroed and removed after; one left by an interrupted run is finished
+ * by the next.
  */
 async function replaceKeysFile(inner: DocStore, home: string, doc: unknown): Promise<void> {
-  const path = join(home, "cli", "keys.json");
+  const dir = join(home, "cli");
+  const path = join(dir, "keys.json");
+  let old: unknown;
+  try {
+    old = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    old = undefined;
+  }
+  if (process.platform === "win32") {
+    for (const f of await readdir(dir).catch(() => [] as string[])) if (f.startsWith(WIPE_PREFIX)) await zeroAndRemove(join(dir, f));
+    let wipe: string | undefined;
+    if (holdsSecrets(old)) {
+      wipe = join(dir, `${WIPE_PREFIX}${randomBytes(6).toString("hex")}`);
+      try {
+        await link(path, wipe);
+      } catch {
+        wipe = undefined;
+      }
+    }
+    await inner.write("keys", doc);
+    if (wipe) await zeroAndRemove(wipe);
+    return;
+  }
   let fh;
   try {
-    fh = await open(path, "r+");
+    fh = holdsSecrets(old) ? await open(path, "r+") : undefined;
   } catch {
     fh = undefined;
   }

@@ -7,7 +7,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync, cpSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -292,7 +292,7 @@ describe("the key store: moves, read-back, fail closed", () => {
     expect(r).toMatchObject({ backend: "keychain", moved: true });
     const onDisk = JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
     expect(onDisk).toMatchObject({ userId: keys.userId, did: keys.did, cert: keys.cert, store: "keychain", service: serviceFor(home) });
-    for (const f of ["spk", "kpk", "ik"]) expect(onDisk[f]).toBeUndefined();
+    for (const f of ["spk", "kpk", "ik"]) expect(onDisk[f] === undefined, f).toBe(true);
     expect(readFileSync(other)).toEqual(Buffer.alloc(size, 0));
     expect(JSON.parse(readFileSync(markerFile(home), "utf8"))).toMatchObject({ backend: "keychain", service: serviceFor(home) });
     // Loads give the same keys.
@@ -308,7 +308,7 @@ describe("the key store: moves, read-back, fail closed", () => {
     const before = adds();
     await new CliState(home).put("keys", { ...keys, cert: `${keys.cert}` });
     expect(adds()).toBe(before);
-    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     // Other secrets under this device's name over a sealed keys.json: refused (the item may be their only copy).
     useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
     await expect(new CliState(home).put("keys", { ...keys, kpk: makeKeys().kpk })).rejects.toMatchObject({ code: "keychain_mismatch" });
@@ -320,6 +320,28 @@ describe("the key store: moves, read-back, fail closed", () => {
     expect(fake.items.size).toBe(0);
     expect(configuredBackend(home)).toBe("file");
     expectNoSecretsIn(fake.argv(), secretsOf(keys));
+  });
+
+  it("the Windows way of overwriting the old file (no open handle across the rename): a second name, zeroed and removed after", async () => {
+    const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const home = tmpHome();
+      const st = new CliState(home);
+      const keys = makeKeys();
+      await st.put("keys", keys);
+      const other = join(home, "keys-link.json");
+      linkSync(join(home, "cli", "keys.json"), other);
+      const size = readFileSync(other).length;
+      // One left by an interrupted run is finished too.
+      writeFileSync(join(home, "cli", ".keys.json.wipe-left"), "secret bytes");
+      await moveKeysToKeychain(st.keyStore);
+      expect(readFileSync(other).equals(Buffer.alloc(size, 0))).toBe(true);
+      expect(readdirSync(join(home, "cli")).filter((f) => f.includes("wipe"))).toEqual([]);
+      expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", real);
+    }
   });
 
   it("a read-back that differs leaves everything as it was", async () => {
@@ -344,7 +366,7 @@ describe("the key store: moves, read-back, fail closed", () => {
     expect(await st.get("keys")).toEqual(keys);
     expect(keyStoreStatus(home).problem).toMatch(/hasn't finished/);
     await moveKeysToKeychain(st.keyStore);
-    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     expect(await new CliState(home).get("keys")).toEqual(keys);
     // Again: nothing to do.
     expect((await moveKeysToKeychain(st.keyStore)).moved).toBe(false);
@@ -414,7 +436,7 @@ describe("the key store: moves, read-back, fail closed", () => {
       // A renewed certificate.
       await new CliState(home).put("keys", { ...keys, cert: keys.cert });
       const onDisk = JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
-      expect(onDisk.spk).toBeUndefined();
+      expect(onDisk.spk === undefined).toBe(true);
       expect(onDisk.store).toBe("keychain");
       expect(await new CliState(home).get("keys")).toEqual(keys);
       expect(keyStoreStatus(home)).toMatchObject({ keys: "keychain", readable: true, problem: expect.stringMatching(/stay in the keychain/) });
@@ -423,7 +445,7 @@ describe("the key store: moves, read-back, fail closed", () => {
     fake.locked = true;
     useKeychainForTests(macosKeychain(fake.run, { exists: () => true }));
     await expect(new CliState(home).put("keys", keys)).rejects.toThrow();
-    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
   });
 
   it("I2: an item whose agreement key isn't the certificate's, or an identity key in keys.json that isn't this identity's, is refused", async () => {
@@ -507,12 +529,12 @@ describe("the key store: moves, read-back, fail closed", () => {
     expect((await moveKeysToKeychain(st.keyStore)).moved).toBe(false);
     const keys = makeKeys();
     await st.put("keys", keys);
-    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     expect(await st.get("keys")).toEqual(keys);
     // Sealed keys stay sealed whatever the marker holds; keys in a file aren't written past a damaged one.
     writeFileSync(markerFile(home), "{not json");
     await st.put("keys", keys);
-    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     const plain = new CliState(tmpHome());
     await plain.put("keys", keys);
     writeFileSync(markerFile(plain.dir), "{not json");
@@ -561,7 +583,7 @@ describe("through the CLI", () => {
     const moved = await u.ok(["keys", "backend", "keychain"]);
     expect(moved).toMatchObject({ backend: "keychain", moved: true });
     const sealed = JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
-    expect(sealed.spk).toBeUndefined();
+    expect(sealed.spk === undefined).toBe(true);
     expect((await u.ok(["whoami"])).userId).toBe(me.userId);
     expect(personTokenOk({ P2P_PERSON_TOKEN: u.personToken }, u.home)).toBe(true);
     const doc = await u.ok(["doctor"]);
@@ -599,9 +621,9 @@ describe("through the CLI", () => {
     await u.ok(["init", "--name", "kspend", "--relay", R, "--yes"]);
     writeFileSync(markerFile(u.home), JSON.stringify({ v: 1, backend: "keychain" }));
     await u.ok(["doctor"]);
-    expect(JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")).spk).toBeDefined();
+    expect(JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")).spk !== undefined).toBe(true);
     await u.ok(["whoami"]);
-    expect(JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")).spk).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(u.home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     expect(fake.items.size).toBe(1);
     // The keychain unusable: the command still runs from keys.json, with a warning.
     const u2 = mk("ks-pending2");
@@ -611,7 +633,7 @@ describe("through the CLI", () => {
     const r = await u2.run(["whoami"]);
     expect(r.code).toBe(0);
     expect(r.err).toMatch(/still in .*keys\.json/);
-    expect(JSON.parse(readFileSync(join(u2.home, "cli", "keys.json"), "utf8")).spk).toBeDefined();
+    expect(JSON.parse(readFileSync(join(u2.home, "cli", "keys.json"), "utf8")).spk !== undefined).toBe(true);
   });
 
   it("two homes on one machine never share an item", async () => {
