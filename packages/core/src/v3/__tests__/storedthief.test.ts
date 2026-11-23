@@ -174,7 +174,7 @@ describe("#92: IdentityChain.addForkRoot only places a proven fork", () => {
     expect([v.incomplete, v.heldBackBy]).toEqual([true, [RELAY]]);
     // #92 follow-up: with the version it left out (the owner's client checks it against its publish log).
     expect(v.heldBackFor).toEqual([own4.hash]);
-    expect(v.heldBackHead).toEqual({ hash: head.hash, keyholders: [...head.keyholders] });
+    expect(v.heldBackHead).toEqual({ hash: head.hash, keyholders: [...head.keyholders], devices: [...head.devices] });
     expect((await store.getIdentity(u.userId))!.leftOut).toBeUndefined();
   });
 
