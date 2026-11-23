@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @peer2peer/core 0.1.3 8abe37eb90772e62
+// @peer2peer/core 0.1.3 321d9233bad61633
 import { createRequire as __p2pCreateRequire } from "node:module";
 const require = __p2pCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -1725,18 +1725,18 @@ function validateTableBytes(numPoints, fpBytes) {
   if (bytes2 > TABLE_BYTES_MAX)
     throw new Error("invalid window size: table would need ~" + Math.ceil(bytes2 / 2 ** 20) + " MiB, max " + TABLE_BYTES_MAX / 2 ** 20 + " MiB");
 }
-function probeRandomBytes(randomBytes17, length) {
-  if (randomBytes17 === void 0)
+function probeRandomBytes(randomBytes18, length) {
+  if (randomBytes18 === void 0)
     return void 0;
-  afunction(randomBytes17, "randomBytes");
+  afunction(randomBytes18, "randomBytes");
   try {
-    const probe = randomBytes17(length);
+    const probe = randomBytes18(length);
     if (!isBytes2(probe) || probe.length !== length)
       return void 0;
   } catch {
     return void 0;
   }
-  return randomBytes17;
+  return randomBytes18;
 }
 function validateMSMPoints(points, c) {
   aarray(points, "points");
@@ -1892,9 +1892,9 @@ var init_curve = __esm({
       baseCanBeBlinded;
       bits;
       // Parametrized with a given Point class (not individual point)
-      constructor(Point, randomBytes17) {
+      constructor(Point, randomBytes18) {
         validatePointCons(Point);
-        this.randomBytes = probeRandomBytes(randomBytes17, BLIND_BYTES);
+        this.randomBytes = probeRandomBytes(randomBytes18, BLIND_BYTES);
         this.Point = Point;
         this.BASE = Point.BASE;
         this.ZERO = Point.ZERO;
@@ -2111,7 +2111,7 @@ function edwards(params, extraOpts = {}) {
   if (FpLegendre(Fp2, CURVE.d) !== -1)
     throw new Error("edwards: CURVE.d must be a non-square in Fp for complete addition formulas");
   validateObject(opts, {}, { uvRatio: "function", randomBytes: "function" });
-  const randomBytes17 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes18 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const MASK = _2n2 << BigInt(Fp2.BYTES * 8) - _1n4;
   function isOdd(n) {
     if (!Fp2.isOdd)
@@ -2372,7 +2372,7 @@ function edwards(params, extraOpts = {}) {
     }
   }
   const normalize4 = (points) => normalizeZ(Point, points);
-  const wnaf = new ScalarMultiplier(Point, randomBytes17);
+  const wnaf = new ScalarMultiplier(Point, randomBytes18);
   if (wnaf.bits >= 6)
     Point.BASE.precompute(6);
   Object.freeze(Point.prototype);
@@ -2404,7 +2404,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     if (outputLen !== expectedLen)
       throw new Error(`hash.outputLen must be ${expectedLen}, got ${outputLen}`);
   }
-  const randomBytes17 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes18 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const toMontgomery2 = opts.toMontgomery;
   const toMontgomerySecret2 = opts.toMontgomerySecret;
   const adjustScalarBytes2 = opts.adjustScalarBytes === void 0 ? (bytes2) => bytes2 : opts.adjustScalarBytes;
@@ -2494,7 +2494,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     seed: _size
   };
   function randomSecretKey(seed) {
-    seed = seed === void 0 ? randomBytes17(lengths.seed) : seed;
+    seed = seed === void 0 ? randomBytes18(lengths.seed) : seed;
     return abytes2(seed, lengths.seed, "seed");
   }
   function isValidSecretKey(key) {
@@ -9355,31 +9355,31 @@ function parseCircleInviteLink(link2) {
   parseCircleVersion(jws);
   return jws;
 }
-function decideOpenJoin(chain, join28, book, limiter, opts) {
+function decideOpenJoin(chain, join29, book, limiter, opts) {
   const now = opts.now ?? nowSec();
   const head = chain.head;
-  if (join28.cid !== chain.cid)
+  if (join29.cid !== chain.cid)
     return { decision: "ignore", reason: "other-circle" };
-  if (opts.isBlocked?.(join28.iss))
+  if (opts.isBlocked?.(join29.iss))
     return { decision: "ignore", reason: "blocked" };
-  if (join28.op !== "join" || join28.at === void 0)
+  if (join29.op !== "join" || join29.at === void 0)
     return { decision: "ignore", reason: "not-a-join" };
-  const cur = book[join28.iss];
-  if (cur && cur.hash !== join28.hash && compareMembership(join28, cur) >= 0)
+  const cur = book[join29.iss];
+  if (cur && cur.hash !== join29.hash && compareMembership(join29, cur) >= 0)
     return { decision: "ignore", reason: "not-current" };
-  if (!chain.hasAncestor(join28.at))
+  if (!chain.hasAncestor(join29.at))
     return { decision: "ignore", reason: "unknown-version" };
-  if (head.members.includes(join28.iss))
+  if (head.members.includes(join29.iss))
     return { decision: "ignore", reason: "already-member" };
   if (circlePolicy(head) !== "open")
     return { decision: "hold", reason: "not-open" };
-  if (!joinCapFitsPolicy(join28.joinCap, "open"))
+  if (!joinCapFitsPolicy(join29.joinCap, "open"))
     return { decision: "ignore", reason: "cap-too-long" };
   const removed = opts.removed instanceof Set ? opts.removed : new Set(opts.removed);
-  if (removed.has(join28.iss))
+  if (removed.has(join29.iss))
     return { decision: "hold", reason: "previously-removed" };
-  const wasMember = chain.versions.some((v) => v.members.includes(join28.iss));
-  const prior = cur && cur.hash !== join28.hash ? cur : void 0;
+  const wasMember = chain.versions.some((v) => v.members.includes(join29.iss));
+  const prior = cur && cur.hash !== join29.hash ? cur : void 0;
   if (wasMember && (!prior || prior.op === "join"))
     return { decision: "hold", reason: "previously-removed" };
   const recent = limiter.acceptedAt.filter((t2) => now - t2 < HOUR);
@@ -11031,7 +11031,8 @@ function heldBackHeadOf(e) {
   const h = e?.heldBackHead;
   if (!h || typeof h.hash !== "string" || !Array.isArray(h.keyholders))
     return void 0;
-  return { hash: h.hash, keyholders: h.keyholders.filter((x) => typeof x === "string") };
+  const strs3 = (a) => a.filter((x) => typeof x === "string");
+  return { hash: h.hash, keyholders: strs3(h.keyholders), ...Array.isArray(h.devices) ? { devices: strs3(h.devices) } : {} };
 }
 function unconnectedRelaysOf(e) {
   const r = e?.unconnectedRelays;
@@ -11286,8 +11287,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
-  const pick = (open4) => {
-    const live = open4.filter((g) => !dead.has(g.need));
+  const pick = (open5) => {
+    const live = open5.filter((g) => !dead.has(g.need));
     const owners = relays.length + 1;
     for (let i = 0; i < owners; i++) {
       const o = (turn + i) % owners;
@@ -11309,17 +11310,17 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    let open4 = frontier();
-    let next = pick(open4);
+    let open5 = frontier();
+    let next = pick(open5);
     if (!next) {
-      open4 = roots();
-      next = pick(open4);
+      open5 = roots();
+      next = pick(open5);
       if (next && anchoredBeforeRoots === void 0)
         anchoredBeforeRoots = chain.anchored;
     }
     if (!next)
       break;
-    wanted = new Set(open4.map((g) => g.need));
+    wanted = new Set(open5.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
       if (lastAsked === 0)
@@ -11388,7 +11389,7 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const heldBackOf = (head, left) => {
     const by = opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
-    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders] } } : void 0;
+    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders], devices: [...head.devices] } } : void 0;
   };
   const newest = tips.filter((d) => !rejected.has(d.hash)).sort((a, b) => b.ver - a.ver)[0];
   const behind = () => newest !== void 0 && (chain.size === 0 || chain.view().head.ver < newest.ver);
@@ -11772,20 +11773,20 @@ async function storeOfferedCircle(store2, versions, opts = {}) {
   await store2.updateCircle(chain.cid, (cur) => cur ? { result: void 0 } : { next: { cid: chain.cid, chain: chain.toStored(), statements: {}, joinedByMe: false }, result: void 0 });
   return chain;
 }
-async function recordOwnJoin(store2, self, join28) {
-  if (join28.iss !== self)
-    fail("cert-mismatch", `the join is ${join28.iss}'s, not this user's`);
-  if (join28.op !== "join" || join28.at === void 0)
+async function recordOwnJoin(store2, self, join29) {
+  if (join29.iss !== self)
+    fail("cert-mismatch", `the join is ${join29.iss}'s, not this user's`);
+  if (join29.op !== "join" || join29.at === void 0)
     fail("malformed", "not a join statement");
-  await store2.updateCircle(join28.cid, (cur) => {
+  await store2.updateCircle(join29.cid, (cur) => {
     if (!cur)
-      return fail("circle-gap", `circle ${join28.cid} is not held`);
+      return fail("circle-gap", `circle ${join29.cid} is not held`);
     const chain = CircleChain.fromStored(cur.chain);
-    if (!chain.hasAncestor(join28.at))
+    if (!chain.hasAncestor(join29.at))
       fail("circle-invalid", "join names a version not on the held chain");
     const statements = { ...cur.statements };
-    applyMembership(statements, membershipFact(join28));
-    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join28.n) }, result: void 0 };
+    applyMembership(statements, membershipFact(join29));
+    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join29.n) }, result: void 0 };
   });
 }
 async function recordOwnLeave(store2, self, leave) {
@@ -11983,13 +11984,13 @@ function circleOwners(versions) {
   }
   return [...out];
 }
-async function decideOpenJoinFor(store2, join28, opts = {}) {
-  const blocked = await store2.isBlocked(join28.iss);
-  return store2.updateCircle(join28.cid, (cur) => {
+async function decideOpenJoinFor(store2, join29, opts = {}) {
+  const blocked = await store2.isBlocked(join29.iss);
+  return store2.updateCircle(join29.cid, (cur) => {
     if (!cur)
       return { result: { decision: "ignore", reason: "other-circle" } };
     const limiter = { acceptedAt: [...cur.openJoins?.acceptedAt ?? []] };
-    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join28, cur.statements, limiter, {
+    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join29, cur.statements, limiter, {
       now: opts.now,
       maxPerHour: opts.maxPerHour,
       isBlocked: () => blocked,
@@ -13530,7 +13531,7 @@ var init_transient = __esm({
 
 // packages/p2p/src/procstart.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync10 } from "node:fs";
 function linuxStartMs(pid) {
   const stat4 = readFileSync10(`/proc/${pid}/stat`, "utf8");
   const fields = stat4.slice(stat4.lastIndexOf(")") + 2).split(" ");
@@ -13544,8 +13545,10 @@ function linuxStartMs(pid) {
   return bootMs + ticks / 100 * 1e3;
 }
 function psStartMs(pid) {
-  const out = execFileSync3("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", PATH: process.env.PATH ?? "" } }).trim();
-  const t2 = Date.parse(out);
+  if (!PS) return void 0;
+  const out = execFileSync3(PS, ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2e3, stdio: ["ignore", "pipe", "ignore"], env: { LC_ALL: "C", TZ: "UTC" } }).trim();
+  if (!out) return void 0;
+  const t2 = Date.parse(`${out} GMT`);
   return Number.isFinite(t2) ? t2 : void 0;
 }
 function processStartMs(pid) {
@@ -13567,10 +13570,11 @@ function lookup(pid) {
   }
   return void 0;
 }
-var bootMs, CACHE_MS, CACHE_MAX, cache2;
+var bootMs, PS, CACHE_MS, CACHE_MAX, cache2;
 var init_procstart = __esm({
   "packages/p2p/src/procstart.ts"() {
     "use strict";
+    PS = ["/bin/ps", "/usr/bin/ps"].find((p) => existsSync4(p));
     CACHE_MS = 5e3;
     CACHE_MAX = 256;
     cache2 = /* @__PURE__ */ new Map();
@@ -14467,7 +14471,7 @@ var init_outbox = __esm({
 });
 
 // packages/p2p/src/extensions.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync5, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync5, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
 import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute8, join as join16, relative, resolve as resolvePath, sep as sep3 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 function extensionPackageName(ns) {
@@ -14553,7 +14557,7 @@ function extensionDirs(env, selfUrl) {
 }
 function resolveIn(nodeModules, name2) {
   const pkgDir = join16(nodeModules, ...name2.split("/"));
-  if (!existsSync4(join16(pkgDir, "package.json"))) return void 0;
+  if (!existsSync5(join16(pkgDir, "package.json"))) return void 0;
   let pkg;
   try {
     pkg = JSON.parse(readFileSync12(join16(pkgDir, "package.json"), "utf8"));
@@ -14585,7 +14589,7 @@ function firstFromHere(home, ns, file) {
   }
   if (seen[ns] === file) return false;
   try {
-    if (existsSync4(home)) {
+    if (existsSync5(home)) {
       const tmp = `${p}.${process.pid}.tmp`;
       writeFileSync8(tmp, JSON.stringify({ ...seen, [ns]: file }), { mode: 384 });
       renameSync6(tmp, p);
@@ -14641,7 +14645,7 @@ function setExtensionEnabled(home, ns, on) {
   if (!KNOWN_EXTENSIONS.includes(ns)) throw new Error(`${ns} is not a registered extension namespace (${KNOWN_EXTENSIONS.join(", ")})`);
   const p = join16(home, "config.json");
   let cfg = {};
-  if (existsSync4(p)) {
+  if (existsSync5(p)) {
     const v = JSON.parse(readFileSync12(p, "utf8"));
     if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("config.json must hold a JSON object");
     cfg = v;
@@ -15772,8 +15776,8 @@ function asSenderDoc(v, own) {
   return x && x.own === own && typeof x.recs === "object" && x.recs !== null ? { own, recs: { ...x.recs }, rate: { ...x.rate ?? {} }, ...x.all ? { all: x.all } : {} } : { own, recs: {}, rate: {} };
 }
 function liveWindows(rate, now) {
-  const open4 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
-  return Object.fromEntries(open4);
+  const open5 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
+  return Object.fromEntries(open5);
 }
 async function writeSender(backend, name2, doc, now) {
   const rate = liveWindows(doc.rate, now);
@@ -19174,7 +19178,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes17, createHash: createHash11 } = __require("crypto");
+    var { randomBytes: randomBytes18, createHash: createHash12 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -19725,7 +19729,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes17(16).toString("base64");
+      const key = randomBytes18(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -19855,7 +19859,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest2 = createHash11("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash12("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest2) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -20136,7 +20140,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open4() {
+          ws.once("open", function open5() {
             duplex._final(callback);
           });
           return;
@@ -20157,7 +20161,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open4() {
+          ws.once("open", function open5() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -20224,7 +20228,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter2 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash11 } = __require("crypto");
+    var { createHash: createHash12 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -20531,7 +20535,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest2 = createHash11("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash12("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -21991,8 +21995,8 @@ async function completeCodeJoin(app, entry, item, opts) {
     await dropHeld(app, (h) => h.id === item.id);
     let isDefault = app.self?.defaultCircle === entry.cid;
     const joined = await loadCircle(app.store, entry.cid);
-    const open4 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
-    if (!app.self?.defaultCircle && entry.first !== false && !open4) {
+    const open5 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
+    if (!app.self?.defaultCircle && entry.first !== false && !open5) {
       await setDefaultCircle(app, entry.cid, { byJoin: true });
       isDefault = true;
     }
@@ -22180,6 +22184,136 @@ var init_codes = __esm({
       preview;
     };
     finishing = false;
+  }
+});
+
+// packages/p2p/src/rotation-lock.ts
+import { randomBytes as randomBytes12, createHash as createHash7 } from "node:crypto";
+import { constants } from "node:fs";
+import { open as open4, readdir as readdir3, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join19 } from "node:path";
+async function readLock2(file) {
+  let fh;
+  try {
+    fh = await open4(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e.code === "ENOENT") return { kind: "gone" };
+    throw lockError(file, `${file} couldn't be read (${e.code ?? e.message})`);
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw lockError(file, `${file} isn't a regular file`);
+    if (st.size > MAX_LOCK_BYTES) throw lockError(file, `${file} is larger than a rotation lock`);
+    const buf = Buffer.alloc(MAX_LOCK_BYTES + 1);
+    let n = 0;
+    for (; ; ) {
+      const { bytesRead } = await fh.read(buf, n, buf.length - n, null);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+      if (n > MAX_LOCK_BYTES) throw lockError(file, `${file} is larger than a rotation lock`);
+    }
+    return { kind: "read", raw: buf.subarray(0, n).toString("utf8"), mtimeMs: st.mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
+function parseLock2(raw) {
+  const t2 = raw.trim();
+  if (/^[0-9]{1,10}$/.test(t2)) {
+    const pid = Number.parseInt(t2, 10);
+    return pid > 0 ? { pid } : void 0;
+  }
+  try {
+    const o = JSON.parse(t2);
+    if (!o || typeof o !== "object" || typeof o.pid !== "number" || !Number.isSafeInteger(o.pid) || o.pid <= 0) return void 0;
+    return { pid: o.pid, ...typeof o.started === "number" && Number.isFinite(o.started) ? { started: o.started } : {} };
+  } catch {
+    return void 0;
+  }
+}
+function running(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function lockLive(rec2) {
+  if (!running(rec2.pid)) return false;
+  if (rec2.started === void 0) return true;
+  const now = processStartMs(rec2.pid);
+  return now === void 0 || Math.abs(now - rec2.started) < START_SLACK_MS2;
+}
+function lockError(file, why2) {
+  return new CliError("rotation_in_progress", `${why2}, so \`p2p identity rotate\` can't tell whether another run is in progress. ${deleteHint(file)}`);
+}
+async function createExclusive(file, content) {
+  try {
+    await writeFile2(file, content, { mode: 384, flag: "wx" });
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+}
+async function sweepMarkers(home) {
+  const names = await readdir3(home).catch(() => []);
+  await Promise.all(names.filter((n) => MARKER_RE.test(n)).map((n) => rm2(join19(home, n), { force: true }).catch(() => void 0)));
+}
+async function withRotationLock(home, fn) {
+  const file = rotationLockOf(home);
+  const started = processStartMs(process.pid) ?? Math.round(Date.now() - process.uptime() * 1e3);
+  const mine = `${JSON.stringify({ pid: process.pid, started, run: randomBytes12(16).toString("hex"), at: Date.now() })}
+`;
+  if (!await createExclusive(file, mine)) {
+    const cur = await readLock2(file);
+    if (cur.kind === "gone") {
+      if (!await createExclusive(file, mine)) throw lockBusy(file);
+    } else {
+      const { raw } = cur;
+      if (raw.trim() === "") {
+        if (Date.now() - cur.mtimeMs < EMPTY_STALE_MS) throw lockBusy(file);
+      } else {
+        const rec2 = parseLock2(raw);
+        if (!rec2) throw lockError(file, `${file} doesn't hold a rotation lock this build can read`);
+        if (lockLive(rec2)) throw lockBusy(file);
+      }
+      const marker = markerOf(file, raw);
+      if (!await createExclusive(marker, mine)) {
+        throw new CliError("rotation_in_progress", `another \`p2p identity rotate\` run is taking over a stale rotation lock: try again. ${deleteHint(file)}`);
+      }
+      try {
+        const now = await readLock2(file);
+        if (now.kind === "read" && now.raw === raw) await rm2(file, { force: true });
+        if (!await createExclusive(file, mine)) throw lockBusy(file);
+      } finally {
+        await rm2(marker, { force: true }).catch(() => void 0);
+      }
+    }
+  }
+  await sweepMarkers(home);
+  try {
+    return await fn();
+  } finally {
+    const now = await readLock2(file).catch(() => void 0);
+    if (now?.kind === "read" && now.raw === mine) await rm2(file, { force: true }).catch(() => void 0);
+  }
+}
+var rotationLockOf, START_SLACK_MS2, MAX_LOCK_BYTES, EMPTY_STALE_MS, MARKER_RE, deleteHint, lockBusy, markerOf;
+var init_rotation_lock = __esm({
+  "packages/p2p/src/rotation-lock.ts"() {
+    "use strict";
+    init_errors2();
+    init_procstart();
+    rotationLockOf = (home) => join19(home, "rotation.lock");
+    START_SLACK_MS2 = 2500;
+    MAX_LOCK_BYTES = 4096;
+    EMPTY_STALE_MS = 6e4;
+    MARKER_RE = /^rotation\.lock\.[0-9a-f]{32}\.takeover$/;
+    deleteHint = (file) => `If nothing is rotating here (a run was killed, or its process id is in use again), delete ${file}`;
+    lockBusy = (file) => new CliError("rotation_in_progress", `another \`p2p identity rotate\` run is in progress for this identity: wait for it to finish, then try again. ${deleteHint(file)}`);
+    markerOf = (file, raw) => `${file}.${createHash7("sha256").update(raw).digest("hex").slice(0, 32)}.takeover`;
   }
 });
 
@@ -23095,8 +23229,8 @@ var init_format = __esm({
 
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
-import { accessSync, constants, statSync as statSync4 } from "node:fs";
-import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join19 } from "node:path";
+import { accessSync, constants as constants2, statSync as statSync4 } from "node:fs";
+import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join20 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
   if (platform === "darwin" && arch === "x64") return ["brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix", "brew install ix"];
@@ -23124,7 +23258,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
   const runnable = (p) => {
     try {
       if (!statSync4(p).isFile()) return false;
-      if (platform !== "win32") accessSync(p, constants.X_OK);
+      if (platform !== "win32") accessSync(p, constants2.X_OK);
       return true;
     } catch {
       return false;
@@ -23141,7 +23275,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
     const d = dir.trim().replace(/^"|"$/g, "");
     if (d === "" || !isAbsolute9(d)) continue;
     for (const ext of hasExt ? [""] : exts) {
-      const p = join19(d, name2 + ext);
+      const p = join20(d, name2 + ext);
       if (runnable(p)) return p;
     }
   }
@@ -23288,8 +23422,8 @@ __export(identity_exports, {
   setup: () => setup,
   whoami: () => whoami
 });
-import { chmod, readFile as readFile4, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join20 } from "node:path";
+import { chmod, readFile as readFile4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join21 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 function p2pCommand(platform = process.platform) {
   return platform === "win32" ? "p2p.cmd" : "p2p";
@@ -23351,10 +23485,10 @@ async function setup(app, opts) {
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
   }
   if (backupMode === "file") {
-    const path2 = opts.backupFile ?? join20(app.home, BACKUP_FILE_NAME);
+    const path2 = opts.backupFile ?? join21(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
-      await writeFile2(path2, `${phrase}
+      await writeFile3(path2, `${phrase}
 `, { mode: 384, flag: "wx" });
     } catch (e) {
       if (e.code === "EEXIST") throw new CliError("exists", `${path2} already exists: not overwriting it (pass --backup-file <path>)`, { ...out });
@@ -23715,8 +23849,8 @@ async function backupRestore(app, phrase, opts) {
       );
     }
     forgetKeychainItem(app.home, app.keys?.did);
-    await rm2(join20(app.home, "cli"), { recursive: true, force: true });
-    await rm2(join20(app.home, "v3"), { recursive: true, force: true });
+    await rm3(join21(app.home, "cli"), { recursive: true, force: true });
+    await rm3(join21(app.home, "v3"), { recursive: true, force: true });
     throw e;
   }
 }
@@ -24014,8 +24148,8 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, lstat, mkdir as mkdir2, readFile as readFile5, rename, rm as rm3, stat as stat2, writeFile as writeFile3, chmod as chmod2 } from "node:fs/promises";
-import { join as join21 } from "node:path";
+import { copyFile, lstat, mkdir as mkdir2, readFile as readFile5, rename, rm as rm4, stat as stat2, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
+import { join as join22 } from "node:path";
 function branchSummary(hash, ver, by, relays) {
   return {
     hash,
@@ -24035,8 +24169,8 @@ async function saveState(home, s2) {
   await b.withLock(() => b.write("state", s2));
 }
 async function dropState(home) {
-  await rm3(join21(rotationDir(home), "state.json"), { force: true });
-  await rm3(newHomeOf(home), { recursive: true, force: true });
+  await rm4(join22(rotationDir(home), "state.json"), { force: true });
+  await rm4(newHomeOf(home), { recursive: true, force: true });
 }
 async function isLink(p) {
   try {
@@ -24055,24 +24189,24 @@ async function exists(p) {
 }
 async function appAt(app, home) {
   await mkdir2(home, { recursive: true, mode: 448 });
-  if (await exists(join21(app.home, "config.json"))) await copyFile(join21(app.home, "config.json"), join21(home, "config.json"));
+  if (await exists(join22(app.home, "config.json"))) await copyFile(join22(app.home, "config.json"), join22(home, "config.json"));
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
-  for (const p of [src, join21(src, "cli"), join21(src, "v3"), join21(src, "cursors")]) {
+  for (const p of [src, join22(src, "cli"), join22(src, "v3"), join22(src, "cursors")]) {
     if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
   }
-  const archive = join21(home, "rotated", tag);
+  const archive = join22(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
-  const srcHasState = await exists(join21(src, "cli"));
+  const srcHasState = await exists(join22(src, "cli"));
   for (const d of ["cli", "v3", "cursors"]) {
-    if (srcHasState && await exists(join21(home, d)) && !await exists(join21(archive, d))) await rename(join21(home, d), join21(archive, d));
+    if (srcHasState && await exists(join22(home, d)) && !await exists(join22(archive, d))) await rename(join22(home, d), join22(archive, d));
   }
   for (const d of ["cli", "v3"]) {
-    if (await exists(join21(src, d)) && !await exists(join21(home, d))) await rename(join21(src, d), join21(home, d));
+    if (await exists(join22(src, d)) && !await exists(join22(home, d))) await rename(join22(src, d), join22(home, d));
   }
-  await rm3(src, { recursive: true, force: true });
-  for (const d of ["cli", "v3"]) await rm3(join21(archive, d, ".lock"), { force: true });
+  await rm4(src, { recursive: true, force: true });
+  for (const d of ["cli", "v3"]) await rm4(join22(archive, d, ".lock"), { force: true });
   return archive;
 }
 function assertAdopted(app, userId) {
@@ -24084,7 +24218,7 @@ async function adoptHome(app, src, tag) {
   app.identityMadeHere = true;
   await app.close();
   const home = app.home;
-  if (await exists(join21(home, "cli"))) await app.state.backend.withLock(async () => {
+  if (await exists(join22(home, "cli"))) await app.state.backend.withLock(async () => {
   });
   if (await exists(app.store.dir)) await new FileDocBackend(app.store.dir).withLock(async () => {
   });
@@ -24301,6 +24435,9 @@ async function loadOrRecover(app, prior, opts) {
   throw new CliError("no_identity", "no identity here yet: run `p2p init` (or `p2p link join` / `p2p backup restore`)");
 }
 async function rotatePlan(app, opts = {}) {
+  return withRotationLock(app.home, () => rotatePlanLocked(app, opts));
+}
+async function rotatePlanLocked(app, opts) {
   const prior = await readRotationState(app.home);
   const recovered = await loadOrRecover(app, prior, opts);
   if (recovered) throw new CliError("rotation_in_progress", "a rotation was just finished here");
@@ -24326,6 +24463,9 @@ function assertSameBranch(st, opts) {
   );
 }
 async function rotateCancel(app) {
+  return withRotationLock(app.home, () => rotateCancelLocked(app));
+}
+async function rotateCancelLocked(app) {
   const st = await readRotationState(app.home);
   if (!st || st.step === "done") return { cancelled: false };
   if (st.step !== "created" || st.accepted) throw new CliError("rotation_in_progress", "the rotation is already under way and can't be cancelled: finish it with `p2p identity rotate --resume`");
@@ -24333,37 +24473,8 @@ async function rotateCancel(app) {
   if (st.backupFile) app.warn(`the backup phrase of the key that wasn't used is still in ${st.backupFile}: delete it`);
   return { cancelled: true, to: st.to };
 }
-async function withRotationLock(app, fn) {
-  const file = rotationLockOf(app.home);
-  const take2 = () => writeFile3(file, `${process.pid}
-`, { mode: 384, flag: "wx" });
-  try {
-    await take2();
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-    const pid = Number.parseInt((await readFile5(file, "utf8").catch(() => "")).trim(), 10);
-    if (Number.isSafeInteger(pid) && pid > 0 && running(pid)) {
-      throw new CliError("rotation_in_progress", "another `p2p identity rotate` run is in progress for this identity: wait for it to finish, then try again");
-    }
-    await rm3(file, { force: true });
-    await take2();
-  }
-  try {
-    return await fn();
-  } finally {
-    await rm3(file, { force: true }).catch(() => void 0);
-  }
-}
-function running(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === "EPERM";
-  }
-}
 async function rotate(app, opts = {}) {
-  return withRotationLock(app, () => rotateLocked(app, opts));
+  return withRotationLock(app.home, () => rotateLocked(app, opts));
 }
 async function rotateLocked(app, opts) {
   const prior = await readRotationState(app.home);
@@ -24449,10 +24560,10 @@ async function rotateLocked(app, opts) {
   return finish(app, st);
 }
 async function writeBackup(app, ik, opts) {
-  const file = opts.backupFile ?? (opts.backupFileDefault ? join21(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
+  const file = opts.backupFile ?? (opts.backupFileDefault ? join22(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
   if (!file) return void 0;
   try {
-    await writeFile3(file, `${backupPhraseFromSeed(ik.secretKey)}
+    await writeFile4(file, `${backupPhraseFromSeed(ik.secretKey)}
 `, { mode: 384, flag: "wx" });
     await chmod2(file, 384);
   } catch (e) {
@@ -24550,7 +24661,7 @@ async function begin(app, opts) {
     ...base.profile ? { profile: { ...base.profile } } : {}
   });
   const home = newHomeOf(app.home);
-  await rm3(home, { recursive: true, force: true });
+  await rm4(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
@@ -24602,7 +24713,7 @@ async function begin(app, opts) {
     const file = await writeBackup(app, newIk, opts);
     if (file) st.backupFile = file;
   } catch (e) {
-    await rm3(home, { recursive: true, force: true });
+    await rm4(home, { recursive: true, force: true });
     throw e;
   }
   await saveState(app.home, st);
@@ -24694,7 +24805,7 @@ async function followers(app, napp, st, opts) {
   const pool = await napp.connect();
   const relay = napp.relays[0];
   const conn = await pool.ensure(relay);
-  const open4 = [];
+  const open5 = [];
   for (const [did, d] of pending) {
     const s2 = newLinkSecret();
     const lid = linkId(s2);
@@ -24714,22 +24825,22 @@ async function followers(app, napp, st, opts) {
     } catch (e) {
       app.io.err(`couldn't reach your device ${did}: ${e.message}`);
     }
-    if (reached) open4.push({ did, s: s2, lid, keyholder });
+    if (reached) open5.push({ did, s: s2, lid, keyholder });
     else d.status = "offline";
   }
   await saveState(app.home, st);
   const waitSec = Math.max(0, Math.min(opts.waitSec ?? LINK_TTL_SEC, LINK_TTL_SEC));
-  if (open4.length > 0) {
-    app.io.err(`waiting up to ${waitSec}s for ${open4.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
+  if (open5.length > 0) {
+    app.io.err(`waiting up to ${waitSec}s for ${open5.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
   }
   const deadline = Date.now() + waitSec * 1e3;
-  while (open4.length > 0 && Date.now() < deadline) {
-    for (const o of [...open4]) {
+  while (open5.length > 0 && Date.now() < deadline) {
+    for (const o of [...open5]) {
       const entries = await linkGet(conn, o.lid, "req");
       const rec2 = st.devices[o.did];
       if (entries === void 0) {
         rec2.status = "offline";
-        open4.splice(open4.indexOf(o), 1);
+        open5.splice(open5.indexOf(o), 1);
         continue;
       }
       let req;
@@ -24739,7 +24850,7 @@ async function followers(app, napp, st, opts) {
         if (e instanceof P2PError && e.reason === "link-multiple-requests") {
           app.warn(`more than one device answered the code sent to ${o.did}: not linking it (re-link it by hand)`);
           rec2.status = "aborted";
-          open4.splice(open4.indexOf(o), 1);
+          open5.splice(open5.indexOf(o), 1);
           continue;
         }
         throw e;
@@ -24757,12 +24868,12 @@ async function followers(app, napp, st, opts) {
       await linkPut(conn, o.lid, "resp", JSON.stringify(frame));
       rec2.status = "followed";
       rec2.newDid = req.did;
-      open4.splice(open4.indexOf(o), 1);
+      open5.splice(open5.indexOf(o), 1);
       await saveState(app.home, st);
     }
-    if (open4.length > 0) await sleep2(napp.tun.linkPollMs);
+    if (open5.length > 0) await sleep2(napp.tun.linkPollMs);
   }
-  for (const o of open4) st.devices[o.did].status = "offline";
+  for (const o of open5) st.devices[o.did].status = "offline";
 }
 async function inviteFriend(app, napp, peer2, statement) {
   try {
@@ -25035,14 +25146,14 @@ async function rejoin(app, napp, cid, statement) {
   let nc = await loadCircle(napp.store, cid);
   if (nc.book[to]?.op !== "join") await signOwnJoin(napp, cid, nc.chain.head.hash);
   nc = await loadCircle(napp.store, cid);
-  const join28 = nc.book[to].jws;
+  const join29 = nc.book[to].jws;
   const c = await loadCircle(app.store, cid);
   const leave = await leaveAsOld(app, cid).catch((e) => {
     if (e instanceof P2PError) return void 0;
     throw e;
   });
   const owner = c.chain.head.owner;
-  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join28, leave] : [join28], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
+  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join29, leave] : [join29], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
   if (d.relays.length === 0) throw new CliError("undelivered", "the owner couldn't be reached");
   if (!leave) return;
   for (const m of c.chain.head.members) {
@@ -25057,7 +25168,7 @@ async function finish(app, st) {
     await saveState(app.home, st);
     await reload(app);
   } else if (st.step === "done" && st.archive === void 0) {
-    st.archive = join21(app.home, "rotated");
+    st.archive = join22(app.home, "rotated");
     await saveState(app.home, st);
   }
   return rotateReport(app, st);
@@ -25102,6 +25213,9 @@ async function rotateReport(app, st) {
   };
 }
 async function rotateResend(app) {
+  return withRotationLock(app.home, () => rotateResendLocked(app));
+}
+async function rotateResendLocked(app) {
   await app.load(true);
   const st = await readRotationState(app.home);
   if (!st || st.step !== "done" || app.userId !== st.to) throw new CliError("no_rotation", "--resend is for a finished rotation, on the device that rotated");
@@ -25506,9 +25620,9 @@ async function swapMember(app, rot, cid, withAdmin) {
   await recordApproval(app, rot.from, { to: rot.to, kind: "circle", cid });
   return ownerPublish(app, cid, { members, admins }, { alsoTo: [rot.from] });
 }
-async function holdRotationJoin(app, env, at, from, rot, cid, join28, reason) {
+async function holdRotationJoin(app, env, at, from, rot, cid, join29, reason) {
   const c = await loadCircle(app.store, cid);
-  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join28, rotation: rot.statement, old: rot.from, reason });
+  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join29, rotation: rot.statement, old: rot.from, reason });
   await hold(app, item);
   return makeEvent(
     env,
@@ -25516,7 +25630,7 @@ async function holdRotationJoin(app, env, at, from, rot, cid, join28, reason) {
     at,
     { from, held: { id: item.id, type: item.type, cid, reason, old: { userId: rot.from, address: await app.addressOf(rot.from) }, ...reason === "conflict" ? { conflict: true } : {} } },
     {},
-    `${join28}|${reason}`
+    `${join29}|${reason}`
   );
 }
 async function onRotationJoin(app, env, at, from, statement, sender, joins) {
@@ -25655,7 +25769,7 @@ async function followHeld(app, idOrItem) {
   following = true;
   const tmp = followHomeOf(app.home);
   try {
-    await rm3(tmp, { recursive: true, force: true });
+    await rm4(tmp, { recursive: true, force: true });
     const napp = await appAt(app, tmp);
     let res;
     try {
@@ -25667,7 +25781,7 @@ async function followHeld(app, idOrItem) {
     if (res.userId !== r.to) throw new CliError("wrong_identity", `the link joined ${res.userId}, not ${r.to}`);
     const old = app.userId;
     const tag = `${old.slice(4, 20)}-${Date.now()}`;
-    await writeFile3(join21(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
+    await writeFile4(join22(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
     assertAdopted(app, res.userId);
@@ -25675,7 +25789,7 @@ async function followHeld(app, idOrItem) {
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
   } catch (e) {
-    if (!await exists(join21(tmp, "linked.json"))) await rm3(tmp, { recursive: true, force: true }).catch(() => void 0);
+    if (!await exists(join22(tmp, "linked.json"))) await rm4(tmp, { recursive: true, force: true }).catch(() => void 0);
     if (e instanceof CliError && (e.code === "wrong_identity" || e.code === "keyholder")) throw e;
     throw new CliError(
       "follow_failed",
@@ -25693,15 +25807,15 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile5(join21(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile5(join22(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
-  for (const p of [rotationDir(home), tmp, join21(tmp, "linked.json"), join21(tmp, "cli"), join21(tmp, "v3"), join21(tmp, "cursors")]) {
+  for (const p of [rotationDir(home), tmp, join22(tmp, "linked.json"), join22(tmp, "cli"), join22(tmp, "v3"), join22(tmp, "cursors")]) {
     if (await isLink(p)) return false;
   }
-  if (!await exists(join21(tmp, "cli")) && await exists(join21(home, "cli"))) {
-    await rm3(tmp, { recursive: true, force: true });
+  if (!await exists(join22(tmp, "cli")) && await exists(join22(home, "cli"))) {
+    await rm4(tmp, { recursive: true, force: true });
     return false;
   }
   await moveHomes(home, tmp, typeof marker.tag === "string" && /^[\w-]{1,80}$/.test(marker.tag) ? marker.tag : `follow-${Date.now()}`);
@@ -25721,7 +25835,7 @@ async function relinkRotated(app, code2, opts = {}) {
   }
   if (targets.size === 0) throw new CliError("not_rotated", "this device's identity hasn't been rotated: --rotated only re-links a device whose identity moved (§2.8)");
   const tmp = followHomeOf(app.home);
-  await rm3(tmp, { recursive: true, force: true });
+  await rm4(tmp, { recursive: true, force: true });
   const napp = await appAt(app, tmp);
   const j = await linkJoin(napp, code2, { label: opts.label ?? (certLabel(app.keys.cert) || defaultLabel()) });
   const old = app.userId;
@@ -25736,11 +25850,11 @@ async function relinkRotated(app, code2, opts = {}) {
         await napp.close();
       }
       if (!targets.has(res.userId)) {
-        await rm3(tmp, { recursive: true, force: true });
+        await rm4(tmp, { recursive: true, force: true });
         throw new CliError("wrong_identity", `that code links to ${res.userId}, which isn't where your identity moved (${[...targets].join(", ")})`);
       }
       const tag = `${old.slice(4, 20)}-${Date.now()}`;
-      await writeFile3(join21(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
+      await writeFile4(join22(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
       assertAdopted(app, res.userId);
@@ -25748,7 +25862,7 @@ async function relinkRotated(app, code2, opts = {}) {
     }
   };
 }
-var STEPS, PRINTABLE_ASCII, rotationDir, newHomeOf, followHomeOf, after, rotationLockOf, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
+var STEPS, PRINTABLE_ASCII, rotationDir, newHomeOf, followHomeOf, after, DEVICE_SEEN_WINDOW_SEC, RESEND_PER_HOUR, MAX_ROTATION_RECORDS, isUserIdish, following;
 var init_rotation = __esm({
   "packages/p2p/src/rotation.ts"() {
     "use strict";
@@ -25756,6 +25870,7 @@ var init_rotation = __esm({
     init_node();
     init_app();
     init_errors2();
+    init_rotation_lock();
     init_format();
     init_relay_client();
     init_circle_ops();
@@ -25766,11 +25881,10 @@ var init_rotation = __esm({
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
     PRINTABLE_ASCII = /^[\x21-\x7e]{1,2048}$/;
-    rotationDir = (home) => join21(home, "rotation");
-    newHomeOf = (home) => join21(rotationDir(home), "new");
-    followHomeOf = (home) => join21(rotationDir(home), "follow");
+    rotationDir = (home) => join22(home, "rotation");
+    newHomeOf = (home) => join22(rotationDir(home), "new");
+    followHomeOf = (home) => join22(rotationDir(home), "follow");
     after = (s2, step2) => STEPS.indexOf(s2.step) >= STEPS.indexOf(step2);
-    rotationLockOf = (home) => join21(home, "rotation.lock");
     DEVICE_SEEN_WINDOW_SEC = 30 * 86400;
     RESEND_PER_HOUR = 50;
     MAX_ROTATION_RECORDS = 256;
@@ -26064,7 +26178,7 @@ var init_sync = __esm({
 });
 
 // packages/p2p/src/inbound.ts
-import { randomBytes as randomBytes12 } from "node:crypto";
+import { randomBytes as randomBytes13 } from "node:crypto";
 import { hostname as hostname2 } from "node:os";
 async function abandonInFlight(app) {
   let n = 0;
@@ -26090,11 +26204,11 @@ function pidAlive2(pid) {
 }
 function claimAlive(c) {
   if (c.host !== HOST) return void 0;
-  if (c.pid === process.pid && (c.started === void 0 || Math.abs(c.started - STARTED2) < START_SLACK_MS2)) return inFlight.has(c.token);
+  if (c.pid === process.pid && (c.started === void 0 || Math.abs(c.started - STARTED2) < START_SLACK_MS3)) return inFlight.has(c.token);
   if (!pidAlive2(c.pid)) return false;
   if (c.started === void 0) return true;
   const started = processStartMs(c.pid);
-  return started === void 0 ? true : Math.abs(started - c.started) < START_SLACK_MS2;
+  return started === void 0 ? true : Math.abs(started - c.started) < START_SLACK_MS3;
 }
 async function fromOf(app, r) {
   return { userId: r.envelope.from, did: r.envelope.fdid, address: await app.addressOf(r.envelope.from), self: r.envelope.from === app.userId };
@@ -26221,7 +26335,7 @@ function receiving(app) {
   app.onAbandon = () => abandonInFlight(app);
   return app;
 }
-var DUPLICATE, HOST, STARTED2, START_SLACK_MS2, PROCESS_TOKEN, attempts, inFlight, running2, abandoned, ENVELOPE_TIMEOUT_MS;
+var DUPLICATE, HOST, STARTED2, START_SLACK_MS3, PROCESS_TOKEN, attempts, inFlight, running2, abandoned, ENVELOPE_TIMEOUT_MS;
 var init_inbound = __esm({
   "packages/p2p/src/inbound.ts"() {
     "use strict";
@@ -26241,8 +26355,8 @@ var init_inbound = __esm({
     DUPLICATE = /* @__PURE__ */ new Set(["replayed-seq", "replayed-nonce"]);
     HOST = hostname2();
     STARTED2 = Math.round(Date.now() - process.uptime() * 1e3);
-    START_SLACK_MS2 = 2500;
-    PROCESS_TOKEN = randomBytes12(9).toString("base64url");
+    START_SLACK_MS3 = 2500;
+    PROCESS_TOKEN = randomBytes13(9).toString("base64url");
     attempts = 0;
     inFlight = /* @__PURE__ */ new Set();
     running2 = /* @__PURE__ */ new Map();
@@ -26673,7 +26787,7 @@ var init_social = __esm({
 });
 
 // packages/p2p/src/join-answers.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function isStatementFor(j, cid) {
   if (typeof j !== "string" || j.length > MAX_JWS_BYTES) return false;
   try {
@@ -26772,12 +26886,12 @@ var init_join_answers = __esm({
     MAX_NEW_ANSWERS_PER_HOUR = ANSWERS_PER_HOUR;
     MAX_PART_RECORDS = ANSWERS_PER_HOUR + 2;
     ANSWER_MAX_BYTES = 32 * 1024 * 1024;
-    answerDocName = (cid, from) => `joinans-${createHash7("sha256").update(`${cid}|${from}`).digest("hex").slice(0, 16)}`;
+    answerDocName = (cid, from) => `joinans-${createHash8("sha256").update(`${cid}|${from}`).digest("hex").slice(0, 16)}`;
   }
 });
 
 // packages/p2p/src/want-pow.ts
-import { createHash as createHash8, randomBytes as randomBytes13 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes14 } from "node:crypto";
 function leadingZeroBits2(b) {
   let n = 0;
   for (const byte of b) {
@@ -26790,7 +26904,7 @@ function leadingZeroBits2(b) {
   return n;
 }
 function solveWantPow(from, to, cid, fromVer, at, bits = WANT_POW_BITS) {
-  const prefix = randomBytes13(6).toString("base64url");
+  const prefix = randomBytes14(6).toString("base64url");
   for (let i = 0; ; i++) {
     const nonce = `${prefix}${i.toString(36)}`;
     if (leadingZeroBits2(digest(from, to, cid, fromVer, at, nonce)) >= bits) return { at, nonce };
@@ -26807,7 +26921,7 @@ var init_want_pow = __esm({
     "use strict";
     WANT_POW_BITS = 18;
     WANT_POW_WINDOW_SEC = 600;
-    digest = (from, to, cid, fromVer, at, nonce) => createHash8("sha256").update(`p2p/v3/want-pow|${from}|${to}|${cid}|${fromVer}|${at}|${nonce}`).digest();
+    digest = (from, to, cid, fromVer, at, nonce) => createHash9("sha256").update(`p2p/v3/want-pow|${from}|${to}|${cid}|${fromVer}|${at}|${nonce}`).digest();
   }
 });
 
@@ -26868,7 +26982,7 @@ __export(circle_ops_exports, {
   signOwnJoin: () => signOwnJoin,
   transfer: () => transfer
 });
-import { randomBytes as randomBytes14 } from "node:crypto";
+import { randomBytes as randomBytes15 } from "node:crypto";
 async function resolveCircle(app, input) {
   const direct = await loadCircle(app.store, input);
   if (direct) return direct;
@@ -26906,8 +27020,8 @@ function parseCircleLink(link2) {
 async function ownerHint(app, c) {
   const owner = c.chain.head.owner;
   const v = await app.view(owner);
-  const join28 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
-  return { ...v ? { doc: v.head.jws } : {}, ...join28 ? { join: join28 } : {} };
+  const join29 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
+  return { ...v ? { doc: v.head.jws } : {}, ...join29 ? { join: join29 } : {} };
 }
 async function circleLink(app, cidOrName) {
   const c = await resolveCircle(app, cidOrName);
@@ -28051,7 +28165,7 @@ async function answerWant(app, from, fdid, want, authorizedBy, relay, capJws, po
       if (cut.parts.length === 0) return refuse("not even one version fits what is left of this hour's budget");
       const charged2 = await chargeAnswer(app, from, pool, cut.bytes, { cid: want.cid, ver: fromVer + cut.sentVersions - 1, resent: resend, ...pool === "reserve" ? { pow: powId } : {} });
       if (!charged2.ok) return refuse(charged2.why);
-      const id2 = b64uEncode(randomBytes14(9));
+      const id2 = b64uEncode(randomBytes15(9));
       let all = true;
       const perRelay = sealedCost(1);
       let spent = 0;
@@ -28216,10 +28330,10 @@ __export(projects_exports, {
   stickyPrivate: () => stickyPrivate,
   takePersonToken: () => takePersonToken
 });
-import { createHash as createHash9, createHmac, randomBytes as randomBytes15, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync5, lstatSync as lstatSync6, mkdirSync as mkdirSync11, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync as readlinkSync2, realpathSync as realpathSync6, renameSync as renameSync9, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync11 } from "node:fs";
+import { createHash as createHash10, createHmac, randomBytes as randomBytes16, timingSafeEqual } from "node:crypto";
+import { existsSync as existsSync6, lstatSync as lstatSync6, mkdirSync as mkdirSync11, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync as readlinkSync2, realpathSync as realpathSync6, renameSync as renameSync9, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
-import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join22, resolve as resolve5, sep as sep4 } from "node:path";
+import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join23, resolve as resolve5, sep as sep4 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
   if (w && isAbsolute10(w)) {
@@ -28308,17 +28422,17 @@ function pseudoPath(p) {
   return PSEUDO_ROOTS.slice(1).some(under);
 }
 function braceChoice2(c) {
-  let open4 = false;
+  let open5 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open4 = true;
+      open5 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open4 && choice) return true;
-      open4 = false;
-    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
+      if (open5 && choice) return true;
+      open5 = false;
+    } else if (open5 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
   }
   return false;
 }
@@ -28405,15 +28519,15 @@ function isBareRepo2(d) {
       return void 0;
     }
   };
-  if (st(join22(d, "HEAD"))?.isFile() && st(join22(d, "objects"))?.isDirectory() && st(join22(d, "refs"))?.isDirectory()) return true;
-  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join22(d, "config")) ?? "");
+  if (st(join23(d, "HEAD"))?.isFile() && st(join23(d, "objects"))?.isDirectory() && st(join23(d, "refs"))?.isDirectory()) return true;
+  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join23(d, "config")) ?? "");
 }
 function gitRef(gitDir, root) {
   let common = gitDir;
-  const cd = readSmall(join22(gitDir, "commondir"))?.trim();
+  const cd = readSmall(join23(gitDir, "commondir"))?.trim();
   if (cd) common = resolve5(gitDir, cd);
   common = real(common);
-  const urls = remotesOf(readSmall(join22(common, "config")) ?? "");
+  const urls = remotesOf(readSmall(join23(common, "config")) ?? "");
   const remote = urls.map(normalizeRemote).find((x) => x !== void 0);
   const main2 = basename5(common) === ".git" ? dirname6(common) : common;
   const name2 = clean3(remote ? remote.split("/").pop() ?? "" : basename5(main2)) || clean3(basename5(root)) || "project";
@@ -28425,7 +28539,7 @@ ${common}`).slice(0, 24)}`,
     kind: "git",
     root,
     ...remote ? { remote } : {},
-    ...existsSync5(join22(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+    ...existsSync6(join23(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
   };
 }
 function present(p) {
@@ -28443,7 +28557,7 @@ function projectOf(dir, doc) {
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
-    const dotgit = join22(cur, ".git");
+    const dotgit = join23(cur, ".git");
     let isThere;
     try {
       lstatSync6(dotgit);
@@ -28464,7 +28578,7 @@ function projectOf(dir, doc) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
         if (m) gitDir = resolve5(cur, m[1]);
       }
-      if (!gitDir || !existsSync5(gitDir)) {
+      if (!gitDir || !existsSync6(gitDir)) {
         return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
@@ -28477,7 +28591,7 @@ function projectOf(dir, doc) {
   const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename5(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
   let marked = false;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (existsSync5(join22(c, PRIVATE_MARKER))) {
+    if (existsSync6(join23(c, PRIVATE_MARKER))) {
       marked = true;
       break;
     }
@@ -28591,13 +28705,13 @@ function nestedBoundaries(root) {
           break;
         }
         if (!e.isDirectory() || e.isSymbolicLink()) continue;
-        const p = join22(d, e.name);
+        const p = join23(d, e.name);
         if (e.name === ".git") continue;
-        if (existsSync5(join22(p, ".git")) || isBareRepo2(p)) {
+        if (existsSync6(join23(p, ".git")) || isBareRepo2(p)) {
           repos.push(p);
           continue;
         }
-        if (existsSync5(join22(p, PRIVATE_MARKER))) priv.push(p);
+        if (existsSync6(join23(p, PRIVATE_MARKER))) priv.push(p);
         next.push(p);
       }
       if (capped) break;
@@ -28672,7 +28786,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync5(join22(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync6(join23(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -28711,16 +28825,16 @@ function sessionScratch(raw) {
   const tmpName = `claude-${process.getuid?.() ?? 0}`;
   for (const t2 of Array.isArray(o.tmp) ? o.tmp.slice(0, 4) : []) {
     const at = path2(t2);
-    const b = at === void 0 ? void 0 : ownDir(join22(at, tmpName));
+    const b = at === void 0 ? void 0 : ownDir(join23(at, tmpName));
     if (b) bases.add(b);
   }
   const config = path2(o.config);
   if (config !== void 0) {
-    const projects = ownDir(join22(config, "projects"));
+    const projects = ownDir(join23(config, "projects"));
     if (projects) bases.add(projects);
     const job = path2(o.job);
-    const jobsDir = ownDir(join22(config, "jobs"));
-    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join22(config, "jobs")) {
+    const jobsDir = ownDir(join23(config, "jobs"));
+    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join23(config, "jobs")) {
       const id2 = basename5(job);
       const r = JOB_ID_RE.test(id2) && sid.startsWith(id2) ? ownDir(job) : void 0;
       if (r && dirname6(r) === jobsDir) jobs.add(r);
@@ -28733,7 +28847,7 @@ function scratchRoot(dir, s2) {
   for (const b of s2.bases) {
     if (dir === b || !within3(dir, b)) continue;
     const parts = dir.slice(b.endsWith(sep4) ? b.length : b.length + 1).split(sep4);
-    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join22(b, parts[0], parts[1]);
+    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join23(b, parts[0], parts[1]);
   }
   return void 0;
 }
@@ -28751,7 +28865,7 @@ function scratchLinks(root) {
     }
     for (const e of ents) {
       if (++seen > SCRATCH_SCAN_ENTRIES) return void 0;
-      const p = join22(d, e.name);
+      const p = join23(d, e.name);
       if (e.isSymbolicLink()) {
         try {
           out.push(realpathSync6(p));
@@ -28878,10 +28992,10 @@ function agentContext(env) {
   return agentEnv(env) || agentAncestor();
 }
 function personTokenFile(home) {
-  return join22(home, "cli", "person.key");
+  return join23(home, "cli", "person.key");
 }
 function personSaltFile(home) {
-  return join22(home, "cli", "person.salt");
+  return join23(home, "cli", "person.salt");
 }
 function deriveToken(spk, salt) {
   return createHmac("sha256", Buffer.from(spk, "base64url")).update(TOKEN_LABEL).update(salt).digest("base64url");
@@ -28894,7 +29008,7 @@ function readTrim(f) {
   }
 }
 function homeFilesOwn(home) {
-  const cli = join22(home, "cli");
+  const cli = join23(home, "cli");
   try {
     const d = lstatSync6(cli);
     if (d.isSymbolicLink() || !d.isDirectory()) return false;
@@ -28902,11 +29016,11 @@ function homeFilesOwn(home) {
     return e.code === "ENOENT";
   }
   const checks = [
-    [join22(cli, "keys.json"), true],
-    [join22(cli, "self.json"), true],
+    [join23(cli, "keys.json"), true],
+    [join23(cli, "self.json"), true],
     [personTokenFile(home), false],
     [personSaltFile(home), false],
-    [join22(home, "v3"), false]
+    [join23(home, "v3"), false]
   ];
   for (const [p, single] of checks) {
     let st;
@@ -28930,7 +29044,7 @@ function derivedToken(home) {
 }
 function writeWhole(f, text2) {
   mkdirSync11(dirname6(f), { recursive: true, mode: 448 });
-  const tmp = `${f}.${randomBytes15(6).toString("hex")}.tmp`;
+  const tmp = `${f}.${randomBytes16(6).toString("hex")}.tmp`;
   try {
     writeFileSync11(tmp, text2, { mode: 384, flag: "wx" });
     let cleared = false;
@@ -28959,15 +29073,15 @@ function writeWhole(f, text2) {
 function ensureSalt(home) {
   const f = personSaltFile(home);
   if (TOKEN_RE.test(readTrim(f) ?? "")) return;
-  if (!existsSync5(f)) {
+  if (!existsSync6(f)) {
     try {
-      writeFileSync11(f, randomBytes15(32).toString("base64url"), { mode: 384, flag: "wx" });
+      writeFileSync11(f, randomBytes16(32).toString("base64url"), { mode: 384, flag: "wx" });
       return;
     } catch {
       if (TOKEN_RE.test(readTrim(f) ?? "")) return;
     }
   }
-  writeWhole(f, randomBytes15(32).toString("base64url"));
+  writeWhole(f, randomBytes16(32).toString("base64url"));
 }
 function personTokenMatchesKeys(home, spk, token) {
   if (!homeFilesOwn(home)) return false;
@@ -28991,8 +29105,8 @@ function personToken(home) {
   };
   const have = read2();
   if (have) return have;
-  mkdirSync11(join22(home, "cli"), { recursive: true, mode: 448 });
-  const t2 = randomBytes15(32).toString("base64url");
+  mkdirSync11(join23(home, "cli"), { recursive: true, mode: 448 });
+  const t2 = randomBytes16(32).toString("base64url");
   try {
     writeFileSync11(f, t2, { mode: 384, flag: "wx" });
     return t2;
@@ -29003,8 +29117,8 @@ function personToken(home) {
   }
 }
 function renewPersonToken(home, spk) {
-  const salt = randomBytes15(32).toString("base64url");
-  const t2 = spk ? deriveToken(spk, salt) : randomBytes15(32).toString("base64url");
+  const salt = randomBytes16(32).toString("base64url");
+  const t2 = spk ? deriveToken(spk, salt) : randomBytes16(32).toString("base64url");
   try {
     writeWhole(personSaltFile(home), salt);
     writeWhole(personTokenFile(home), t2);
@@ -29021,7 +29135,7 @@ function isDirectory(p) {
   }
 }
 function identityHere(home) {
-  return existsSync5(join22(home, "cli", "keys.json")) && existsSync5(join22(home, "cli", "self.json"));
+  return existsSync6(join23(home, "cli", "keys.json")) && existsSync6(join23(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -29039,7 +29153,7 @@ function same2(given, t2) {
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
 }
 function healPersonToken(home) {
-  if (!identityHere(home) || !existsSync5(personTokenFile(home))) return;
+  if (!identityHere(home) || !existsSync6(personTokenFile(home))) return;
   try {
     personToken(home);
   } catch {
@@ -29409,7 +29523,7 @@ var init_projects = __esm({
     MAX_SESSION_CONSTRAINTS = 16;
     MAX_UNDER = 64;
     STICKY = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints", "legacy-over", "repo-private", "sent-private"]);
-    sha = (s2) => createHash9("sha256").update(s2, "utf8").digest("hex");
+    sha = (s2) => createHash10("sha256").update(s2, "utf8").digest("hex");
     PSEUDO_ROOTS = ["/dev", "/proc", "/sys"];
     clean3 = (s2) => sanitizePeerText(s2, 64).replace(/[^\w.@+-]/g, "").slice(0, 64);
     NESTED_SCAN_DEPTH = 4;
@@ -29545,7 +29659,7 @@ var init_version = __esm({
 
 // packages/p2p/src/app.ts
 import { hostname as hostname3, userInfo as userInfo2 } from "node:os";
-import { basename as basename6, join as join23 } from "node:path";
+import { basename as basename6, join as join24 } from "node:path";
 function branchesCovered(chain, tips) {
   if (tips.length < 2) return true;
   const ancestry2 = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
@@ -29755,8 +29869,8 @@ var init_app = __esm({
         this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
         this.readOnly = opts.readOnly === true;
         const lockOpts = this.progress.debug ? { onLock: lockLogger(this.progress), onLockWait: ({ dir, waitedMs, holderPid }) => debug(this.progress, `lock ${basename6(dir)}: still waiting after ${waitedMs}ms (held by pid ${holderPid ?? "?"})`) } : {};
-        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join23(this.home, "cli"))) : void 0, lockOpts);
-        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join23(this.home, "v3")) : new FileTrustStoreV3(join23(this.home, "v3"), lockOpts);
+        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join24(this.home, "cli"))) : void 0, lockOpts);
+        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join24(this.home, "v3")) : new FileTrustStoreV3(join24(this.home, "v3"), lockOpts);
         this.file = readFileConfig(this.home);
         this.transport = transportResolver(opts.env, this.file);
         this.tun = tunables(opts.env);
@@ -30094,10 +30208,11 @@ var init_app = __esm({
         } catch (e) {
           if (!(e instanceof P2PError)) throw e;
           if (opts.strict) {
-            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e), heldBackHeadOf(e)) : []])];
+            const heldBy = own ? heldBackByOf(e) : [];
+            const unconnected = [.../* @__PURE__ */ new Set([...unconnectedRelaysOf(e), ...own ? await this.ownHeldBack(heldBy, heldBackForOf(e), heldBackHeadOf(e)) : []])];
             const versions = unconnectedVersionsOf(e);
             const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : void 0;
-            if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
+            if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId, heldBy)}`);
             v = fb;
             named = unconnected;
           } else {
@@ -30112,9 +30227,10 @@ var init_app = __esm({
             if (!opts.quiet) this.warn(`refreshing ${await this.addressOf(userId)}'s identity document was cut short; using what was held before (try again)`);
             return held2;
           }
-          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? [], v.heldBackHead) : []])];
+          const heldBy = own ? v.heldBackBy ?? [] : [];
+          const unconnected = [.../* @__PURE__ */ new Set([...v.unconnectedRelays ?? [], ...own ? await this.ownHeldBack(heldBy, v.heldBackFor ?? [], v.heldBackHead) : []])];
           const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+          if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId, heldBy)}`);
           named = unconnected;
           v = fb;
         }
@@ -30129,8 +30245,8 @@ var init_app = __esm({
        * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
        * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
        * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
-       * that our devices published (the publish log), or, when the head held back for (`head`) leaves this device out as
-       * a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
+       * that our devices published (the publish log) and that the head held back for (`head`) revoked no device of (#99),
+       * or, when the head held back for (`head`) leaves this device out as a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
        * published (another owner device whose versions haven't reached this device's log yet, the provenance rule of
        * ownBranchTip in rotation.ts). That provenance alone never counts against a head that still lists this device: the
        * devices a logged version lists include ones the owner revoked since, and a version such a device signed, held
@@ -30147,9 +30263,10 @@ var init_app = __esm({
         const published = new Set((await this.store.getPublishLog()).published);
         const headLeavesMeOut = head !== void 0 && !head.keyholders.includes(this.did);
         const trusted = headLeavesMeOut ? /* @__PURE__ */ new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]) : /* @__PURE__ */ new Set();
+        const revokedNone = (v) => head?.devices !== void 0 && v.devices.every((d) => head.devices.includes(d));
         const own = left.some((h) => {
           const v = tips.has(h) ? chain.get(h) : void 0;
-          return v !== void 0 && (published.has(h) || trusted.has(v.by));
+          return v !== void 0 && (published.has(h) && (headLeavesMeOut || revokedNone(v)) || trusted.has(v.by));
         });
         return own ? [...by] : [];
       }
@@ -30157,16 +30274,26 @@ var init_app = __esm({
        * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
        * core named (#67 review F1): each sent a version whose missing parent every relay was asked for and none had,
        * so nothing a device of ours published would be there. Otherwise only which relays sent the newer versions.
+       * #99 review: `heldBy`, the relays core held the refresh back for, are named too when they weren't counted
+       * (ownHeldBack refused, as when their head drops a device this device's current version lists), with what to do:
+       * nothing else names them.
        */
-      unconnectedHint(unconnected, versions, userId) {
+      unconnectedHint(unconnected, versions, userId, heldBy = []) {
         if (userId !== this.keys?.userId) return "";
+        const held2 = [...new Set(heldBy)].filter((r) => !unconnected.includes(r));
+        const heldHint = held2.length === 0 ? "" : this.heldBackHint(held2);
         if (unconnected.length > 0) {
           const one = unconnected.length === 1;
-          return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+          return `${heldHint}. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
         }
-        const from = [...new Set(versions.flatMap((x) => x.relays))];
-        if (from.length === 0) return "";
-        return `. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+        const from = [...new Set(versions.flatMap((x) => x.relays))].filter((r) => !held2.includes(r));
+        if (from.length === 0) return heldHint;
+        return `${heldHint}. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+      }
+      /** #99 review: the relays a refresh of our own identity was held back for, not set aside (ownHeldBack refused). */
+      heldBackHint(held2) {
+        const one = held2.length === 1;
+        return `. ${held2.join(", ")} ${one ? "serves" : "serve"} a newer version of your identity, signed with your identity key, that leaves out this device's current version and doesn't connect to it. This device can't tell whether that is a change you made on another device (such as revoking a device there) or someone else holding your identity key, so ${one ? "that relay isn't" : "those relays aren't"} set aside automatically. If no device of yours made that change, remove ${one ? "it" : "them"} (\`p2p relays remove <url>\`: that goes ahead on what your other relays confirm), then rotate your identity (\`p2p identity rotate\`)`;
       }
       /**
        * #67: a strict refresh of our OWN identity couldn't confirm the head over every listed relay. Before an
@@ -31833,9 +31960,9 @@ function shellTokens(command, markLiteral = false, substs, starts, raws) {
       continue;
     }
     if (substs && (c === "$" && command[i + 1] === "(" || c === "`")) {
-      const open4 = c === "`" ? 1 : 2;
+      const open5 = c === "`" ? 1 : 2;
       const end = c === "`" ? closingTick(command, i + 1) : closingParen(command, i + 2);
-      substs.push(command.slice(i + open4, end));
+      substs.push(command.slice(i + open5, end));
       cur += SUBST;
       has = true;
       i = end;
@@ -32000,18 +32127,18 @@ function evalLike(s2) {
   return false;
 }
 function braceChoice(c) {
-  let open4 = false;
+  let open5 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open4 = true;
+      open5 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open4 && choice)
+      if (open5 && choice)
         return true;
-      open4 = false;
-    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === "."))
+      open5 = false;
+    } else if (open5 && (ch === "," || ch === "." && c[i + 1] === "."))
       choice = true;
   }
   return false;
@@ -40295,13 +40422,13 @@ init_projects();
 init_sessions();
 init_state2();
 init_xstate();
-import { createHash as createHash10, createHmac as createHmac2 } from "node:crypto";
+import { createHash as createHash11, createHmac as createHmac2 } from "node:crypto";
 import { mkdirSync as mkdirSync12, readFileSync as readFileSync16, renameSync as renameSync10, writeFileSync as writeFileSync12 } from "node:fs";
-import { join as join24 } from "node:path";
+import { join as join25 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
   if (!secret) throw new CliError("no_identity", "no identity here yet: run `p2p init`");
-  const key = createHash10("sha256").update("p2p/ext-local-mac/v1|").update(ns).update("|").update(secret).digest();
+  const key = createHash11("sha256").update("p2p/ext-local-mac/v1|").update(ns).update("|").update(secret).digest();
   return createHmac2("sha256", key).update(data, "utf8").digest("base64url");
 }
 var IX_INSTALL_HINT = "https://github.com/ix-infrastructure/Ix";
@@ -40418,8 +40545,8 @@ async function mayShareSessionContext(app, ofSid, fromSid) {
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
-  const dir = join24(home, "ext");
-  const file = join24(dir, `${ns}.json`);
+  const dir = join25(home, "ext");
+  const file = join25(dir, `${ns}.json`);
   const read2 = () => {
     try {
       const v = JSON.parse(readFileSync16(file, "utf8"));
@@ -40541,10 +40668,10 @@ init_v3();
 init_ix_local();
 
 // packages/p2p/src/sandbox.ts
-import { randomBytes as randomBytes16 } from "node:crypto";
-import { closeSync as closeSync4, constants as constants2, existsSync as existsSync6, fstatSync as fstatSync2, mkdirSync as mkdirSync13, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync7, renameSync as renameSync11, rmSync as rmSync6, statSync as statSync6, writeFileSync as writeFileSync13 } from "node:fs";
+import { randomBytes as randomBytes17 } from "node:crypto";
+import { closeSync as closeSync4, constants as constants3, existsSync as existsSync7, fstatSync as fstatSync2, mkdirSync as mkdirSync13, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync7, renameSync as renameSync11, rmSync as rmSync6, statSync as statSync6, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname7, isAbsolute as isAbsolute11, join as join25, normalize as normalize3, resolve as resolve6, sep as sep5 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute11, join as join26, normalize as normalize3, resolve as resolve6, sep as sep5 } from "node:path";
 init_ancestry();
 init_config();
 init_errors2();
@@ -40574,7 +40701,7 @@ function tildeForm(abs, userHome2) {
 }
 function claudeSettingsPath(env) {
   const dir = env.CLAUDE_CONFIG_DIR?.trim();
-  return join25(dir ? resolve6(dir) : join25(userHomeOf(env), ".claude"), "settings.json");
+  return join26(dir ? resolve6(dir) : join26(userHomeOf(env), ".claude"), "settings.json");
 }
 function claudeManagedPath(platform = process.platform) {
   if (platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
@@ -40598,7 +40725,7 @@ function trimSlashes2(s2) {
 function sandboxPath(entry, userHome2, base) {
   const e = trimSlashes2(entry.trim());
   if (e === "~") return normalize3(userHome2);
-  if (e.startsWith("~/")) return normalize3(join25(userHome2, e.slice(2)));
+  if (e.startsWith("~/")) return normalize3(join26(userHome2, e.slice(2)));
   if (e.startsWith("//")) return normalize3(e.slice(1));
   if (isAbsolute11(e)) return normalize3(e);
   return base && e !== "" ? normalize3(resolve6(base, e)) : void 0;
@@ -40609,7 +40736,7 @@ function ruleFolder(rule, tool, userHome2) {
   if (p.endsWith("/**")) p = p.slice(0, -3);
   if (p === "" || /[*?[\]{}]/.test(p)) return void 0;
   if (p === "~") return normalize3(userHome2);
-  if (p.startsWith("~/")) return normalize3(join25(userHome2, p.slice(2)));
+  if (p.startsWith("~/")) return normalize3(join26(userHome2, p.slice(2)));
   if (p.startsWith("//")) return normalize3(p.slice(1));
   return void 0;
 }
@@ -40619,7 +40746,7 @@ var MAX_CONFIG_BYTES = 1024 * 1024;
 function readConfigFile(path2) {
   let fd;
   try {
-    fd = openSync4(path2, constants2.O_RDONLY | (constants2.O_NONBLOCK ?? 0));
+    fd = openSync4(path2, constants3.O_RDONLY | (constants3.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
@@ -40662,7 +40789,7 @@ function projectRoots(workdir) {
   const out = [normalize3(workdir)];
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
-    if (existsSync6(join25(d, ".git"))) {
+    if (existsSync7(join26(d, ".git"))) {
       if (!out.includes(d)) out.push(d);
       break;
     }
@@ -40676,7 +40803,7 @@ function onPath(name2, env) {
   for (const dir of (env.PATH ?? "").split(":")) {
     if (!dir || !isAbsolute11(dir)) continue;
     try {
-      if (statSync6(join25(dir, name2)).isFile()) return true;
+      if (statSync6(join26(dir, name2)).isFile()) return true;
     } catch {
     }
   }
@@ -40697,7 +40824,7 @@ function claudeSandboxStatus(env, o = {}) {
   const unreadable = [];
   for (const root of projectRoots(o.workdir ?? sessionWorkdir(env))) {
     for (const name2 of ["settings.local.json", "settings.json"]) {
-      const file = join25(root, ".claude", name2);
+      const file = join26(root, ".claude", name2);
       if (file === settings) continue;
       const doc = readJson(file);
       if (doc === "bad") unreadable.push(file);
@@ -40855,7 +40982,7 @@ var isDir = (p) => {
 };
 function codexConfigPath(env) {
   const h = env.CODEX_HOME?.trim();
-  return join25(h ? resolve6(h) : join25(userHomeOf(env), ".codex"), "config.toml");
+  return join26(h ? resolve6(h) : join26(userHomeOf(env), ".codex"), "config.toml");
 }
 function codexDenyPathsOf(env) {
   const p = p2pHomePaths(env);
@@ -40877,8 +41004,8 @@ function codexProjectConfigs(workdir) {
   const out = [];
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
-    const f = join25(d, ".codex", "config.toml");
-    if (existsSync6(f)) out.push(f);
+    const f = join26(d, ".codex", "config.toml");
+    if (existsSync7(f)) out.push(f);
     if (d === top) break;
     const up = dirname7(d);
     if (up === d) break;
@@ -41007,7 +41134,7 @@ function applyPlans(plans, now = /* @__PURE__ */ new Date()) {
       mode = statSync6(target).mode & 511;
     } catch {
     }
-    const tmp = `${target}.p2p-tmp-${randomBytes16(8).toString("hex")}`;
+    const tmp = `${target}.p2p-tmp-${randomBytes17(8).toString("hex")}`;
     rmSync6(tmp, { force: true });
     writeFileSync13(tmp, c.after, { mode, flag: "wx" });
     renameSync11(tmp, target);
@@ -41049,7 +41176,7 @@ function declinedHere(env, front) {
   }
 }
 function frontPresent(front, env) {
-  return existsSync6(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
+  return existsSync7(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
 }
 async function sandboxNotice(app, front) {
   if (app.front !== true && agentContext(app.env)) return void 0;
@@ -41101,8 +41228,8 @@ init_rotation();
 init_outbox();
 init_running();
 import { watch as watchDir } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile6, rename as rename2, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join26 } from "node:path";
+import { mkdir as mkdir3, readFile as readFile6, rename as rename2, writeFile as writeFile5 } from "node:fs/promises";
+import { join as join27 } from "node:path";
 
 // packages/p2p/src/graph-memory.ts
 init_v3();
@@ -41390,7 +41517,7 @@ async function graphMemoryReport(app) {
 
 // packages/p2p/src/watch.ts
 function cursorPath(app, sid) {
-  return join26(app.home, "cursors", `${sid}.cursor`);
+  return join27(app.home, "cursors", `${sid}.cursor`);
 }
 async function readCursor(app, sid) {
   try {
@@ -41402,9 +41529,9 @@ async function readCursor(app, sid) {
 }
 async function writeCursor(app, sid, c) {
   const p = cursorPath(app, sid);
-  await mkdir3(join26(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir3(join27(app.home, "cursors"), { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
-  await writeFile4(tmp, JSON.stringify(c), { mode: 384 });
+  await writeFile5(tmp, JSON.stringify(c), { mode: 384 });
   await rename2(tmp, p);
 }
 function eventFor(e, sid, self, cursor) {
@@ -41514,7 +41641,7 @@ async function watch(app, opts) {
   const offEvents = app.state.onEventsAdded(wake);
   let logWatcher;
   try {
-    logWatcher = watchDir(join26(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
+    logWatcher = watchDir(join27(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
       if (name2 === null || String(name2) === "events.json") wake();
     });
     logWatcher.on("error", () => {
@@ -41666,7 +41793,7 @@ init_projects();
 init_keystore();
 import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
 import { readFile as readFile7, stat as stat3 } from "node:fs/promises";
-import { dirname as dirname8, join as join27 } from "node:path";
+import { dirname as dirname8, join as join28 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
 init_history();
@@ -41802,9 +41929,9 @@ function ownStatuses(app, peers) {
 function watchCursor(home) {
   let best;
   try {
-    for (const name2 of readdirSync4(join27(home, "cursors"))) {
+    for (const name2 of readdirSync4(join28(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
-      const at = statSync7(join27(home, "cursors", name2)).mtimeMs;
+      const at = statSync7(join28(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
     }
   } catch {
@@ -41818,7 +41945,7 @@ function findModRoot(app, given) {
   try {
     const here = dirname8(fileURLToPath3(import.meta.url));
     const root = dirname8(here);
-    statSync7(join27(root, ".claude-plugin", "plugin.json"));
+    statSync7(join28(root, ".claude-plugin", "plugin.json"));
     return root;
   } catch {
     return void 0;
@@ -41832,12 +41959,12 @@ async function readSmall2(path2) {
 async function modVersions(root) {
   const out = {};
   try {
-    const v = JSON.parse(await readSmall2(join27(root, ".claude-plugin", "plugin.json"))).version;
+    const v = JSON.parse(await readSmall2(join28(root, ".claude-plugin", "plugin.json"))).version;
     if (typeof v === "string") out.plugin = peer(v, 32);
   } catch {
   }
   try {
-    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join27(root, "bin", "p2p.mjs")));
+    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join28(root, "bin", "p2p.mjs")));
     if (m) out.bundled = peer(m[1], 32);
   } catch {
   }
@@ -44310,14 +44437,14 @@ function daysLeft(exp, now) {
 function prettyInvite(r, p) {
   const st = styleOf(p);
   const now = nowOf(p);
-  const join28 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
+  const join29 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
   const what = r.circles.length ? `It makes them your friend and joins them to ${r.circles.map((c) => st.bold(`"${cell(c.name, 40)}"`)).join(", ")}.` : "It makes them your friend.";
   return [
     st.bold(`Your invite${r.label ? ` for ${cell(r.label, 40)}` : ""}`) + st.dim(`  (works once, for ${daysLeft(r.expiresAt, now)}${r.to ? `, only for ${cell(r.to.address, 48)}` : ""})`),
     "",
     `  ${st.cyan(st.bold(cell(r.web, 400)))}`,
     "",
-    st.dim(`  or the code: ${cell(r.code, 200)}   (${join28})`),
+    st.dim(`  or the code: ${cell(r.code, 200)}   (${join29})`),
     "",
     what,
     st.yellow("Send it over a channel you trust: ") + "anyone who sees it first can use it. They see who it's from and say yes before anything happens.",

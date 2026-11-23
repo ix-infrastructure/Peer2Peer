@@ -645,10 +645,11 @@ export class App {
       // Strict callers (publishing our own next version) must not build on a head they couldn't confirm.
       if (opts.strict) {
         // #79: relays core held the refresh back for count like the ones it names (see the incomplete case below).
-        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? await this.ownHeldBack(heldBackByOf(e), heldBackForOf(e), heldBackHeadOf(e)) : [])])];
+        const heldBy = own ? heldBackByOf(e) : [];
+        const unconnected = [...new Set([...unconnectedRelaysOf(e), ...(own ? await this.ownHeldBack(heldBy, heldBackForOf(e), heldBackHeadOf(e)) : [])])];
         const versions = unconnectedVersionsOf(e);
         const fb = e.reason === "chain-broken" ? await this.ownStrictFallback(userId, list, unconnected, versions, opts.setAside, refreshFrom) : undefined;
-        if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId)}`);
+        if (!fb) throw new CliError("refresh_failed", `couldn't confirm the current identity document on the relays (${e.reason}): not publishing on a possibly stale head${this.unconnectedHint(unconnected, versions, userId, heldBy)}`);
         v = fb;
         named = unconnected;
       } else {
@@ -668,9 +669,10 @@ export class App {
       // a current one we hold and lists more than it) count like the relays it names as serving versions that
       // don't connect: a rotation sets them aside, any other edit refuses and names them. Only when what they left
       // out is a version our own devices published (ownHeldBack).
-      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? await this.ownHeldBack(v.heldBackBy ?? [], v.heldBackFor ?? [], v.heldBackHead) : [])])];
+      const heldBy = own ? (v.heldBackBy ?? []) : [];
+      const unconnected = [...new Set([...(v.unconnectedRelays ?? []), ...(own ? await this.ownHeldBack(heldBy, v.heldBackFor ?? [], v.heldBackHead) : [])])];
       const fb = await this.ownStrictFallback(userId, list, unconnected, v.unconnectedVersions ?? [], opts.setAside, refreshFrom);
-      if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId)}`);
+      if (!fb) throw new CliError("refresh_failed", `refreshing the identity document was cut short; try again${this.unconnectedHint(unconnected, v.unconnectedVersions ?? [], userId, heldBy)}`);
       named = unconnected;
       v = fb;
     }
@@ -689,8 +691,8 @@ export class App {
    * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
    * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
    * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
-   * that our devices published (the publish log), or, when the head held back for (`head`) leaves this device out as
-   * a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
+   * that our devices published (the publish log) and that the head held back for (`head`) revoked no device of (#99),
+   * or, when the head held back for (`head`) leaves this device out as a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
    * published (another owner device whose versions haven't reached this device's log yet, the provenance rule of
    * ownBranchTip in rotation.ts). That provenance alone never counts against a head that still lists this device: the
    * devices a logged version lists include ones the owner revoked since, and a version such a device signed, held
@@ -708,9 +710,19 @@ export class App {
     // Unknown (an older core): as if it listed this device, so provenance alone never counts.
     const headLeavesMeOut = head !== undefined && !head.keyholders.includes(this.did);
     const trusted = headLeavesMeOut ? new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]) : new Set<string>();
+    // #99: our own published tip V counts against a head that still lists this device only when that head lists
+    // every device V lists. A head that dropped one may be the owner's revocation, reached from another device while
+    // this one was offline longer than the relays keep the history between them: a relay still serving V must not get
+    // the relays serving that revocation set aside (the rotation would plan from V's stale device list). That case
+    // can't be told apart from a thief's head that keeps this device and drops another device V lists: whoever holds
+    // the key chooses what its head lists, so it can make this rule refuse. Refusing is the fail-closed choice (no
+    // relay is set aside on evidence the head's signer picks); the error then names the relays the refresh was held
+    // back for and says how to remove one (unconnectedHint's `heldBy`). An unknown head (an older core) revoked
+    // something, for all we know.
+    const revokedNone = (v: { devices: readonly string[] }) => head?.devices !== undefined && v.devices.every((d) => head.devices!.includes(d));
     const own = left.some((h) => {
       const v = tips.has(h) ? chain.get(h) : undefined;
-      return v !== undefined && (published.has(h) || trusted.has(v.by));
+      return v !== undefined && ((published.has(h) && (headLeavesMeOut || revokedNone(v))) || trusted.has(v.by));
     });
     return own ? [...by] : [];
   }
@@ -719,16 +731,31 @@ export class App {
    * For a strict refresh of our own identity that failed: what to do. The key-compromise wording only for relays
    * core named (#67 review F1): each sent a version whose missing parent every relay was asked for and none had,
    * so nothing a device of ours published would be there. Otherwise only which relays sent the newer versions.
+   * #99 review: `heldBy`, the relays core held the refresh back for, are named too when they weren't counted
+   * (ownHeldBack refused, as when their head drops a device this device's current version lists), with what to do:
+   * nothing else names them.
    */
-  private unconnectedHint(unconnected: readonly string[], versions: readonly UnconnectedVersion[], userId: string): string {
+  private unconnectedHint(unconnected: readonly string[], versions: readonly UnconnectedVersion[], userId: string, heldBy: readonly string[] = []): string {
     if (userId !== this.keys?.userId) return "";
+    const held = [...new Set(heldBy)].filter((r) => !unconnected.includes(r));
+    const heldHint = held.length === 0 ? "" : this.heldBackHint(held);
     if (unconnected.length > 0) {
       const one = unconnected.length === 1;
-      return `. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
+      return `${heldHint}. ${unconnected.join(", ")} ${one ? "serves" : "serve"} versions of your identity, signed with your identity key, that don't connect to your history and that no relay holds the history of: if no device of yours published them, someone else holds your identity key. Remove ${one ? "that relay" : "those relays"} (\`p2p relays remove <url>\`) or rotate your identity (\`p2p identity rotate\`)`;
     }
-    const from = [...new Set(versions.flatMap((x) => x.relays))];
-    if (from.length === 0) return "";
-    return `. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+    const from = [...new Set(versions.flatMap((x) => x.relays))].filter((r) => !held.includes(r));
+    if (from.length === 0) return heldHint;
+    return `${heldHint}. Newer versions of your identity from ${from.join(", ")} don't connect to the history this device holds yet; if one of those relays keeps serving versions no device of yours published, remove it (\`p2p relays remove <url>\`)`;
+  }
+
+  /** #99 review: the relays a refresh of our own identity was held back for, not set aside (ownHeldBack refused). */
+  private heldBackHint(held: readonly string[]): string {
+    const one = held.length === 1;
+    return (
+      `. ${held.join(", ")} ${one ? "serves" : "serve"} a newer version of your identity, signed with your identity key, that leaves out this device's current version and doesn't connect to it. ` +
+      `This device can't tell whether that is a change you made on another device (such as revoking a device there) or someone else holding your identity key, so ${one ? "that relay isn't" : "those relays aren't"} set aside automatically. ` +
+      `If no device of yours made that change, remove ${one ? "it" : "them"} (\`p2p relays remove <url>\`: that goes ahead on what your other relays confirm), then rotate your identity (\`p2p identity rotate\`)`
+    );
   }
 
   /**

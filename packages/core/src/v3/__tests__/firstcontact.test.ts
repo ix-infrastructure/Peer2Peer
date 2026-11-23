@@ -529,12 +529,14 @@ describe("#79 post-merge: the relays a refresh of our own identity was held back
       const v = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2], own });
       expect([own, v.incomplete, v.heldBackBy]).toEqual([own, true, own ? [RELAY] : undefined]);
       expect(v.heldBackFor).toEqual(own ? [own4.hash] : undefined);
-      expect(v.heldBackHead).toEqual(own ? { hash: head.hash, keyholders: [...head.keyholders] } : undefined);
+      expect(v.heldBackHead).toEqual(own ? { hash: head.hash, keyholders: [...head.keyholders], devices: [...head.devices] } : undefined);
       // The walk anchored the history: the next refresh fails chain-broken, with the same relay reported.
       const e = await refreshIdentity(store, u.userId, f, { now: NOW, relays: [RELAY, RELAY2], own }).catch((x: unknown) => x);
       expect([own, (e as { reason?: string }).reason, heldBackByOf(e)]).toEqual([own, "chain-broken", own ? [RELAY] : []]);
       expect(heldBackForOf(e)).toEqual(own ? [own4.hash] : []);
       expect(heldBackHeadOf(e)?.hash).toBe(own ? head.hash : undefined);
+      // #99: the head's devices travel with it, so the owner's client can tell whether it revoked any.
+      expect(heldBackHeadOf(e)?.devices).toEqual(own ? [...head.devices] : undefined);
     }
   });
 });

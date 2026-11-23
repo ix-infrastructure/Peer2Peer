@@ -146,7 +146,8 @@ export type RefreshedView = IdentityView & {
    */
   heldBackFor?: string[];
   /**
-   * With heldBackBy: the head those relays sent, that the refresh was held back for (its jwsHash and key holders). The
+   * With heldBackBy: the head those relays sent, that the refresh was held back for (its jwsHash, devices and key
+   * holders). The
    * owner's client trusts a left-out version by its publisher's provenance only when that head leaves its own device
    * out as a key holder (#79: a thief's head against the owner's devices, not the owner revoking another device).
    */
@@ -157,6 +158,11 @@ export type RefreshedView = IdentityView & {
 export interface HeldBackHead {
   hash: string;
   keyholders: string[];
+  /**
+   * #99: the devices it lists. The owner's client counts its own published tip against this head only when the head
+   * lists every device that tip lists (it revoked none of them). Undefined from an older core: treated as unknown.
+   */
+  devices?: string[];
 }
 
 /** A verified version a refresh left unconnected above the held head, and the relays that sent it (#67). */
@@ -185,9 +191,10 @@ export function heldBackForOf(e: unknown): string[] {
 
 /** The head a `chain-broken` refresh of our own identity was held back for (RefreshedView.heldBackHead), or undefined. */
 export function heldBackHeadOf(e: unknown): HeldBackHead | undefined {
-  const h = (e as { heldBackHead?: unknown } | null)?.heldBackHead as { hash?: unknown; keyholders?: unknown } | undefined;
+  const h = (e as { heldBackHead?: unknown } | null)?.heldBackHead as { hash?: unknown; keyholders?: unknown; devices?: unknown } | undefined;
   if (!h || typeof h.hash !== "string" || !Array.isArray(h.keyholders)) return undefined;
-  return { hash: h.hash, keyholders: h.keyholders.filter((x): x is string => typeof x === "string") };
+  const strs = (a: unknown[]) => a.filter((x): x is string => typeof x === "string");
+  return { hash: h.hash, keyholders: strs(h.keyholders), ...(Array.isArray(h.devices) ? { devices: strs(h.devices) } : {}) };
 }
 
 /** The relays a failed refresh names as having sent versions it couldn't connect (#67); empty when none or not such a failure. */
@@ -824,7 +831,7 @@ export async function refreshIdentity(
    */
   const heldBackOf = (head: VerifiedIdentityDoc, left: readonly VerifiedIdentityDoc[]): HeldBack | undefined => {
     const by = opts.own && left.length > 0 ? relays.filter((r) => sentBy.get(r)?.has(head.hash) && !left.some((e) => sentBy.get(r)?.has(e.hash))) : [];
-    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders] } } : undefined;
+    return by.length > 0 ? { by, for: left.map((e) => e.hash), head: { hash: head.hash, keyholders: [...head.keyholders], devices: [...head.devices] } } : undefined;
   };
 
   // The newest version the relays returned that the chain rules didn't reject.
