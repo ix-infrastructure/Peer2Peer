@@ -120,12 +120,8 @@ describe("#99: rotation lock", () => {
     expect(existsSync(mod), "build p2p first (npm run build)").toBe(true);
     const log = join(h, "..", `${h.split("/").pop()}-owners.log`);
     homes.push(log);
-    const script = [
-      `const { withRotationLock } = await import(${JSON.stringify(mod)});`,
-      `const { appendFileSync } = await import("node:fs");`,
-      `try { await withRotationLock(${JSON.stringify(h)}, async () => { appendFileSync(${JSON.stringify(log)}, "in\\n"); await new Promise((r) => setTimeout(r, 500)); appendFileSync(${JSON.stringify(log)}, "out\\n"); }); } catch (e) { if (e.code !== "rotation_in_progress") { console.error(e); process.exit(2); } }`,
-    ].join("\n");
-    const kids = Array.from({ length: 4 }, () => spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "inherit"] }));
+    const child = fileURLToPath(new URL("./rotation-lock-child.mjs", import.meta.url));
+    const kids = Array.from({ length: 4 }, () => spawn(process.execPath, [child, h, log], { stdio: ["ignore", "ignore", "inherit"] }));
     const codes = await Promise.all(kids.map((k) => new Promise<number | null>((r) => k.once("exit", r))));
     expect(codes).toEqual([0, 0, 0, 0]);
     const lines = readFileSync(log, "utf8").trim().split("\n");
