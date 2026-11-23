@@ -447,11 +447,50 @@ describe("#79: a relay a refresh of our own identity was held back for doesn't b
       const log = (await app.store.getPublishLog()).published;
       const old = log.find((h) => h !== chain.hash)!;
       expect(old).toBeDefined();
-      const heldBack = (by: string[], left: string[]) => (app as unknown as { ownHeldBack(by: string[], left: string[]): Promise<string[]> }).ownHeldBack(by, left);
-      expect(await heldBack([RB], [chain.hash])).toEqual([RB]);
-      expect(await heldBack([RB], [old])).toEqual([]);
-      expect(await heldBack([RB], ["A".repeat(43)])).toEqual([]);
-      expect(await heldBack([], [chain.hash])).toEqual([]);
+      type Head = { hash: string; keyholders: string[]; devices?: string[] };
+      const heldBack = (by: string[], left: string[], head?: Head) =>
+        (app as unknown as { ownHeldBack(by: string[], left: string[], head?: Head): Promise<string[]> }).ownHeldBack(by, left, head);
+      // #99: a head that keeps every device our tip lists (a thief's, adding one of its own).
+      const thief: Head = { hash: "T".repeat(43), keyholders: [...chain.keyholders], devices: [...chain.devices, generateDeviceKeysV3(chain.iss).did] };
+      expect(await heldBack([RB], [chain.hash], thief)).toEqual([RB]);
+      expect(await heldBack([RB], [old], thief)).toEqual([]);
+      expect(await heldBack([RB], ["A".repeat(43)], thief)).toEqual([]);
+      expect(await heldBack([], [chain.hash], thief)).toEqual([]);
+      // #99: no head (an older core) or one that didn't say which devices it lists: as if it revoked one.
+      expect(await heldBack([RB], [chain.hash])).toEqual([]);
+      expect(await heldBack([RB], [chain.hash], { hash: thief.hash, keyholders: thief.keyholders })).toEqual([]);
+    } finally {
+      await app.close();
+    }
+    u.cleanup();
+  }, 60_000);
+
+  it("#99: our own published tip V never gets the relays serving a head that revoked a device V lists set aside (a long-offline device)", async () => {
+    // This device published V listing itself and D. The owner since moved on from another device and revoked D; the
+    // history between them is past what the relays keep, so nothing connects V to that head, and a relay replays V.
+    const u = new User("wes", { [RA]: `ws://127.0.0.1:${ra.port}/v3`, [RB]: `ws://127.0.0.1:${rb.port}/v3` });
+    const userId = (await u.ok(["init", "--name", "wes", "--relay", RA, "--yes"])).userId as string;
+    const ik = identityKeyFromSeed(b64uDecode(keysOf(u).ik!, 32));
+    const me = keysOf(u).did;
+    const d = generateDeviceKeysV3(userId).did;
+    const base = await heldHead(u);
+    const v = createIdentityDoc(ik, { ver: base.ver + 1, prev: base.hash, name: base.name, relays: [...base.relays], devices: [me, d], keyholders: [me, d], by: me, iat: nowSec() - 30 });
+    const app = await u.app();
+    await app.load();
+    try {
+      await addIdentityVersion(app.store, v);
+      await app.store.recordPublished({ hash: jwsHash(v), devices: [d] });
+      type Head = { hash: string; keyholders: string[]; devices?: string[] };
+      const heldBack = (head: Head) =>
+        (app as unknown as { ownHeldBack(by: string[], left: string[], head?: Head): Promise<string[]> }).ownHeldBack([RA], [jwsHash(v)], head);
+      const x = generateDeviceKeysV3(userId).did;
+      const hash = "H".repeat(43);
+      // The owner's head: revoked D, still lists this device (and a new one). RA isn't set aside.
+      expect(await heldBack({ hash, keyholders: [me, x], devices: [me, x] })).toEqual([]);
+      // A head that revoked nothing V lists (a thief adding a device): as before (#79), RA is set aside.
+      expect(await heldBack({ hash, keyholders: [me, d], devices: [me, d, x] })).toEqual([RA]);
+      // A head that leaves this device out as a key holder (the #79 thief against the owner's devices): unchanged.
+      expect(await heldBack({ hash, keyholders: [x], devices: [x] })).toEqual([RA]);
     } finally {
       await app.close();
     }

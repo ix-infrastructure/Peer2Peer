@@ -114,6 +114,7 @@ import {
 import { FileDocBackend } from "@peer2peer/core/v3/node";
 import { App, certDid, defaultLabel, newKeysDoc } from "./app.js";
 import { CliError } from "./errors.js";
+import { rotationLockOf, withRotationLock } from "./rotation-lock.js";
 import { branchLine } from "./format.js";
 import { fetchTips, linkGet, linkPut, publishOver, relayCode, RelayConnection, sleep } from "./relay-client.js";
 import type { HeldItem, SelfDoc } from "./state.js";
@@ -726,6 +727,10 @@ async function loadOrRecover(app: App, prior: RotationState | undefined, opts: R
  * fingerprint, the devices that would follow, and what moves.
  */
 export async function rotatePlan(app: App, opts: RotateOptions = {}): Promise<RotationPlan> {
+  return withRotationLock(app.home, () => rotatePlanLocked(app, opts));
+}
+
+async function rotatePlanLocked(app: App, opts: RotateOptions): Promise<RotationPlan> {
   const prior = await readRotationState(app.home);
   const recovered = await loadOrRecover(app, prior, opts);
   if (recovered) throw new CliError("rotation_in_progress", "a rotation was just finished here");
@@ -760,6 +765,10 @@ function assertSameBranch(st: RotationState, opts: RotateOptions): void {
 
 /** `p2p identity rotate --cancel`: drops a rotation whose plan wasn't accepted (nothing was published). */
 export async function rotateCancel(app: App): Promise<{ cancelled: boolean; to?: string }> {
+  return withRotationLock(app.home, () => rotateCancelLocked(app));
+}
+
+async function rotateCancelLocked(app: App): Promise<{ cancelled: boolean; to?: string }> {
   const st = await readRotationState(app.home);
   if (!st || st.step === "done") return { cancelled: false };
   if (st.step !== "created" || st.accepted) throw new CliError("rotation_in_progress", "the rotation is already under way and can't be cancelled: finish it with `p2p identity rotate --resume`");
@@ -768,46 +777,14 @@ export async function rotateCancel(app: App): Promise<{ cancelled: boolean; to?:
   return { cancelled: true, to: st.to };
 }
 
-/** #91 review: where a running `rotate` records its process id (one run per home at a time). */
-export const rotationLockOf = (home: string) => join(home, "rotation.lock");
+export { rotationLockOf };
 
 /**
- * #91 review: one `p2p identity rotate` run per home at a time, so a second run (`--resume --contest` while the
- * first is in followers()) can't have its state overwritten by the first's saves. A lock left by a process that no
- * longer runs is taken over.
+ * One `p2p identity rotate` run per home at a time (#91 review): `--plan`, `--cancel` and `--resend` too (#99), so a
+ * `--plan --exclude X` racing a `--resume --yes` run can't lose the exclusion. See withRotationLock.
  */
-async function withRotationLock<T>(app: App, fn: () => Promise<T>): Promise<T> {
-  const file = rotationLockOf(app.home);
-  const take = () => writeFile(file, `${process.pid}\n`, { mode: 0o600, flag: "wx" });
-  try {
-    await take();
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    const pid = Number.parseInt((await readFile(file, "utf8").catch(() => "")).trim(), 10);
-    if (Number.isSafeInteger(pid) && pid > 0 && running(pid)) {
-      throw new CliError("rotation_in_progress", "another `p2p identity rotate` run is in progress for this identity: wait for it to finish, then try again");
-    }
-    await rm(file, { force: true });
-    await take();
-  }
-  try {
-    return await fn();
-  } finally {
-    await rm(file, { force: true }).catch(() => undefined);
-  }
-}
-
-function running(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 export async function rotate(app: App, opts: RotateOptions = {}): Promise<RotateResult> {
-  return withRotationLock(app, () => rotateLocked(app, opts));
+  return withRotationLock(app.home, () => rotateLocked(app, opts));
 }
 
 async function rotateLocked(app: App, opts: RotateOptions): Promise<RotateResult> {
@@ -1737,6 +1714,10 @@ export const RESEND_PER_HOUR = 50;
  * of what a relay advertises, in a rolling hour).
  */
 export async function rotateResend(app: App): Promise<{ sent: number; failed: string[]; remaining: number; throttled: boolean }> {
+  return withRotationLock(app.home, () => rotateResendLocked(app));
+}
+
+async function rotateResendLocked(app: App): Promise<{ sent: number; failed: string[]; remaining: number; throttled: boolean }> {
   await app.load(true);
   const st = await readRotationState(app.home);
   if (!st || st.step !== "done" || app.userId !== st.to) throw new CliError("no_rotation", "--resend is for a finished rotation, on the device that rotated");

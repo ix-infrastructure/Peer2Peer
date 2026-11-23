@@ -682,7 +682,7 @@ export class App {
    * would leave out the versions `left`), counted like the relays core names as serving versions that don't connect
    * (a rotation sets them aside, the hint names them) only when one of `left` is our own current tip: a tip of our
    * stored chain (never an old version a relay replays: that is an ancestor of what we hold, or not held at all)
-   * that our devices published (the publish log), or, when the head held back for (`head`) leaves this device out as
+   * that our devices published (the publish log) and that the head held back for (`head`) revoked no device of (#99), or, when the head held back for (`head`) leaves this device out as
    * a key holder (a thief's head against the owner's devices, #79), that a device a version in the publish log lists
    * published (another owner device whose versions haven't reached this device's log yet, the provenance rule of
    * ownBranchTip in rotation.ts). That provenance alone never counts against a head that still lists this device: the
@@ -701,9 +701,16 @@ export class App {
     // Unknown (an older core): as if it listed this device, so provenance alone never counts.
     const headLeavesMeOut = head !== undefined && !head.keyholders.includes(this.did);
     const trusted = headLeavesMeOut ? new Set([this.did, ...[...published].flatMap((h) => chain.get(h)?.devices ?? [])]) : new Set<string>();
+    // #99: our own published tip V counts against a head that still lists this device only when that head lists
+    // every device V lists. A head that dropped one may be the owner's revocation, reached from another device while
+    // this one was offline longer than the relays keep the history between them: a relay still serving V must not get
+    // the relays serving that revocation set aside (the rotation would plan from V's stale device list). A thief's
+    // head adds a device of its own, and drops none of V's unless it drops this one too (headLeavesMeOut). An unknown
+    // head (an older core) revoked something, for all we know.
+    const revokedNone = (v: { devices: readonly string[] }) => head?.devices !== undefined && v.devices.every((d) => head.devices!.includes(d));
     const own = left.some((h) => {
       const v = tips.has(h) ? chain.get(h) : undefined;
-      return v !== undefined && (published.has(h) || trusted.has(v.by));
+      return v !== undefined && ((published.has(h) && (headLeavesMeOut || revokedNone(v))) || trusted.has(v.by));
     });
     return own ? [...by] : [];
   }
