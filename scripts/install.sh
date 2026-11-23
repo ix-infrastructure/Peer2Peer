@@ -42,7 +42,7 @@
 # P2P_DETECT_TTY (stdin, dev or none).
 
 # The release these scripts install; bumped after each release (docs/releasing.md, step 5).
-P2P_VERSION="0.1.2"
+P2P_VERSION="0.1.3"
 PACKAGES="@peer2peer/cli @peer2peer/ext-ix"
 MIN_NODE="22.0.0"
 NL='
