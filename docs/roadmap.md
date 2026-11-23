@@ -66,7 +66,7 @@ In progress. Make `p2p` easy to read and easy to use:
 
 ## Unique usernames (handles)
 
-**Needs an RFC** before any code; this is a design for discussion.
+**Needs an RFC** before any code: [RFC 0004](rfcs/0004-handles.md) (proposed) is open for comment on [#2](https://github.com/ix-infrastructure/Peer2Peer/issues/2).
 
 Today a person shows up as `name@fingerprint`, because names are self-chosen and not unique. A handle would be a unique, human-readable name that maps to exactly one userId. There are no accounts and no central server, so uniqueness has to come from something already globally unique, never from a database run as the only authority. Three kinds are proposed:
 
