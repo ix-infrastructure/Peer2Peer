@@ -269,8 +269,7 @@ public static class P2PCred {
   }
   static string Field(string[] f, int i) { return i < f.Length ? f[i].Trim() : ""; }
   public static int Run() {
-    string[] f = Console.In.ReadToEnd().Split('
-');
+    string[] f = Console.In.ReadToEnd().Split((char)10);
     string op = Field(f, 0), target = Field(f, 1);
     if (target.Length == 0) return 4;
     int e;
@@ -469,7 +468,7 @@ function writeMarker(home: string, backend: KeyBackend): void {
 // The keys document, split and joined
 
 /** The keys document as the CLI uses it (state.ts KeysDoc), with secrets. */
-interface FullKeys {
+export interface FullKeys {
   v: 1;
   userId: string;
   did: string;
@@ -512,7 +511,8 @@ function without<T extends Record<string, unknown>>(o: T, keys: readonly string[
   return out;
 }
 
-function payloadOf(k: FullKeys): string {
+/** The item's secret for keys `k` (exported for the tests). */
+export function payloadOf(k: FullKeys): string {
   const body = { v: 1, userId: k.userId, did: k.did, spk: k.spk, kpk: k.kpk, ...(typeof k.ik === "string" ? { ik: k.ik } : {}) };
   return `p2p1.${Buffer.from(JSON.stringify(body), "utf8").toString("base64url")}`;
 }
@@ -851,6 +851,8 @@ export async function moveKeysToKeychain(store: KeyStoreBackend): Promise<MoveRe
     const raw = await store.readRaw();
     const service = serviceFor(home);
     if (raw === undefined) {
+      // No keys yet: the keychain must work before this home counts on it (a probe item, stored, read back, deleted).
+      probeKeychain(kc, service);
       writeMarker(home, "keychain");
       return { backend: "keychain", moved: false, where: `${kc.label}: no keys here yet, the ones this device makes will be kept there`, warnings: [] };
     }
@@ -925,6 +927,29 @@ export async function finishPendingMove(store: KeyStoreBackend): Promise<string 
   }
 }
 
+/** Stores, reads back and deletes a throwaway item under `service`; throws when any of it fails. Its secret is random, never a key. */
+export function probeKeychain(kc: Keychain, service: string): void {
+  const account = `probe-${randomBytes(8).toString("hex")}`;
+  const secret = `p2p1.${randomBytes(24).toString("base64url")}`;
+  try {
+    kc.set(service, account, LABEL, secret);
+    const back = kc.get(service, account);
+    if (back !== secret) throw new KeychainError("what it read back wasn't what it stored");
+  } catch (e) {
+    try {
+      kc.remove(service, account);
+    } catch {
+      // nothing more to do
+    }
+    throw new CliError("keychain_write_failed", `${kc.label} can't be used here: ${e instanceof KeychainError ? e.reason : "an unexpected error"}. Nothing was changed: new keys stay in files`);
+  }
+  try {
+    kc.remove(service, account);
+  } catch (e) {
+    throw new CliError("keychain_write_failed", `${kc.label} stored a test item but couldn't delete it (${e instanceof KeychainError ? e.reason : "error"}): nothing was changed. Delete the item ${service} (account ${account}) yourself`);
+  }
+}
+
 /** Deletes this home's keychain item for the keys `k` (which keys.json holds) when there is one; a warning when it can't. */
 function forgetLeftover(home: string, k: FullKeys, warnings: string[]): void {
   try {
@@ -936,6 +961,13 @@ function forgetLeftover(home: string, k: FullKeys, warnings: string[]): void {
   if (!kc || kc.unavailable()) return;
   const service = serviceFor(home);
   try {
+    // Only an item that holds exactly these keys (a move's copy): anything else under this name is left alone.
+    const have = kc.get(service, k.did);
+    if (have === undefined) return;
+    if (have !== payloadOf(k)) {
+      warnings.push(`${kc.label} holds an item for this device (${service}, account ${k.did}) that isn't a copy of the keys in keys.json: it was left alone`);
+      return;
+    }
     kc.remove(service, k.did);
     cache.delete(`${service}|${k.did}`);
   } catch (e) {

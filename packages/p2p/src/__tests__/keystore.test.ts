@@ -6,6 +6,7 @@
 // test (P2P_TEST_REAL_KEYCHAIN=1, macOS) uses a throwaway keychain file.
 
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,8 @@ import {
   useKeychainForTests,
   windowsKeychain,
   WINDOWS_SCRIPT,
+  payloadOf,
+  realRunner,
   WINDOWS_CSHARP,
   WINDOWS_POWERSHELL,
   powershellPath,
@@ -221,6 +224,21 @@ describe("the OS tools: secrets over stdin, never in a command line", () => {
     expect(() => none.get("peer2peer-keys-abc", "d_x")).toThrow(KeychainError);
   });
 
+  it("Windows: the C# helper has no line break inside a string or char literal (CS1010), and compiles where a C# compiler is installed", () => {
+    for (const line of WINDOWS_CSHARP.split("\n")) {
+      // Every quote on a line is closed on that line.
+      const bare = line.replace(/\\./g, "");
+      expect((bare.match(/'/g) ?? []).length % 2, line).toBe(0);
+      expect((bare.match(/"/g) ?? []).length % 2, line).toBe(0);
+    }
+    const mcs = ["/usr/bin/mcs", "/usr/local/bin/mcs", "/opt/homebrew/bin/mcs"].find((p) => existsSync(p));
+    if (!mcs) return;
+    const dir = tmpHome();
+    writeFileSync(join(dir, "P2PCred.cs"), WINDOWS_CSHARP);
+    execFileSync(mcs, ["-target:library", `-out:${join(dir, "P2PCred.dll")}`, join(dir, "P2PCred.cs")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "P2PCred.dll"))).toBe(true);
+  });
+
   it("Windows (M1): the secret never passes through a cmdlet or a PowerShell variable: only the C# reads stdin and writes the answer", () => {
     const ps = WINDOWS_SCRIPT.replace(WINDOWS_CSHARP, "");
     expect(WINDOWS_SCRIPT).toContain(WINDOWS_CSHARP);
@@ -338,7 +356,7 @@ describe("the key store: moves, read-back, fail closed", () => {
     const keys = makeKeys();
     await st.put("keys", keys);
     // The move stored the item and wrote the marker, then stopped.
-    fake.items.set(`${serviceFor(home)}|${keys.did}`, "p2p1.left-over");
+    fake.items.set(`${serviceFor(home)}|${keys.did}`, payloadOf({ ...keys }));
     writeFileSync(markerFile(home), JSON.stringify({ v: 1, backend: "keychain" }));
     const r = await moveKeysToFiles(st.keyStore);
     expect(r).toMatchObject({ backend: "file", moved: false });
@@ -351,6 +369,37 @@ describe("the key store: moves, read-back, fail closed", () => {
     fake.items.set(`${serviceFor(st2.dir)}|${k2.did}`, "p2p1.keep");
     await moveKeysToFiles(st2.keyStore);
     expect(fake.items.get(`${serviceFor(st2.dir)}|${k2.did}`)).toBe("p2p1.keep");
+    // Nor an item under this device's name that isn't a copy of keys.json's keys: kept, with a warning.
+    const st3 = new CliState(tmpHome());
+    const k3 = makeKeys();
+    await st3.put("keys", k3);
+    fake.items.set(`${serviceFor(st3.dir)}|${k3.did}`, "p2p1.other");
+    const r3 = await moveKeysToFiles(st3.keyStore);
+    expect(fake.items.get(`${serviceFor(st3.dir)}|${k3.did}`)).toBe("p2p1.other");
+    expect(r3.warnings.join(" ")).toMatch(/left alone/);
+  });
+
+  it("an empty home: `keys backend keychain` stores, reads back and deletes a probe item before it records the choice", async () => {
+    const home = tmpHome();
+    const r = await moveKeysToKeychain(new CliState(home).keyStore);
+    expect(r.moved).toBe(false);
+    const probes = fake.calls.filter((c) => c.args[0] === "-i");
+    expect(probes).toHaveLength(1);
+    expect(probes[0].input).toMatch(/-a probe-[0-9a-f]{16} /);
+    expect(fake.items.size).toBe(0);
+    expect(configuredBackend(home)).toBe("keychain");
+    // A keychain that can't store: no marker.
+    const locked = tmpHome();
+    fake.locked = true;
+    await expect(moveKeysToKeychain(new CliState(locked).keyStore)).rejects.toMatchObject({ code: "keychain_write_failed" });
+    expect(existsSync(markerFile(locked))).toBe(false);
+    fake.locked = false;
+    // One that reads back something else: no marker, and the probe is gone.
+    const odd = tmpHome();
+    fake.corruptNext = true;
+    await expect(moveKeysToKeychain(new CliState(odd).keyStore)).rejects.toMatchObject({ code: "keychain_write_failed" });
+    expect(existsSync(markerFile(odd))).toBe(false);
+    expect(fake.items.size).toBe(0);
   });
 
   it("L4: sealed keys stay in the keychain when keystore.json is missing or says files: an ordinary write never unseals them", async () => {
@@ -576,6 +625,68 @@ describe("through the CLI", () => {
     expect(new Set([...fake.items.keys()].map((k) => k.split("|")[0])).size).toBe(2);
     expect((await a.ok(["whoami"])).name).toBe("ksa");
     expect((await b.ok(["whoami"])).name).toBe("ksb");
+  });
+});
+
+// Opt-in: the real Windows Credential Manager through powershell.exe -EncodedCommand, stdin and the
+// compiled C# helper, end to end (CI's windows job). A throwaway service unique to the run, deleted after.
+// Secrets are compared as booleans only, so a failure never prints one.
+describe.runIf(process.env.P2P_TEST_REAL_CREDMAN === "1" && process.platform === "win32")("the real Windows Credential Manager (opt-in)", () => {
+  const service = process.env.P2P_TEST_KEYCHAIN_SERVICE || `peer2peer-keys-test-${randomBytes(6).toString("hex")}`;
+  afterAll(() => {
+    try {
+      windowsKeychain().remove(service, "d_test");
+    } catch {
+      // gone already
+    }
+  });
+
+  it("stores, reads back, and deletes a credential; PowerShell leaves stdin to the helper", () => {
+    useKeychainForTests(undefined);
+    const calls: { input: string }[] = [];
+    const run: Runner = (file, args, input) => {
+      calls.push({ input });
+      return realRunner(file, args, input);
+    };
+    const kc = windowsKeychain(run);
+    expect(kc.unavailable()).toBeUndefined();
+    const secret = `p2p1.${randomBytes(32).toString("base64url")}`;
+    expect(kc.get(service, "d_test") === undefined).toBe(true);
+    kc.set(service, "d_test", LABEL, secret);
+    // The whole secret came back: the helper read every line of stdin (PowerShell consumed none of it).
+    const back = kc.get(service, "d_test");
+    expect(back === secret).toBe(true);
+    // Overwritten in place (CredWrite replaces a generic credential).
+    const second = `p2p1.${randomBytes(32).toString("base64url")}`;
+    kc.set(service, "d_test", LABEL, second);
+    expect(kc.get(service, "d_test") === second).toBe(true);
+    expect(kc.remove(service, "d_test")).toBe(true);
+    expect(kc.get(service, "d_test") === undefined).toBe(true);
+    expect(kc.remove(service, "d_test")).toBe(false);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it("a whole move into the Credential Manager and back, through the key store", async () => {
+    useKeychainForTests(windowsKeychain());
+    const home = tmpHome();
+    const st = new CliState(home);
+    const keys = makeKeys();
+    await st.put("keys", keys);
+    try {
+      expect((await moveKeysToKeychain(st.keyStore)).moved).toBe(true);
+      expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
+      useKeychainForTests(windowsKeychain());
+      expect(JSON.stringify(await new CliState(home).get("keys")) === JSON.stringify(keys)).toBe(true);
+      expect((await moveKeysToFiles(st.keyStore)).moved).toBe(true);
+      expect(windowsKeychain().get(serviceFor(home), keys.did) === undefined).toBe(true);
+    } finally {
+      try {
+        windowsKeychain().remove(serviceFor(home), keys.did);
+      } catch {
+        // gone already
+      }
+      useKeychainForTests(undefined);
+    }
   });
 });
 

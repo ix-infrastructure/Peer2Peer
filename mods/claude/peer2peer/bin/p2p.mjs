@@ -12876,6 +12876,7 @@ async function moveKeysToKeychain(store2) {
     const raw = await store2.readRaw();
     const service = serviceFor(home);
     if (raw === void 0) {
+      probeKeychain(kc, service);
       writeMarker(home, "keychain");
       return { backend: "keychain", moved: false, where: `${kc.label}: no keys here yet, the ones this device makes will be kept there`, warnings: [] };
     }
@@ -12936,6 +12937,26 @@ async function finishPendingMove(store2) {
     return `this device's keys are still in ${join11(store2.home, "cli", "keys.json")}, not in the keychain this home chose: ${e.message}`;
   }
 }
+function probeKeychain(kc, service) {
+  const account = `probe-${randomBytes9(8).toString("hex")}`;
+  const secret = `p2p1.${randomBytes9(24).toString("base64url")}`;
+  try {
+    kc.set(service, account, LABEL, secret);
+    const back = kc.get(service, account);
+    if (back !== secret) throw new KeychainError("what it read back wasn't what it stored");
+  } catch (e) {
+    try {
+      kc.remove(service, account);
+    } catch {
+    }
+    throw new CliError("keychain_write_failed", `${kc.label} can't be used here: ${e instanceof KeychainError ? e.reason : "an unexpected error"}. Nothing was changed: new keys stay in files`);
+  }
+  try {
+    kc.remove(service, account);
+  } catch (e) {
+    throw new CliError("keychain_write_failed", `${kc.label} stored a test item but couldn't delete it (${e instanceof KeychainError ? e.reason : "error"}): nothing was changed. Delete the item ${service} (account ${account}) yourself`);
+  }
+}
 function forgetLeftover(home, k, warnings) {
   try {
     if (deviceKeysV3FromSecrets(k.userId, b64uDecode(k.spk, 32), b64uDecode(k.kpk, 32)).did !== k.did) return;
@@ -12946,6 +12967,12 @@ function forgetLeftover(home, k, warnings) {
   if (!kc || kc.unavailable()) return;
   const service = serviceFor(home);
   try {
+    const have = kc.get(service, k.did);
+    if (have === void 0) return;
+    if (have !== payloadOf(k)) {
+      warnings.push(`${kc.label} holds an item for this device (${service}, account ${k.did}) that isn't a copy of the keys in keys.json: it was left alone`);
+      return;
+    }
     kc.remove(service, k.did);
     cache.delete(`${service}|${k.did}`);
   } catch (e) {
@@ -13036,8 +13063,7 @@ public static class P2PCred {
   }
   static string Field(string[] f, int i) { return i < f.Length ? f[i].Trim() : ""; }
   public static int Run() {
-    string[] f = Console.In.ReadToEnd().Split('
-');
+    string[] f = Console.In.ReadToEnd().Split((char)10);
     string op = Field(f, 0), target = Field(f, 1);
     if (target.Length == 0) return 4;
     int e;

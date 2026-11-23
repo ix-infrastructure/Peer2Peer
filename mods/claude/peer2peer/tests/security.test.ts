@@ -696,6 +696,24 @@ describe('pre-release review: the home folder as a last word, globs at its name,
       `secret-tool lookup account d_${'b'.repeat(26)}`,
       `cd /tmp && sudo security delete-generic-password -a d_${'c'.repeat(26)}`,
       `echo x; /usr/bin/secret-tool clear service peer2peer-keys-0123 account d_x`,
+      // Every command boundary and prefix (the re-review of #103).
+      'echo hi\nsecurity find-generic-password -s peer2peer-keys-0123 -w',
+      '{ security find-generic-password -s peer2peer-keys-0123 -w; }',
+      '! security find-generic-password -s peer2peer-keys-0123 -w',
+      'if security find-generic-password -s peer2peer-keys-0123 -w; then echo y; fi',
+      'if true; then security find-generic-password -s peer2peer-keys-0123 -w; fi',
+      'for i in 1; do security find-generic-password -s peer2peer-keys-0123 -w; done',
+      'sh -c "security find-generic-password -s peer2peer-keys-0123 -w"',
+      "bash -c 'security find-generic-password -s peer2peer-keys-0123 -w'",
+      'zsh -lc "security find-generic-password -s peer2peer-keys-0123 -w"',
+      'timeout 5 security find-generic-password -s peer2peer-keys-0123 -w',
+      'nice -n 5 security find-generic-password -s peer2peer-keys-0123 -w',
+      'echo peer2peer-keys-0123 | xargs security find-generic-password -w -s',
+      '/usr/bin/env security find-generic-password -s peer2peer-keys-0123 -w',
+      'env FOO=1 /usr/bin/secret-tool lookup service peer2peer-keys-0123',
+      '/opt/homebrew/bin/security find-generic-password -s peer2peer-keys-0123 -w',
+      `security find-generic-password -wa d_${'d'.repeat(26)}`,
+      `x=$(security find-generic-password -wa d_${'e'.repeat(26)})`,
     ]
     for (const command of refused) expect(touchesBackupFile({ tool: 'Bash', command }, [], [home]), command).toBe(true)
     const fine = [
@@ -707,6 +725,10 @@ describe('pre-release review: the home folder as a last word, globs at its name,
       'node scripts/x.mjs && rg peer2peer-keys src',
       `cat docs/security/notes.md | grep d_${'a'.repeat(26)}`,
       'python3 scripts/check.py peer2peer-keys',
+      // Judged per command: a harmless keychain command next to a search of the source.
+      'security list-keychains; rg peer2peer-keys src',
+      'security list-keychains && grep -rn peer2peer-keys packages',
+      'cat docs/security/threat-model.md\nrg peer2peer-keys src',
     ]
     for (const command of fine) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
   })

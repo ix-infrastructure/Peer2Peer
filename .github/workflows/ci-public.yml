@@ -32,8 +32,8 @@
 #   - the Claude CLI is a pinned version at least two weeks old, fetched as
 #     its platform package and checked against a sha512 committed below.
 #
-# Windows isn't in the matrix yet: the suites spawn POSIX shells and git
-# fixtures, and nothing here has been run on Windows runners.
+# Windows isn't in the gate matrix yet: the suites spawn POSIX shells and git
+# fixtures. The keystore (OS keychain) tests run on windows-latest in a job of their own (windows-keychain).
 #
 # The internal self-hosted workflow (ci.yml, manual dispatch only) is removed
 # from the public repository at launch.
@@ -233,6 +233,47 @@ jobs:
         with:
           path: ${{ steps.npm-cache.outputs.dir }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  windows-keychain:
+    # The OS keychain backend on Windows (packages/p2p/src/keystore.ts), end to end: the keystore tests,
+    # plus an opt-in test against the runner's real Credential Manager through powershell.exe
+    # -EncodedCommand, stdin and the compiled C# helper (store, read back, delete). A job of its own, so
+    # the gate above is unchanged; it runs on pull requests and dispatches. The credential's service name
+    # is unique to the run and is deleted afterwards; the tests compare secrets as booleans, never print them.
+    name: windows keychain (node 22)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+      P2P_TEST_REAL_CREDMAN: "1"
+      P2P_TEST_KEYCHAIN_SERVICE: peer2peer-keys-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22"
+      - name: install and build (core, relay, codex-bridge; p2p installed)
+        run: |
+          set -euo pipefail
+          for p in core relay codex-bridge p2p; do
+            (cd "packages/$p" && npm ci --ignore-scripts)
+          done
+          for p in core relay codex-bridge; do
+            (cd "packages/$p" && npm run build)
+          done
+      - name: keystore tests, with the real Credential Manager
+        working-directory: packages/p2p
+        run: npx vitest run src/__tests__/keystore.test.ts
+      - name: delete the run's test credential (if a test left it)
+        if: always()
+        shell: pwsh
+        run: |
+          cmdkey /delete:"$env:P2P_TEST_KEYCHAIN_SERVICE/d_test" 2>&1 | Out-Null
+          exit 0
 
   compat:
     name: cross-version matrix
