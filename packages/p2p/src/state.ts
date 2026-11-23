@@ -5,7 +5,8 @@
 // Every read-modify-write runs under the lock, so `p2p watch` and short
 // commands can run at the same time.
 //
-//   keys      this device's secrets (and the identity seed on key holders)
+//   keys      this device's secrets (and the identity seed on key holders); with the keychain backend
+//             only the public part, the secrets in the OS keychain (keystore.ts)
 //   self      name, relays, did, the default circle
 //   sessions  own session rosters, by sid
 //   seq       envelope sequence counters, by (own, sid)
@@ -48,6 +49,8 @@ import { join } from "node:path";
 import { FileDocBackend, type LockOptions } from "@peer2peer/core/v3/node";
 import type { DocBackend, RotationStatement, StatusBody } from "@peer2peer/core/v3";
 import { debug, step, type Progress } from "./progress.js";
+import { KeyStoreBackend } from "./keystore.js";
+import { OverlayDocBackend } from "./readonly.js";
 
 export interface KeysDoc {
   v: 1;
@@ -467,7 +470,14 @@ export class CliState {
     backend?: CliBackend,
     lockOpts: Partial<LockOptions> = {},
   ) {
-    this.backend = backend ?? new FileDocBackend(join(dir, "cli"), lockOpts);
+    // The keys document goes through the key store (keystore.ts): the OS keychain when this home chose it.
+    // `p2p doctor`'s overlay keeps every write in memory: so does the key store (no keychain write, no file touched).
+    this.backend = new KeyStoreBackend(backend ?? new FileDocBackend(join(dir, "cli"), lockOpts), dir, { memoryOnly: backend instanceof OverlayDocBackend });
+  }
+
+  /** The key store in front of this state's documents (keystore.ts). */
+  get keyStore(): KeyStoreBackend {
+    return this.backend as KeyStoreBackend;
   }
 
   async get<K extends keyof Docs>(name: K): Promise<Docs[K] | undefined> {

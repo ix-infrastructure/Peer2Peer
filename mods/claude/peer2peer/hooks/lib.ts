@@ -3901,9 +3901,18 @@ function homeAccessIn(text: string, isReading: boolean, homes: readonly string[]
   // A glob where the home's name would be (`~/.*/cli/keys.json`, `/home/x/.p*`, `.*/cli` from ~).
   if (/(?:~|\$\{?home\}?|\/(?:home|users)\/[^/\s]+)\/\.[^/\s]*[*?[{]/.test(text)) return 'keys'
   if (/(?:^|[\s:;|&(])\.[^/\s]*[*?[{][^/\s]*\/(?:cli|v3|ext|config|backup)/.test(text)) return 'keys'
+  // The keys in the OS keychain (`p2p keys backend keychain`): a keychain tool naming p2p's items
+  // (`peer2peer-keys-<hash>`), or dumping every item.
+  if (KEYCHAIN_TOOL.test(text) && (/peer2peer-keys/.test(text) || KEYCHAIN_DUMP.test(text))) return 'keys'
 
   return null
 }
+
+/** The OS keychain tools: macOS `security`, libsecret's `secret-tool`, Windows' credential tools and APIs. */
+const KEYCHAIN_TOOL = /(?:^|[\s;|&(:/\\])(?:security|secret-tool|cmdkey|vaultcmd|powershell|pwsh|python3?|node|osascript)(?:\.exe)?\b|credread|get-storedcredential|passwordvault|secretstorage|keyring\b/
+
+/** Reading every item at once: `security dump-keychain`, `secret-tool search --all`. */
+const KEYCHAIN_DUMP = /dump-keychain|secret-tool\s+search\b[^\n;|&]*--all/
 
 /** Whether a tool's input reaches the backup phrase file or the CLI's key store (see p2pHomeAccess). */
 export function touchesBackupFile(input: unknown, files: readonly string[], homes: readonly string[] = []): boolean {

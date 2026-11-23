@@ -681,6 +681,21 @@ describe('pre-release review: the home folder as a last word, globs at its name,
     for (const command of ['ls ~/.config', 'cat ~/.gitconfig', 'grep -r keys.json src/', 'ls .github/*']) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
   })
 
+  test('#8: the keys in the OS keychain: a keychain tool naming p2p\'s items, or dumping them all, is refused', () => {
+    const refused = [
+      'security find-generic-password -s peer2peer-keys-0123456789abcdef0123 -w',
+      '/usr/bin/security find-generic-password -s "peer2peer-keys-0123" -a d_x -w',
+      'security dump-keychain -d login.keychain',
+      'secret-tool lookup service peer2peer-keys-0123 account d_x',
+      'secret-tool search --all service x',
+      'powershell -c "[P2PCred]::Read(\'peer2peer-keys-0123/d_x\')"',
+      'python3 -c "import keyring; keyring.get_password(\'peer2peer-keys-0123\', \'d_x\')"',
+    ]
+    for (const command of refused) expect(touchesBackupFile({ tool: 'Bash', command }, [], [home]), command).toBe(true)
+    const fine = ['security find-generic-password -s github.com -w', 'secret-tool lookup service other', 'grep -rn peer2peer-keys packages/p2p/src', 'security list-keychains']
+    for (const command of fine) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
+  })
+
   test('L1: 100 KB inputs stay fast; over 16 KiB, refused only when they name a home', () => {
     const big = (s: string, size = 100_000) => s.repeat(Math.ceil(size / s.length))
     const plain = p2pHomeAccess({ tool: 'Bash', command: big('a=a;') }, [home])

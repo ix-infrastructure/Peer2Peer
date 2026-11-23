@@ -29,6 +29,7 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from "no
 import { circlePolicy, liveFriendshipsV3, loadCircle, sanitizePeerText, standsLookup } from "@peer2peer/core/v3";
 import type { App } from "./app.js";
 import { CliError } from "./errors.js";
+import { signingSeedSync } from "./keystore.js";
 
 /** The person's own terminal session (`p2p tui`, `p2p send` with no --from-session). */
 export const PERSON_SESSION = "tui";
@@ -1170,13 +1171,9 @@ function derivedToken(home: string): string | undefined {
   if (!identityHere(home)) return undefined;
   const salt = readTrim(personSaltFile(home));
   if (!salt || !TOKEN_RE.test(salt)) return undefined;
-  let spk: unknown;
-  try {
-    spk = (JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as { spk?: unknown }).spk;
-  } catch {
-    return undefined;
-  }
-  return typeof spk === "string" && spk !== "" ? deriveToken(spk, salt) : undefined;
+  // From keys.json, or from the OS keychain when the keys are kept there (keystore.ts).
+  const spk = signingSeedSync(home);
+  return spk ? deriveToken(spk, salt) : undefined;
 }
 
 /** Writes `text` to `f` whole: a new 0600 file made exclusively beside it, renamed over it (a planted symlink is replaced, not followed). */
