@@ -698,7 +698,9 @@ describe.runIf(process.env.P2P_TEST_REAL_CREDMAN === "1" && process.platform ===
       expect((await moveKeysToKeychain(st.keyStore)).moved).toBe(true);
       expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
       useKeychainForTests(windowsKeychain());
-      expect(JSON.stringify(await new CliState(home).get("keys")) === JSON.stringify(keys)).toBe(true);
+      // Same fields, same values (in any order), compared without printing either.
+      const canon = (o: unknown) => JSON.stringify(Object.entries(o as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)));
+      expect(canon(await new CliState(home).get("keys")) === canon(keys)).toBe(true);
       expect((await moveKeysToFiles(st.keyStore)).moved).toBe(true);
       expect(windowsKeychain().get(serviceFor(home), keys.did) === undefined).toBe(true);
     } finally {
