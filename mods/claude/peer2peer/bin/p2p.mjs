@@ -12456,8 +12456,8 @@ var init_errors2 = __esm({
 // packages/p2p/src/keystore.ts
 import { spawnSync } from "node:child_process";
 import { createHash as createHash3, randomBytes as randomBytes9 } from "node:crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync9, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
-import { link, open as open2, readdir as readdir2, readFile as readFile3, rm, stat } from "node:fs/promises";
+import { constants, existsSync as existsSync3, mkdirSync as mkdirSync7, readdirSync as readdirSync2, readFileSync as readFileSync9, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { link, lstat, open as open2, readFile as readFile3, rm, stat } from "node:fs/promises";
 import { join as join11, resolve as resolve4 } from "node:path";
 function checkArgs(...args) {
   for (const a of args) if (!SAFE_ARG.test(a)) throw new KeychainError("an item name with characters the keychain tools can't be given safely");
@@ -12773,23 +12773,40 @@ function keysUnreadable(home) {
     return true;
   }
 }
-async function zeroAndRemove(path2) {
+async function zeroAndRemove(path2, keysPath) {
   try {
-    const fh = await open2(path2, "r+");
-    try {
-      const { size: size2 } = await fh.stat();
-      if (size2 > 0) {
-        await fh.write(Buffer.alloc(size2, 0), 0, size2, 0);
-        await fh.sync();
+    const st = await lstat(path2);
+    const keys = await stat(keysPath).catch(() => void 0);
+    const sameAsKeys = keys !== void 0 && keys.ino === st.ino && keys.dev === st.dev;
+    if (st.isFile() && st.nlink === 1 && !sameAsKeys) {
+      const fh = await open2(path2, constants.O_RDWR | constants.O_NOFOLLOW);
+      try {
+        const now = await fh.stat();
+        if (now.ino === st.ino && now.dev === st.dev && now.nlink === 1 && now.size > 0) {
+          await fh.write(Buffer.alloc(now.size, 0), 0, now.size, 0);
+          await fh.sync();
+        }
+      } finally {
+        await fh.close().catch(() => {
+        });
       }
-    } finally {
-      await fh.close().catch(() => {
-      });
     }
   } catch {
   }
   await rm(path2, { force: true }).catch(() => {
   });
+}
+function wipeLeftovers(home) {
+  try {
+    return readdirSync2(join11(home, "cli")).filter((f) => f.startsWith(WIPE_PREFIX));
+  } catch {
+    return [];
+  }
+}
+async function sweepWipeLeftovers(home) {
+  const found = wipeLeftovers(home);
+  for (const f of found) await zeroAndRemove(join11(home, "cli", f), join11(home, "cli", "keys.json"));
+  return found.length;
 }
 async function replaceKeysFile(inner, home, doc) {
   const dir = join11(home, "cli");
@@ -12801,7 +12818,7 @@ async function replaceKeysFile(inner, home, doc) {
     old = void 0;
   }
   if (process.platform === "win32") {
-    for (const f of await readdir2(dir).catch(() => [])) if (f.startsWith(WIPE_PREFIX)) await zeroAndRemove(join11(dir, f));
+    await sweepWipeLeftovers(home);
     let wipe;
     if (holdsSecrets(old)) {
       wipe = join11(dir, `${WIPE_PREFIX}${randomBytes9(6).toString("hex")}`);
@@ -12812,7 +12829,7 @@ async function replaceKeysFile(inner, home, doc) {
       }
     }
     await inner.write("keys", doc);
-    if (wipe) await zeroAndRemove(wipe);
+    if (wipe) await zeroAndRemove(wipe, path2);
     return;
   }
   let fh;
@@ -12876,6 +12893,13 @@ function asFull(v) {
   return without(v, SEAL_FIELDS);
 }
 function keyStoreStatus(home) {
+  const st = keyStoreStatusOf(home);
+  const left = wipeLeftovers(home);
+  if (left.length === 0) return st;
+  const say = `${left.length === 1 ? "a wipe file" : `${left.length} wipe files`} from an interrupted move ${left.length === 1 ? "is" : "are"} still in ${join11(home, "cli")} (${left.join(", ")}), and may hold the old keys file's bytes: the next p2p command that isn't read-only removes ${left.length === 1 ? "it" : "them"}`;
+  return { ...st, leftovers: left, problem: st.problem ? `${st.problem}; ${say}` : say };
+}
+function keyStoreStatusOf(home) {
   const kc = platformKeychain();
   const why2 = kc ? kc.unavailable() : `p2p knows no OS keychain on ${process.platform}`;
   const keychain = { ...kc ? { kind: kc.kind } : {}, label: kc?.label ?? "an OS keychain", available: why2 === void 0, ...why2 !== void 0 ? { why: why2 } : {} };
@@ -12937,6 +12961,7 @@ async function moveKeysToFiles(store2) {
   const home = store2.home;
   const where = `${join11(home, "cli", "keys.json")} (0600)`;
   return store2.withLock(async () => {
+    await sweepWipeLeftovers(home);
     const raw = await store2.readRaw();
     const warnings = [];
     if (raw === void 0 || !isSealed(raw)) {
@@ -12963,6 +12988,7 @@ async function moveKeysToFiles(store2) {
   });
 }
 async function finishPendingMove(store2) {
+  await sweepWipeLeftovers(store2.home);
   let backend;
   try {
     backend = configuredBackend(store2.home);
@@ -15165,7 +15191,7 @@ var init_receipts = __esm({
 
 // packages/p2p/src/history.ts
 import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash5, hkdfSync as hkdfSync2, randomBytes as randomBytes11 } from "node:crypto";
-import { mkdirSync as mkdirSync10, readdirSync as readdirSync2, readFileSync as readFileSync14, renameSync as renameSync8, rmSync as rmSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, renameSync as renameSync8, rmSync as rmSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { join as join18 } from "node:path";
 function historySettings(app) {
   let cfg = {};
@@ -15230,7 +15256,7 @@ function open3(key, name2, doc) {
 }
 function segmentNames(app) {
   try {
-    return readdirSync2(join18(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
+    return readdirSync3(join18(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
   } catch {
     return [];
   }
@@ -15249,7 +15275,7 @@ function pruneQuarantine(app, cutoff) {
   const dir = join18(app.state.dir, "cli");
   let files;
   try {
-    files = readdirSync2(dir).map((f) => ({ f, m: QUARANTINE_RE.exec(f) })).filter((x) => x.m).map((x) => ({ f: x.f, at: Number(x.m[1]) })).sort((a, b) => a.at - b.at);
+    files = readdirSync3(dir).map((f) => ({ f, m: QUARANTINE_RE.exec(f) })).filter((x) => x.m).map((x) => ({ f: x.f, at: Number(x.m[1]) })).sort((a, b) => a.at - b.at);
   } catch {
     return;
   }
@@ -22189,13 +22215,13 @@ var init_codes = __esm({
 
 // packages/p2p/src/rotation-lock.ts
 import { randomBytes as randomBytes12, createHash as createHash7 } from "node:crypto";
-import { constants } from "node:fs";
-import { open as open4, readdir as readdir3, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { constants as constants2 } from "node:fs";
+import { open as open4, readdir as readdir2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join19 } from "node:path";
 async function readLock2(file) {
   let fh;
   try {
-    fh = await open4(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    fh = await open4(file, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0) | (constants2.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return { kind: "gone" };
     throw lockError(file, `${file} couldn't be read (${e.code ?? e.message})`);
@@ -22258,7 +22284,7 @@ async function createExclusive(file, content) {
   }
 }
 async function sweepMarkers(home) {
-  const names = await readdir3(home).catch(() => []);
+  const names = await readdir2(home).catch(() => []);
   await Promise.all(names.filter((n) => MARKER_RE.test(n)).map((n) => rm2(join19(home, n), { force: true }).catch(() => void 0)));
 }
 async function withRotationLock(home, fn) {
@@ -23229,7 +23255,7 @@ var init_format = __esm({
 
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
-import { accessSync, constants as constants2, statSync as statSync4 } from "node:fs";
+import { accessSync, constants as constants3, statSync as statSync4 } from "node:fs";
 import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join20 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
@@ -23258,7 +23284,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
   const runnable = (p) => {
     try {
       if (!statSync4(p).isFile()) return false;
-      if (platform !== "win32") accessSync(p, constants2.X_OK);
+      if (platform !== "win32") accessSync(p, constants3.X_OK);
       return true;
     } catch {
       return false;
@@ -24148,7 +24174,7 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, lstat, mkdir as mkdir2, readFile as readFile5, rename, rm as rm4, stat as stat2, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
+import { copyFile, lstat as lstat2, mkdir as mkdir2, readFile as readFile5, rename, rm as rm4, stat as stat2, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
 import { join as join22 } from "node:path";
 function branchSummary(hash, ver, by, relays) {
   return {
@@ -24174,7 +24200,7 @@ async function dropState(home) {
 }
 async function isLink(p) {
   try {
-    return (await lstat(p)).isSymbolicLink();
+    return (await lstat2(p)).isSymbolicLink();
   } catch {
     return false;
   }
@@ -28331,7 +28357,7 @@ __export(projects_exports, {
   takePersonToken: () => takePersonToken
 });
 import { createHash as createHash10, createHmac, randomBytes as randomBytes16, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync6, lstatSync as lstatSync6, mkdirSync as mkdirSync11, readdirSync as readdirSync3, readFileSync as readFileSync15, readlinkSync as readlinkSync2, realpathSync as realpathSync6, renameSync as renameSync9, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync6, lstatSync as lstatSync6, mkdirSync as mkdirSync11, readdirSync as readdirSync4, readFileSync as readFileSync15, readlinkSync as readlinkSync2, realpathSync as realpathSync6, renameSync as renameSync9, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
 import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join23, resolve as resolve5, sep as sep4 } from "node:path";
 function sessionWorkdir(env) {
@@ -28695,7 +28721,7 @@ function nestedBoundaries(root) {
     for (const d of level) {
       let entries;
       try {
-        entries = readdirSync3(d, { withFileTypes: true });
+        entries = readdirSync4(d, { withFileTypes: true });
       } catch {
         continue;
       }
@@ -28859,7 +28885,7 @@ function scratchLinks(root) {
     const d = stack.pop();
     let ents;
     try {
-      ents = readdirSync3(d, { withFileTypes: true });
+      ents = readdirSync4(d, { withFileTypes: true });
     } catch {
       return void 0;
     }
@@ -40669,7 +40695,7 @@ init_ix_local();
 
 // packages/p2p/src/sandbox.ts
 import { randomBytes as randomBytes17 } from "node:crypto";
-import { closeSync as closeSync4, constants as constants3, existsSync as existsSync7, fstatSync as fstatSync2, mkdirSync as mkdirSync13, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync7, renameSync as renameSync11, rmSync as rmSync6, statSync as statSync6, writeFileSync as writeFileSync13 } from "node:fs";
+import { closeSync as closeSync4, constants as constants4, existsSync as existsSync7, fstatSync as fstatSync2, mkdirSync as mkdirSync13, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync7, renameSync as renameSync11, rmSync as rmSync6, statSync as statSync6, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { dirname as dirname7, isAbsolute as isAbsolute11, join as join26, normalize as normalize3, resolve as resolve6, sep as sep5 } from "node:path";
 init_ancestry();
@@ -40746,7 +40772,7 @@ var MAX_CONFIG_BYTES = 1024 * 1024;
 function readConfigFile(path2) {
   let fd;
   try {
-    fd = openSync4(path2, constants3.O_RDONLY | (constants3.O_NONBLOCK ?? 0));
+    fd = openSync4(path2, constants4.O_RDONLY | (constants4.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
@@ -41791,7 +41817,7 @@ init_extensions();
 init_ix_local();
 init_projects();
 init_keystore();
-import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
+import { readdirSync as readdirSync5, statSync as statSync7 } from "node:fs";
 import { readFile as readFile7, stat as stat3 } from "node:fs/promises";
 import { dirname as dirname8, join as join28 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -41929,7 +41955,7 @@ function ownStatuses(app, peers) {
 function watchCursor(home) {
   let best;
   try {
-    for (const name2 of readdirSync4(join28(home, "cursors"))) {
+    for (const name2 of readdirSync5(join28(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
       const at = statSync7(join28(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
@@ -42504,7 +42530,7 @@ function keyStorageCheck(c, ks) {
     return;
   }
   if (ks.problem) {
-    c.add("key-storage", "unknown", "key storage", `${store2}, readable; ${errText(ks.problem)}`, "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
+    c.add("key-storage", "unknown", "key storage", `${store2}, readable; ${errText(ks.problem)}`, ks.leftovers?.length && !/hasn't finished|stay in the keychain/.test(ks.problem) ? "run any p2p command that isn't read-only (`p2p whoami`): it removes them" : "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
     return;
   }
   c.add("key-storage", "ok", "key storage", `${store2}, readable${ks.keys === "file" && ks.keychain.available ? `; \`p2p keys backend keychain\` moves them into ${ks.keychain.label}` : ""}`);

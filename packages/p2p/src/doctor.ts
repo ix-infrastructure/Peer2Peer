@@ -1045,7 +1045,7 @@ function keyStorageCheck(c: Checks, ks: KeyStoreStatus): void {
     return;
   }
   if (ks.problem) {
-    c.add("key-storage", "unknown", "key storage", `${store}, readable; ${errText(ks.problem)}`, "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
+    c.add("key-storage", "unknown", "key storage", `${store}, readable; ${errText(ks.problem)}`, ks.leftovers?.length && !/hasn't finished|stay in the keychain/.test(ks.problem) ? "run any p2p command that isn't read-only (`p2p whoami`): it removes them" : "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
     return;
   }
   c.add("key-storage", "ok", "key storage", `${store}, readable${ks.keys === "file" && ks.keychain.available ? `; \`p2p keys backend keychain\` moves them into ${ks.keychain.label}` : ""}`);

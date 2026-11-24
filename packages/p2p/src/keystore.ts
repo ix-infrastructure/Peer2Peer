@@ -27,8 +27,8 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { link, open, readdir, readFile, rm, stat } from "node:fs/promises";
+import { constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { link, lstat, open, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { b64uDecode, b64uEncode, decodeTyped, deviceKeysV3FromSecrets, identityKeyFromSeed, TYP3 } from "@peer2peer/core/v3";
 import { CliError } from "./errors.js";
@@ -652,18 +652,29 @@ export interface DocStore {
   withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
-/** Overwrites the file at `path` with zeros (its current length), syncs it, and removes it. Best effort. */
-async function zeroAndRemove(path: string): Promise<void> {
+/**
+ * Removes the wipe file at `path`, first overwriting its bytes with zeros only when that is safe: a
+ * regular file (never a symbolic link, which is removed without following it), with no other name
+ * (nlink 1, so no other file loses its content), and not keys.json itself (the same inode is only
+ * unlinked: a run that made the link may not have renamed the new file in yet). Best effort.
+ */
+async function zeroAndRemove(path: string, keysPath: string): Promise<void> {
   try {
-    const fh = await open(path, "r+");
-    try {
-      const { size } = await fh.stat();
-      if (size > 0) {
-        await fh.write(Buffer.alloc(size, 0), 0, size, 0);
-        await fh.sync();
+    const st = await lstat(path);
+    const keys = await stat(keysPath).catch(() => undefined);
+    const sameAsKeys = keys !== undefined && keys.ino === st.ino && keys.dev === st.dev;
+    if (st.isFile() && st.nlink === 1 && !sameAsKeys) {
+      const fh = await open(path, constants.O_RDWR | constants.O_NOFOLLOW);
+      try {
+        const now = await fh.stat();
+        // Still the file that was checked (nothing swapped in between).
+        if (now.ino === st.ino && now.dev === st.dev && now.nlink === 1 && now.size > 0) {
+          await fh.write(Buffer.alloc(now.size, 0), 0, now.size, 0);
+          await fh.sync();
+        }
+      } finally {
+        await fh.close().catch(() => {});
       }
-    } finally {
-      await fh.close().catch(() => {});
     }
   } catch {
     // gone already, or not ours to open
@@ -672,6 +683,22 @@ async function zeroAndRemove(path: string): Promise<void> {
 }
 
 const WIPE_PREFIX = ".keys.json.wipe-";
+
+/** Wipe files a move left in `<home>/cli` (one interrupted between linking and removing). */
+function wipeLeftovers(home: string): string[] {
+  try {
+    return readdirSync(join(home, "cli")).filter((f) => f.startsWith(WIPE_PREFIX));
+  } catch {
+    return [];
+  }
+}
+
+/** Removes the wipe files a move left behind (zeroed where safe: zeroAndRemove). Returns how many there were. */
+export async function sweepWipeLeftovers(home: string): Promise<number> {
+  const found = wipeLeftovers(home);
+  for (const f of found) await zeroAndRemove(join(home, "cli", f), join(home, "cli", "keys.json"));
+  return found.length;
+}
 
 /**
  * Writes `doc` to keys.json, and when the file it replaces held secrets, overwrites that file's old
@@ -692,7 +719,7 @@ async function replaceKeysFile(inner: DocStore, home: string, doc: unknown): Pro
     old = undefined;
   }
   if (process.platform === "win32") {
-    for (const f of await readdir(dir).catch(() => [] as string[])) if (f.startsWith(WIPE_PREFIX)) await zeroAndRemove(join(dir, f));
+    await sweepWipeLeftovers(home);
     let wipe: string | undefined;
     if (holdsSecrets(old)) {
       wipe = join(dir, `${WIPE_PREFIX}${randomBytes(6).toString("hex")}`);
@@ -703,7 +730,7 @@ async function replaceKeysFile(inner: DocStore, home: string, doc: unknown): Pro
       }
     }
     await inner.write("keys", doc);
-    if (wipe) await zeroAndRemove(wipe);
+    if (wipe) await zeroAndRemove(wipe, path);
     return;
   }
   let fh;
@@ -837,10 +864,20 @@ export interface KeyStoreStatus {
   keychain: { kind?: Keychain["kind"]; label: string; available: boolean; why?: string };
   /** keychain: the item's service name and account (not secret). */
   item?: { service: string; account: string };
+  /** Wipe files an interrupted move left in `cli/` (they may hold the old keys.json's bytes). */
+  leftovers?: string[];
 }
 
 /** Where this home's keys are and whether they can be read (no secret in it). Read only. */
 export function keyStoreStatus(home: string): KeyStoreStatus {
+  const st = keyStoreStatusOf(home);
+  const left = wipeLeftovers(home);
+  if (left.length === 0) return st;
+  const say = `${left.length === 1 ? "a wipe file" : `${left.length} wipe files`} from an interrupted move ${left.length === 1 ? "is" : "are"} still in ${join(home, "cli")} (${left.join(", ")}), and may hold the old keys file's bytes: the next p2p command that isn't read-only removes ${left.length === 1 ? "it" : "them"}`;
+  return { ...st, leftovers: left, problem: st.problem ? `${st.problem}; ${say}` : say };
+}
+
+function keyStoreStatusOf(home: string): KeyStoreStatus {
   const kc = platformKeychain();
   const why = kc ? kc.unavailable() : `p2p knows no OS keychain on ${process.platform}`;
   const keychain = { ...(kc ? { kind: kc.kind } : {}), label: kc?.label ?? "an OS keychain", available: why === undefined, ...(why !== undefined ? { why } : {}) };
@@ -924,6 +961,7 @@ export async function moveKeysToFiles(store: KeyStoreBackend): Promise<MoveResul
   const home = store.home;
   const where = `${join(home, "cli", "keys.json")} (0600)`;
   return store.withLock(async () => {
+    await sweepWipeLeftovers(home);
     const raw = await store.readRaw();
     const warnings: string[] = [];
     if (raw === undefined || !isSealed(raw)) {
@@ -958,6 +996,8 @@ export async function moveKeysToFiles(store: KeyStoreBackend): Promise<MoveResul
  * commands that may write; never by read-only ones. Returns a warning when it couldn't.
  */
 export async function finishPendingMove(store: KeyStoreBackend): Promise<string | undefined> {
+  // Wipe files an interrupted move left (Windows' way of overwriting the old keys.json): finished now.
+  await sweepWipeLeftovers(store.home);
   let backend: KeyBackend;
   try {
     backend = configuredBackend(store.home);

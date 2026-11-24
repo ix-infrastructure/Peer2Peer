@@ -7,7 +7,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, cpSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fstatSync, linkSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import { newKeysDoc } from "../app.js";
 import { CliState, type KeysDoc } from "../state.js";
 import {
   configuredBackend,
+  finishPendingMove,
   keyStoreStatus,
   libsecretKeychain,
   macosKeychain,
@@ -324,24 +325,86 @@ describe("the key store: moves, read-back, fail closed", () => {
 
   it("the Windows way of overwriting the old file (no open handle across the rename): a second name, zeroed and removed after", async () => {
     const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    // On Windows itself a handle held open would block the rename this test is about: no handle there.
+    const watch = process.platform !== "win32";
     Object.defineProperty(process, "platform", { value: "win32" });
     try {
       const home = tmpHome();
       const st = new CliState(home);
       const keys = makeKeys();
       await st.put("keys", keys);
-      const other = join(home, "keys-link.json");
-      linkSync(join(home, "cli", "keys.json"), other);
-      const size = readFileSync(other).length;
+      // A handle on the old file shows its bytes after it is gone from every name.
+      const fd = watch ? openSync(join(home, "cli", "keys.json"), "r") : -1;
+      const size = watch ? fstatSync(fd).size : 0;
       // One left by an interrupted run is finished too.
       writeFileSync(join(home, "cli", ".keys.json.wipe-left"), "secret bytes");
       await moveKeysToKeychain(st.keyStore);
-      expect(readFileSync(other).equals(Buffer.alloc(size, 0))).toBe(true);
+      if (watch) {
+        const after = Buffer.alloc(size);
+        readSync(fd, after, 0, size, 0);
+        closeSync(fd);
+        expect(after.equals(Buffer.alloc(size, 0))).toBe(true);
+      }
       expect(readdirSync(join(home, "cli")).filter((f) => f.includes("wipe"))).toEqual([]);
       expect(JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")).spk === undefined).toBe(true);
     } finally {
       Object.defineProperty(process, "platform", real);
     }
+  });
+
+  it("wipe files left by an interrupted move: removed on the next writable load, reported until then; zeroed only when safe", async () => {
+    const home = tmpHome();
+    const st = new CliState(home);
+    const keys = makeKeys();
+    await st.put("keys", keys);
+    const cli = join(home, "cli");
+    const keysFile = join(cli, "keys.json");
+    const keysBytes = readFileSync(keysFile);
+    // 1. A plain leftover (nlink 1, not keys.json): zeroed, then removed.
+    writeFileSync(join(cli, ".keys.json.wipe-plain"), "old secret bytes");
+    // (Not on Windows, where a file removed while open keeps its name until the handle closes.)
+    const win = process.platform === "win32";
+    const fd = win ? -1 : openSync(join(cli, ".keys.json.wipe-plain"), "r");
+    // 2. A second name of keys.json itself (a run that linked but hasn't renamed yet): only unlinked.
+    linkSync(keysFile, join(cli, ".keys.json.wipe-same"));
+    // 3. A symbolic link to a file elsewhere: removed, never followed.
+    const outside = join(home, "outside.txt");
+    writeFileSync(outside, "not p2p's");
+    let linked = true;
+    try {
+      symlinkSync(outside, join(cli, ".keys.json.wipe-link"));
+    } catch {
+      // Windows without the symlink privilege
+      linked = false;
+    }
+    // 4. A file with another name elsewhere (nlink 2): removed, its other name keeps its bytes.
+    const shared = join(home, "shared.txt");
+    writeFileSync(shared, "someone else's");
+    linkSync(shared, join(cli, ".keys.json.wipe-shared"));
+
+    const status = keyStoreStatus(home);
+    expect(status.leftovers?.sort()).toEqual([...(linked ? [".keys.json.wipe-link"] : []), ".keys.json.wipe-plain", ".keys.json.wipe-same", ".keys.json.wipe-shared"]);
+    expect(status.problem).toMatch(/interrupted move/);
+    // A read-only look leaves them.
+    expect(readdirSync(cli).filter((f) => f.includes("wipe"))).toHaveLength(linked ? 4 : 3);
+
+    expect(await finishPendingMove(st.keyStore)).toBeUndefined();
+    expect(readdirSync(cli).filter((f) => f.includes("wipe"))).toEqual([]);
+    if (!win) {
+      const plain = Buffer.alloc(16);
+      readSync(fd, plain, 0, 16, 0);
+      closeSync(fd);
+      expect(plain.equals(Buffer.alloc(16, 0))).toBe(true);
+    }
+    expect(readFileSync(keysFile).equals(keysBytes)).toBe(true);
+    expect(readFileSync(outside, "utf8")).toBe("not p2p's");
+    expect(readFileSync(shared, "utf8")).toBe("someone else's");
+    expect(keyStoreStatus(home).leftovers).toBeUndefined();
+
+    // `keys backend file` sweeps them too.
+    writeFileSync(join(cli, ".keys.json.wipe-again"), "x");
+    await moveKeysToFiles(st.keyStore);
+    expect(readdirSync(cli).filter((f) => f.includes("wipe"))).toEqual([]);
   });
 
   it("a read-back that differs leaves everything as it was", async () => {

@@ -6,8 +6,9 @@
 # The full gate is manual (workflow_dispatch): a maintainer runs it from the
 # Actions tab (or `gh workflow run ci-public.yml --ref <branch>`), on a pull
 # request's branch before merging. On pull requests (the `pull_request`
-# event, never `pull_request_target`) only the cross-version matrix runs (the
-# `compat` job below); the gate job is skipped. There is no push trigger. The
+# event, never `pull_request_target`) the cross-version matrix (the `compat`
+# job below) and the Windows keychain tests (`windows-keychain`) run; the gate
+# job is skipped. A dispatch runs all three. There is no push trigger. The
 # DCO check (dco.yml) also runs on pull requests.
 #
 # Per job, in the build order core -> relay -> codex-bridge -> p2p -> ext-ix:
