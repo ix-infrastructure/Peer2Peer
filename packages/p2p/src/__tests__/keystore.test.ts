@@ -284,17 +284,19 @@ describe("the key store: moves, read-back, fail closed", () => {
     const st = new CliState(home);
     const keys = makeKeys();
     await st.put("keys", keys);
-    // Another name for the old file (a backup tool's hard link): its bytes are overwritten too.
+    // Another name for the old file (a backup tool's hard link). On POSIX the old file is zeroed through
+    // the handle held across the rename, so that name's bytes are overwritten too. On Windows the old file
+    // is zeroed through a wipe name only when it has no other name (nlink 1), so this one keeps its bytes.
     const other = join(home, "keys-link.json");
     linkSync(join(home, "cli", "keys.json"), other);
-    const size = readFileSync(other).length;
+    const otherBytes = readFileSync(other);
 
     const r = await moveKeysToKeychain(st.keyStore);
     expect(r).toMatchObject({ backend: "keychain", moved: true });
     const onDisk = JSON.parse(readFileSync(join(home, "cli", "keys.json"), "utf8")) as Record<string, unknown>;
     expect(onDisk).toMatchObject({ userId: keys.userId, did: keys.did, cert: keys.cert, store: "keychain", service: serviceFor(home) });
     for (const f of ["spk", "kpk", "ik"]) expect(onDisk[f] === undefined, f).toBe(true);
-    expect(readFileSync(other)).toEqual(Buffer.alloc(size, 0));
+    expect(readFileSync(other).equals(process.platform === "win32" ? otherBytes : Buffer.alloc(otherBytes.length, 0))).toBe(true);
     expect(JSON.parse(readFileSync(markerFile(home), "utf8"))).toMatchObject({ backend: "keychain", service: serviceFor(home) });
     // Loads give the same keys.
     expect(await st.get("keys")).toEqual(keys);

@@ -706,8 +706,8 @@ export async function sweepWipeLeftovers(home: string): Promise<number> {
  * still be somewhere; the keychain is the place the keys are kept now). On POSIX the old file stays
  * open across the rename and is zeroed through that handle. Windows refuses to rename over a file that
  * is open, so there a second name for the old file (a hard link, `.keys.json.wipe-…`) keeps it while the
- * new one is renamed in, and is zeroed and removed after; one left by an interrupted run is finished
- * by the next.
+ * new one is renamed in, and is zeroed and removed after (only when it has no other name: a backup's
+ * hard link to the old file keeps its bytes there); one left by an interrupted run is finished by the next.
  */
 async function replaceKeysFile(inner: DocStore, home: string, doc: unknown): Promise<void> {
   const dir = join(home, "cli");
