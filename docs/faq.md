@@ -41,7 +41,7 @@ Check the fingerprint (`ben@ayrn-mrvm-…`) over a channel you trust, set a petn
 If it was an ordinary device: `p2p devices revoke <did>` from another device. If it held your identity key: `p2p identity rotate --exclude <did>` (or `/peers rotate`) on a key holder you still have, or `p2p backup restore` with your phrase on a new device and then rotate.
 
 **Where are my keys?**
-In `~/.p2p` (or `P2P_HOME`): 0700 directories and 0600 files. There's no OS keychain backend yet; it's [planned](roadmap.md#protocol-and-identity).
+In `~/.p2p` (or `P2P_HOME`): 0700 directories and 0600 files, by default. `p2p keys backend keychain`, in your own terminal, moves them into the OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux), and `p2p keys backend file` moves them back; `p2p keys backend` and `p2p doctor` say where they are. What that protects, and what it doesn't (an agent sandbox that denies `~/.p2p` doesn't cover the keychain, and anything running as you can delete the item: save your backup phrase first): [the threat model](security/threat-model.md#keys-in-the-os-keychain).
 
 **What's the difference between Peer2Peer and Ix?**
 Peer2Peer is the free, open network. Ix is an open-source code-graph tool with an optional, recommended extension for richer sharing and graph memory. You install Ix yourself; Peer2Peer never installs it. Paid features never gate the network. See [architecture.md](architecture.md).

@@ -88,7 +88,6 @@ Changes to core that let UIs, such as `p2p tui` and team web UIs, work well ([#6
 ## Protocol and identity
 
 - **Protocol 3.1, step 2:** once peers are on 3.1, device caps go on by default, so peers learn each other's features directly (see [compatibility.md](compatibility.md)).
-- **An OS keychain backend** for keys (macOS Keychain, Windows Credential Manager, libsecret), with migration of existing keys, and `p2p doctor` reporting the backend in use. Today keys are in 0600 files under `~/.p2p`.
 - **Circle version floors** ([RFC #37](https://github.com/ix-infrastructure/Peer2Peer/issues/37)): an optional, signed minimum version for a circle ("this circle needs Peer2Peer ≥ X"), so a feature that only makes sense circle-wide can be required. Members below it stay members and are told to update; it takes effect at least 14 days after it is announced, and is never a maximum.
 - **Fork detection when a relay is cut short** ([#28](https://github.com/ix-infrastructure/Peer2Peer/issues/28)): find a forked identity document (a rotation signed with a stolen key, beside the real head) even when a relay's answer is cut short, without letting one hostile relay force every refresh incomplete.
 

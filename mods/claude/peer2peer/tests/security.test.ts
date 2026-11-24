@@ -681,6 +681,58 @@ describe('pre-release review: the home folder as a last word, globs at its name,
     for (const command of ['ls ~/.config', 'cat ~/.gitconfig', 'grep -r keys.json src/', 'ls .github/*']) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
   })
 
+  test('#8: the keys in the OS keychain: a keychain tool naming p2p\'s items, or dumping them all, is refused', () => {
+    const refused = [
+      'security find-generic-password -s peer2peer-keys-0123456789abcdef0123 -w',
+      '/usr/bin/security find-generic-password -s "peer2peer-keys-0123" -a d_x -w',
+      'security dump-keychain -d login.keychain',
+      'secret-tool lookup service peer2peer-keys-0123 account d_x',
+      'secret-tool search --all service x',
+      'powershell -c "[P2PCred]::Read(\'peer2peer-keys-0123/d_x\')"',
+      'python3 -c "import keyring; keyring.get_password(\'peer2peer-keys-0123\', \'d_x\')"',
+      // By the label, or by the device id as the account, without the service.
+      'security find-generic-password -l peer2peer-keys-device -w',
+      `security find-generic-password -a d_${'a'.repeat(26)} -w`,
+      `secret-tool lookup account d_${'b'.repeat(26)}`,
+      `cd /tmp && sudo security delete-generic-password -a d_${'c'.repeat(26)}`,
+      `echo x; /usr/bin/secret-tool clear service peer2peer-keys-0123 account d_x`,
+      // Every command boundary and prefix (the re-review of #103).
+      'echo hi\nsecurity find-generic-password -s peer2peer-keys-0123 -w',
+      '{ security find-generic-password -s peer2peer-keys-0123 -w; }',
+      '! security find-generic-password -s peer2peer-keys-0123 -w',
+      'if security find-generic-password -s peer2peer-keys-0123 -w; then echo y; fi',
+      'if true; then security find-generic-password -s peer2peer-keys-0123 -w; fi',
+      'for i in 1; do security find-generic-password -s peer2peer-keys-0123 -w; done',
+      'sh -c "security find-generic-password -s peer2peer-keys-0123 -w"',
+      "bash -c 'security find-generic-password -s peer2peer-keys-0123 -w'",
+      'zsh -lc "security find-generic-password -s peer2peer-keys-0123 -w"',
+      'timeout 5 security find-generic-password -s peer2peer-keys-0123 -w',
+      'nice -n 5 security find-generic-password -s peer2peer-keys-0123 -w',
+      'echo peer2peer-keys-0123 | xargs security find-generic-password -w -s',
+      '/usr/bin/env security find-generic-password -s peer2peer-keys-0123 -w',
+      'env FOO=1 /usr/bin/secret-tool lookup service peer2peer-keys-0123',
+      '/opt/homebrew/bin/security find-generic-password -s peer2peer-keys-0123 -w',
+      `security find-generic-password -wa d_${'d'.repeat(26)}`,
+      `x=$(security find-generic-password -wa d_${'e'.repeat(26)})`,
+    ]
+    for (const command of refused) expect(touchesBackupFile({ tool: 'Bash', command }, [], [home]), command).toBe(true)
+    const fine = [
+      'security find-generic-password -s github.com -w',
+      'secret-tool lookup service other',
+      'grep -rn peer2peer-keys packages/p2p/src',
+      'security list-keychains',
+      'grep -n dump-keychain docs/security/threat-model.md',
+      'node scripts/x.mjs && rg peer2peer-keys src',
+      `cat docs/security/notes.md | grep d_${'a'.repeat(26)}`,
+      'python3 scripts/check.py peer2peer-keys',
+      // Judged per command: a harmless keychain command next to a search of the source.
+      'security list-keychains; rg peer2peer-keys src',
+      'security list-keychains && grep -rn peer2peer-keys packages',
+      'cat docs/security/threat-model.md\nrg peer2peer-keys src',
+    ]
+    for (const command of fine) expect(p2pHomeAccess({ tool: 'Bash', command }, [home]), command).toBeNull()
+  })
+
   test('L1: 100 KB inputs stay fast; over 16 KiB, refused only when they name a home', () => {
     const big = (s: string, size = 100_000) => s.repeat(Math.ceil(size / s.length))
     const plain = p2pHomeAccess({ tool: 'Bash', command: big('a=a;') }, [home])

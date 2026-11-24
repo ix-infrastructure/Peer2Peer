@@ -118,6 +118,7 @@ describe("person-only commands", () => {
     { argv: ["proof", "add", "github", "nobody"] },
     { argv: ["extensions", "disable", "ix"] },
     { argv: ["receipts", "off"] },
+    { argv: ["keys", "backend", "file"] },
     { argv: ["setup", "--print-backup"] },
     { argv: ["setup", "--backup-file", join(tmpdir(), "po-never-written.txt")] },
   ];

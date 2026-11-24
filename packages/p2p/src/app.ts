@@ -11,6 +11,7 @@
 // the user's other devices.
 
 import { identityHere, personTokenMatchesKeys, personTokenOk } from "./projects.js";
+import { finishPendingMove } from "./keystore.js";
 import { confirmOnTty } from "./tty-confirm.js";
 import { hostname, userInfo } from "node:os";
 import {
@@ -271,6 +272,12 @@ export class App {
     }
     this.checkFrontKeys(keys);
     this.setKeys(keys, self);
+    // A home that chose the OS keychain whose keys are still in keys.json (an interrupted move, or a
+    // rotation that swapped in a new identity's files): moved now (keystore.ts). Never on a read-only run.
+    if (!this.readOnly) {
+      const w = await finishPendingMove(this.state.keyStore);
+      if (w) this.warn(w);
+    }
     return true;
   }
 

@@ -62,7 +62,8 @@ import { rosterAudience, sessionRef } from "./sessions.js";
 import { EVENT_RETENTION_MS, type PeerStatusRec } from "./state.js";
 import { enabledNamespaces } from "./extensions.js";
 import { extIxInstalled, ixBinary, ixDeclined, IX_INSTALL_URL, ixInstallLine, ixMemorySupport, ixVersion, runIx } from "./ix-local.js";
-import { personHere } from "./projects.js";
+import { identityHere, personHere } from "./projects.js";
+import { keyStoreStatus, type KeyStoreStatus } from "./keystore.js";
 import { sandboxFix, sandboxReport } from "./sandbox.js";
 import { graphMemoryReport, type GraphMemoryDoc } from "./graph-memory.js";
 import { graphMemoryEnabled } from "./config.js";
@@ -1032,6 +1033,24 @@ async function userChecks(c: Checks, app: App, userId: string, ms: number, mine:
 
 // ---------------------------------------------------------------------------
 
+/** Where this device's keys are kept (`p2p keys backend`), and whether they could be read. Never a secret. */
+function keyStorageCheck(c: Checks, ks: KeyStoreStatus): void {
+  const store = ks.keys === "keychain" ? `${ks.keychain.label} (item ${ks.item?.service})` : "files in P2P_HOME (cli/keys.json, 0600)";
+  if (ks.keys === "none") {
+    c.add("key-storage", "ok", "key storage", `no keys here yet; new ones go to ${ks.configured === "keychain" ? ks.keychain.label : "files in P2P_HOME"}`);
+    return;
+  }
+  if (!ks.readable) {
+    c.add("key-storage", "fail", "key storage", `${store}: the keys can't be read${ks.problem ? ` (${errText(ks.problem)})` : ""}`, ks.keys === "keychain" ? "unlock the keychain (or install its tool) and run the command again; nothing makes new keys in their place" : "check cli/keys.json in P2P_HOME");
+    return;
+  }
+  if (ks.problem) {
+    c.add("key-storage", "unknown", "key storage", `${store}, readable; ${errText(ks.problem)}`, ks.leftovers?.length && !/hasn't finished|stay in the keychain/.test(ks.problem) ? "run any p2p command that isn't read-only (`p2p whoami`): it removes them" : "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
+    return;
+  }
+  c.add("key-storage", "ok", "key storage", `${store}, readable${ks.keys === "file" && ks.keychain.available ? `; \`p2p keys backend keychain\` moves them into ${ks.keychain.label}` : ""}`);
+}
+
 export function summarize(checks: readonly Check[]): DoctorResult["summary"] {
   return {
     ok: checks.filter((x) => x.status === "ok").length,
@@ -1058,7 +1077,21 @@ export async function doctor(app: App, o: DoctorOptions): Promise<DoctorResult> 
   app.tun.requestTimeoutMs = ms;
   const c = new Checks();
   const scope: DoctorResult["scope"] = o.user !== undefined ? "user" : "device";
-  const hasIdentity = await app.load(false).catch(() => false);
+  let loadError: unknown;
+  const hasIdentity = await app.load(false).catch((e: unknown) => {
+    loadError = e;
+    return false;
+  });
+  // Where the keys are kept, and whether they could be read (keystore.ts): first, since nothing else works without them.
+  const ks = keyStoreStatus(app.home);
+  // About another user only when they can't be read (nothing about them can be checked then).
+  if (scope === "device" || (ks.keys !== "none" && !ks.readable)) keyStorageCheck(c, ks);
+  if (!hasIdentity && ks.keys !== "none" && identityHere(app.home)) {
+    c.add("identity", "fail", "identity", `this device holds an identity, but it couldn't be loaded: ${errText(loadError ?? ks.problem)}`, ks.keys === "keychain" ? "unlock the keychain (or install its tool), then run `p2p doctor` again; p2p never makes new keys in their place" : `check ${app.home}/cli/keys.json`);
+    await versionCheck(c, app, o, ms);
+    if (scope === "device") sandboxChecks(c, app);
+    return { scope, version: o.version, ...(o.user !== undefined ? { user: { input: o.user } } : {}), checks: c.list, summary: summarize(c.list) };
+  }
   if (!hasIdentity) {
     c.add("identity", "fail", "identity", "this device has no Peer2Peer identity yet", "run `/peers setup` in Claude Code (or `p2p setup`), then `/peers join <code>` with a code from a friend");
     let relays: string[];

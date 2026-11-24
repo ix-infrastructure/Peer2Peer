@@ -68,6 +68,7 @@ import { receiving } from "./inbound.js";
 import { recordJoin, resignJoin } from "./circle-ops.js";
 import { setupIx, type SetupIx } from "./ix-local.js";
 import { renewPersonToken } from "./projects.js";
+import { forgetKeychainItem } from "./keystore.js";
 
 // ---------------------------------------------------------------------------
 // init
@@ -704,6 +705,7 @@ export async function backupRestore(
     // review N-H1: nothing is committed unless a relay took the new version. The home was fresh
     // (checked above), and no relay can hold the new version (every publish was refused outright or
     // never reached a relay), so its state directories go; config.json stays.
+    forgetKeychainItem(app.home, app.keys?.did);
     await rm(join(app.home, "cli"), { recursive: true, force: true });
     await rm(join(app.home, "v3"), { recursive: true, force: true });
     throw e;

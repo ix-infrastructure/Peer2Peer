@@ -3901,8 +3901,66 @@ function homeAccessIn(text: string, isReading: boolean, homes: readonly string[]
   // A glob where the home's name would be (`~/.*/cli/keys.json`, `/home/x/.p*`, `.*/cli` from ~).
   if (/(?:~|\$\{?home\}?|\/(?:home|users)\/[^/\s]+)\/\.[^/\s]*[*?[{]/.test(text)) return 'keys'
   if (/(?:^|[\s:;|&(])\.[^/\s]*[*?[{][^/\s]*\/(?:cli|v3|ext|config|backup)/.test(text)) return 'keys'
+  // The keys in the OS keychain (`p2p keys backend keychain`): see keychainAccess.
+  if (keychainAccess(text)) return 'keys'
 
   return null
+}
+
+/**
+ * Where one command ends and the next begins: a newline (as guardTexts leaves it, a literal `\n`, or a
+ * real one), `;`, `&`, `|`, `&&`, `||`, a backtick, `$(`, `)`, `{`, `}`, and the comma before the next
+ * field of the tool input (`,description:`).
+ */
+const KEYCHAIN_SPLIT = /\\n|\n|;|&&|\|\||\||&|`|\$\(|\)|\{|\}|,(?=[a-z_]+:)/
+
+/**
+ * What may come before the program word of a command: the field name, `(`, `!`, a shell keyword
+ * (`if`, `then`, `do`, …), a runner (`sudo`, `doas`, `nohup`, `nice`, `time`, `exec`, `command`,
+ * `xargs`, `env` or `/usr/bin/env` with its settings, `timeout <n>`), or `sh -c` (any shell: the quotes
+ * are already gone). Stripped one at a time.
+ */
+const KEYCHAIN_PREFIX =
+  /^(?:command:|[\s(!]+|(?:if|then|do|else|elif|while|until|time|nohup|exec|command|builtin)\s+|(?:sudo|doas)\s+(?:-[a-z]*[ug]\s+\S+\s+|-\S+\s+)*|nice\s+(?:-n\s*\S+\s+|-\S+\s+)*|xargs\s+(?:-[a-z]*[ndlips]\s*\S+\s+|-\S+\s+)*|(?:\S*\/)?env\s+(?:-[a-z]*[ucs]\s+\S+\s+|-\S+\s+|[a-z_][a-z0-9_]*=\S*\s+)*|timeout\s+(?:-\S+\s+)*\S+\s+|(?:\S*\/)?(?:ba|z|da|k)?sh\s+(?:-[a-z]+\s+)*?-[a-z]*c\s+)/
+
+/** The program word is a keychain tool: macOS `security`, libsecret's `secret-tool`, Windows' `cmdkey`, PowerShell; bare or by any path. */
+const KEYCHAIN_PROGRAM = /^(?:\S*\/)?(?:security|secret-tool|cmdkey(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?)(?=\s|$)/
+
+/** The credential APIs a script calls by name (PowerShell, python's keyring, our own helper). */
+const KEYCHAIN_API = /credread|p2pcred|get-storedcredential|passwordvault|secretstorage|keyring\.(?:get|set|delete)_password/
+
+/** p2p's items: by name (the service and the label start with `peer2peer-keys`), or by a device id as the account (`-a d_…`, `-wa d_…`, `account d_…`). */
+const KEYCHAIN_ITEM = /peer2peer-keys|(?:^|\s)-[a-z]*a\s*d_[a-z2-7]{26}\b|\saccount\s+d_[a-z2-7]{26}\b/
+/** A device id anywhere (an API call's argument). */
+const KEYCHAIN_DID = /\bd_[a-z2-7]{26}\b/
+
+/** Reading every item at once: `security dump-keychain`, `secret-tool search --all`. */
+const KEYCHAIN_DUMP = /\bdump-keychain\b|\bsearch\b.*\s--all\b/
+
+/**
+ * Whether one command of `text` reaches p2p's keychain items: a keychain tool as its program word (after
+ * any of the prefixes above) naming p2p's items or a device id, or dumping every item; or a credential
+ * API called with p2p's item names or a device id. Judged per command, so `security list-keychains; rg
+ * peer2peer-keys src` is two harmless commands. Best effort, like every guard here: a name built at run
+ * time, an alias, a function or a script file gets past it.
+ */
+export function keychainAccess(text: string): boolean {
+  for (const raw of text.split(KEYCHAIN_SPLIT)) {
+    let seg = raw
+    let xargs = false
+    for (let i = 0; i < 16; i++) {
+      const m = KEYCHAIN_PREFIX.exec(seg)
+      if (!m || m[0] === '') break
+      if (m[0].startsWith('xargs')) xargs = true
+      seg = seg.slice(m[0].length)
+    }
+    // Under xargs the arguments come from an earlier command (`echo peer2peer-keys-… | xargs security …`): the whole line counts.
+    const args = xargs ? text : seg
+    if (KEYCHAIN_PROGRAM.test(seg) && (KEYCHAIN_ITEM.test(args) || /peer2peer-keys|\bd_[a-z2-7]{26}\b/.test(args) || KEYCHAIN_DUMP.test(seg))) return true
+    if (KEYCHAIN_API.test(seg) && (/peer2peer-keys/.test(seg) || KEYCHAIN_DID.test(seg))) return true
+  }
+
+  return false
 }
 
 /** Whether a tool's input reaches the backup phrase file or the CLI's key store (see p2pHomeAccess). */

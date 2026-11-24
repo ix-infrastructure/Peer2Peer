@@ -81,9 +81,9 @@ function procHidesOthers() {
   }
 }
 function procRead(pid) {
-  let stat3;
+  let stat4;
   try {
-    stat3 = readFileSync8(`/proc/${pid}/stat`, "utf8");
+    stat4 = readFileSync8(`/proc/${pid}/stat`, "utf8");
   } catch (e) {
     const code2 = e.code;
     if (code2 === "EACCES" || code2 === "EPERM" || code2 === "ENOENT") {
@@ -96,11 +96,11 @@ function procRead(pid) {
     }
     throw e;
   }
-  const close = stat3.lastIndexOf(")");
+  const close = stat4.lastIndexOf(")");
   if (close < 0) throw new Error("unreadable stat");
-  const ppid = Number(stat3.slice(close + 2).split(" ")[1]);
+  const ppid = Number(stat4.slice(close + 2).split(" ")[1]);
   if (!Number.isSafeInteger(ppid)) throw new Error("unreadable stat");
-  const comm = stat3.slice(stat3.indexOf("(") + 1, close);
+  const comm = stat4.slice(stat4.indexOf("(") + 1, close);
   return {
     ppid,
     comm,
@@ -1725,18 +1725,18 @@ function validateTableBytes(numPoints, fpBytes) {
   if (bytes2 > TABLE_BYTES_MAX)
     throw new Error("invalid window size: table would need ~" + Math.ceil(bytes2 / 2 ** 20) + " MiB, max " + TABLE_BYTES_MAX / 2 ** 20 + " MiB");
 }
-function probeRandomBytes(randomBytes17, length) {
-  if (randomBytes17 === void 0)
+function probeRandomBytes(randomBytes18, length) {
+  if (randomBytes18 === void 0)
     return void 0;
-  afunction(randomBytes17, "randomBytes");
+  afunction(randomBytes18, "randomBytes");
   try {
-    const probe = randomBytes17(length);
+    const probe = randomBytes18(length);
     if (!isBytes2(probe) || probe.length !== length)
       return void 0;
   } catch {
     return void 0;
   }
-  return randomBytes17;
+  return randomBytes18;
 }
 function validateMSMPoints(points, c) {
   aarray(points, "points");
@@ -1892,9 +1892,9 @@ var init_curve = __esm({
       baseCanBeBlinded;
       bits;
       // Parametrized with a given Point class (not individual point)
-      constructor(Point, randomBytes17) {
+      constructor(Point, randomBytes18) {
         validatePointCons(Point);
-        this.randomBytes = probeRandomBytes(randomBytes17, BLIND_BYTES);
+        this.randomBytes = probeRandomBytes(randomBytes18, BLIND_BYTES);
         this.Point = Point;
         this.BASE = Point.BASE;
         this.ZERO = Point.ZERO;
@@ -2111,7 +2111,7 @@ function edwards(params, extraOpts = {}) {
   if (FpLegendre(Fp2, CURVE.d) !== -1)
     throw new Error("edwards: CURVE.d must be a non-square in Fp for complete addition formulas");
   validateObject(opts, {}, { uvRatio: "function", randomBytes: "function" });
-  const randomBytes17 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes18 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const MASK = _2n2 << BigInt(Fp2.BYTES * 8) - _1n4;
   function isOdd(n) {
     if (!Fp2.isOdd)
@@ -2372,7 +2372,7 @@ function edwards(params, extraOpts = {}) {
     }
   }
   const normalize4 = (points) => normalizeZ(Point, points);
-  const wnaf = new ScalarMultiplier(Point, randomBytes17);
+  const wnaf = new ScalarMultiplier(Point, randomBytes18);
   if (wnaf.bits >= 6)
     Point.BASE.precompute(6);
   Object.freeze(Point.prototype);
@@ -2404,7 +2404,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     if (outputLen !== expectedLen)
       throw new Error(`hash.outputLen must be ${expectedLen}, got ${outputLen}`);
   }
-  const randomBytes17 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
+  const randomBytes18 = opts.randomBytes === void 0 ? randomBytes6 : opts.randomBytes;
   const toMontgomery2 = opts.toMontgomery;
   const toMontgomerySecret2 = opts.toMontgomerySecret;
   const adjustScalarBytes2 = opts.adjustScalarBytes === void 0 ? (bytes2) => bytes2 : opts.adjustScalarBytes;
@@ -2494,7 +2494,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     seed: _size
   };
   function randomSecretKey(seed) {
-    seed = seed === void 0 ? randomBytes17(lengths.seed) : seed;
+    seed = seed === void 0 ? randomBytes18(lengths.seed) : seed;
     return abytes2(seed, lengths.seed, "seed");
   }
   function isValidSecretKey(key) {
@@ -8743,8 +8743,8 @@ async function verifyInviteV3(jws, ctx, opts = {}) {
 function inviteLink(inviteJws, opts = {}) {
   return (opts.web ? INVITE_WEB_PREFIX : INVITE_LINK_PREFIX) + b64uEncode(utf8(inviteJws));
 }
-function parseInviteLink(link) {
-  const s2 = typeof link === "string" ? link.trim() : "";
+function parseInviteLink(link2) {
+  const s2 = typeof link2 === "string" ? link2.trim() : "";
   const prefix = [INVITE_LINK_PREFIX, INVITE_WEB_PREFIX, ...LEGACY_INVITE_WEB_PREFIXES].find((p) => s2.startsWith(p));
   if (prefix === void 0)
     fail("malformed", "not an invite link");
@@ -9346,8 +9346,8 @@ function circleInviteLink(headJws, opts = {}) {
   parseCircleVersion(headJws);
   return (opts.web ? CIRCLE_WEB_PREFIX : CIRCLE_LINK_PREFIX) + b64uEncode(utf8(headJws));
 }
-function parseCircleInviteLink(link) {
-  const s2 = typeof link === "string" ? link.trim() : "";
+function parseCircleInviteLink(link2) {
+  const s2 = typeof link2 === "string" ? link2.trim() : "";
   const prefix = [CIRCLE_LINK_PREFIX, CIRCLE_WEB_PREFIX, ...LEGACY_CIRCLE_WEB_PREFIXES].find((p) => s2.startsWith(p));
   if (prefix === void 0)
     fail("malformed", "not a circle link");
@@ -9355,31 +9355,31 @@ function parseCircleInviteLink(link) {
   parseCircleVersion(jws);
   return jws;
 }
-function decideOpenJoin(chain, join28, book, limiter, opts) {
+function decideOpenJoin(chain, join29, book, limiter, opts) {
   const now = opts.now ?? nowSec();
   const head = chain.head;
-  if (join28.cid !== chain.cid)
+  if (join29.cid !== chain.cid)
     return { decision: "ignore", reason: "other-circle" };
-  if (opts.isBlocked?.(join28.iss))
+  if (opts.isBlocked?.(join29.iss))
     return { decision: "ignore", reason: "blocked" };
-  if (join28.op !== "join" || join28.at === void 0)
+  if (join29.op !== "join" || join29.at === void 0)
     return { decision: "ignore", reason: "not-a-join" };
-  const cur = book[join28.iss];
-  if (cur && cur.hash !== join28.hash && compareMembership(join28, cur) >= 0)
+  const cur = book[join29.iss];
+  if (cur && cur.hash !== join29.hash && compareMembership(join29, cur) >= 0)
     return { decision: "ignore", reason: "not-current" };
-  if (!chain.hasAncestor(join28.at))
+  if (!chain.hasAncestor(join29.at))
     return { decision: "ignore", reason: "unknown-version" };
-  if (head.members.includes(join28.iss))
+  if (head.members.includes(join29.iss))
     return { decision: "ignore", reason: "already-member" };
   if (circlePolicy(head) !== "open")
     return { decision: "hold", reason: "not-open" };
-  if (!joinCapFitsPolicy(join28.joinCap, "open"))
+  if (!joinCapFitsPolicy(join29.joinCap, "open"))
     return { decision: "ignore", reason: "cap-too-long" };
   const removed = opts.removed instanceof Set ? opts.removed : new Set(opts.removed);
-  if (removed.has(join28.iss))
+  if (removed.has(join29.iss))
     return { decision: "hold", reason: "previously-removed" };
-  const wasMember = chain.versions.some((v) => v.members.includes(join28.iss));
-  const prior = cur && cur.hash !== join28.hash ? cur : void 0;
+  const wasMember = chain.versions.some((v) => v.members.includes(join29.iss));
+  const prior = cur && cur.hash !== join29.hash ? cur : void 0;
   if (wasMember && (!prior || prior.op === "join"))
     return { decision: "hold", reason: "previously-removed" };
   const recent = limiter.acceptedAt.filter((t2) => now - t2 < HOUR);
@@ -10354,8 +10354,8 @@ function parsePlaintextV3(kind, bytes2) {
         const cap2 = optS(o, "cap", "circle");
         if (cap2 !== void 0 && (cap2.length > MAX_JWS_BYTES || cap2.split(".").length !== 3))
           fail("malformed", "circle.cap must be one compact JWS");
-        const link = optS(o, "link", "circle");
-        if (link !== void 0 && !/^[A-Za-z0-9_-]{43}$/.test(link))
+        const link2 = optS(o, "link", "circle");
+        if (link2 !== void 0 && !/^[A-Za-z0-9_-]{43}$/.test(link2))
           fail("malformed", "circle.link must be a version's jwsHash");
         let pow3;
         if (o.pow !== void 0) {
@@ -10370,7 +10370,7 @@ function parsePlaintextV3(kind, bytes2) {
           kind,
           want: { cid: w.cid, fromVer: w.fromVer },
           ...cap2 !== void 0 ? { cap: cap2 } : {},
-          ...link !== void 0 ? { link } : {},
+          ...link2 !== void 0 ? { link: link2 } : {},
           ...pow3 !== void 0 ? { pow: pow3 } : {}
         };
       }
@@ -11051,8 +11051,8 @@ function forRelay(result, relay) {
 }
 async function withTimeout(p, ms) {
   let timer;
-  const timeout = new Promise((resolve7) => {
-    timer = setTimeout(() => resolve7(void 0), ms);
+  const timeout = new Promise((resolve8) => {
+    timer = setTimeout(() => resolve8(void 0), ms);
   });
   try {
     return await Promise.race([p.catch(() => void 0), timeout]);
@@ -11287,8 +11287,8 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   const sentByAny = (h) => relays.some((r) => sentBy.get(r)?.has(h));
   let turn = 0;
-  const pick = (open4) => {
-    const live = open4.filter((g) => !dead.has(g.need));
+  const pick = (open5) => {
+    const live = open5.filter((g) => !dead.has(g.need));
     const owners = relays.length + 1;
     for (let i = 0; i < owners; i++) {
       const o = (turn + i) % owners;
@@ -11310,17 +11310,17 @@ async function refreshIdentity(store2, userId, fetch2, opts = {}) {
   };
   let requests = 0;
   for (; chainOf && gaps.length > 0 && !exhausted && requests < CHAIN_WALK_MAX_REQUESTS; requests++) {
-    let open4 = frontier();
-    let next = pick(open4);
+    let open5 = frontier();
+    let next = pick(open5);
     if (!next) {
-      open4 = roots();
-      next = pick(open4);
+      open5 = roots();
+      next = pick(open5);
       if (next && anchoredBeforeRoots === void 0)
         anchoredBeforeRoots = chain.anchored;
     }
     if (!next)
       break;
-    wanted = new Set(open4.map((g) => g.need));
+    wanted = new Set(open5.map((g) => g.need));
     const page = await fetchEach((r) => chainOf(userId, [r], next.need, CHAIN_WALK_PAGE), CHAIN_WALK_PAGE, true, next.need);
     if (page.length === 0) {
       if (lastAsked === 0)
@@ -11615,16 +11615,16 @@ async function getIdentityView(store2, userId, opts = {}) {
   const leftOut = opts.ignorePending ? [] : usablePendingHeads({ ...raw, pendingHeads: raw.leftOut }, { now: opts.now });
   const stored2 = { ...raw, pendingHeads, leftOut };
   const key = `${stored2.historyGap ? "g" : "a"}${stored2.anchoredAtV1 ? "1" : ""}${stored2.anchoredGenesis?.length ? jwsHash(stored2.anchoredGenesis.join(".")) : ""}:${jwsHash(stored2.versions.join("."))}:${pendingHeads.length > 0 ? jwsHash(pendingHeads.join(".")) : ""}:${leftOut.length > 0 ? jwsHash(leftOut.join(".")) : ""}`;
-  let cache2 = viewCache.get(store2);
-  if (!cache2)
-    viewCache.set(store2, cache2 = /* @__PURE__ */ new Map());
-  const hit = cache2.get(userId);
+  let cache3 = viewCache.get(store2);
+  if (!cache3)
+    viewCache.set(store2, cache3 = /* @__PURE__ */ new Map());
+  const hit = cache3.get(userId);
   if (hit && hit.key === key)
     return frozenCopy(hit.view);
   const view = IdentityChain.fromStored(stored2, { now: opts.now }).view();
-  cache2.set(userId, { key, view });
-  if (cache2.size > VIEW_CACHE_MAX)
-    cache2.delete(cache2.keys().next().value);
+  cache3.set(userId, { key, view });
+  if (cache3.size > VIEW_CACHE_MAX)
+    cache3.delete(cache3.keys().next().value);
   return frozenCopy(view);
 }
 function frozenCopy(v) {
@@ -11773,20 +11773,20 @@ async function storeOfferedCircle(store2, versions, opts = {}) {
   await store2.updateCircle(chain.cid, (cur) => cur ? { result: void 0 } : { next: { cid: chain.cid, chain: chain.toStored(), statements: {}, joinedByMe: false }, result: void 0 });
   return chain;
 }
-async function recordOwnJoin(store2, self, join28) {
-  if (join28.iss !== self)
-    fail("cert-mismatch", `the join is ${join28.iss}'s, not this user's`);
-  if (join28.op !== "join" || join28.at === void 0)
+async function recordOwnJoin(store2, self, join29) {
+  if (join29.iss !== self)
+    fail("cert-mismatch", `the join is ${join29.iss}'s, not this user's`);
+  if (join29.op !== "join" || join29.at === void 0)
     fail("malformed", "not a join statement");
-  await store2.updateCircle(join28.cid, (cur) => {
+  await store2.updateCircle(join29.cid, (cur) => {
     if (!cur)
-      return fail("circle-gap", `circle ${join28.cid} is not held`);
+      return fail("circle-gap", `circle ${join29.cid} is not held`);
     const chain = CircleChain.fromStored(cur.chain);
-    if (!chain.hasAncestor(join28.at))
+    if (!chain.hasAncestor(join29.at))
       fail("circle-invalid", "join names a version not on the held chain");
     const statements = { ...cur.statements };
-    applyMembership(statements, membershipFact(join28));
-    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join28.n) }, result: void 0 };
+    applyMembership(statements, membershipFact(join29));
+    return { next: { ...cur, statements, joinedByMe: true, myN: Math.max(cur.myN ?? -1, join29.n) }, result: void 0 };
   });
 }
 async function recordOwnLeave(store2, self, leave) {
@@ -11984,13 +11984,13 @@ function circleOwners(versions) {
   }
   return [...out];
 }
-async function decideOpenJoinFor(store2, join28, opts = {}) {
-  const blocked = await store2.isBlocked(join28.iss);
-  return store2.updateCircle(join28.cid, (cur) => {
+async function decideOpenJoinFor(store2, join29, opts = {}) {
+  const blocked = await store2.isBlocked(join29.iss);
+  return store2.updateCircle(join29.cid, (cur) => {
     if (!cur)
       return { result: { decision: "ignore", reason: "other-circle" } };
     const limiter = { acceptedAt: [...cur.openJoins?.acceptedAt ?? []] };
-    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join28, cur.statements, limiter, {
+    const decision = decideOpenJoin(CircleChain.fromStored(cur.chain), join29, cur.statements, limiter, {
       now: opts.now,
       maxPerHour: opts.maxPerHour,
       isBlocked: () => blocked,
@@ -12453,6 +12453,767 @@ var init_errors2 = __esm({
   }
 });
 
+// packages/p2p/src/keystore.ts
+import { spawnSync } from "node:child_process";
+import { createHash as createHash3, randomBytes as randomBytes9 } from "node:crypto";
+import { constants, existsSync as existsSync3, mkdirSync as mkdirSync7, readdirSync as readdirSync2, readFileSync as readFileSync9, realpathSync as realpathSync4, renameSync as renameSync5, rmSync as rmSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { link, lstat, open as open2, readFile as readFile3, rm, stat } from "node:fs/promises";
+import { join as join11, resolve as resolve4 } from "node:path";
+function checkArgs(...args) {
+  for (const a of args) if (!SAFE_ARG.test(a)) throw new KeychainError("an item name with characters the keychain tools can't be given safely");
+}
+function toolMessage(out, secret) {
+  let s2 = out;
+  if (secret) s2 = s2.split(secret).join("[secret]");
+  s2 = s2.replace(/p2p1\.[A-Za-z0-9_-]*/g, "[secret]").replace(/[A-Za-z0-9_-]{40,}/g, "[…]");
+  s2 = s2.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return s2.length > 160 ? `${s2.slice(0, 160)}…` : s2;
+}
+function spawnProblem(r, tool) {
+  if (!r.error) return void 0;
+  if (r.error === "ETIMEDOUT") return `${tool} didn't answer in ${KEYCHAIN_TIMEOUT_MS / 1e3}s (is the keychain locked, with its unlock prompt waiting?)`;
+  if (r.error === "ENOENT") return `${tool} isn't installed`;
+  return `${tool} couldn't be run (${r.error})`;
+}
+function macosKeychain(run = realRunner, opts = {}) {
+  const kc = opts.keychainFile ? [opts.keychainFile] : [];
+  const exists2 = opts.exists ?? existsSync3;
+  if (opts.keychainFile && /["\s\\]/.test(opts.keychainFile)) throw new KeychainError("a keychain path with spaces, quotes or backslashes");
+  return {
+    kind: "macos",
+    label: "the macOS Keychain",
+    unavailable: () => exists2(SECURITY) ? void 0 : `${SECURITY} isn't there`,
+    get(service, account) {
+      checkArgs(service, account);
+      const r = run(SECURITY, ["find-generic-password", "-s", service, "-a", account, "-w", ...kc], "");
+      const p = spawnProblem(r, "security");
+      if (p) throw new KeychainError(p);
+      if (r.status === 44) return void 0;
+      if (r.status !== 0) throw new KeychainError(`security couldn't read the item (exit ${r.status}${r.stderr.trim() ? `: ${toolMessage(r.stderr)}` : ""}): is the keychain locked?`);
+      return r.stdout.replace(/\r?\n$/, "");
+    },
+    set(service, account, label, secret) {
+      checkArgs(service, account, label);
+      if (!SAFE_SECRET.test(secret)) throw new KeychainError("a secret in an unexpected form");
+      const line = ["add-generic-password", "-s", service, "-a", account, "-l", label, "-T", SECURITY, "-w", secret, ...kc].join(" ");
+      const r = run(SECURITY, ["-i"], `${line}
+`);
+      const p = spawnProblem(r, "security");
+      if (p) throw new KeychainError(p);
+      if (r.status !== 0 || r.stderr.trim() !== "") throw new KeychainError(`security couldn't store the item${r.stderr.trim() ? ` (${toolMessage(r.stderr, secret)})` : ` (exit ${r.status})`}`);
+    },
+    remove(service, account) {
+      checkArgs(service, account);
+      const r = run(SECURITY, ["delete-generic-password", "-s", service, "-a", account, ...kc], "");
+      const p = spawnProblem(r, "security");
+      if (p) throw new KeychainError(p);
+      if (r.status === 44) return false;
+      if (r.status !== 0) throw new KeychainError(`security couldn't delete the item (exit ${r.status}${r.stderr.trim() ? `: ${toolMessage(r.stderr)}` : ""})`);
+      return true;
+    }
+  };
+}
+function libsecretKeychain(run = realRunner, opts = {}) {
+  const exists2 = opts.exists ?? existsSync3;
+  const tool = () => SECRET_TOOL_PATHS.find((p) => exists2(p));
+  const need = () => {
+    const t2 = tool();
+    if (!t2) throw new KeychainError("secret-tool isn't installed (the libsecret tools package: libsecret-tools on Debian and Ubuntu, libsecret on Fedora and Arch)");
+    return t2;
+  };
+  return {
+    kind: "linux",
+    label: "the Secret Service keyring (libsecret)",
+    unavailable: () => tool() ? void 0 : "secret-tool isn't installed (the libsecret tools package)",
+    get(service, account) {
+      checkArgs(service, account);
+      const r = run(need(), ["lookup", "service", service, "account", account], "");
+      const p = spawnProblem(r, "secret-tool");
+      if (p) throw new KeychainError(p);
+      if (r.status === 0) return r.stdout.replace(/\r?\n$/, "");
+      if (r.status === 1 && r.stderr.trim() === "" && r.stdout === "") return void 0;
+      throw new KeychainError(`secret-tool couldn't read the item (exit ${r.status}${r.stderr.trim() ? `: ${toolMessage(r.stderr)}` : ""}): is a Secret Service (GNOME Keyring, KWallet) running and unlocked in this session?`);
+    },
+    set(service, account, label, secret) {
+      checkArgs(service, account, label);
+      if (!SAFE_SECRET.test(secret)) throw new KeychainError("a secret in an unexpected form");
+      const r = run(need(), ["store", `--label=${label}`, "service", service, "account", account], secret);
+      const p = spawnProblem(r, "secret-tool");
+      if (p) throw new KeychainError(p);
+      if (r.status !== 0) throw new KeychainError(`secret-tool couldn't store the item (exit ${r.status}${r.stderr.trim() ? `: ${toolMessage(r.stderr, secret)}` : ""})`);
+    },
+    remove(service, account) {
+      checkArgs(service, account);
+      const had = this.get(service, account) !== void 0;
+      const r = run(need(), ["clear", "service", service, "account", account], "");
+      const p = spawnProblem(r, "secret-tool");
+      if (p) throw new KeychainError(p);
+      if (r.status !== 0 && had) throw new KeychainError(`secret-tool couldn't delete the item (exit ${r.status}${r.stderr.trim() ? `: ${toolMessage(r.stderr)}` : ""})`);
+      return had;
+    }
+  };
+}
+function powershellPath(env = process.env, exists2 = existsSync3) {
+  if (exists2(WINDOWS_POWERSHELL)) return WINDOWS_POWERSHELL;
+  for (const root of [env.SystemRoot, env.windir]) {
+    const r = (root ?? "").replace(/\\+$/, "");
+    if (/^[A-Za-z]:\\(?:Windows|WINNT)$/i.test(r)) {
+      const exe = `${r}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+      if (exists2(exe)) return exe;
+    }
+  }
+  return void 0;
+}
+function windowsKeychain(run = realRunner, opts = {}) {
+  const exists2 = opts.exists ?? existsSync3;
+  const encoded = Buffer.from(WINDOWS_SCRIPT, "utf16le").toString("base64");
+  const call = (req) => {
+    const exe = powershellPath(opts.env, exists2);
+    if (!exe) throw new KeychainError("Windows PowerShell isn't in the Windows folder");
+    const input = [req.op, req.target, req.account ?? "", req.label ?? "", req.secret ?? ""].join("\n") + "\n";
+    const r = run(exe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], input);
+    const p = spawnProblem(r, "PowerShell");
+    if (p) throw new KeychainError(p);
+    return { ...r, stderr: toolMessage(r.stderr, req.secret) };
+  };
+  const target = (service, account) => `${service}/${account}`;
+  return {
+    kind: "windows",
+    label: "the Windows Credential Manager",
+    unavailable: () => powershellPath(opts.env, exists2) ? void 0 : `Windows PowerShell isn't at ${WINDOWS_POWERSHELL}`,
+    get(service, account) {
+      checkArgs(service, account);
+      const r = call({ op: "get", target: target(service, account) });
+      if (r.status === 3) return void 0;
+      if (r.status !== 0) throw new KeychainError(`the Credential Manager couldn't be read (exit ${r.status}${r.stderr ? `: ${r.stderr}` : ""})`);
+      return r.stdout.replace(/\r?\n$/, "");
+    },
+    set(service, account, label, secret) {
+      checkArgs(service, account, label);
+      if (!SAFE_SECRET.test(secret)) throw new KeychainError("a secret in an unexpected form");
+      const r = call({ op: "set", target: target(service, account), account, label, secret });
+      if (r.status !== 0) throw new KeychainError(`the Credential Manager couldn't store the item (exit ${r.status}${r.stderr ? `: ${r.stderr}` : ""})`);
+    },
+    remove(service, account) {
+      checkArgs(service, account);
+      const r = call({ op: "delete", target: target(service, account) });
+      if (r.status === 3) return false;
+      if (r.status !== 0) throw new KeychainError(`the Credential Manager couldn't delete the item (exit ${r.status}${r.stderr ? `: ${r.stderr}` : ""})`);
+      return true;
+    }
+  };
+}
+function platformKeychain(platform = process.platform) {
+  if (override !== void 0) return override ?? void 0;
+  if (platform === "darwin") return macosKeychain();
+  if (platform === "win32") return windowsKeychain();
+  if (platform === "linux" || platform === "freebsd" || platform === "openbsd") return libsecretKeychain();
+  return void 0;
+}
+function canonicalHome(home) {
+  try {
+    return realpathSync4.native(home);
+  } catch {
+    return resolve4(home);
+  }
+}
+function serviceFor(home) {
+  return `${SERVICE_PREFIX}${createHash3("sha256").update(canonicalHome(home)).digest("hex").slice(0, 20)}`;
+}
+function markerFile(home) {
+  return join11(home, "keystore.json");
+}
+function configuredBackend(home) {
+  let raw;
+  try {
+    raw = readFileSync9(markerFile(home), "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return "file";
+    throw new CliError("keystore_unreadable", `${markerFile(home)} can't be read (${e.code ?? "error"}): it says where this device's keys go. Fix or remove it`);
+  }
+  let m;
+  try {
+    m = JSON.parse(raw);
+  } catch {
+    throw new CliError("keystore_unreadable", `${markerFile(home)} isn't valid JSON: it says where this device's keys go. Set it again: \`p2p keys backend keychain\` or \`p2p keys backend file\``);
+  }
+  if (m.backend === "file" || m.backend === "keychain") return m.backend;
+  throw new CliError("keystore_unreadable", `${markerFile(home)} names no backend p2p knows: set it again with \`p2p keys backend keychain\` or \`p2p keys backend file\``);
+}
+function writeMarker(home, backend) {
+  mkdirSync7(home, { recursive: true, mode: 448 });
+  const m = { v: 1, backend, ...backend === "keychain" ? { service: serviceFor(home), home: canonicalHome(home) } : {}, at: Date.now() };
+  const f = markerFile(home);
+  const tmp = `${f}.${randomBytes9(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync7(tmp, JSON.stringify(m, null, 2) + "\n", { mode: 384, flag: "wx" });
+    renameSync5(tmp, f);
+  } catch (e) {
+    rmSync3(tmp, { force: true });
+    throw e;
+  }
+}
+function holdsSecrets(raw) {
+  return isObj(raw) && typeof raw.spk === "string" && raw.spk !== "";
+}
+function isSealed(raw) {
+  return isObj(raw) && raw.store === "keychain" && !holdsSecrets(raw);
+}
+function without(o, keys) {
+  const out = {};
+  for (const [k, v] of Object.entries(o)) if (!keys.includes(k)) out[k] = v;
+  return out;
+}
+function payloadOf(k) {
+  const body = { v: 1, userId: k.userId, did: k.did, spk: k.spk, kpk: k.kpk, ...typeof k.ik === "string" ? { ik: k.ik } : {} };
+  return `p2p1.${Buffer.from(JSON.stringify(body), "utf8").toString("base64url")}`;
+}
+function openPayload(secret, pub, where) {
+  const bad = (why2) => new CliError("keychain_mismatch", `the keychain item for this device (${where}) ${why2}: this device's keys can't be loaded. Nothing was changed, and no new keys were made`);
+  if (!SAFE_SECRET.test(secret)) throw bad("isn't one p2p wrote");
+  let body;
+  try {
+    body = JSON.parse(Buffer.from(secret.slice(5), "base64url").toString("utf8"));
+  } catch {
+    throw bad("isn't one p2p wrote");
+  }
+  const { spk, kpk, ik } = body;
+  if (typeof spk !== "string" || typeof kpk !== "string" || ik !== void 0 && typeof ik !== "string") throw bad("isn't one p2p wrote");
+  try {
+    const dk = deviceKeysV3FromSecrets(pub.userId, b64uDecode(spk, 32), b64uDecode(kpk, 32));
+    if (dk.did !== pub.did) throw bad("holds another device's keys");
+    const cert = decodeTyped(pub.cert, TYP3.device).payload;
+    if (cert.did !== pub.did || cert.spk !== b64uEncode(dk.signingPublicKey) || cert.kpk !== b64uEncode(dk.agreementPublicKey)) throw bad("holds keys this device's certificate doesn't name");
+    if (typeof ik === "string" && identityKeyFromSeed(b64uDecode(ik, 32)).userId !== pub.userId) throw bad("holds another identity's key");
+  } catch (e) {
+    if (e instanceof CliError) throw e;
+    throw bad("isn't one p2p wrote");
+  }
+  return { spk, kpk, ...typeof ik === "string" ? { ik } : {} };
+}
+function keychainOrThrow() {
+  const kc = platformKeychain();
+  if (!kc) throw new CliError("keychain_unavailable", `this device's keys are kept in an OS keychain, and p2p knows none on ${process.platform}. Nothing was changed, and no new keys were made`);
+  const why2 = kc.unavailable();
+  if (why2) throw new CliError("keychain_unavailable", `this device's keys are in ${kc.label}, which can't be used here: ${why2}. Nothing was changed, and no new keys were made`);
+  return kc;
+}
+function unseal(home, raw) {
+  const service = serviceFor(home);
+  if (raw.service !== service) {
+    throw new CliError(
+      "keychain_moved",
+      `this device's keys are in the keychain under another home's name (${String(raw.service).slice(0, 64)}, not ${service}): was ${home} moved or copied from elsewhere? Move it back, or run p2p with P2P_HOME set to the folder it was made in. Nothing was changed, and no new keys were made`
+    );
+  }
+  if (typeof raw.did !== "string" || typeof raw.userId !== "string") throw new CliError("keychain_mismatch", `${join11(home, "cli", "keys.json")} is damaged: no device id. Nothing was changed`);
+  const kc = keychainOrThrow();
+  const key = `${service}|${raw.did}`;
+  let secret = cache.get(key);
+  if (secret === void 0) {
+    try {
+      secret = kc.get(service, raw.did);
+    } catch (e) {
+      const why2 = e instanceof KeychainError ? e.reason : "an unexpected error";
+      throw new CliError("keychain_unreadable", `this device's keys are in ${kc.label} (item ${service}, account ${raw.did}), which couldn't be read: ${why2}. Unlock it and run the command again. Nothing was changed, and no new keys were made`);
+    }
+    if (secret === void 0) {
+      throw new CliError(
+        "keychain_missing",
+        `this device's keys should be in ${kc.label} (item ${service}, account ${raw.did}), and it has no such item: was it deleted, or is this another user account? Restore it from a keychain backup, or \`p2p backup restore\` on a fresh home. Nothing was changed, and no new keys were made`
+      );
+    }
+  }
+  const secrets = openPayload(secret, raw, `${service}, account ${raw.did}`);
+  if (secrets.ik === void 0 && raw.ik !== void 0) {
+    let ok;
+    try {
+      ok = typeof raw.ik === "string" && identityKeyFromSeed(b64uDecode(raw.ik, 32)).userId === raw.userId;
+    } catch {
+      ok = false;
+    }
+    if (!ok) throw new CliError("keychain_mismatch", `${join11(home, "cli", "keys.json")} holds an identity key that isn't this identity's: this device's keys can't be loaded. Nothing was changed, and no new keys were made`);
+  }
+  cache.set(key, secret);
+  return { ...without(raw, SEAL_FIELDS), ...secrets };
+}
+function openKeys(home, raw) {
+  if (raw === void 0 || raw === null) return raw;
+  if (isSealed(raw)) return unseal(home, raw);
+  return isObj(raw) ? without(raw, SEAL_FIELDS) : raw;
+}
+function signingSeedSync(home) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync9(join11(home, "cli", "keys.json"), "utf8"));
+  } catch {
+    return void 0;
+  }
+  try {
+    const k = openKeys(home, raw);
+    return isObj(k) && typeof k.spk === "string" && k.spk !== "" ? k.spk : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function assertKeysReadable(home) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync9(join11(home, "cli", "keys.json"), "utf8"));
+  } catch {
+    return;
+  }
+  if (isSealed(raw)) unseal(home, raw);
+}
+function keysUnreadable(home) {
+  try {
+    assertKeysReadable(home);
+    return false;
+  } catch {
+    return true;
+  }
+}
+async function zeroAndRemove(path2, keysPath) {
+  try {
+    const st = await lstat(path2);
+    const keys = await stat(keysPath).catch(() => void 0);
+    const sameAsKeys = keys !== void 0 && keys.ino === st.ino && keys.dev === st.dev;
+    if (st.isFile() && st.nlink === 1 && !sameAsKeys) {
+      const fh = await open2(path2, constants.O_RDWR | constants.O_NOFOLLOW);
+      try {
+        const now = await fh.stat();
+        if (now.ino === st.ino && now.dev === st.dev && now.nlink === 1 && now.size > 0) {
+          await fh.write(Buffer.alloc(now.size, 0), 0, now.size, 0);
+          await fh.sync();
+        }
+      } finally {
+        await fh.close().catch(() => {
+        });
+      }
+    }
+  } catch {
+  }
+  await rm(path2, { force: true }).catch(() => {
+  });
+}
+function wipeLeftovers(home) {
+  try {
+    return readdirSync2(join11(home, "cli")).filter((f) => f.startsWith(WIPE_PREFIX));
+  } catch {
+    return [];
+  }
+}
+async function sweepWipeLeftovers(home) {
+  const found = wipeLeftovers(home);
+  for (const f of found) await zeroAndRemove(join11(home, "cli", f), join11(home, "cli", "keys.json"));
+  return found.length;
+}
+async function replaceKeysFile(inner, home, doc) {
+  const dir = join11(home, "cli");
+  const path2 = join11(dir, "keys.json");
+  let old;
+  try {
+    old = JSON.parse(await readFile3(path2, "utf8"));
+  } catch {
+    old = void 0;
+  }
+  if (process.platform === "win32") {
+    await sweepWipeLeftovers(home);
+    let wipe;
+    if (holdsSecrets(old)) {
+      wipe = join11(dir, `${WIPE_PREFIX}${randomBytes9(6).toString("hex")}`);
+      try {
+        await link(path2, wipe);
+      } catch {
+        wipe = void 0;
+      }
+    }
+    await inner.write("keys", doc);
+    if (wipe) await zeroAndRemove(wipe, path2);
+    return;
+  }
+  let fh;
+  try {
+    fh = holdsSecrets(old) ? await open2(path2, "r+") : void 0;
+  } catch {
+    fh = void 0;
+  }
+  try {
+    const before = fh ? await fh.stat() : void 0;
+    await inner.write("keys", doc);
+    if (fh && before && before.size > 0) {
+      const now = await stat(path2).catch(() => void 0);
+      if (!now || now.ino !== before.ino || now.dev !== before.dev) {
+        await fh.write(Buffer.alloc(before.size, 0), 0, before.size, 0);
+        await fh.sync();
+      }
+    }
+  } finally {
+    await fh?.close().catch(() => {
+    });
+  }
+}
+function storeAndVerify(kc, home, k, replace) {
+  const service = serviceFor(home);
+  const secret = payloadOf(k);
+  const key = `${service}|${k.did}`;
+  if (cache.get(key) === secret) return;
+  try {
+    const have = kc.get(service, k.did);
+    if (have === secret) {
+      cache.set(key, secret);
+      return;
+    }
+    if (have !== void 0) {
+      if (!replace) throw new CliError("keychain_mismatch", `${kc.label} holds other keys for this device (item ${service}, account ${k.did}) than the ones being written: nothing was changed`);
+      kc.remove(service, k.did);
+      cache.delete(key);
+    }
+    kc.set(service, k.did, LABEL, secret);
+  } catch (e) {
+    if (e instanceof CliError) throw e;
+    throw new CliError("keychain_write_failed", `couldn't store this device's keys in ${kc.label}: ${e instanceof KeychainError ? e.reason : "an unexpected error"}. Nothing was changed: the keys are where they were`);
+  }
+  let back;
+  try {
+    back = kc.get(service, k.did);
+  } catch (e) {
+    throw new CliError("keychain_write_failed", `stored this device's keys in ${kc.label}, but couldn't read them back: ${e instanceof KeychainError ? e.reason : "an unexpected error"}. Nothing was changed: the keys are where they were`);
+  }
+  if (back !== secret) throw new CliError("keychain_write_failed", `the keys read back from ${kc.label} weren't the ones stored. Nothing was changed: the keys are where they were`);
+  cache.set(`${service}|${k.did}`, secret);
+}
+function sealedOf(home, k) {
+  return { ...without(k, [...SECRET_FIELDS, ...SEAL_FIELDS]), store: "keychain", service: serviceFor(home) };
+}
+function asFull(v) {
+  if (!isObj(v) || typeof v.spk !== "string" || typeof v.kpk !== "string" || typeof v.did !== "string" || typeof v.userId !== "string") {
+    throw new CliError("internal", "a keys document without its keys");
+  }
+  return without(v, SEAL_FIELDS);
+}
+function keyStoreStatus(home) {
+  const st = keyStoreStatusOf(home);
+  const left = wipeLeftovers(home);
+  if (left.length === 0) return st;
+  const say = `${left.length === 1 ? "a wipe file" : `${left.length} wipe files`} from an interrupted move ${left.length === 1 ? "is" : "are"} still in ${join11(home, "cli")} (${left.join(", ")}), and may hold the old keys file's bytes: the next p2p command that isn't read-only removes ${left.length === 1 ? "it" : "them"}`;
+  return { ...st, leftovers: left, problem: st.problem ? `${st.problem}; ${say}` : say };
+}
+function keyStoreStatusOf(home) {
+  const kc = platformKeychain();
+  const why2 = kc ? kc.unavailable() : `p2p knows no OS keychain on ${process.platform}`;
+  const keychain = { ...kc ? { kind: kc.kind } : {}, label: kc?.label ?? "an OS keychain", available: why2 === void 0, ...why2 !== void 0 ? { why: why2 } : {} };
+  let configured = "file";
+  let problem;
+  try {
+    configured = configuredBackend(home);
+  } catch (e) {
+    problem = e.message;
+  }
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync9(join11(home, "cli", "keys.json"), "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") return { configured, keys: "none", readable: false, ...problem ? { problem } : {}, keychain };
+    return { configured, keys: "file", readable: false, problem: `${join11(home, "cli", "keys.json")} can't be read`, keychain };
+  }
+  if (isSealed(raw)) {
+    const item = { service: String(raw.service), account: String(raw.did) };
+    if (configured !== "keychain" && !problem) problem = `the keys are in the keychain, but ${markerFile(home)} is missing or says files: they stay in the keychain (\`p2p keys backend keychain\` records it again; \`p2p keys backend file\` moves them out)`;
+    try {
+      unseal(home, raw);
+      return { configured, keys: "keychain", readable: true, ...problem ? { problem } : {}, keychain, item };
+    } catch (e) {
+      return { configured, keys: "keychain", readable: false, problem: e.message, keychain, item };
+    }
+  }
+  if (!holdsSecrets(raw)) return { configured, keys: "file", readable: false, problem: `${join11(home, "cli", "keys.json")} holds no keys`, keychain };
+  if (configured === "keychain" && !problem) problem = `the keys are still in ${join11(home, "cli", "keys.json")}: the move into the keychain hasn't finished (\`p2p keys backend keychain\` finishes it)`;
+  return { configured, keys: "file", readable: true, ...problem ? { problem } : {}, keychain };
+}
+async function moveKeysToKeychain(store2) {
+  const home = store2.home;
+  const kc = platformKeychain();
+  if (!kc) throw new CliError("keychain_unavailable", `p2p knows no OS keychain on ${process.platform}: the keys stay in files`);
+  const why2 = kc.unavailable();
+  if (why2) throw new CliError("keychain_unavailable", `${kc.label} can't be used here: ${why2}. Nothing was changed: the keys stay in files`);
+  return store2.withLock(async () => {
+    const raw = await store2.readRaw();
+    const service = serviceFor(home);
+    if (raw === void 0) {
+      probeKeychain(kc, service);
+      writeMarker(home, "keychain");
+      return { backend: "keychain", moved: false, where: `${kc.label}: no keys here yet, the ones this device makes will be kept there`, warnings: [] };
+    }
+    if (isSealed(raw)) {
+      unseal(home, raw);
+      writeMarker(home, "keychain");
+      return { backend: "keychain", moved: false, where: `${kc.label} (they were there already)`, item: { service, account: String(raw.did) }, warnings: [] };
+    }
+    const k = asFull(raw);
+    storeAndVerify(kc, home, k, true);
+    writeMarker(home, "keychain");
+    await replaceKeysFile(store2.inner, home, sealedOf(home, k));
+    return { backend: "keychain", moved: true, where: kc.label, item: { service, account: k.did }, warnings: [] };
+  });
+}
+async function moveKeysToFiles(store2) {
+  const home = store2.home;
+  const where = `${join11(home, "cli", "keys.json")} (0600)`;
+  return store2.withLock(async () => {
+    await sweepWipeLeftovers(home);
+    const raw = await store2.readRaw();
+    const warnings = [];
+    if (raw === void 0 || !isSealed(raw)) {
+      writeMarker(home, "file");
+      if (raw !== void 0 && holdsSecrets(raw)) forgetLeftover(home, asFull(raw), warnings);
+      return { backend: "file", moved: false, where: raw === void 0 ? `${where}: no keys here yet` : `${where} (they were there already)`, warnings };
+    }
+    const k = unseal(home, raw);
+    await store2.inner.write("keys", k);
+    const back = await store2.inner.read("keys");
+    if (!isObj(back) || payloadOf(asFull(back)) !== payloadOf(k)) {
+      throw new CliError("keys_write_failed", `the keys read back from ${where} weren't the ones written: the keychain item was kept`);
+    }
+    writeMarker(home, "file");
+    const kc = platformKeychain();
+    const service = String(raw.service);
+    try {
+      kc?.remove(service, k.did);
+      cache.delete(`${service}|${k.did}`);
+    } catch (e) {
+      warnings.push(`the keys are in ${where} now, but the keychain item ${service} (account ${k.did}) couldn't be deleted (${e instanceof KeychainError ? e.reason : "error"}): delete it yourself`);
+    }
+    return { backend: "file", moved: true, where, warnings };
+  });
+}
+async function finishPendingMove(store2) {
+  await sweepWipeLeftovers(store2.home);
+  let backend;
+  try {
+    backend = configuredBackend(store2.home);
+  } catch (e) {
+    return e.message;
+  }
+  if (backend !== "keychain") return void 0;
+  if (!holdsSecrets(await store2.readRaw())) return void 0;
+  try {
+    await moveKeysToKeychain(store2);
+    return void 0;
+  } catch (e) {
+    return `this device's keys are still in ${join11(store2.home, "cli", "keys.json")}, not in the keychain this home chose: ${e.message}`;
+  }
+}
+function probeKeychain(kc, service) {
+  const account = `probe-${randomBytes9(8).toString("hex")}`;
+  const secret = `p2p1.${randomBytes9(24).toString("base64url")}`;
+  try {
+    kc.set(service, account, LABEL, secret);
+    const back = kc.get(service, account);
+    if (back !== secret) throw new KeychainError("what it read back wasn't what it stored");
+  } catch (e) {
+    try {
+      kc.remove(service, account);
+    } catch {
+    }
+    throw new CliError("keychain_write_failed", `${kc.label} can't be used here: ${e instanceof KeychainError ? e.reason : "an unexpected error"}. Nothing was changed: new keys stay in files`);
+  }
+  try {
+    kc.remove(service, account);
+  } catch (e) {
+    throw new CliError("keychain_write_failed", `${kc.label} stored a test item but couldn't delete it (${e instanceof KeychainError ? e.reason : "error"}): nothing was changed. Delete the item ${service} (account ${account}) yourself`);
+  }
+}
+function forgetLeftover(home, k, warnings) {
+  try {
+    if (deviceKeysV3FromSecrets(k.userId, b64uDecode(k.spk, 32), b64uDecode(k.kpk, 32)).did !== k.did) return;
+  } catch {
+    return;
+  }
+  const kc = platformKeychain();
+  if (!kc || kc.unavailable()) return;
+  const service = serviceFor(home);
+  try {
+    const have = kc.get(service, k.did);
+    if (have === void 0) return;
+    if (have !== payloadOf(k)) {
+      warnings.push(`${kc.label} holds an item for this device (${service}, account ${k.did}) that isn't a copy of the keys in keys.json: it was left alone`);
+      return;
+    }
+    kc.remove(service, k.did);
+    cache.delete(`${service}|${k.did}`);
+  } catch (e) {
+    warnings.push(`a copy of the keys may still be in ${kc.label} (item ${service}, account ${k.did}) from a move that didn't finish, and it couldn't be deleted (${e instanceof KeychainError ? e.reason : "error"}): delete it yourself`);
+  }
+}
+function forgetKeychainItem(home, did) {
+  if (!did) return;
+  try {
+    if (configuredBackend(home) !== "keychain") return;
+    const service = serviceFor(home);
+    platformKeychain()?.remove(service, did);
+    cache.delete(`${service}|${did}`);
+  } catch {
+  }
+}
+var KEYCHAIN_TIMEOUT_MS, realRunner, KeychainError, SAFE_ARG, SAFE_SECRET, SECURITY, SECRET_TOOL_PATHS, WINDOWS_CSHARP, WINDOWS_SCRIPT, WINDOWS_POWERSHELL, override, SERVICE_PREFIX, LABEL, SECRET_FIELDS, SEAL_FIELDS, isObj, cache, WIPE_PREFIX, KeyStoreBackend;
+var init_keystore = __esm({
+  "packages/p2p/src/keystore.ts"() {
+    "use strict";
+    init_v3();
+    init_errors2();
+    KEYCHAIN_TIMEOUT_MS = 2e4;
+    realRunner = (file, args, input) => {
+      const r = spawnSync(file, [...args], {
+        input,
+        encoding: "utf8",
+        timeout: KEYCHAIN_TIMEOUT_MS,
+        windowsHide: true,
+        shell: false,
+        maxBuffer: 1 << 20,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", ...r.error ? { error: r.error.code ?? "error" } : {} };
+    };
+    KeychainError = class extends Error {
+      constructor(reason) {
+        super(reason);
+        this.reason = reason;
+      }
+      reason;
+    };
+    SAFE_ARG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+    SAFE_SECRET = /^p2p1\.[A-Za-z0-9_-]{1,4096}$/;
+    SECURITY = "/usr/bin/security";
+    SECRET_TOOL_PATHS = ["/usr/bin/secret-tool", "/bin/secret-tool", "/run/current-system/sw/bin/secret-tool"];
+    WINDOWS_CSHARP = String.raw`using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class P2PCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public int Flags; public int Type; public string TargetName; public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public int CredentialBlobSize; public IntPtr CredentialBlob; public int Persist;
+    public int AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+  }
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CredWriteW(ref CREDENTIAL c, int flags);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CredReadW(string target, int type, int flags, out IntPtr c);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CredDeleteW(string target, int type, int flags);
+  [DllImport("advapi32.dll")] static extern void CredFree(IntPtr p);
+  static int Write(string target, string user, string label, string secret) {
+    byte[] b = Encoding.UTF8.GetBytes(secret);
+    IntPtr p = Marshal.AllocHGlobal(b.Length);
+    try {
+      Marshal.Copy(b, 0, p, b.Length);
+      CREDENTIAL c = new CREDENTIAL();
+      c.Type = 1; c.TargetName = target; c.UserName = user; c.Comment = label;
+      c.CredentialBlobSize = b.Length; c.CredentialBlob = p; c.Persist = 2;
+      if (!CredWriteW(ref c, 0)) return Marshal.GetLastWin32Error();
+      return 0;
+    } finally {
+      for (int i = 0; i < b.Length; i++) Marshal.WriteByte(p, i, 0);
+      Marshal.FreeHGlobal(p);
+      Array.Clear(b, 0, b.Length);
+    }
+  }
+  static string Read(string target, out int err) {
+    IntPtr p;
+    err = 0;
+    if (!CredReadW(target, 1, 0, out p)) { err = Marshal.GetLastWin32Error(); return null; }
+    try {
+      CREDENTIAL c = (CREDENTIAL)Marshal.PtrToStructure(p, typeof(CREDENTIAL));
+      byte[] b = new byte[c.CredentialBlobSize];
+      Marshal.Copy(c.CredentialBlob, b, 0, c.CredentialBlobSize);
+      return Encoding.UTF8.GetString(b);
+    } finally { CredFree(p); }
+  }
+  static string Field(string[] f, int i) { return i < f.Length ? f[i].Trim() : ""; }
+  public static int Run() {
+    string[] f = Console.In.ReadToEnd().Split((char)10);
+    string op = Field(f, 0), target = Field(f, 1);
+    if (target.Length == 0) return 4;
+    int e;
+    if (op == "set") {
+      e = Write(target, Field(f, 2), Field(f, 3), Field(f, 4));
+      if (e != 0) { Console.Error.WriteLine("CredWrite failed: Win32 error " + e); return 2; }
+      return 0;
+    }
+    if (op == "get") {
+      string s = Read(target, out e);
+      if (e == 1168) return 3;
+      if (e != 0) { Console.Error.WriteLine("CredRead failed: Win32 error " + e); return 2; }
+      Console.Out.Write(s);
+      Console.Out.Flush();
+      return 0;
+    }
+    if (op == "delete") {
+      if (CredDeleteW(target, 1, 0)) return 0;
+      e = Marshal.GetLastWin32Error();
+      if (e == 1168) return 3;
+      Console.Error.WriteLine("CredDelete failed: Win32 error " + e);
+      return 2;
+    }
+    return 4;
+  }
+}
+`;
+    WINDOWS_SCRIPT = `$ErrorActionPreference = 'Stop'
+$PSModuleAutoloadingPreference = 'None'
+$src = @'
+${WINDOWS_CSHARP}'@
+$cp = [System.CodeDom.Compiler.CompilerParameters]::new()
+$cp.GenerateInMemory = $true
+[void]$cp.ReferencedAssemblies.Add('System.dll')
+$res = [Microsoft.CSharp.CSharpCodeProvider]::new().CompileAssemblyFromSource($cp, $src)
+if ($res.Errors.HasErrors) { [Console]::Error.WriteLine('the credential helper did not compile'); exit 5 }
+exit [int]$res.CompiledAssembly.GetType('P2PCred').GetMethod('Run').Invoke($null, $null)
+`;
+    WINDOWS_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    SERVICE_PREFIX = "peer2peer-keys-";
+    LABEL = "peer2peer-keys-device";
+    SECRET_FIELDS = ["spk", "kpk", "ik"];
+    SEAL_FIELDS = ["store", "service"];
+    isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+    cache = /* @__PURE__ */ new Map();
+    WIPE_PREFIX = ".keys.json.wipe-";
+    KeyStoreBackend = class {
+      constructor(inner, home, opts = {}) {
+        this.inner = inner;
+        this.home = home;
+        this.opts = opts;
+      }
+      inner;
+      home;
+      opts;
+      async read(name2) {
+        const raw = await this.inner.read(name2);
+        return name2 === "keys" ? openKeys(this.home, raw) : raw;
+      }
+      /** keys.json as it is on disk (sealed or not). */
+      readRaw() {
+        return this.inner.read("keys");
+      }
+      async write(name2, value) {
+        if (name2 !== "keys" || value === null || value === void 0 || this.opts.memoryOnly) return this.inner.write(name2, value);
+        const k = asFull(value);
+        const sealed = isSealed(await this.inner.read("keys"));
+        if (sealed || configuredBackend(this.home) === "keychain") {
+          storeAndVerify(keychainOrThrow(), this.home, k, !sealed);
+          return replaceKeysFile(this.inner, this.home, sealedOf(this.home, k));
+        }
+        return this.inner.write(name2, k);
+      }
+      remove(name2) {
+        return this.inner.remove ? this.inner.remove(name2) : this.inner.write(name2, null);
+      }
+      withLock(fn) {
+        return this.inner.withLock(fn);
+      }
+    };
+  }
+});
+
 // packages/p2p/src/shortcode.ts
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes as nodeRandom } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns";
@@ -12634,7 +13395,7 @@ function refusePrivateRelays(relays, what, allow, opts = {}) {
     }
   }
 }
-async function refusePrivateResolved(relays, what, opts = {}, resolve7 = dnsLookup) {
+async function refusePrivateResolved(relays, what, opts = {}, resolve8 = dnsLookup) {
   for (const { relay, dial } of relays) {
     let host;
     try {
@@ -12643,17 +13404,17 @@ async function refusePrivateResolved(relays, what, opts = {}, resolve7 = dnsLook
       continue;
     }
     if (host.startsWith("[") || parseV4(host) || parseV6(host)) continue;
-    const addrs = await new Promise((r) => resolve7(host, { all: true }, (err, a) => r(err ? [] : a)));
+    const addrs = await new Promise((r) => resolve8(host, { all: true }, (err, a) => r(err ? [] : a)));
     const bad = addrs.find((a) => isPrivateAddress(a.address));
     if (bad) {
       throw new CliError("private_relay", privateRelayMessage(`${what}'s relay`, new URL(relay).hostname, { ...opts, detail: `it resolves to ${bad.address}` }));
     }
   }
 }
-function privateGuardLookup(resolve7 = dnsLookup) {
+function privateGuardLookup(resolve8 = dnsLookup) {
   return (hostname4, options, callback) => {
     const family = typeof options === "object" && options !== null && typeof options.family === "number" ? options.family : void 0;
-    resolve7(hostname4, { all: true, ...family ? { family } : {} }, (err, addrs) => {
+    resolve8(hostname4, { all: true, ...family ? { family } : {} }, (err, addrs) => {
       if (err) return callback(err, "", 0);
       const bad = addrs.find((a) => isPrivateAddress(a.address));
       if (bad || addrs.length === 0) {
@@ -12796,14 +13557,14 @@ var init_transient = __esm({
 
 // packages/p2p/src/procstart.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { existsSync as existsSync3, readFileSync as readFileSync9 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync10 } from "node:fs";
 function linuxStartMs(pid) {
-  const stat3 = readFileSync9(`/proc/${pid}/stat`, "utf8");
-  const fields = stat3.slice(stat3.lastIndexOf(")") + 2).split(" ");
+  const stat4 = readFileSync10(`/proc/${pid}/stat`, "utf8");
+  const fields = stat4.slice(stat4.lastIndexOf(")") + 2).split(" ");
   const ticks = Number(fields[19]);
   if (!Number.isFinite(ticks)) return void 0;
   if (bootMs === void 0) {
-    const m = /^btime (\d+)$/m.exec(readFileSync9("/proc/stat", "utf8"));
+    const m = /^btime (\d+)$/m.exec(readFileSync10("/proc/stat", "utf8"));
     if (!m) return void 0;
     bootMs = Number(m[1]) * 1e3;
   }
@@ -12819,12 +13580,12 @@ function psStartMs(pid) {
 function processStartMs(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return void 0;
   const now = Date.now();
-  const hit = cache.get(pid);
+  const hit = cache2.get(pid);
   if (hit && now - hit.at < CACHE_MS) return hit.ms;
   const ms = lookup(pid);
-  cache.delete(pid);
-  cache.set(pid, { at: now, ms });
-  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache2.delete(pid);
+  cache2.set(pid, { at: now, ms });
+  if (cache2.size > CACHE_MAX) cache2.delete(cache2.keys().next().value);
   return ms;
 }
 function lookup(pid) {
@@ -12835,28 +13596,28 @@ function lookup(pid) {
   }
   return void 0;
 }
-var bootMs, PS, CACHE_MS, CACHE_MAX, cache;
+var bootMs, PS, CACHE_MS, CACHE_MAX, cache2;
 var init_procstart = __esm({
   "packages/p2p/src/procstart.ts"() {
     "use strict";
-    PS = ["/bin/ps", "/usr/bin/ps"].find((p) => existsSync3(p));
+    PS = ["/bin/ps", "/usr/bin/ps"].find((p) => existsSync4(p));
     CACHE_MS = 5e3;
     CACHE_MAX = 256;
-    cache = /* @__PURE__ */ new Map();
+    cache2 = /* @__PURE__ */ new Map();
   }
 });
 
 // packages/p2p/src/running.ts
-import { readFileSync as readFileSync10 } from "node:fs";
+import { readFileSync as readFileSync11 } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 async function markRunning(app, sid) {
-  await mkdir(join11(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir(join12(app.home, "cursors"), { recursive: true, mode: 448 });
   await writeFile(markerPath(app, sid), JSON.stringify({ pid: process.pid, started: STARTED }), { mode: 384 });
 }
 async function unmarkRunning(app, sid) {
   try {
-    const m = JSON.parse(readFileSync10(markerPath(app, sid), "utf8"));
+    const m = JSON.parse(readFileSync11(markerPath(app, sid), "utf8"));
     if (m.pid === process.pid) await writeFile(markerPath(app, sid), JSON.stringify({ ...m, ended: Date.now() }), { mode: 384 });
   } catch {
   }
@@ -12874,7 +13635,7 @@ function sessionEnded(app, sid) {
   if (app.watching === sid) return false;
   let m;
   try {
-    m = JSON.parse(readFileSync10(markerPath(app, sid), "utf8"));
+    m = JSON.parse(readFileSync11(markerPath(app, sid), "utf8"));
   } catch {
     return false;
   }
@@ -12896,7 +13657,7 @@ var init_running = __esm({
     START_SLACK_MS = 2500;
     markerPath = (app, sid) => {
       if (!SID_RE.test(sid) || sid === "." || sid === "..") throw new Error(`not a session id: ${JSON.stringify(sid.slice(0, 40))}`);
-      return join11(app.home, "cursors", `${sid}.watch`);
+      return join12(app.home, "cursors", `${sid}.watch`);
     };
   }
 });
@@ -12904,9 +13665,9 @@ var init_running = __esm({
 // packages/core/dist/filebackend.js
 import { constants as fsConstants2, promises as fs2 } from "node:fs";
 import { homedir as homedir2, hostname } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function defaultTrustDir() {
-  return join12(homedir2(), ".ix", "p2p");
+  return join13(homedir2(), ".ix", "p2p");
 }
 async function statRead(path2) {
   try {
@@ -12961,7 +13722,7 @@ var init_filebackend = __esm({
       async read(name2) {
         let text2;
         try {
-          text2 = await fs2.readFile(join12(this.dir, `${name2}.json`), "utf8");
+          text2 = await fs2.readFile(join13(this.dir, `${name2}.json`), "utf8");
         } catch (e) {
           if (e.code === "ENOENT")
             return void 0;
@@ -12970,12 +13731,12 @@ var init_filebackend = __esm({
         return JSON.parse(text2);
       }
       async remove(name2) {
-        await fs2.rm(join12(this.dir, `${name2}.json`), { force: true });
+        await fs2.rm(join13(this.dir, `${name2}.json`), { force: true });
       }
       async write(name2, value) {
         await this.ensureDir();
-        const target = join12(this.dir, `${name2}.json`);
-        const tmp = join12(this.dir, `.${name2}.json.${process.pid}.${b64uEncode(randomBytes8(6))}.tmp`);
+        const target = join13(this.dir, `${name2}.json`);
+        const tmp = join13(this.dir, `.${name2}.json.${process.pid}.${b64uEncode(randomBytes8(6))}.tmp`);
         const fh = await fs2.open(tmp, "wx", FILE_MODE);
         try {
           await fh.writeFile(JSON.stringify(value));
@@ -13028,7 +13789,7 @@ var init_filebackend = __esm({
        */
       async withLock(fn) {
         await this.ensureDir();
-        const lock = join12(this.dir, ".lock");
+        const lock = join13(this.dir, ".lock");
         const token = b64uEncode(randomBytes8(16));
         const body = JSON.stringify({ pid: process.pid, host: hostname(), token });
         const t0 = Date.now();
@@ -13178,9 +13939,9 @@ var init_filebackend = __esm({
 
 // packages/core/dist/v3/node.js
 import { homedir as homedir3 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 function defaultTrustDirV3() {
-  return join13(homedir3(), ".p2p", "v3");
+  return join14(homedir3(), ".p2p", "v3");
 }
 var FileTrustStoreV3;
 var init_node = __esm({
@@ -13259,14 +14020,63 @@ var init_progress = __esm({
   }
 });
 
+// packages/p2p/src/readonly.ts
+var OverlayDocBackend, ReadOnlyTrustStoreV3;
+var init_readonly = __esm({
+  "packages/p2p/src/readonly.ts"() {
+    "use strict";
+    init_v3();
+    init_node();
+    OverlayDocBackend = class {
+      constructor(base) {
+        this.base = base;
+      }
+      base;
+      docs = /* @__PURE__ */ new Map();
+      chain = Promise.resolve();
+      removed = /* @__PURE__ */ new Set();
+      async read(name2) {
+        const mine = this.docs.get(name2);
+        if (mine !== void 0) return JSON.parse(mine);
+        if (this.removed.has(name2)) return void 0;
+        return this.base.read(name2);
+      }
+      /** In memory only, like write: the base is never touched. */
+      async remove(name2) {
+        this.docs.delete(name2);
+        this.removed.add(name2);
+      }
+      async write(name2, value) {
+        this.docs.set(name2, JSON.stringify(value));
+      }
+      /** In-process only: never the on-disk lock (taking it would create the lock file). */
+      withLock(fn) {
+        const run = this.chain.then(fn, fn);
+        this.chain = run.catch(() => {
+        });
+        return run;
+      }
+    };
+    ReadOnlyTrustStoreV3 = class extends TrustStoreV3 {
+      constructor(dir) {
+        super(new OverlayDocBackend(new FileDocBackend(dir)));
+        this.dir = dir;
+      }
+      dir;
+    };
+  }
+});
+
 // packages/p2p/src/state.ts
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 var sessKey, EVENT_RETENTION_MS, EVENT_MAX, STATE_BURST, STATE_YIELD_MS, CliState;
 var init_state2 = __esm({
   "packages/p2p/src/state.ts"() {
     "use strict";
     init_node();
     init_progress();
+    init_keystore();
+    init_readonly();
     sessKey = (own, sid) => `${own}|${sid}`;
     EVENT_RETENTION_MS = 7 * 24 * 3600 * 1e3;
     EVENT_MAX = 2e3;
@@ -13276,7 +14086,7 @@ var init_state2 = __esm({
       constructor(dir, progress, backend, lockOpts = {}) {
         this.dir = dir;
         this.progress = progress;
-        this.backend = backend ?? new FileDocBackend(join14(dir, "cli"), lockOpts);
+        this.backend = new KeyStoreBackend(backend ?? new FileDocBackend(join15(dir, "cli"), lockOpts), dir, { memoryOnly: backend instanceof OverlayDocBackend });
       }
       dir;
       progress;
@@ -13312,6 +14122,10 @@ var init_state2 = __esm({
         this.queue = run.catch(() => {
         });
         return run;
+      }
+      /** The key store in front of this state's documents (keystore.ts). */
+      get keyStore() {
+        return this.backend;
       }
       async get(name2) {
         return await this.backend.read(name2);
@@ -13444,7 +14258,7 @@ var init_state2 = __esm({
 });
 
 // packages/p2p/src/outbox.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 function recipientShare(items, bytes2) {
   const crowded = items > OUTBOX_MAX / 2 || bytes2 > OUTBOX_MAX_BYTES / 2;
   return crowded ? { items: OUTBOX_PER_RECIPIENT / 2, bytes: OUTBOX_RECIPIENT_BYTES / 2 } : { items: OUTBOX_PER_RECIPIENT, bytes: OUTBOX_RECIPIENT_BYTES };
@@ -13469,7 +14283,7 @@ async function enqueue(app, copies, meta, now = Date.now()) {
     }
   }
   const fresh = copies.map((c) => ({
-    id: createHash3("sha256").update(c.env).digest("base64url"),
+    id: createHash4("sha256").update(c.env).digest("base64url"),
     to: meta.dest.userId,
     tdid: c.did,
     kind: meta.kind,
@@ -13683,8 +14497,8 @@ var init_outbox = __esm({
 });
 
 // packages/p2p/src/extensions.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync7, readFileSync as readFileSync11, realpathSync as realpathSync4, renameSync as renameSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute8, join as join15, relative, resolve as resolvePath, sep as sep3 } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync5, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname4, isAbsolute as isAbsolute8, join as join16, relative, resolve as resolvePath, sep as sep3 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 function extensionPackageName(ns) {
   return `@peer2peer/ext-${ns}`;
@@ -13748,10 +14562,10 @@ function siblingNodeModules(selfFile) {
 }
 function realish2(p) {
   try {
-    return realpathSync4(p);
+    return realpathSync5(p);
   } catch {
     const parent = dirname4(p);
-    return parent === p ? p : join15(realish2(parent), basename3(p));
+    return parent === p ? p : join16(realish2(parent), basename3(p));
   }
 }
 function isInside2(p, dir) {
@@ -13762,19 +14576,19 @@ function isInside2(p, dir) {
 }
 function extensionDirs(env, selfUrl) {
   const excluded = (env.P2P_EXTENSION_EXCLUDE ?? "").split(delimiter2).map((d) => d.trim()).filter((d) => d !== "" && isAbsolute8(d));
-  const dirs = (env.P2P_EXTENSION_PATH ?? "").split(delimiter2).map((d) => d.trim()).filter(Boolean).filter((d) => !excluded.some((x) => isInside2(d, x))).map((d) => basename3(d) === "node_modules" ? d : join15(d, "node_modules"));
+  const dirs = (env.P2P_EXTENSION_PATH ?? "").split(delimiter2).map((d) => d.trim()).filter(Boolean).filter((d) => !excluded.some((x) => isInside2(d, x))).map((d) => basename3(d) === "node_modules" ? d : join16(d, "node_modules"));
   const self = selfUrl.startsWith("file:") ? fileURLToPath(selfUrl) : selfUrl;
   const sib = siblingNodeModules(self);
   return [.../* @__PURE__ */ new Set([...dirs, ...sib ? [sib] : []])];
 }
 function resolveIn(nodeModules, name2) {
-  const pkgDir = join15(nodeModules, ...name2.split("/"));
-  if (!existsSync4(join15(pkgDir, "package.json"))) return void 0;
+  const pkgDir = join16(nodeModules, ...name2.split("/"));
+  if (!existsSync5(join16(pkgDir, "package.json"))) return void 0;
   let pkg;
   try {
-    pkg = JSON.parse(readFileSync11(join15(pkgDir, "package.json"), "utf8"));
+    pkg = JSON.parse(readFileSync12(join16(pkgDir, "package.json"), "utf8"));
   } catch {
-    throw new ExtResolveError(`${join15(pkgDir, "package.json")} is not valid JSON`);
+    throw new ExtResolveError(`${join16(pkgDir, "package.json")} is not valid JSON`);
   }
   if (pkg?.name !== name2) throw new ExtResolveError(`${pkgDir} is not ${name2}`);
   const dot = typeof pkg.exports === "string" ? pkg.exports : pkg.exports?.["."];
@@ -13783,8 +14597,8 @@ function resolveIn(nodeModules, name2) {
   let real2;
   let realPkg;
   try {
-    realPkg = realpathSync4(pkgDir);
-    real2 = realpathSync4(resolvePath(pkgDir, entry));
+    realPkg = realpathSync5(pkgDir);
+    real2 = realpathSync5(resolvePath(pkgDir, entry));
   } catch {
     throw new ExtResolveError(`${name2}'s entry ${sanitizePeerText(entry, 120)} doesn't exist`);
   }
@@ -13793,18 +14607,18 @@ function resolveIn(nodeModules, name2) {
 }
 function firstFromHere(home, ns, file) {
   if (!home) return true;
-  const p = join15(home, SEEN_FILE);
+  const p = join16(home, SEEN_FILE);
   let seen = {};
   try {
-    seen = JSON.parse(readFileSync11(p, "utf8"));
+    seen = JSON.parse(readFileSync12(p, "utf8"));
   } catch {
   }
   if (seen[ns] === file) return false;
   try {
-    if (existsSync4(home)) {
+    if (existsSync5(home)) {
       const tmp = `${p}.${process.pid}.tmp`;
-      writeFileSync7(tmp, JSON.stringify({ ...seen, [ns]: file }), { mode: 384 });
-      renameSync5(tmp, p);
+      writeFileSync8(tmp, JSON.stringify({ ...seen, [ns]: file }), { mode: 384 });
+      renameSync6(tmp, p);
     }
   } catch {
   }
@@ -13855,19 +14669,19 @@ async function loadExtensions(opts) {
 }
 function setExtensionEnabled(home, ns, on) {
   if (!KNOWN_EXTENSIONS.includes(ns)) throw new Error(`${ns} is not a registered extension namespace (${KNOWN_EXTENSIONS.join(", ")})`);
-  const p = join15(home, "config.json");
+  const p = join16(home, "config.json");
   let cfg = {};
-  if (existsSync4(p)) {
-    const v = JSON.parse(readFileSync11(p, "utf8"));
+  if (existsSync5(p)) {
+    const v = JSON.parse(readFileSync12(p, "utf8"));
     if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("config.json must hold a JSON object");
     cfg = v;
   }
   const cur = Array.isArray(cfg.extensions) ? cfg.extensions.filter((x) => typeof x === "string") : [];
   const next = on ? [.../* @__PURE__ */ new Set([...cur, ns])] : cur.filter((x) => x !== ns);
-  mkdirSync7(home, { recursive: true, mode: 448 });
+  mkdirSync8(home, { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync7(tmp, JSON.stringify({ ...cfg, extensions: next }, null, 2) + "\n", { mode: 384 });
-  renameSync5(tmp, p);
+  writeFileSync8(tmp, JSON.stringify({ ...cfg, extensions: next }, null, 2) + "\n", { mode: 384 });
+  renameSync6(tmp, p);
   return next;
 }
 function sanitizeRendered(v, depth = 0) {
@@ -13947,9 +14761,9 @@ var init_extensions = __esm({
 });
 
 // packages/p2p/src/config.ts
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync12, renameSync as renameSync6, writeFileSync as writeFileSync8 } from "node:fs";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync13, renameSync as renameSync7, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function graphMemoryEnabled(env, home) {
   const v = env.P2P_IX_MEMORY?.trim().toLowerCase();
@@ -14014,12 +14828,12 @@ function statusCapsEnabled(env, home) {
 }
 function resolveHome2(env) {
   const h = env.P2P_HOME?.trim();
-  return h ? h : join16(homedir4(), ".p2p");
+  return h ? h : join17(homedir4(), ".p2p");
 }
 function readFileConfig(home) {
   let raw;
   try {
-    raw = readFileSync12(join16(home, "config.json"), "utf8");
+    raw = readFileSync13(join17(home, "config.json"), "utf8");
   } catch {
     return {};
   }
@@ -14027,7 +14841,7 @@ function readFileConfig(home) {
   try {
     v = JSON.parse(raw);
   } catch {
-    throw new CliError("config", `${join16(home, "config.json")} is not valid JSON`);
+    throw new CliError("config", `${join17(home, "config.json")} is not valid JSON`);
   }
   if (typeof v !== "object" || v === null || Array.isArray(v)) throw new CliError("config", "config.json must hold a JSON object");
   return v;
@@ -14040,12 +14854,12 @@ async function updateFileConfigField(app, key, fn) {
   });
 }
 function setFileConfigField(home, key, value) {
-  const p = join16(home, "config.json");
+  const p = join17(home, "config.json");
   const cfg = readFileConfig(home);
-  mkdirSync8(home, { recursive: true, mode: 448 });
+  mkdirSync9(home, { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
-  writeFileSync8(tmp, JSON.stringify({ ...cfg, [key]: value }, null, 2) + "\n", { mode: 384 });
-  renameSync6(tmp, p);
+  writeFileSync9(tmp, JSON.stringify({ ...cfg, [key]: value }, null, 2) + "\n", { mode: 384 });
+  renameSync7(tmp, p);
 }
 function normalizeRelays(list) {
   const out = [];
@@ -14070,7 +14884,7 @@ function shippedDefaultRelays(env) {
   }
   let raw;
   try {
-    raw = readFileSync12(path2, "utf8");
+    raw = readFileSync13(path2, "utf8");
   } catch {
     return [];
   }
@@ -14258,7 +15072,7 @@ var init_features = __esm({
 });
 
 // packages/p2p/src/receipts.ts
-import { randomBytes as randomBytes9 } from "node:crypto";
+import { randomBytes as randomBytes10 } from "node:crypto";
 function receiptRateAllows(rate, user) {
   const mine = rate.by[user]?.length ?? 0;
   if (mine >= RECEIPT_RATE_PER_USER || rate.all.length >= RECEIPT_RATE_HARD) return false;
@@ -14292,7 +15106,7 @@ function withDoc(app, fn) {
   });
 }
 function newReceiptId() {
-  return randomBytes9(12).toString("base64url");
+  return randomBytes10(12).toString("base64url");
 }
 async function asksReceipts(app, own, sid) {
   return peerSupports(app, own, { sid }, STATUS_CAP_RECEIPTS);
@@ -14376,9 +15190,9 @@ var init_receipts = __esm({
 });
 
 // packages/p2p/src/history.ts
-import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash4, hkdfSync as hkdfSync2, randomBytes as randomBytes10 } from "node:crypto";
-import { mkdirSync as mkdirSync9, readdirSync as readdirSync2, readFileSync as readFileSync13, renameSync as renameSync7, rmSync as rmSync3, writeFileSync as writeFileSync9 } from "node:fs";
-import { join as join17 } from "node:path";
+import { createCipheriv as createCipheriv2, createDecipheriv as createDecipheriv2, createHash as createHash5, hkdfSync as hkdfSync2, randomBytes as randomBytes11 } from "node:crypto";
+import { mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, renameSync as renameSync8, rmSync as rmSync4, writeFileSync as writeFileSync10 } from "node:fs";
+import { join as join18 } from "node:path";
 function historySettings(app) {
   let cfg = {};
   try {
@@ -14396,11 +15210,11 @@ function historySettings(app) {
   };
 }
 function historyKeyFile(home) {
-  return join17(home, "cli", "history.key");
+  return join18(home, "cli", "history.key");
 }
 function readKey2(home) {
   try {
-    const t2 = readFileSync13(historyKeyFile(home), "utf8").trim();
+    const t2 = readFileSync14(historyKeyFile(home), "utf8").trim();
     return KEY_RE.test(t2) ? Buffer.from(hkdfSync2("sha256", b64uDecode(t2, 32), new Uint8Array(0), new TextEncoder().encode(KEY_INFO), 32)) : void 0;
   } catch {
     return void 0;
@@ -14409,22 +15223,22 @@ function readKey2(home) {
 function historyKey(home, create) {
   const have = readKey2(home);
   if (have || !create) return have;
-  mkdirSync9(join17(home, "cli"), { recursive: true, mode: 448 });
+  mkdirSync10(join18(home, "cli"), { recursive: true, mode: 448 });
   try {
-    writeFileSync9(historyKeyFile(home), b64uEncode(new Uint8Array(randomBytes10(32))), { mode: 384, flag: "wx" });
+    writeFileSync10(historyKeyFile(home), b64uEncode(new Uint8Array(randomBytes11(32))), { mode: 384, flag: "wx" });
   } catch {
   }
   return readKey2(home);
 }
 function seal(key, name2, value) {
-  const nonce = randomBytes10(12);
+  const nonce = randomBytes11(12);
   const pt = Buffer.from(JSON.stringify(value), "utf8");
   const c = createCipheriv2("chacha20-poly1305", key, nonce, { authTagLength: 16 });
   c.setAAD(Buffer.from(AAD_PREFIX + name2, "utf8"), { plaintextLength: pt.length });
   const ct = Buffer.concat([c.update(pt), c.final(), c.getAuthTag()]);
   return { v: 1, alg: "c20p1305", n: b64uEncode(new Uint8Array(nonce)), c: b64uEncode(new Uint8Array(ct)) };
 }
-function open2(key, name2, doc) {
+function open3(key, name2, doc) {
   const s2 = doc;
   if (!s2 || s2.v !== 1 || s2.alg !== "c20p1305" || typeof s2.n !== "string" || typeof s2.c !== "string") return void 0;
   try {
@@ -14442,30 +15256,30 @@ function open2(key, name2, doc) {
 }
 function segmentNames(app) {
   try {
-    return readdirSync2(join17(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
+    return readdirSync3(join18(app.state.dir, "cli")).map((f) => /^(history-\d{1,9})\.json$/.exec(f)?.[1]).filter((x) => x !== void 0).sort((a, b) => segNum(a) - segNum(b));
   } catch {
     return [];
   }
 }
 function quarantine(app, name2, why2) {
   setAside++;
-  const dir = join17(app.state.dir, "cli");
+  const dir = join18(app.state.dir, "cli");
   const to = `history.bad-${Date.now()}-${name2}.json`;
   try {
-    renameSync7(join17(dir, `${name2}.json`), join17(dir, to));
+    renameSync8(join18(dir, `${name2}.json`), join18(dir, to));
     app.io.err(`p2p: message history: ${name2} couldn't be opened (${why2}); set aside as ${to}`);
   } catch {
   }
 }
 function pruneQuarantine(app, cutoff) {
-  const dir = join17(app.state.dir, "cli");
+  const dir = join18(app.state.dir, "cli");
   let files;
   try {
-    files = readdirSync2(dir).map((f) => ({ f, m: QUARANTINE_RE.exec(f) })).filter((x) => x.m).map((x) => ({ f: x.f, at: Number(x.m[1]) })).sort((a, b) => a.at - b.at);
+    files = readdirSync3(dir).map((f) => ({ f, m: QUARANTINE_RE.exec(f) })).filter((x) => x.m).map((x) => ({ f: x.f, at: Number(x.m[1]) })).sort((a, b) => a.at - b.at);
   } catch {
     return;
   }
-  for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync3(join17(dir, x.f), { force: true });
+  for (const [i, x] of files.entries()) if (x.at < cutoff || i < files.length - MAX_QUARANTINED) rmSync4(join18(dir, x.f), { force: true });
 }
 async function readSealed(app, key, name2, hash) {
   let doc;
@@ -14476,7 +15290,7 @@ async function readSealed(app, key, name2, hash) {
   }
   if (doc === void 0 || doc === null) return { ok: false, missing: true, why: "missing" };
   if (hash !== void 0 && docHash(doc) !== hash) return { ok: false, missing: false, why: "not the copy the index names" };
-  const v = open2(key, name2, doc);
+  const v = open3(key, name2, doc);
   return v === void 0 ? { ok: false, missing: false, why: "altered, or sealed under another key" } : { ok: true, value: v, doc };
 }
 async function readSeg(app, key, name2, hash) {
@@ -14638,7 +15452,7 @@ async function clearHistory(app) {
       else await b.write(name2, null);
     }
     pruneQuarantine(app, Number.MAX_SAFE_INTEGER);
-    rmSync3(historyKeyFile(app.home), { force: true });
+    rmSync4(historyKeyFile(app.home), { force: true });
     return n;
   });
   const events = await app.state.update("events", (cur) => {
@@ -14708,7 +15522,7 @@ async function recordSent(app, o) {
   const circle = await circleOf(app, o.to.own, o.to.sid);
   await recordHistory(app, [
     {
-      id: `out:${randomBytes10(9).toString("base64url")}`,
+      id: `out:${randomBytes11(9).toString("base64url")}`,
       at: Date.now(),
       dir: "out",
       type: o.ext ? "ext" : "message",
@@ -14849,7 +15663,7 @@ var init_history = __esm({
     AAD_PREFIX = "p2p/v3/history/v1|";
     KEY_RE = /^[A-Za-z0-9_-]{43}$/;
     recBytes = (r) => Buffer.byteLength(JSON.stringify(r), "utf8");
-    docHash = (doc) => createHash4("sha256").update(JSON.stringify(doc), "utf8").digest("base64url").slice(0, 22);
+    docHash = (doc) => createHash5("sha256").update(JSON.stringify(doc), "utf8").digest("base64url").slice(0, 22);
     segNum = (name2) => Number(name2.slice("history-".length));
     MARK = "history-mark";
     MAX_QUARANTINED = 16;
@@ -14866,7 +15680,7 @@ var init_history = __esm({
 });
 
 // packages/p2p/src/xstate.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function xstateCost(r) {
   return Math.max(r.bytes, XSTATE_MIN_COST) + Buffer.byteLength(r.fallback, "utf8") + r.kind.length + r.sid.length + XSTATE_OVERHEAD;
 }
@@ -14988,8 +15802,8 @@ function asSenderDoc(v, own) {
   return x && x.own === own && typeof x.recs === "object" && x.recs !== null ? { own, recs: { ...x.recs }, rate: { ...x.rate ?? {} }, ...x.all ? { all: x.all } : {} } : { own, recs: {}, rate: {} };
 }
 function liveWindows(rate, now) {
-  const open4 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
-  return Object.fromEntries(open4);
+  const open5 = Object.entries(rate).filter(([, w]) => now - w.start < 6e4).sort((a, b) => b[1].start - a[1].start).slice(0, XSTATE_RATE_WINDOWS_MAX);
+  return Object.fromEntries(open5);
 }
 async function writeSender(backend, name2, doc, now) {
   const rate = liveWindows(doc.rate, now);
@@ -15136,7 +15950,7 @@ var init_xstate = __esm({
     XSTATE_SPACING_SLACK_MS = 1e3;
     XSTATE_LS_MAX = 8;
     valueKey = (sid, kind) => `${sid}|${kind}`;
-    senderDoc = (own) => `xstate-${createHash5("sha256").update(own).digest("hex").slice(0, 16)}`;
+    senderDoc = (own) => `xstate-${createHash6("sha256").update(own).digest("hex").slice(0, 16)}`;
     emptyIndex = () => ({ v: 2, users: {} });
     reconciled = /* @__PURE__ */ new WeakSet();
     summarize = (recs) => ({ n: Object.keys(recs).length, cost: Object.values(recs).reduce((t2, r) => t2 + xstateCost(r), 0) });
@@ -18390,7 +19204,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes17, createHash: createHash11 } = __require("crypto");
+    var { randomBytes: randomBytes18, createHash: createHash12 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -18941,7 +19755,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes17(16).toString("base64");
+      const key = randomBytes18(16).toString("base64");
       const request = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -19071,7 +19885,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest2 = createHash11("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash12("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest2) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -19352,7 +20166,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open4() {
+          ws.once("open", function open5() {
             duplex._final(callback);
           });
           return;
@@ -19373,7 +20187,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open4() {
+          ws.once("open", function open5() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -19440,7 +20254,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter2 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash11 } = __require("crypto");
+    var { createHash: createHash12 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -19747,7 +20561,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest2 = createHash11("sha1").update(key + GUID).digest("base64");
+        const digest2 = createHash12("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -19932,7 +20746,7 @@ async function getJson(url, timeoutMs, progress, what = "identity documents", lo
 }
 function getJsonGuarded(url, timeoutMs, lookup2) {
   const get = url.startsWith("https:") ? httpsGet : httpGet;
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let done = false;
     const deadline = setTimeout(() => {
       req.destroy();
@@ -19952,7 +20766,7 @@ function getJsonGuarded(url, timeoutMs, lookup2) {
       if (res.statusCode === 404) {
         res.resume();
         settle();
-        return resolve7(void 0);
+        return resolve8(void 0);
       }
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
         res.resume();
@@ -19972,7 +20786,7 @@ function getJsonGuarded(url, timeoutMs, lookup2) {
         try {
           const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           settle();
-          resolve7(v);
+          resolve8(v);
         } catch (e) {
           fail2(e);
         }
@@ -20131,8 +20945,8 @@ var init_relay_client = __esm({
         let dialTimer;
         try {
           await Promise.race([
-            new Promise((resolve7, reject) => {
-              ws.once("open", () => resolve7());
+            new Promise((resolve8, reject) => {
+              ws.once("open", () => resolve8());
               ws.once("error", (e) => {
                 const code2 = e.code ?? "";
                 if (code2 === "ECONNREFUSED") reject(unreachable(`connection refused on port ${port}`));
@@ -20187,14 +21001,14 @@ var init_relay_client = __esm({
       }
       requestInner(frame, timeoutMs) {
         const id2 = `c${this.nextId++}`;
-        return new Promise((resolve7, reject) => {
+        return new Promise((resolve8, reject) => {
           if (!this.isOpen) return reject(new CliError("network", `relay ${this.relay} is not connected`));
           const timer = setTimeout(() => {
             this.pending.delete(id2);
             reject(new CliError("timeout", `${this.relay}: no reply to ${frame.t} after ${Math.round(timeoutMs / 1e3)}s`));
           }, timeoutMs);
           timer.unref();
-          this.pending.set(id2, { resolve: resolve7, reject, timer });
+          this.pending.set(id2, { resolve: resolve8, reject, timer });
           this.ws.send(JSON.stringify({ ...frame, id: id2 }));
         });
       }
@@ -20454,11 +21268,11 @@ var init_relay_client = __esm({
       }
       /** Resolves after `ms`, or sooner when a handler finishes or a relay says `caught-up`. */
       nap(ms) {
-        return new Promise((resolve7) => {
+        return new Promise((resolve8) => {
           const done = () => {
             clearTimeout(t2);
             this.wakers.delete(done);
-            resolve7();
+            resolve8();
           };
           const t2 = setTimeout(done, ms);
           this.wakers.add(done);
@@ -21207,8 +22021,8 @@ async function completeCodeJoin(app, entry, item, opts) {
     await dropHeld(app, (h) => h.id === item.id);
     let isDefault = app.self?.defaultCircle === entry.cid;
     const joined = await loadCircle(app.store, entry.cid);
-    const open4 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
-    if (!app.self?.defaultCircle && entry.first !== false && !open4) {
+    const open5 = !joined || circlePolicy(joined.chain.head) === "open" || r.policy === "open";
+    if (!app.self?.defaultCircle && entry.first !== false && !open5) {
       await setDefaultCircle(app, entry.cid, { byJoin: true });
       isDefault = true;
     }
@@ -21400,14 +22214,14 @@ var init_codes = __esm({
 });
 
 // packages/p2p/src/rotation-lock.ts
-import { randomBytes as randomBytes11, createHash as createHash6 } from "node:crypto";
-import { constants } from "node:fs";
-import { open as open3, readdir as readdir2, rm, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { randomBytes as randomBytes12, createHash as createHash7 } from "node:crypto";
+import { constants as constants2 } from "node:fs";
+import { open as open4, readdir as readdir2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join19 } from "node:path";
 async function readLock2(file) {
   let fh;
   try {
-    fh = await open3(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    fh = await open4(file, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0) | (constants2.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return { kind: "gone" };
     throw lockError(file, `${file} couldn't be read (${e.code ?? e.message})`);
@@ -21471,12 +22285,12 @@ async function createExclusive(file, content) {
 }
 async function sweepMarkers(home) {
   const names = await readdir2(home).catch(() => []);
-  await Promise.all(names.filter((n) => MARKER_RE.test(n)).map((n) => rm(join18(home, n), { force: true }).catch(() => void 0)));
+  await Promise.all(names.filter((n) => MARKER_RE.test(n)).map((n) => rm2(join19(home, n), { force: true }).catch(() => void 0)));
 }
 async function withRotationLock(home, fn) {
   const file = rotationLockOf(home);
   const started = processStartMs(process.pid) ?? Math.round(Date.now() - process.uptime() * 1e3);
-  const mine = `${JSON.stringify({ pid: process.pid, started, run: randomBytes11(16).toString("hex"), at: Date.now() })}
+  const mine = `${JSON.stringify({ pid: process.pid, started, run: randomBytes12(16).toString("hex"), at: Date.now() })}
 `;
   if (!await createExclusive(file, mine)) {
     const cur = await readLock2(file);
@@ -21497,10 +22311,10 @@ async function withRotationLock(home, fn) {
       }
       try {
         const now = await readLock2(file);
-        if (now.kind === "read" && now.raw === raw) await rm(file, { force: true });
+        if (now.kind === "read" && now.raw === raw) await rm2(file, { force: true });
         if (!await createExclusive(file, mine)) throw lockBusy(file);
       } finally {
-        await rm(marker, { force: true }).catch(() => void 0);
+        await rm2(marker, { force: true }).catch(() => void 0);
       }
     }
   }
@@ -21509,7 +22323,7 @@ async function withRotationLock(home, fn) {
     return await fn();
   } finally {
     const now = await readLock2(file).catch(() => void 0);
-    if (now?.kind === "read" && now.raw === mine) await rm(file, { force: true }).catch(() => void 0);
+    if (now?.kind === "read" && now.raw === mine) await rm2(file, { force: true }).catch(() => void 0);
   }
 }
 var rotationLockOf, START_SLACK_MS2, MAX_LOCK_BYTES, EMPTY_STALE_MS, MARKER_RE, deleteHint, lockBusy, markerOf;
@@ -21518,14 +22332,14 @@ var init_rotation_lock = __esm({
     "use strict";
     init_errors2();
     init_procstart();
-    rotationLockOf = (home) => join18(home, "rotation.lock");
+    rotationLockOf = (home) => join19(home, "rotation.lock");
     START_SLACK_MS2 = 2500;
     MAX_LOCK_BYTES = 4096;
     EMPTY_STALE_MS = 6e4;
     MARKER_RE = /^rotation\.lock\.[0-9a-f]{32}\.takeover$/;
     deleteHint = (file) => `If nothing is rotating here (a run was killed, or its process id is in use again), delete ${file}`;
     lockBusy = (file) => new CliError("rotation_in_progress", `another \`p2p identity rotate\` run is in progress for this identity: wait for it to finish, then try again. ${deleteHint(file)}`);
-    markerOf = (file, raw) => `${file}.${createHash6("sha256").update(raw).digest("hex").slice(0, 32)}.takeover`;
+    markerOf = (file, raw) => `${file}.${createHash7("sha256").update(raw).digest("hex").slice(0, 32)}.takeover`;
   }
 });
 
@@ -22441,8 +23255,8 @@ var init_format = __esm({
 
 // packages/p2p/src/ix-local.ts
 import { execFile as execFile4 } from "node:child_process";
-import { accessSync, constants as constants2, statSync as statSync4 } from "node:fs";
-import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join19 } from "node:path";
+import { accessSync, constants as constants3, statSync as statSync4 } from "node:fs";
+import { delimiter as delimiter3, isAbsolute as isAbsolute9, join as join20 } from "node:path";
 function ixInstallCommands(platform = process.platform, arch = process.arch) {
   if (platform === "win32") return ["irm https://ix-infra.com/install.ps1 | iex"];
   if (platform === "darwin" && arch === "x64") return ["brew tap ix-infrastructure/ix https://github.com/ix-infrastructure/Ix", "brew install ix"];
@@ -22470,7 +23284,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
   const runnable = (p) => {
     try {
       if (!statSync4(p).isFile()) return false;
-      if (platform !== "win32") accessSync(p, constants2.X_OK);
+      if (platform !== "win32") accessSync(p, constants3.X_OK);
       return true;
     } catch {
       return false;
@@ -22487,7 +23301,7 @@ function whichAbsolute(name2, env = process.env, platform = process.platform) {
     const d = dir.trim().replace(/^"|"$/g, "");
     if (d === "" || !isAbsolute9(d)) continue;
     for (const ext of hasExt ? [""] : exts) {
-      const p = join19(d, name2 + ext);
+      const p = join20(d, name2 + ext);
       if (runnable(p)) return p;
     }
   }
@@ -22514,10 +23328,10 @@ function absolutePath(v, platform = process.platform) {
   }).join(sep6);
 }
 function runIx(bin, argv, o) {
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     execFile4(bin, [...argv], { cwd: o.cwd, env: ixChildEnv(o.env, o.target), timeout: o.timeoutMs, killSignal: "SIGKILL", maxBuffer: 1 << 20, windowsHide: true }, (err, stdout, stderr) => {
       const e = err;
-      resolve7({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
+      resolve8({ code: e ? typeof e.code === "number" ? e.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...e?.killed ? { timedOut: true } : {} });
     });
   });
 }
@@ -22634,8 +23448,8 @@ __export(identity_exports, {
   setup: () => setup,
   whoami: () => whoami
 });
-import { chmod, readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join20 } from "node:path";
+import { chmod, readFile as readFile4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join21 } from "node:path";
 import { resolveTxt } from "node:dns/promises";
 function p2pCommand(platform = process.platform) {
   return platform === "win32" ? "p2p.cmd" : "p2p";
@@ -22697,7 +23511,7 @@ async function setup(app, opts) {
     out.ix = { found: false, installed: false, recommended: false, enabled: false, hint: `couldn't check for Ix: ${sanitizePeerText(e.message, 200)}` };
   }
   if (backupMode === "file") {
-    const path2 = opts.backupFile ?? join20(app.home, BACKUP_FILE_NAME);
+    const path2 = opts.backupFile ?? join21(app.home, BACKUP_FILE_NAME);
     const { phrase } = await backupShow(app);
     try {
       await writeFile3(path2, `${phrase}
@@ -23060,8 +23874,9 @@ async function backupRestore(app, phrase, opts) {
         { home: app.home, cause: e instanceof CliError ? e.code : "error" }
       );
     }
-    await rm2(join20(app.home, "cli"), { recursive: true, force: true });
-    await rm2(join20(app.home, "v3"), { recursive: true, force: true });
+    forgetKeychainItem(app.home, app.keys?.did);
+    await rm3(join21(app.home, "cli"), { recursive: true, force: true });
+    await rm3(join21(app.home, "v3"), { recursive: true, force: true });
     throw e;
   }
 }
@@ -23156,7 +23971,7 @@ async function restoreInto(app, phrase, opts) {
 function lostKeyholderWarning(n) {
   return `${n === 1 ? "a revoked device was a key holder: it" : `${n} revoked devices were key holders: they`} still hold your identity key and could publish new versions, and occupy the relays' restricted connection slots for your identity. Only identity rotation neutralises a lost key holder: run \`p2p identity rotate\` (§2.8) from a key holder you still have`;
 }
-async function avatarValue(input, read2 = (p) => readFile3(p)) {
+async function avatarValue(input, read2 = (p) => readFile4(p)) {
   if (/^https:\/\//i.test(input) || input.startsWith("data:")) return input;
   let bytes2;
   try {
@@ -23311,6 +24126,7 @@ var init_identity2 = __esm({
     init_circle_ops();
     init_ix_local();
     init_projects();
+    init_keystore();
     BACKUP_FILE_NAME = "backup-phrase.txt";
     MAGIC = [
       ["png", [137, 80, 78, 71]],
@@ -23358,8 +24174,8 @@ __export(rotation_exports, {
   rotationsFor: () => rotationsFor,
   untrustedImportSigner: () => untrustedImportSigner
 });
-import { copyFile, lstat, mkdir as mkdir2, readFile as readFile4, rename, rm as rm3, stat, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
-import { join as join21 } from "node:path";
+import { copyFile, lstat as lstat2, mkdir as mkdir2, readFile as readFile5, rename, rm as rm4, stat as stat2, writeFile as writeFile4, chmod as chmod2 } from "node:fs/promises";
+import { join as join22 } from "node:path";
 function branchSummary(hash, ver, by, relays) {
   return {
     hash,
@@ -23379,19 +24195,19 @@ async function saveState(home, s2) {
   await b.withLock(() => b.write("state", s2));
 }
 async function dropState(home) {
-  await rm3(join21(rotationDir(home), "state.json"), { force: true });
-  await rm3(newHomeOf(home), { recursive: true, force: true });
+  await rm4(join22(rotationDir(home), "state.json"), { force: true });
+  await rm4(newHomeOf(home), { recursive: true, force: true });
 }
 async function isLink(p) {
   try {
-    return (await lstat(p)).isSymbolicLink();
+    return (await lstat2(p)).isSymbolicLink();
   } catch {
     return false;
   }
 }
 async function exists(p) {
   try {
-    await stat(p);
+    await stat2(p);
     return true;
   } catch {
     return false;
@@ -23399,24 +24215,24 @@ async function exists(p) {
 }
 async function appAt(app, home) {
   await mkdir2(home, { recursive: true, mode: 448 });
-  if (await exists(join21(app.home, "config.json"))) await copyFile(join21(app.home, "config.json"), join21(home, "config.json"));
+  if (await exists(join22(app.home, "config.json"))) await copyFile(join22(app.home, "config.json"), join22(home, "config.json"));
   return new App({ env: { ...app.env, P2P_HOME: home }, io: app.io });
 }
 async function moveHomes(home, src, tag) {
-  for (const p of [src, join21(src, "cli"), join21(src, "v3"), join21(src, "cursors")]) {
+  for (const p of [src, join22(src, "cli"), join22(src, "v3"), join22(src, "cursors")]) {
     if (await isLink(p)) throw new CliError("refused", `${p} is a symbolic link: nothing was moved into ${home}`);
   }
-  const archive = join21(home, "rotated", tag);
+  const archive = join22(home, "rotated", tag);
   await mkdir2(archive, { recursive: true, mode: 448 });
-  const srcHasState = await exists(join21(src, "cli"));
+  const srcHasState = await exists(join22(src, "cli"));
   for (const d of ["cli", "v3", "cursors"]) {
-    if (srcHasState && await exists(join21(home, d)) && !await exists(join21(archive, d))) await rename(join21(home, d), join21(archive, d));
+    if (srcHasState && await exists(join22(home, d)) && !await exists(join22(archive, d))) await rename(join22(home, d), join22(archive, d));
   }
   for (const d of ["cli", "v3"]) {
-    if (await exists(join21(src, d)) && !await exists(join21(home, d))) await rename(join21(src, d), join21(home, d));
+    if (await exists(join22(src, d)) && !await exists(join22(home, d))) await rename(join22(src, d), join22(home, d));
   }
-  await rm3(src, { recursive: true, force: true });
-  for (const d of ["cli", "v3"]) await rm3(join21(archive, d, ".lock"), { force: true });
+  await rm4(src, { recursive: true, force: true });
+  for (const d of ["cli", "v3"]) await rm4(join22(archive, d, ".lock"), { force: true });
   return archive;
 }
 function assertAdopted(app, userId) {
@@ -23428,7 +24244,7 @@ async function adoptHome(app, src, tag) {
   app.identityMadeHere = true;
   await app.close();
   const home = app.home;
-  if (await exists(join21(home, "cli"))) await app.state.backend.withLock(async () => {
+  if (await exists(join22(home, "cli"))) await app.state.backend.withLock(async () => {
   });
   if (await exists(app.store.dir)) await new FileDocBackend(app.store.dir).withLock(async () => {
   });
@@ -23770,7 +24586,7 @@ async function rotateLocked(app, opts) {
   return finish(app, st);
 }
 async function writeBackup(app, ik, opts) {
-  const file = opts.backupFile ?? (opts.backupFileDefault ? join21(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
+  const file = opts.backupFile ?? (opts.backupFileDefault ? join22(app.home, `backup-phrase-${displayFingerprint(ik.userId).replace(/-/g, "")}.txt`) : void 0);
   if (!file) return void 0;
   try {
     await writeFile4(file, `${backupPhraseFromSeed(ik.secretKey)}
@@ -23871,7 +24687,7 @@ async function begin(app, opts) {
     ...base.profile ? { profile: { ...base.profile } } : {}
   });
   const home = newHomeOf(app.home);
-  await rm3(home, { recursive: true, force: true });
+  await rm4(home, { recursive: true, force: true });
   const napp = await appAt(app, home);
   const self = { name: base.name, relays: [...base.relays], createdAt: Date.now() };
   const nkeys = newKeysDoc(newIk.userId, device, cert, newIk);
@@ -23923,7 +24739,7 @@ async function begin(app, opts) {
     const file = await writeBackup(app, newIk, opts);
     if (file) st.backupFile = file;
   } catch (e) {
-    await rm3(home, { recursive: true, force: true });
+    await rm4(home, { recursive: true, force: true });
     throw e;
   }
   await saveState(app.home, st);
@@ -24015,7 +24831,7 @@ async function followers(app, napp, st, opts) {
   const pool = await napp.connect();
   const relay = napp.relays[0];
   const conn = await pool.ensure(relay);
-  const open4 = [];
+  const open5 = [];
   for (const [did, d] of pending) {
     const s2 = newLinkSecret();
     const lid = linkId(s2);
@@ -24035,22 +24851,22 @@ async function followers(app, napp, st, opts) {
     } catch (e) {
       app.io.err(`couldn't reach your device ${did}: ${e.message}`);
     }
-    if (reached) open4.push({ did, s: s2, lid, keyholder });
+    if (reached) open5.push({ did, s: s2, lid, keyholder });
     else d.status = "offline";
   }
   await saveState(app.home, st);
   const waitSec = Math.max(0, Math.min(opts.waitSec ?? LINK_TTL_SEC, LINK_TTL_SEC));
-  if (open4.length > 0) {
-    app.io.err(`waiting up to ${waitSec}s for ${open4.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
+  if (open5.length > 0) {
+    app.io.err(`waiting up to ${waitSec}s for ${open5.length} of your devices to follow: on each, accept the held rotation (\`p2p held\`, then \`p2p identity follow <id>\`); --wait to change`);
   }
   const deadline = Date.now() + waitSec * 1e3;
-  while (open4.length > 0 && Date.now() < deadline) {
-    for (const o of [...open4]) {
+  while (open5.length > 0 && Date.now() < deadline) {
+    for (const o of [...open5]) {
       const entries = await linkGet(conn, o.lid, "req");
       const rec2 = st.devices[o.did];
       if (entries === void 0) {
         rec2.status = "offline";
-        open4.splice(open4.indexOf(o), 1);
+        open5.splice(open5.indexOf(o), 1);
         continue;
       }
       let req;
@@ -24060,7 +24876,7 @@ async function followers(app, napp, st, opts) {
         if (e instanceof P2PError && e.reason === "link-multiple-requests") {
           app.warn(`more than one device answered the code sent to ${o.did}: not linking it (re-link it by hand)`);
           rec2.status = "aborted";
-          open4.splice(open4.indexOf(o), 1);
+          open5.splice(open5.indexOf(o), 1);
           continue;
         }
         throw e;
@@ -24078,12 +24894,12 @@ async function followers(app, napp, st, opts) {
       await linkPut(conn, o.lid, "resp", JSON.stringify(frame));
       rec2.status = "followed";
       rec2.newDid = req.did;
-      open4.splice(open4.indexOf(o), 1);
+      open5.splice(open5.indexOf(o), 1);
       await saveState(app.home, st);
     }
-    if (open4.length > 0) await sleep2(napp.tun.linkPollMs);
+    if (open5.length > 0) await sleep2(napp.tun.linkPollMs);
   }
-  for (const o of open4) st.devices[o.did].status = "offline";
+  for (const o of open5) st.devices[o.did].status = "offline";
 }
 async function inviteFriend(app, napp, peer2, statement) {
   try {
@@ -24356,14 +25172,14 @@ async function rejoin(app, napp, cid, statement) {
   let nc = await loadCircle(napp.store, cid);
   if (nc.book[to]?.op !== "join") await signOwnJoin(napp, cid, nc.chain.head.hash);
   nc = await loadCircle(napp.store, cid);
-  const join28 = nc.book[to].jws;
+  const join29 = nc.book[to].jws;
   const c = await loadCircle(app.store, cid);
   const leave = await leaveAsOld(app, cid).catch((e) => {
     if (e instanceof P2PError) return void 0;
     throw e;
   });
   const owner = c.chain.head.owner;
-  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join28, leave] : [join28], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
+  const d = await napp.deliver(owner, "circle", { own: to, sid: "~circle" }, { circles: [], joins: leave ? [join29, leave] : [join29], ops: [], rotation: statement }, { extraCaps: memberCaps(c, owner) });
   if (d.relays.length === 0) throw new CliError("undelivered", "the owner couldn't be reached");
   if (!leave) return;
   for (const m of c.chain.head.members) {
@@ -24378,7 +25194,7 @@ async function finish(app, st) {
     await saveState(app.home, st);
     await reload(app);
   } else if (st.step === "done" && st.archive === void 0) {
-    st.archive = join21(app.home, "rotated");
+    st.archive = join22(app.home, "rotated");
     await saveState(app.home, st);
   }
   return rotateReport(app, st);
@@ -24830,9 +25646,9 @@ async function swapMember(app, rot, cid, withAdmin) {
   await recordApproval(app, rot.from, { to: rot.to, kind: "circle", cid });
   return ownerPublish(app, cid, { members, admins }, { alsoTo: [rot.from] });
 }
-async function holdRotationJoin(app, env, at, from, rot, cid, join28, reason) {
+async function holdRotationJoin(app, env, at, from, rot, cid, join29, reason) {
   const c = await loadCircle(app.store, cid);
-  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join28, rotation: rot.statement, old: rot.from, reason });
+  const item = withHeldId({ type: "rotation-join", from: rot.to, at, cid, head: c.chain.head.jws, join: join29, rotation: rot.statement, old: rot.from, reason });
   await hold(app, item);
   return makeEvent(
     env,
@@ -24840,7 +25656,7 @@ async function holdRotationJoin(app, env, at, from, rot, cid, join28, reason) {
     at,
     { from, held: { id: item.id, type: item.type, cid, reason, old: { userId: rot.from, address: await app.addressOf(rot.from) }, ...reason === "conflict" ? { conflict: true } : {} } },
     {},
-    `${join28}|${reason}`
+    `${join29}|${reason}`
   );
 }
 async function onRotationJoin(app, env, at, from, statement, sender, joins) {
@@ -24979,7 +25795,7 @@ async function followHeld(app, idOrItem) {
   following = true;
   const tmp = followHomeOf(app.home);
   try {
-    await rm3(tmp, { recursive: true, force: true });
+    await rm4(tmp, { recursive: true, force: true });
     const napp = await appAt(app, tmp);
     let res;
     try {
@@ -24991,7 +25807,7 @@ async function followHeld(app, idOrItem) {
     if (res.userId !== r.to) throw new CliError("wrong_identity", `the link joined ${res.userId}, not ${r.to}`);
     const old = app.userId;
     const tag = `${old.slice(4, 20)}-${Date.now()}`;
-    await writeFile4(join21(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
+    await writeFile4(join22(tmp, "linked.json"), JSON.stringify({ to: r.to, tag }), { mode: 384 });
     await adoptHome(app, tmp, tag);
     await reload(app);
     assertAdopted(app, res.userId);
@@ -24999,7 +25815,7 @@ async function followHeld(app, idOrItem) {
     await app.state.addEvents([makeEvent(`rotated|${old}|${r.to}`, "p2p.contact", Date.now(), { from: { userId: r.to, did: res.did, address: res.address, self: true }, what: "rotated", old })]);
     return { ...res, from: old };
   } catch (e) {
-    if (!await exists(join21(tmp, "linked.json"))) await rm3(tmp, { recursive: true, force: true }).catch(() => void 0);
+    if (!await exists(join22(tmp, "linked.json"))) await rm4(tmp, { recursive: true, force: true }).catch(() => void 0);
     if (e instanceof CliError && (e.code === "wrong_identity" || e.code === "keyholder")) throw e;
     throw new CliError(
       "follow_failed",
@@ -25017,15 +25833,15 @@ async function recoverInterruptedFollow(home) {
   const tmp = followHomeOf(home);
   let marker;
   try {
-    marker = JSON.parse(await readFile4(join21(tmp, "linked.json"), "utf8"));
+    marker = JSON.parse(await readFile5(join22(tmp, "linked.json"), "utf8"));
   } catch {
     return false;
   }
-  for (const p of [rotationDir(home), tmp, join21(tmp, "linked.json"), join21(tmp, "cli"), join21(tmp, "v3"), join21(tmp, "cursors")]) {
+  for (const p of [rotationDir(home), tmp, join22(tmp, "linked.json"), join22(tmp, "cli"), join22(tmp, "v3"), join22(tmp, "cursors")]) {
     if (await isLink(p)) return false;
   }
-  if (!await exists(join21(tmp, "cli")) && await exists(join21(home, "cli"))) {
-    await rm3(tmp, { recursive: true, force: true });
+  if (!await exists(join22(tmp, "cli")) && await exists(join22(home, "cli"))) {
+    await rm4(tmp, { recursive: true, force: true });
     return false;
   }
   await moveHomes(home, tmp, typeof marker.tag === "string" && /^[\w-]{1,80}$/.test(marker.tag) ? marker.tag : `follow-${Date.now()}`);
@@ -25045,7 +25861,7 @@ async function relinkRotated(app, code2, opts = {}) {
   }
   if (targets.size === 0) throw new CliError("not_rotated", "this device's identity hasn't been rotated: --rotated only re-links a device whose identity moved (§2.8)");
   const tmp = followHomeOf(app.home);
-  await rm3(tmp, { recursive: true, force: true });
+  await rm4(tmp, { recursive: true, force: true });
   const napp = await appAt(app, tmp);
   const j = await linkJoin(napp, code2, { label: opts.label ?? (certLabel(app.keys.cert) || defaultLabel()) });
   const old = app.userId;
@@ -25060,11 +25876,11 @@ async function relinkRotated(app, code2, opts = {}) {
         await napp.close();
       }
       if (!targets.has(res.userId)) {
-        await rm3(tmp, { recursive: true, force: true });
+        await rm4(tmp, { recursive: true, force: true });
         throw new CliError("wrong_identity", `that code links to ${res.userId}, which isn't where your identity moved (${[...targets].join(", ")})`);
       }
       const tag = `${old.slice(4, 20)}-${Date.now()}`;
-      await writeFile4(join21(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
+      await writeFile4(join22(tmp, "linked.json"), JSON.stringify({ to: res.userId, tag }), { mode: 384 });
       await adoptHome(app, tmp, tag);
       await reload(app);
       assertAdopted(app, res.userId);
@@ -25091,9 +25907,9 @@ var init_rotation = __esm({
     init_inbound();
     STEPS = ["created", "published", "devices", "social", "final", "done"];
     PRINTABLE_ASCII = /^[\x21-\x7e]{1,2048}$/;
-    rotationDir = (home) => join21(home, "rotation");
-    newHomeOf = (home) => join21(rotationDir(home), "new");
-    followHomeOf = (home) => join21(rotationDir(home), "follow");
+    rotationDir = (home) => join22(home, "rotation");
+    newHomeOf = (home) => join22(rotationDir(home), "new");
+    followHomeOf = (home) => join22(rotationDir(home), "follow");
     after = (s2, step2) => STEPS.indexOf(s2.step) >= STEPS.indexOf(step2);
     DEVICE_SEEN_WINDOW_SEC = 30 * 86400;
     RESEND_PER_HOUR = 50;
@@ -25388,7 +26204,7 @@ var init_sync = __esm({
 });
 
 // packages/p2p/src/inbound.ts
-import { randomBytes as randomBytes12 } from "node:crypto";
+import { randomBytes as randomBytes13 } from "node:crypto";
 import { hostname as hostname2 } from "node:os";
 async function abandonInFlight(app) {
   let n = 0;
@@ -25566,7 +26382,7 @@ var init_inbound = __esm({
     HOST = hostname2();
     STARTED2 = Math.round(Date.now() - process.uptime() * 1e3);
     START_SLACK_MS3 = 2500;
-    PROCESS_TOKEN = randomBytes12(9).toString("base64url");
+    PROCESS_TOKEN = randomBytes13(9).toString("base64url");
     attempts = 0;
     inFlight = /* @__PURE__ */ new Set();
     running2 = /* @__PURE__ */ new Map();
@@ -25997,7 +26813,7 @@ var init_social = __esm({
 });
 
 // packages/p2p/src/join-answers.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 function isStatementFor(j, cid) {
   if (typeof j !== "string" || j.length > MAX_JWS_BYTES) return false;
   try {
@@ -26096,12 +26912,12 @@ var init_join_answers = __esm({
     MAX_NEW_ANSWERS_PER_HOUR = ANSWERS_PER_HOUR;
     MAX_PART_RECORDS = ANSWERS_PER_HOUR + 2;
     ANSWER_MAX_BYTES = 32 * 1024 * 1024;
-    answerDocName = (cid, from) => `joinans-${createHash7("sha256").update(`${cid}|${from}`).digest("hex").slice(0, 16)}`;
+    answerDocName = (cid, from) => `joinans-${createHash8("sha256").update(`${cid}|${from}`).digest("hex").slice(0, 16)}`;
   }
 });
 
 // packages/p2p/src/want-pow.ts
-import { createHash as createHash8, randomBytes as randomBytes13 } from "node:crypto";
+import { createHash as createHash9, randomBytes as randomBytes14 } from "node:crypto";
 function leadingZeroBits2(b) {
   let n = 0;
   for (const byte of b) {
@@ -26114,7 +26930,7 @@ function leadingZeroBits2(b) {
   return n;
 }
 function solveWantPow(from, to, cid, fromVer, at, bits = WANT_POW_BITS) {
-  const prefix = randomBytes13(6).toString("base64url");
+  const prefix = randomBytes14(6).toString("base64url");
   for (let i = 0; ; i++) {
     const nonce = `${prefix}${i.toString(36)}`;
     if (leadingZeroBits2(digest(from, to, cid, fromVer, at, nonce)) >= bits) return { at, nonce };
@@ -26131,7 +26947,7 @@ var init_want_pow = __esm({
     "use strict";
     WANT_POW_BITS = 18;
     WANT_POW_WINDOW_SEC = 600;
-    digest = (from, to, cid, fromVer, at, nonce) => createHash8("sha256").update(`p2p/v3/want-pow|${from}|${to}|${cid}|${fromVer}|${at}|${nonce}`).digest();
+    digest = (from, to, cid, fromVer, at, nonce) => createHash9("sha256").update(`p2p/v3/want-pow|${from}|${to}|${cid}|${fromVer}|${at}|${nonce}`).digest();
   }
 });
 
@@ -26192,7 +27008,7 @@ __export(circle_ops_exports, {
   signOwnJoin: () => signOwnJoin,
   transfer: () => transfer
 });
-import { randomBytes as randomBytes14 } from "node:crypto";
+import { randomBytes as randomBytes15 } from "node:crypto";
 async function resolveCircle(app, input) {
   const direct = await loadCircle(app.store, input);
   if (direct) return direct;
@@ -26210,8 +27026,8 @@ function encodeCircleLink(head, hint, web = false) {
   if (!hint || !hint.doc && !hint.join) return base;
   return `${base}~${b64uEncode(new TextEncoder().encode(JSON.stringify(hint)))}`;
 }
-function parseCircleLink(link) {
-  const s2 = link.trim();
+function parseCircleLink(link2) {
+  const s2 = link2.trim();
   const i = s2.indexOf("~");
   const head = parseCircleInviteLink(i >= 0 ? s2.slice(0, i) : s2);
   if (i < 0) return { head };
@@ -26230,8 +27046,8 @@ function parseCircleLink(link) {
 async function ownerHint(app, c) {
   const owner = c.chain.head.owner;
   const v = await app.view(owner);
-  const join28 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
-  return { ...v ? { doc: v.head.jws } : {}, ...join28 ? { join: join28 } : {} };
+  const join29 = c.book[owner]?.op === "join" ? c.book[owner].jws : void 0;
+  return { ...v ? { doc: v.head.jws } : {}, ...join29 ? { join: join29 } : {} };
 }
 async function circleLink(app, cidOrName) {
   const c = await resolveCircle(app, cidOrName);
@@ -26742,10 +27558,10 @@ async function dropPending(app, cid) {
     await app.revokeCaps(caps).catch(() => 0);
   }
 }
-async function joinFromLink(app, link, opts) {
+async function joinFromLink(app, link2, opts) {
   let parsed;
   try {
-    parsed = parseCircleLink(link);
+    parsed = parseCircleLink(link2);
   } catch (e) {
     if (e instanceof CliError) throw e;
     throw new CliError("usage", "that is not a circle link (p2p://circle/… or https://ix-infra.com/p2p/c#…)");
@@ -27375,7 +28191,7 @@ async function answerWant(app, from, fdid, want, authorizedBy, relay, capJws, po
       if (cut.parts.length === 0) return refuse("not even one version fits what is left of this hour's budget");
       const charged2 = await chargeAnswer(app, from, pool, cut.bytes, { cid: want.cid, ver: fromVer + cut.sentVersions - 1, resent: resend, ...pool === "reserve" ? { pow: powId } : {} });
       if (!charged2.ok) return refuse(charged2.why);
-      const id2 = b64uEncode(randomBytes14(9));
+      const id2 = b64uEncode(randomBytes15(9));
       let all = true;
       const perRelay = sealedCost(1);
       let spent = 0;
@@ -27540,10 +28356,10 @@ __export(projects_exports, {
   stickyPrivate: () => stickyPrivate,
   takePersonToken: () => takePersonToken
 });
-import { createHash as createHash9, createHmac, randomBytes as randomBytes15, timingSafeEqual } from "node:crypto";
-import { existsSync as existsSync5, lstatSync as lstatSync6, mkdirSync as mkdirSync10, readdirSync as readdirSync3, readFileSync as readFileSync14, readlinkSync as readlinkSync2, realpathSync as realpathSync5, renameSync as renameSync8, rmSync as rmSync4, statSync as statSync5, writeFileSync as writeFileSync10 } from "node:fs";
+import { createHash as createHash10, createHmac, randomBytes as randomBytes16, timingSafeEqual } from "node:crypto";
+import { existsSync as existsSync6, lstatSync as lstatSync6, mkdirSync as mkdirSync11, readdirSync as readdirSync4, readFileSync as readFileSync15, readlinkSync as readlinkSync2, realpathSync as realpathSync6, renameSync as renameSync9, rmSync as rmSync5, statSync as statSync5, writeFileSync as writeFileSync11 } from "node:fs";
 import { homedir as homedir5, tmpdir as tmpdir5 } from "node:os";
-import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join22, resolve as resolve4, sep as sep4 } from "node:path";
+import { basename as basename5, delimiter as delimiter4, dirname as dirname6, isAbsolute as isAbsolute10, join as join23, resolve as resolve5, sep as sep4 } from "node:path";
 function sessionWorkdir(env) {
   const w = env.P2P_WORKDIR?.trim();
   if (w && isAbsolute10(w)) {
@@ -27569,10 +28385,10 @@ function overWhys(v) {
 }
 function real(p) {
   try {
-    return realpathSync5.native(p);
+    return realpathSync6.native(p);
   } catch {
     try {
-      return realpathSync5(p);
+      return realpathSync6(p);
     } catch {
       return p;
     }
@@ -27583,7 +28399,7 @@ function hasDotDot(p) {
 }
 function physicalPath(p) {
   const abs = isAbsolute10(p) ? p : `${process.cwd()}${sep4}${p}`;
-  if (process.platform === "win32") return resolve4(abs);
+  if (process.platform === "win32") return resolve5(abs);
   let cur = "/";
   for (const c of abs.split("/")) {
     if (c === "" || c === ".") continue;
@@ -27617,7 +28433,7 @@ function existingDir(p) {
 }
 function pseudoPath(p) {
   if (process.platform === "win32" || typeof p !== "string" || !isAbsolute10(p)) return false;
-  const at = resolve4(p);
+  const at = resolve5(p);
   if (!PSEUDO_ROOTS.some((root) => at === root || at.startsWith(`${root}/`))) return false;
   let st;
   try {
@@ -27632,17 +28448,17 @@ function pseudoPath(p) {
   return PSEUDO_ROOTS.slice(1).some(under);
 }
 function braceChoice2(c) {
-  let open4 = false;
+  let open5 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open4 = true;
+      open5 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open4 && choice) return true;
-      open4 = false;
-    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
+      if (open5 && choice) return true;
+      open5 = false;
+    } else if (open5 && (ch === "," || ch === "." && c[i + 1] === ".")) choice = true;
   }
   return false;
 }
@@ -27715,7 +28531,7 @@ function readSmall(file) {
   try {
     const st = statSync5(file);
     if (!st.isFile() || st.size > 256 * 1024) return void 0;
-    return readFileSync14(file, "utf8");
+    return readFileSync15(file, "utf8");
   } catch {
     return void 0;
   }
@@ -27729,15 +28545,15 @@ function isBareRepo2(d) {
       return void 0;
     }
   };
-  if (st(join22(d, "HEAD"))?.isFile() && st(join22(d, "objects"))?.isDirectory() && st(join22(d, "refs"))?.isDirectory()) return true;
-  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join22(d, "config")) ?? "");
+  if (st(join23(d, "HEAD"))?.isFile() && st(join23(d, "objects"))?.isDirectory() && st(join23(d, "refs"))?.isDirectory()) return true;
+  return /^\s*bare\s*=\s*true\s*$/im.test(readSmall(join23(d, "config")) ?? "");
 }
 function gitRef(gitDir, root) {
   let common = gitDir;
-  const cd = readSmall(join22(gitDir, "commondir"))?.trim();
-  if (cd) common = resolve4(gitDir, cd);
+  const cd = readSmall(join23(gitDir, "commondir"))?.trim();
+  if (cd) common = resolve5(gitDir, cd);
   common = real(common);
-  const urls = remotesOf(readSmall(join22(common, "config")) ?? "");
+  const urls = remotesOf(readSmall(join23(common, "config")) ?? "");
   const remote = urls.map(normalizeRemote).find((x) => x !== void 0);
   const main2 = basename5(common) === ".git" ? dirname6(common) : common;
   const name2 = clean3(remote ? remote.split("/").pop() ?? "" : basename5(main2)) || clean3(basename5(root)) || "project";
@@ -27749,11 +28565,11 @@ ${common}`).slice(0, 24)}`,
     kind: "git",
     root,
     ...remote ? { remote } : {},
-    ...existsSync5(join22(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
+    ...existsSync6(join23(root, PRIVATE_MARKER)) ? { repoPrivate: true } : {}
   };
 }
 function present(p) {
-  let q = resolve4(p);
+  let q = resolve5(p);
   while (/[*?[\]{}]/.test(basename5(q)) && dirname6(q) !== q) q = dirname6(q);
   try {
     statSync5(q);
@@ -27767,7 +28583,7 @@ function projectOf(dir, doc) {
   const start = existingDir(given);
   let cur = start;
   for (let i = 0; i < 4096; i++) {
-    const dotgit = join22(cur, ".git");
+    const dotgit = join23(cur, ".git");
     let isThere;
     try {
       lstatSync6(dotgit);
@@ -27786,9 +28602,9 @@ function projectOf(dir, doc) {
       if (st?.isDirectory()) gitDir = dotgit;
       else if (st?.isFile()) {
         const m = /^gitdir:\s*(.+?)\s*$/m.exec(readSmall(dotgit) ?? "");
-        if (m) gitDir = resolve4(cur, m[1]);
+        if (m) gitDir = resolve5(cur, m[1]);
       }
-      if (!gitDir || !existsSync5(gitDir)) {
+      if (!gitDir || !existsSync6(gitDir)) {
         return { id: dirProjectId(cur), name: clean3(basename5(cur)) || "folder", kind: "dir", root: cur, brokenGit: true };
       }
       return gitRef(gitDir, cur);
@@ -27801,7 +28617,7 @@ function projectOf(dir, doc) {
   const dirRef = (root, repoPrivate) => ({ id: dirProjectId(root), name: clean3(basename5(root)) || "folder", kind: "dir", root, ...repoPrivate ? { repoPrivate: true } : {} });
   let marked = false;
   for (let c = start, i = 0; i < 4096; i++) {
-    if (existsSync5(join22(c, PRIVATE_MARKER))) {
+    if (existsSync6(join23(c, PRIVATE_MARKER))) {
       marked = true;
       break;
     }
@@ -27866,7 +28682,7 @@ async function projectView(app, ref, doc) {
 }
 function broadRoot(root, env = {}) {
   const norm = (p) => {
-    const r = resolve4(p);
+    const r = resolve5(p);
     return process.platform === "win32" ? r.toLowerCase() : r;
   };
   const forms = (p) => [.../* @__PURE__ */ new Set([norm(p), norm(real(p))])];
@@ -27905,7 +28721,7 @@ function nestedBoundaries(root) {
     for (const d of level) {
       let entries;
       try {
-        entries = readdirSync3(d, { withFileTypes: true });
+        entries = readdirSync4(d, { withFileTypes: true });
       } catch {
         continue;
       }
@@ -27915,13 +28731,13 @@ function nestedBoundaries(root) {
           break;
         }
         if (!e.isDirectory() || e.isSymbolicLink()) continue;
-        const p = join22(d, e.name);
+        const p = join23(d, e.name);
         if (e.name === ".git") continue;
-        if (existsSync5(join22(p, ".git")) || isBareRepo2(p)) {
+        if (existsSync6(join23(p, ".git")) || isBareRepo2(p)) {
           repos.push(p);
           continue;
         }
-        if (existsSync5(join22(p, PRIVATE_MARKER))) priv.push(p);
+        if (existsSync6(join23(p, PRIVATE_MARKER))) priv.push(p);
         next.push(p);
       }
       if (capped) break;
@@ -27996,7 +28812,7 @@ async function listProjects(app) {
   const doc = await projectsDoc(app);
   const out = [];
   for (const [id2, r] of Object.entries(doc.projects)) {
-    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync5(join22(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
+    out.push(await projectView(app, { id: id2, name: r.name, kind: r.remote !== void 0 || existsSync6(join23(r.root, ".git")) ? "git" : "dir", root: r.root, ...r.remote ? { remote: r.remote } : {} }, doc));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
@@ -28029,22 +28845,22 @@ function sessionScratch(raw) {
   }
   const sid = o.sid;
   if (typeof sid !== "string" || !SCRATCH_SID_RE.test(sid)) return void 0;
-  const path2 = (v) => typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute10(v) ? resolve4(v) : void 0;
+  const path2 = (v) => typeof v === "string" && v !== "" && v.length <= 4096 && !/[\0\n]/.test(v) && isAbsolute10(v) ? resolve5(v) : void 0;
   const bases = /* @__PURE__ */ new Set();
   const jobs = /* @__PURE__ */ new Set();
   const tmpName = `claude-${process.getuid?.() ?? 0}`;
   for (const t2 of Array.isArray(o.tmp) ? o.tmp.slice(0, 4) : []) {
     const at = path2(t2);
-    const b = at === void 0 ? void 0 : ownDir(join22(at, tmpName));
+    const b = at === void 0 ? void 0 : ownDir(join23(at, tmpName));
     if (b) bases.add(b);
   }
   const config = path2(o.config);
   if (config !== void 0) {
-    const projects = ownDir(join22(config, "projects"));
+    const projects = ownDir(join23(config, "projects"));
     if (projects) bases.add(projects);
     const job = path2(o.job);
-    const jobsDir = ownDir(join22(config, "jobs"));
-    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join22(config, "jobs")) {
+    const jobsDir = ownDir(join23(config, "jobs"));
+    if (job !== void 0 && jobsDir !== void 0 && dirname6(job) === join23(config, "jobs")) {
       const id2 = basename5(job);
       const r = JOB_ID_RE.test(id2) && sid.startsWith(id2) ? ownDir(job) : void 0;
       if (r && dirname6(r) === jobsDir) jobs.add(r);
@@ -28057,7 +28873,7 @@ function scratchRoot(dir, s2) {
   for (const b of s2.bases) {
     if (dir === b || !within3(dir, b)) continue;
     const parts = dir.slice(b.endsWith(sep4) ? b.length : b.length + 1).split(sep4);
-    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join22(b, parts[0], parts[1]);
+    if (parts.length >= 2 && parts[0] !== "" && parts[1] === s2.sid) return join23(b, parts[0], parts[1]);
   }
   return void 0;
 }
@@ -28069,19 +28885,19 @@ function scratchLinks(root) {
     const d = stack.pop();
     let ents;
     try {
-      ents = readdirSync3(d, { withFileTypes: true });
+      ents = readdirSync4(d, { withFileTypes: true });
     } catch {
       return void 0;
     }
     for (const e of ents) {
       if (++seen > SCRATCH_SCAN_ENTRIES) return void 0;
-      const p = join22(d, e.name);
+      const p = join23(d, e.name);
       if (e.isSymbolicLink()) {
         try {
-          out.push(realpathSync5(p));
+          out.push(realpathSync6(p));
         } catch {
           try {
-            out.push(resolve4(d, readlinkSync2(p)));
+            out.push(resolve5(d, readlinkSync2(p)));
           } catch {
             return void 0;
           }
@@ -28202,23 +29018,23 @@ function agentContext(env) {
   return agentEnv(env) || agentAncestor();
 }
 function personTokenFile(home) {
-  return join22(home, "cli", "person.key");
+  return join23(home, "cli", "person.key");
 }
 function personSaltFile(home) {
-  return join22(home, "cli", "person.salt");
+  return join23(home, "cli", "person.salt");
 }
 function deriveToken(spk, salt) {
   return createHmac("sha256", Buffer.from(spk, "base64url")).update(TOKEN_LABEL).update(salt).digest("base64url");
 }
 function readTrim(f) {
   try {
-    return readFileSync14(f, "utf8").trim();
+    return readFileSync15(f, "utf8").trim();
   } catch {
     return void 0;
   }
 }
 function homeFilesOwn(home) {
-  const cli = join22(home, "cli");
+  const cli = join23(home, "cli");
   try {
     const d = lstatSync6(cli);
     if (d.isSymbolicLink() || !d.isDirectory()) return false;
@@ -28226,11 +29042,11 @@ function homeFilesOwn(home) {
     return e.code === "ENOENT";
   }
   const checks = [
-    [join22(cli, "keys.json"), true],
-    [join22(cli, "self.json"), true],
+    [join23(cli, "keys.json"), true],
+    [join23(cli, "self.json"), true],
     [personTokenFile(home), false],
     [personSaltFile(home), false],
-    [join22(home, "v3"), false]
+    [join23(home, "v3"), false]
   ];
   for (const [p, single] of checks) {
     let st;
@@ -28249,27 +29065,22 @@ function derivedToken(home) {
   if (!identityHere(home)) return void 0;
   const salt = readTrim(personSaltFile(home));
   if (!salt || !TOKEN_RE.test(salt)) return void 0;
-  let spk;
-  try {
-    spk = JSON.parse(readFileSync14(join22(home, "cli", "keys.json"), "utf8")).spk;
-  } catch {
-    return void 0;
-  }
-  return typeof spk === "string" && spk !== "" ? deriveToken(spk, salt) : void 0;
+  const spk = signingSeedSync(home);
+  return spk ? deriveToken(spk, salt) : void 0;
 }
 function writeWhole(f, text2) {
-  mkdirSync10(dirname6(f), { recursive: true, mode: 448 });
-  const tmp = `${f}.${randomBytes15(6).toString("hex")}.tmp`;
+  mkdirSync11(dirname6(f), { recursive: true, mode: 448 });
+  const tmp = `${f}.${randomBytes16(6).toString("hex")}.tmp`;
   try {
-    writeFileSync10(tmp, text2, { mode: 384, flag: "wx" });
+    writeFileSync11(tmp, text2, { mode: 384, flag: "wx" });
     let cleared = false;
     for (let tries = 0; ; tries++) {
       try {
-        renameSync8(tmp, f);
+        renameSync9(tmp, f);
         break;
       } catch (e) {
         if (!cleared && isDirectory(f)) {
-          rmSync4(f, { recursive: true, force: true });
+          rmSync5(f, { recursive: true, force: true });
           cleared = true;
           continue;
         }
@@ -28281,22 +29092,22 @@ function writeWhole(f, text2) {
       }
     }
   } catch (e) {
-    rmSync4(tmp, { force: true });
+    rmSync5(tmp, { force: true });
     throw e;
   }
 }
 function ensureSalt(home) {
   const f = personSaltFile(home);
   if (TOKEN_RE.test(readTrim(f) ?? "")) return;
-  if (!existsSync5(f)) {
+  if (!existsSync6(f)) {
     try {
-      writeFileSync10(f, randomBytes15(32).toString("base64url"), { mode: 384, flag: "wx" });
+      writeFileSync11(f, randomBytes16(32).toString("base64url"), { mode: 384, flag: "wx" });
       return;
     } catch {
       if (TOKEN_RE.test(readTrim(f) ?? "")) return;
     }
   }
-  writeWhole(f, randomBytes15(32).toString("base64url"));
+  writeWhole(f, randomBytes16(32).toString("base64url"));
 }
 function personTokenMatchesKeys(home, spk, token) {
   if (!homeFilesOwn(home)) return false;
@@ -28320,10 +29131,10 @@ function personToken(home) {
   };
   const have = read2();
   if (have) return have;
-  mkdirSync10(join22(home, "cli"), { recursive: true, mode: 448 });
-  const t2 = randomBytes15(32).toString("base64url");
+  mkdirSync11(join23(home, "cli"), { recursive: true, mode: 448 });
+  const t2 = randomBytes16(32).toString("base64url");
   try {
-    writeFileSync10(f, t2, { mode: 384, flag: "wx" });
+    writeFileSync11(f, t2, { mode: 384, flag: "wx" });
     return t2;
   } catch {
     const again = read2();
@@ -28332,8 +29143,8 @@ function personToken(home) {
   }
 }
 function renewPersonToken(home, spk) {
-  const salt = randomBytes15(32).toString("base64url");
-  const t2 = spk ? deriveToken(spk, salt) : randomBytes15(32).toString("base64url");
+  const salt = randomBytes16(32).toString("base64url");
+  const t2 = spk ? deriveToken(spk, salt) : randomBytes16(32).toString("base64url");
   try {
     writeWhole(personSaltFile(home), salt);
     writeWhole(personTokenFile(home), t2);
@@ -28350,7 +29161,7 @@ function isDirectory(p) {
   }
 }
 function identityHere(home) {
-  return existsSync5(join22(home, "cli", "keys.json")) && existsSync5(join22(home, "cli", "self.json"));
+  return existsSync6(join23(home, "cli", "keys.json")) && existsSync6(join23(home, "cli", "self.json"));
 }
 function personTokenOk(env, home) {
   const given = env?.P2P_PERSON_TOKEN?.trim();
@@ -28368,7 +29179,7 @@ function same2(given, t2) {
   return a.length === b.length && b.length >= 32 && timingSafeEqual(a, b);
 }
 function healPersonToken(home) {
-  if (!identityHere(home) || !existsSync5(personTokenFile(home))) return;
+  if (!identityHere(home) || !existsSync6(personTokenFile(home))) return;
   try {
     personToken(home);
   } catch {
@@ -28727,6 +29538,7 @@ var init_projects = __esm({
     init_ancestry();
     init_v3();
     init_errors2();
+    init_keystore();
     PERSON_SESSION = "tui";
     PRIVATE_MARKER = ".p2p-private";
     OVER_WHYS = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints"]);
@@ -28737,7 +29549,7 @@ var init_projects = __esm({
     MAX_SESSION_CONSTRAINTS = 16;
     MAX_UNDER = 64;
     STICKY = /* @__PURE__ */ new Set(["projects", "folders", "unresolved", "front", "constraints", "legacy-over", "repo-private", "sent-private"]);
-    sha = (s2) => createHash9("sha256").update(s2, "utf8").digest("hex");
+    sha = (s2) => createHash10("sha256").update(s2, "utf8").digest("hex");
     PSEUDO_ROOTS = ["/dev", "/proc", "/sys"];
     clean3 = (s2) => sanitizePeerText(s2, 64).replace(/[^\w.@+-]/g, "").slice(0, 64);
     NESTED_SCAN_DEPTH = 4;
@@ -28825,53 +29637,6 @@ var init_tty_confirm = __esm({
   }
 });
 
-// packages/p2p/src/readonly.ts
-var OverlayDocBackend, ReadOnlyTrustStoreV3;
-var init_readonly = __esm({
-  "packages/p2p/src/readonly.ts"() {
-    "use strict";
-    init_v3();
-    init_node();
-    OverlayDocBackend = class {
-      constructor(base) {
-        this.base = base;
-      }
-      base;
-      docs = /* @__PURE__ */ new Map();
-      chain = Promise.resolve();
-      removed = /* @__PURE__ */ new Set();
-      async read(name2) {
-        const mine = this.docs.get(name2);
-        if (mine !== void 0) return JSON.parse(mine);
-        if (this.removed.has(name2)) return void 0;
-        return this.base.read(name2);
-      }
-      /** In memory only, like write: the base is never touched. */
-      async remove(name2) {
-        this.docs.delete(name2);
-        this.removed.add(name2);
-      }
-      async write(name2, value) {
-        this.docs.set(name2, JSON.stringify(value));
-      }
-      /** In-process only: never the on-disk lock (taking it would create the lock file). */
-      withLock(fn) {
-        const run = this.chain.then(fn, fn);
-        this.chain = run.catch(() => {
-        });
-        return run;
-      }
-    };
-    ReadOnlyTrustStoreV3 = class extends TrustStoreV3 {
-      constructor(dir) {
-        super(new OverlayDocBackend(new FileDocBackend(dir)));
-        this.dir = dir;
-      }
-      dir;
-    };
-  }
-});
-
 // packages/p2p/src/relay-info.ts
 async function relayInfo(app, relay, opts = {}) {
   const url = canonicalRelayUrl(relay);
@@ -28920,7 +29685,7 @@ var init_version = __esm({
 
 // packages/p2p/src/app.ts
 import { hostname as hostname3, userInfo as userInfo2 } from "node:os";
-import { basename as basename6, join as join23 } from "node:path";
+import { basename as basename6, join as join24 } from "node:path";
 function branchesCovered(chain, tips) {
   if (tips.length < 2) return true;
   const ancestry2 = tips.map((t2) => new Set(chain.ancestors(t2).map((v) => v.hash)));
@@ -29034,6 +29799,7 @@ var init_app = __esm({
   "packages/p2p/src/app.ts"() {
     "use strict";
     init_projects();
+    init_keystore();
     init_tty_confirm();
     init_v3();
     init_node();
@@ -29129,8 +29895,8 @@ var init_app = __esm({
         this.progress = { ...makeProgress(opts.env, (m) => opts.io.err(`p2p: ${m}`)), signal: this.abort.signal };
         this.readOnly = opts.readOnly === true;
         const lockOpts = this.progress.debug ? { onLock: lockLogger(this.progress), onLockWait: ({ dir, waitedMs, holderPid }) => debug(this.progress, `lock ${basename6(dir)}: still waiting after ${waitedMs}ms (held by pid ${holderPid ?? "?"})`) } : {};
-        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join23(this.home, "cli"))) : void 0, lockOpts);
-        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join23(this.home, "v3")) : new FileTrustStoreV3(join23(this.home, "v3"), lockOpts);
+        this.state = new CliState(this.home, this.progress, this.readOnly ? new OverlayDocBackend(new FileDocBackend(join24(this.home, "cli"))) : void 0, lockOpts);
+        this.store = this.readOnly ? new ReadOnlyTrustStoreV3(join24(this.home, "v3")) : new FileTrustStoreV3(join24(this.home, "v3"), lockOpts);
         this.file = readFileConfig(this.home);
         this.transport = transportResolver(opts.env, this.file);
         this.tun = tunables(opts.env);
@@ -29145,6 +29911,10 @@ var init_app = __esm({
         }
         this.checkFrontKeys(keys);
         this.setKeys(keys, self);
+        if (!this.readOnly) {
+          const w = await finishPendingMove(this.state.keyStore);
+          if (w) this.warn(w);
+        }
         return true;
       }
       /**
@@ -30122,8 +30892,8 @@ var init_app = __esm({
 import { createInterface } from "node:readline/promises";
 
 // packages/p2p/src/cli.ts
-import { realpathSync as realpathSync7 } from "node:fs";
-import { resolve as resolve6 } from "node:path";
+import { realpathSync as realpathSync8 } from "node:fs";
+import { resolve as resolve7 } from "node:path";
 
 // packages/codex-bridge/dist/lib.js
 var P2P_PREFIX = "p2p:";
@@ -31216,9 +31986,9 @@ function shellTokens(command, markLiteral = false, substs, starts, raws) {
       continue;
     }
     if (substs && (c === "$" && command[i + 1] === "(" || c === "`")) {
-      const open4 = c === "`" ? 1 : 2;
+      const open5 = c === "`" ? 1 : 2;
       const end = c === "`" ? closingTick(command, i + 1) : closingParen(command, i + 2);
-      substs.push(command.slice(i + open4, end));
+      substs.push(command.slice(i + open5, end));
       cur += SUBST;
       has = true;
       i = end;
@@ -31383,18 +32153,18 @@ function evalLike(s2) {
   return false;
 }
 function braceChoice(c) {
-  let open4 = false;
+  let open5 = false;
   let choice = false;
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (ch === "{") {
-      open4 = true;
+      open5 = true;
       choice = false;
     } else if (ch === "}") {
-      if (open4 && choice)
+      if (open5 && choice)
         return true;
-      open4 = false;
-    } else if (open4 && (ch === "," || ch === "." && c[i + 1] === "."))
+      open5 = false;
+    } else if (open5 && (ch === "," || ch === "." && c[i + 1] === "."))
       choice = true;
   }
   return false;
@@ -32006,13 +32776,13 @@ var McpServer = class {
   }
   request(method, params, timeoutMs = 6e4) {
     const id2 = this.nextId++;
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id2);
         reject(new Error(`${method} timed out`));
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(id2, { resolve: resolve7, reject, timer });
+      this.pending.set(id2, { resolve: resolve8, reject, timer });
       this.send({ id: id2, method, params });
     });
   }
@@ -32146,7 +32916,7 @@ import { spawn } from "node:child_process";
 var TIMEOUT_MS = 3e4;
 function nodeExec(env = process.env) {
   return {
-    run: (argv, init2) => new Promise((resolve7, reject) => {
+    run: (argv, init2) => new Promise((resolve8, reject) => {
       const child = spawn(argv[0], argv.slice(1), { env: typeof env === "function" ? env() : env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       let stdout = "";
       let stderr = "";
@@ -32159,7 +32929,7 @@ function nodeExec(env = process.env) {
       });
       child.on("close", (code2) => {
         clearTimeout(timer);
-        resolve7({ exitCode: code2 ?? 1, stdout, stderr });
+        resolve8({ exitCode: code2 ?? 1, stdout, stderr });
       });
       child.stdin.on("error", () => {
       });
@@ -32655,7 +33425,7 @@ async function parentEnvValue(name2, ppid = process.ppid) {
       return null;
     }
     if (process.platform === "darwin") {
-      const ps = (args) => new Promise((resolve7, reject) => execFile("/bin/ps", [...args, "-ww", "-o", "command=", "-p", String(ppid)], { timeout: 3e3, maxBuffer: 4e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve7(String(so))));
+      const ps = (args) => new Promise((resolve8, reject) => execFile("/bin/ps", [...args, "-ww", "-o", "command=", "-p", String(ppid)], { timeout: 3e3, maxBuffer: 4e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve8(String(so))));
       const [withEnv, command] = await Promise.all([ps(["-E"]), ps([])]);
       return envFromPs(withEnv, command, name2);
     }
@@ -32668,7 +33438,7 @@ async function parentCwd(ppid = process.ppid) {
     if (process.platform === "linux")
       return await readlink(`/proc/${ppid}/cwd`);
     if (process.platform === "darwin") {
-      const out = await new Promise((resolve7, reject) => execFile("/usr/sbin/lsof", ["-a", "-p", String(ppid), "-d", "cwd", "-Fn"], { timeout: 3e3, maxBuffer: 1e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve7(String(so))));
+      const out = await new Promise((resolve8, reject) => execFile("/usr/sbin/lsof", ["-a", "-p", String(ppid), "-d", "cwd", "-Fn"], { timeout: 3e3, maxBuffer: 1e6, env: safeExecEnv() }, (e, so) => e ? reject(e) : resolve8(String(so))));
       const line = out.split("\n").find((l) => l.startsWith("n/"));
       return line ? line.slice(1) : void 0;
     }
@@ -33165,11 +33935,11 @@ var realClock = {
     t2.unref?.();
     return { cancel: () => clearTimeout(t2) };
   },
-  sleep: (ms, signal) => new Promise((resolve7) => {
-    const t2 = setTimeout(resolve7, ms);
+  sleep: (ms, signal) => new Promise((resolve8) => {
+    const t2 = setTimeout(resolve8, ms);
     signal?.addEventListener("abort", () => {
       clearTimeout(t2);
-      resolve7();
+      resolve8();
     }, { once: true });
   })
 };
@@ -34843,7 +35613,7 @@ function serve(sock, handle) {
       handle(req, conn).then((res) => conn.end(JSON.stringify(res) + "\n")).catch((e) => conn.end(JSON.stringify({ ok: false, reason: String(e?.message ?? e) }) + "\n"));
     });
   });
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     server.once("error", reject);
     server.listen(sock, () => {
       if (process.platform !== "win32") {
@@ -34853,12 +35623,12 @@ function serve(sock, handle) {
         }
       }
       server.unref();
-      resolve7(server);
+      resolve8(server);
     });
   });
 }
 function ask(sock, req, timeoutMs = 5e3) {
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const conn = createConnection(sock);
     let buf = "";
     const timer = setTimeout(() => {
@@ -34875,7 +35645,7 @@ function ask(sock, req, timeoutMs = 5e3) {
     conn.on("close", () => {
       clearTimeout(timer);
       try {
-        resolve7(JSON.parse(buf.trim()));
+        resolve8(JSON.parse(buf.trim()));
       } catch {
         reject(new Error("no answer"));
       }
@@ -34883,10 +35653,10 @@ function ask(sock, req, timeoutMs = 5e3) {
   });
 }
 function parentOf(pid) {
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     execFile2("/bin/ps", ["-o", "ppid=", "-p", String(pid)], { timeout: 2e3, env: safeExecEnv() }, (err, stdout) => {
       const n = Number(String(stdout).trim());
-      resolve7(err || !Number.isInteger(n) || n <= 1 ? void 0 : n);
+      resolve8(err || !Number.isInteger(n) || n <= 1 ? void 0 : n);
     });
   });
 }
@@ -34923,8 +35693,8 @@ async function peerPid(conn, run = runOut) {
     if (process.platform === "darwin")
       return parseLsofPeer(await run("lsof", ["-nP", "-U", "-F", "pfdn"]), process.pid, fd);
     if (process.platform === "linux") {
-      const link = await run("readlink", [`/proc/self/fd/${fd}`]);
-      const inode = /socket:\[(\d+)\]/.exec(link)?.[1];
+      const link2 = await run("readlink", [`/proc/self/fd/${fd}`]);
+      const inode = /socket:\[(\d+)\]/.exec(link2)?.[1];
       return inode ? parseSsPeer(await run("ss", ["-xpn"]), inode) : void 0;
     }
   } catch {
@@ -34969,11 +35739,11 @@ function parseSsPeer(out, inode) {
   return void 0;
 }
 function runOut(cmd, args) {
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const bin = cmd.startsWith("/") ? cmd : safeBinary(cmd);
     if (!bin)
       return reject(new Error(`${cmd} not found in the system folders`));
-    execFile2(bin, args, { timeout: 5e3, maxBuffer: 2e7, env: safeExecEnv() }, (err, stdout) => err ? reject(err) : resolve7(String(stdout)));
+    execFile2(bin, args, { timeout: 5e3, maxBuffer: 2e7, env: safeExecEnv() }, (err, stdout) => err ? reject(err) : resolve8(String(stdout)));
   });
 }
 function commOf(pid) {
@@ -35182,7 +35952,7 @@ var RolloutReader = class {
 // packages/codex-bridge/dist/server.js
 var BRIDGE_VERSION = "0.1.3";
 function childWatch(env, extra = {}) {
-  return (argv, onLine, signal) => new Promise((resolve7, reject) => {
+  return (argv, onLine, signal) => new Promise((resolve8, reject) => {
     const child = spawn2(argv[0], argv.slice(1), { env: childEnv(env, extra), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let buf = "";
     let stderr = "";
@@ -35204,15 +35974,15 @@ function childWatch(env, extra = {}) {
     });
     child.on("close", (code2) => {
       signal.removeEventListener("abort", kill);
-      resolve7({ code: code2, stderr });
+      resolve8({ code: code2, stderr });
     });
   });
 }
 function gitIn(git = gitBinary()) {
-  return (cwd, args) => new Promise((resolve7) => {
+  return (cwd, args) => new Promise((resolve8) => {
     if (!git)
-      return resolve7(void 0);
-    execFile3(git, ["-c", "core.fsmonitor=false", ...args], { cwd, env: safeExecEnv(), timeout: 5e3 }, (err, stdout) => resolve7(err ? void 0 : String(stdout).trim() || void 0));
+      return resolve8(void 0);
+    execFile3(git, ["-c", "core.fsmonitor=false", ...args], { cwd, env: safeExecEnv(), timeout: 5e3 }, (err, stdout) => resolve8(err ? void 0 : String(stdout).trim() || void 0));
   });
 }
 function codexQueue(env, log) {
@@ -35224,8 +35994,8 @@ function codexQueue(env, log) {
     return void 0;
   }
   const queueEnv = childEnv(env, { CODEX_HOME: env.CODEX_HOME });
-  return (threadId, text2) => new Promise((resolve7) => {
-    execFile3(bin, ["queue", "--thread", threadId, "--message", text2], { env: queueEnv, timeout: 3e4 }, (err) => resolve7(!err));
+  return (threadId, text2) => new Promise((resolve8) => {
+    execFile3(bin, ["queue", "--thread", threadId, "--message", text2], { env: queueEnv, timeout: 3e4 }, (err) => resolve8(!err));
   });
 }
 function personTokenOf(home) {
@@ -35381,12 +36151,12 @@ async function runMcpServer(o) {
 `), refuseMutating);
   void bridge.start().catch((e) => log(`start failed: ${String(e?.message ?? e)}`));
   const feeder = lineFeeder((line) => server.onLine(line));
-  await new Promise((resolve7) => {
+  await new Promise((resolve8) => {
     o.stdin.setEncoding?.("utf8");
     o.stdin.on("data", (chunk) => feeder.push(String(chunk)));
-    o.stdin.on("end", resolve7);
-    o.stdin.on("close", resolve7);
-    o.stdin.on("error", () => resolve7());
+    o.stdin.on("end", resolve8);
+    o.stdin.on("close", resolve8);
+    o.stdin.on("error", () => resolve8());
   });
   await feeder.end();
   server.close();
@@ -36071,8 +36841,8 @@ function resolveLink(path2) {
   try {
     return realpathSync3(path2);
   } catch {
-    const link = readlinkSync(path2);
-    return isAbsolute6(link) ? link : join9(dirname3(path2), link);
+    const link2 = readlinkSync(path2);
+    return isAbsolute6(link2) ? link2 : join9(dirname3(path2), link2);
   }
 }
 function printedInstructions(plan) {
@@ -39678,13 +40448,13 @@ init_projects();
 init_sessions();
 init_state2();
 init_xstate();
-import { createHash as createHash10, createHmac as createHmac2 } from "node:crypto";
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync15, renameSync as renameSync9, writeFileSync as writeFileSync11 } from "node:fs";
-import { join as join24 } from "node:path";
+import { createHash as createHash11, createHmac as createHmac2 } from "node:crypto";
+import { mkdirSync as mkdirSync12, readFileSync as readFileSync16, renameSync as renameSync10, writeFileSync as writeFileSync12 } from "node:fs";
+import { join as join25 } from "node:path";
 function localMac(app, ns, data) {
   const secret = app.device?.signingSecretKey;
   if (!secret) throw new CliError("no_identity", "no identity here yet: run `p2p init`");
-  const key = createHash10("sha256").update("p2p/ext-local-mac/v1|").update(ns).update("|").update(secret).digest();
+  const key = createHash11("sha256").update("p2p/ext-local-mac/v1|").update(ns).update("|").update(secret).digest();
   return createHmac2("sha256", key).update(data, "utf8").digest("base64url");
 }
 var IX_INSTALL_HINT = "https://github.com/ix-infrastructure/Ix";
@@ -39801,11 +40571,11 @@ async function mayShareSessionContext(app, ofSid, fromSid) {
 }
 var MAX_EXT_STORE_BYTES = 64 * 1024;
 function extStore(home, ns) {
-  const dir = join24(home, "ext");
-  const file = join24(dir, `${ns}.json`);
+  const dir = join25(home, "ext");
+  const file = join25(dir, `${ns}.json`);
   const read2 = () => {
     try {
-      const v = JSON.parse(readFileSync15(file, "utf8"));
+      const v = JSON.parse(readFileSync16(file, "utf8"));
       return v && typeof v === "object" && !Array.isArray(v) ? v : {};
     } catch {
       return {};
@@ -39816,10 +40586,10 @@ function extStore(home, ns) {
     set: async (key, value) => {
       const next = JSON.stringify({ ...read2(), [key]: value });
       if (Buffer.byteLength(next, "utf8") > MAX_EXT_STORE_BYTES) throw new CliError("too_large", `the ${ns} extension's store would exceed ${MAX_EXT_STORE_BYTES} bytes`);
-      mkdirSync11(dir, { recursive: true, mode: 448 });
+      mkdirSync12(dir, { recursive: true, mode: 448 });
       const tmp = `${file}.${process.pid}.tmp`;
-      writeFileSync11(tmp, next, { mode: 384 });
-      renameSync9(tmp, file);
+      writeFileSync12(tmp, next, { mode: 384 });
+      renameSync10(tmp, file);
     }
   };
 }
@@ -39919,14 +40689,15 @@ init_inbound();
 init_rotation();
 init_sessions();
 init_projects();
+init_keystore();
 init_v3();
 init_ix_local();
 
 // packages/p2p/src/sandbox.ts
-import { randomBytes as randomBytes16 } from "node:crypto";
-import { closeSync as closeSync4, constants as constants3, existsSync as existsSync6, fstatSync as fstatSync2, mkdirSync as mkdirSync12, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync6, renameSync as renameSync10, rmSync as rmSync5, statSync as statSync6, writeFileSync as writeFileSync12 } from "node:fs";
+import { randomBytes as randomBytes17 } from "node:crypto";
+import { closeSync as closeSync4, constants as constants4, existsSync as existsSync7, fstatSync as fstatSync2, mkdirSync as mkdirSync13, openSync as openSync4, readSync as readSync2, realpathSync as realpathSync7, renameSync as renameSync11, rmSync as rmSync6, statSync as statSync6, writeFileSync as writeFileSync13 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { dirname as dirname7, isAbsolute as isAbsolute11, join as join25, normalize as normalize3, resolve as resolve5, sep as sep5 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute11, join as join26, normalize as normalize3, resolve as resolve6, sep as sep5 } from "node:path";
 init_ancestry();
 init_config();
 init_errors2();
@@ -39935,9 +40706,9 @@ function userHomeOf(env) {
   return env.HOME?.trim() || env.USERPROFILE?.trim() || homedir6();
 }
 function p2pHomePaths(env) {
-  const home = normalize3(resolve5(resolveHome2(env)));
+  const home = normalize3(resolve6(resolveHome2(env)));
   try {
-    const real2 = realpathSync6(home);
+    const real2 = realpathSync7(home);
     return real2 !== home ? { home, real: real2 } : { home };
   } catch {
     return { home };
@@ -39951,12 +40722,12 @@ function within4(path2, root) {
   return a === b || a.startsWith(r);
 }
 function tildeForm(abs, userHome2) {
-  const h = normalize3(resolve5(userHome2));
+  const h = normalize3(resolve6(userHome2));
   return abs.startsWith(h + sep5) ? `~/${abs.slice(h.length + 1).split(sep5).join("/")}` : abs;
 }
 function claudeSettingsPath(env) {
   const dir = env.CLAUDE_CONFIG_DIR?.trim();
-  return join25(dir ? resolve5(dir) : join25(userHomeOf(env), ".claude"), "settings.json");
+  return join26(dir ? resolve6(dir) : join26(userHomeOf(env), ".claude"), "settings.json");
 }
 function claudeManagedPath(platform = process.platform) {
   if (platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
@@ -39980,10 +40751,10 @@ function trimSlashes2(s2) {
 function sandboxPath(entry, userHome2, base) {
   const e = trimSlashes2(entry.trim());
   if (e === "~") return normalize3(userHome2);
-  if (e.startsWith("~/")) return normalize3(join25(userHome2, e.slice(2)));
+  if (e.startsWith("~/")) return normalize3(join26(userHome2, e.slice(2)));
   if (e.startsWith("//")) return normalize3(e.slice(1));
   if (isAbsolute11(e)) return normalize3(e);
-  return base && e !== "" ? normalize3(resolve5(base, e)) : void 0;
+  return base && e !== "" ? normalize3(resolve6(base, e)) : void 0;
 }
 function ruleFolder(rule, tool, userHome2) {
   if (!rule.startsWith(`${tool}(`) || !rule.endsWith(")")) return void 0;
@@ -39991,7 +40762,7 @@ function ruleFolder(rule, tool, userHome2) {
   if (p.endsWith("/**")) p = p.slice(0, -3);
   if (p === "" || /[*?[\]{}]/.test(p)) return void 0;
   if (p === "~") return normalize3(userHome2);
-  if (p.startsWith("~/")) return normalize3(join25(userHome2, p.slice(2)));
+  if (p.startsWith("~/")) return normalize3(join26(userHome2, p.slice(2)));
   if (p.startsWith("//")) return normalize3(p.slice(1));
   return void 0;
 }
@@ -40001,7 +40772,7 @@ var MAX_CONFIG_BYTES = 1024 * 1024;
 function readConfigFile(path2) {
   let fd;
   try {
-    fd = openSync4(path2, constants3.O_RDONLY | (constants3.O_NONBLOCK ?? 0));
+    fd = openSync4(path2, constants4.O_RDONLY | (constants4.O_NONBLOCK ?? 0));
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw new CliError("config", `${path2} couldn't be read: ${e.message}`);
@@ -40044,7 +40815,7 @@ function projectRoots(workdir) {
   const out = [normalize3(workdir)];
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
-    if (existsSync6(join25(d, ".git"))) {
+    if (existsSync7(join26(d, ".git"))) {
       if (!out.includes(d)) out.push(d);
       break;
     }
@@ -40058,7 +40829,7 @@ function onPath(name2, env) {
   for (const dir of (env.PATH ?? "").split(":")) {
     if (!dir || !isAbsolute11(dir)) continue;
     try {
-      if (statSync6(join25(dir, name2)).isFile()) return true;
+      if (statSync6(join26(dir, name2)).isFile()) return true;
     } catch {
     }
   }
@@ -40079,7 +40850,7 @@ function claudeSandboxStatus(env, o = {}) {
   const unreadable = [];
   for (const root of projectRoots(o.workdir ?? sessionWorkdir(env))) {
     for (const name2 of ["settings.local.json", "settings.json"]) {
-      const file = join25(root, ".claude", name2);
+      const file = join26(root, ".claude", name2);
       if (file === settings) continue;
       const doc = readJson(file);
       if (doc === "bad") unreadable.push(file);
@@ -40237,7 +41008,7 @@ var isDir = (p) => {
 };
 function codexConfigPath(env) {
   const h = env.CODEX_HOME?.trim();
-  return join25(h ? resolve5(h) : join25(userHomeOf(env), ".codex"), "config.toml");
+  return join26(h ? resolve6(h) : join26(userHomeOf(env), ".codex"), "config.toml");
 }
 function codexDenyPathsOf(env) {
   const p = p2pHomePaths(env);
@@ -40246,7 +41017,7 @@ function codexDenyPathsOf(env) {
 var RULE_CHARS = /* @__PURE__ */ new Set(["[", "]", "{", "}", "*", "?", "(", ")"]);
 function p2pHomeProblem(env) {
   const paths = p2pHomePaths(env);
-  const userHome2 = normalize3(resolve5(userHomeOf(env)));
+  const userHome2 = normalize3(resolve6(userHomeOf(env)));
   for (const h of [paths.home, ...paths.real ? [paths.real] : []]) {
     if ([...h].some((c) => RULE_CHARS.has(c))) return `P2P_HOME (${h}) has a character that means something in a sandbox rule ([ ] { } * ? ( )): move it to a plain path, then run this again`;
     if (h === sep5 || within4(userHome2, h)) return `P2P_HOME (${h}) is your home folder or a folder above it: denying it would shut your agents out of everything. Point P2P_HOME at its own folder`;
@@ -40259,8 +41030,8 @@ function codexProjectConfigs(workdir) {
   const out = [];
   let d = normalize3(workdir);
   for (let i = 0; i < 64; i++) {
-    const f = join25(d, ".codex", "config.toml");
-    if (existsSync6(f)) out.push(f);
+    const f = join26(d, ".codex", "config.toml");
+    if (existsSync7(f)) out.push(f);
     if (d === top) break;
     const up = dirname7(d);
     if (up === d) break;
@@ -40378,21 +41149,21 @@ function applyPlans(plans, now = /* @__PURE__ */ new Date()) {
   const done = [];
   for (const c of changes) {
     const target = resolveLink(c.path);
-    mkdirSync12(dirname7(target), { recursive: true });
+    mkdirSync13(dirname7(target), { recursive: true });
     let backup;
     if (c.before !== null) {
       backup = `${c.path}.p2p-backup-${stamp}`;
-      writeFileSync12(backup, c.before, { mode: 384, flag: "wx" });
+      writeFileSync13(backup, c.before, { mode: 384, flag: "wx" });
     }
     let mode = 384;
     try {
       mode = statSync6(target).mode & 511;
     } catch {
     }
-    const tmp = `${target}.p2p-tmp-${randomBytes16(8).toString("hex")}`;
-    rmSync5(tmp, { force: true });
-    writeFileSync12(tmp, c.after, { mode, flag: "wx" });
-    renameSync10(tmp, target);
+    const tmp = `${target}.p2p-tmp-${randomBytes17(8).toString("hex")}`;
+    rmSync6(tmp, { force: true });
+    writeFileSync13(tmp, c.after, { mode, flag: "wx" });
+    renameSync11(tmp, target);
     done.push({ path: c.path, ...backup ? { backup } : {} });
   }
   return done;
@@ -40431,7 +41202,7 @@ function declinedHere(env, front) {
   }
 }
 function frontPresent(front, env) {
-  return existsSync6(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
+  return existsSync7(dirname7(front === "claude" ? claudeSettingsPath(env) : codexConfigPath(env)));
 }
 async function sandboxNotice(app, front) {
   if (app.front !== true && agentContext(app.env)) return void 0;
@@ -40483,8 +41254,8 @@ init_rotation();
 init_outbox();
 init_running();
 import { watch as watchDir } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile5, rename as rename2, writeFile as writeFile5 } from "node:fs/promises";
-import { join as join26 } from "node:path";
+import { mkdir as mkdir3, readFile as readFile6, rename as rename2, writeFile as writeFile5 } from "node:fs/promises";
+import { join as join27 } from "node:path";
 
 // packages/p2p/src/graph-memory.ts
 init_v3();
@@ -40772,11 +41543,11 @@ async function graphMemoryReport(app) {
 
 // packages/p2p/src/watch.ts
 function cursorPath(app, sid) {
-  return join26(app.home, "cursors", `${sid}.cursor`);
+  return join27(app.home, "cursors", `${sid}.cursor`);
 }
 async function readCursor(app, sid) {
   try {
-    const v = JSON.parse(await readFile5(cursorPath(app, sid), "utf8"));
+    const v = JSON.parse(await readFile6(cursorPath(app, sid), "utf8"));
     if (typeof v.n === "number" && typeof v.start === "number") return v;
   } catch {
   }
@@ -40784,7 +41555,7 @@ async function readCursor(app, sid) {
 }
 async function writeCursor(app, sid, c) {
   const p = cursorPath(app, sid);
-  await mkdir3(join26(app.home, "cursors"), { recursive: true, mode: 448 });
+  await mkdir3(join27(app.home, "cursors"), { recursive: true, mode: 448 });
   const tmp = `${p}.${process.pid}.tmp`;
   await writeFile5(tmp, JSON.stringify(c), { mode: 384 });
   await rename2(tmp, p);
@@ -40808,21 +41579,21 @@ function untilAborted(p, signal) {
     p.catch(() => void 0);
     return Promise.resolve(void 0);
   }
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const off = () => signal.removeEventListener("abort", onAbort);
     const onAbort = () => {
       off();
-      resolve7(void 0);
+      resolve8(void 0);
     };
     signal.addEventListener("abort", onAbort);
     p.then(
       (v) => {
         off();
-        resolve7(v);
+        resolve8(v);
       },
       (e) => {
         off();
-        if (signal.aborted) resolve7(void 0);
+        if (signal.aborted) resolve8(void 0);
         else reject(e);
       }
     );
@@ -40896,7 +41667,7 @@ async function watch(app, opts) {
   const offEvents = app.state.onEventsAdded(wake);
   let logWatcher;
   try {
-    logWatcher = watchDir(join26(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
+    logWatcher = watchDir(join27(app.state.dir, "cli"), { persistent: false }, (_ev, name2) => {
       if (name2 === null || String(name2) === "events.json") wake();
     });
     logWatcher.on("error", () => {
@@ -41045,9 +41816,10 @@ init_state2();
 init_extensions();
 init_ix_local();
 init_projects();
-import { readdirSync as readdirSync4, statSync as statSync7 } from "node:fs";
-import { readFile as readFile6, stat as stat2 } from "node:fs/promises";
-import { dirname as dirname8, join as join27 } from "node:path";
+init_keystore();
+import { readdirSync as readdirSync5, statSync as statSync7 } from "node:fs";
+import { readFile as readFile7, stat as stat3 } from "node:fs/promises";
+import { dirname as dirname8, join as join28 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_config();
 init_history();
@@ -41183,9 +41955,9 @@ function ownStatuses(app, peers) {
 function watchCursor(home) {
   let best;
   try {
-    for (const name2 of readdirSync4(join27(home, "cursors"))) {
+    for (const name2 of readdirSync5(join28(home, "cursors"))) {
       if (!name2.endsWith(".cursor")) continue;
-      const at = statSync7(join27(home, "cursors", name2)).mtimeMs;
+      const at = statSync7(join28(home, "cursors", name2)).mtimeMs;
       if (!best || at > best.at) best = { sid: name2.slice(0, -".cursor".length), at };
     }
   } catch {
@@ -41199,7 +41971,7 @@ function findModRoot(app, given) {
   try {
     const here = dirname8(fileURLToPath3(import.meta.url));
     const root = dirname8(here);
-    statSync7(join27(root, ".claude-plugin", "plugin.json"));
+    statSync7(join28(root, ".claude-plugin", "plugin.json"));
     return root;
   } catch {
     return void 0;
@@ -41207,18 +41979,18 @@ function findModRoot(app, given) {
 }
 var MAX_MOD_FILE_BYTES = 16 * 1024 * 1024;
 async function readSmall2(path2) {
-  if ((await stat2(path2)).size > MAX_MOD_FILE_BYTES) throw new Error("too large");
-  return readFile6(path2, "utf8");
+  if ((await stat3(path2)).size > MAX_MOD_FILE_BYTES) throw new Error("too large");
+  return readFile7(path2, "utf8");
 }
 async function modVersions(root) {
   const out = {};
   try {
-    const v = JSON.parse(await readSmall2(join27(root, ".claude-plugin", "plugin.json"))).version;
+    const v = JSON.parse(await readSmall2(join28(root, ".claude-plugin", "plugin.json"))).version;
     if (typeof v === "string") out.plugin = peer(v, 32);
   } catch {
   }
   try {
-    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join27(root, "bin", "p2p.mjs")));
+    const m = /^var VERSION = "([^"]{1,32})";$/m.exec(await readSmall2(join28(root, "bin", "p2p.mjs")));
     if (m) out.bundled = peer(m[1], 32);
   } catch {
   }
@@ -41747,6 +42519,22 @@ async function userChecks(c, app, userId, ms, mine) {
     if (recs.length > reported) c.add("their-sessions", "ok", "their sessions", `${recs.length - reported} more not shown`);
   }
 }
+function keyStorageCheck(c, ks) {
+  const store2 = ks.keys === "keychain" ? `${ks.keychain.label} (item ${ks.item?.service})` : "files in P2P_HOME (cli/keys.json, 0600)";
+  if (ks.keys === "none") {
+    c.add("key-storage", "ok", "key storage", `no keys here yet; new ones go to ${ks.configured === "keychain" ? ks.keychain.label : "files in P2P_HOME"}`);
+    return;
+  }
+  if (!ks.readable) {
+    c.add("key-storage", "fail", "key storage", `${store2}: the keys can't be read${ks.problem ? ` (${errText(ks.problem)})` : ""}`, ks.keys === "keychain" ? "unlock the keychain (or install its tool) and run the command again; nothing makes new keys in their place" : "check cli/keys.json in P2P_HOME");
+    return;
+  }
+  if (ks.problem) {
+    c.add("key-storage", "unknown", "key storage", `${store2}, readable; ${errText(ks.problem)}`, ks.leftovers?.length && !/hasn't finished|stay in the keychain/.test(ks.problem) ? "run any p2p command that isn't read-only (`p2p whoami`): it removes them" : "run `p2p keys backend keychain` (or `p2p keys backend file`) in your own terminal");
+    return;
+  }
+  c.add("key-storage", "ok", "key storage", `${store2}, readable${ks.keys === "file" && ks.keychain.available ? `; \`p2p keys backend keychain\` moves them into ${ks.keychain.label}` : ""}`);
+}
 function summarize2(checks) {
   return {
     ok: checks.filter((x) => x.status === "ok").length,
@@ -41754,8 +42542,8 @@ function summarize2(checks) {
     unknown: checks.filter((x) => x.status === "unknown").length
   };
 }
-function doctorTimeoutMs(app, override) {
-  if (override !== void 0) return override;
+function doctorTimeoutMs(app, override2) {
+  if (override2 !== void 0) return override2;
   const raw = Number(app.env.P2P_DOCTOR_TIMEOUT_MS);
   const base = Number.isFinite(raw) && raw > 0 ? raw : 5e3;
   const cap2 = app.tun.connectTimeoutMs > 0 ? app.tun.connectTimeoutMs : base;
@@ -41768,7 +42556,19 @@ async function doctor(app, o) {
   app.tun.requestTimeoutMs = ms;
   const c = new Checks();
   const scope = o.user !== void 0 ? "user" : "device";
-  const hasIdentity = await app.load(false).catch(() => false);
+  let loadError;
+  const hasIdentity = await app.load(false).catch((e) => {
+    loadError = e;
+    return false;
+  });
+  const ks = keyStoreStatus(app.home);
+  if (scope === "device" || ks.keys !== "none" && !ks.readable) keyStorageCheck(c, ks);
+  if (!hasIdentity && ks.keys !== "none" && identityHere(app.home)) {
+    c.add("identity", "fail", "identity", `this device holds an identity, but it couldn't be loaded: ${errText(loadError ?? ks.problem)}`, ks.keys === "keychain" ? "unlock the keychain (or install its tool), then run `p2p doctor` again; p2p never makes new keys in their place" : `check ${app.home}/cli/keys.json`);
+    await versionCheck(c, app, o, ms);
+    if (scope === "device") sandboxChecks(c, app);
+    return { scope, version: o.version, ...o.user !== void 0 ? { user: { input: o.user } } : {}, checks: c.list, summary: summarize2(c.list) };
+  }
   if (!hasIdentity) {
     c.add("identity", "fail", "identity", "this device has no Peer2Peer identity yet", "run `/peers setup` in Claude Code (or `p2p setup`), then `/peers join <code>` with a code from a friend");
     let relays;
@@ -43213,7 +44013,7 @@ var Tui = class {
     this.promptAnswer?.(void 0);
     this.ui = { ...this.ui, modal: { kind: "prompt", title, lines, text: "" } };
     this.draw();
-    return new Promise((resolve7) => this.promptAnswer = resolve7);
+    return new Promise((resolve8) => this.promptAnswer = resolve8);
   }
   async effect(e) {
     switch (e.kind) {
@@ -43663,14 +44463,14 @@ function daysLeft(exp, now) {
 function prettyInvite(r, p) {
   const st = styleOf(p);
   const now = nowOf(p);
-  const join28 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
+  const join29 = `p2p join${r.privateRelay ? " --allow-private-relay" : ""} '${cell(r.web, 400)}'`;
   const what = r.circles.length ? `It makes them your friend and joins them to ${r.circles.map((c) => st.bold(`"${cell(c.name, 40)}"`)).join(", ")}.` : "It makes them your friend.";
   return [
     st.bold(`Your invite${r.label ? ` for ${cell(r.label, 40)}` : ""}`) + st.dim(`  (works once, for ${daysLeft(r.expiresAt, now)}${r.to ? `, only for ${cell(r.to.address, 48)}` : ""})`),
     "",
     `  ${st.cyan(st.bold(cell(r.web, 400)))}`,
     "",
-    st.dim(`  or the code: ${cell(r.code, 200)}   (${join28})`),
+    st.dim(`  or the code: ${cell(r.code, 200)}   (${join29})`),
     "",
     what,
     st.yellow("Send it over a channel you trust: ") + "anyone who sees it first can use it. They see who it's from and say yes before anything happens.",
@@ -43801,7 +44601,8 @@ var PERSON_ONLY = /* @__PURE__ */ new Map([
   ["block", "changes who reaches you"],
   ["petname", "changes the names you know people by"],
   ["circle leave", "changes your circles"],
-  ["held decline", "decides a held request for you"]
+  ["held decline", "decides a held request for you"],
+  ["keys backend", "moves your identity and device keys"]
 ]);
 var ROTATE_ACTS = ["resume", "cancel", "exclude", "keep", "invite", "keepKeyholders", "backupFile", "contest", "resend", "yes", "branch"];
 function personOnlyOf(cmd) {
@@ -43818,6 +44619,9 @@ function personOnlyOf(cmd) {
       return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why: why2 } : void 0;
     case "ix config":
       return args.length > 0 ? { what: "ix config", why: why2 } : void 0;
+    // A bare `keys backend` only says where the keys are.
+    case "keys backend":
+      return args.length > 0 ? { what: `keys backend ${args[0] === "file" || args[0] === "keychain" ? args[0] : "<backend>"}`, why: why2 } : void 0;
     // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
     // person's proof outside an agent's session (a fresh home has no person token yet, and a
     // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
@@ -43923,11 +44727,11 @@ function buildProgram(deps) {
             (o) => ({ o }),
             (e) => ({ e })
           ),
-          new Promise((resolve7) => {
+          new Promise((resolve8) => {
             const t2 = setInterval(() => {
               if (Date.now() - start - (waitingOnUser - user0) < limitMs) return;
               clearInterval(t2);
-              resolve7("expired");
+              resolve8("expired");
             }, 200);
             t2.unref?.();
             stop = () => clearInterval(t2);
@@ -44335,6 +45139,42 @@ ${f.plan.snippet}
       return { json: r, human: formatWhoami(r) };
     })
   );
+  const keys = program2.command("keys").description("Where this device's secret keys are kept: files in P2P_HOME (the default) or the OS keychain");
+  keys.command("backend [backend]").description("Show where this device's keys are kept; `keychain` moves them into the OS keychain, `file` back into P2P_HOME (only you, never an agent)").option("--json", "JSON output").addHelpText(
+    "after",
+    [
+      "",
+      "keychain: the macOS Keychain, the Windows Credential Manager, or the Secret Service keyring (libsecret's",
+      "secret-tool) on Linux. The keys are stored, read back and compared before keys.json loses them; a move that",
+      "was interrupted finishes when run again. If the keychain can't be read later (locked, its tool missing),",
+      "commands that need the keys stop with an error: p2p never makes new keys in their place."
+    ].join("\n")
+  ).action(
+    run(
+      async (app, backend) => {
+        if (backend !== void 0 && backend !== "keychain" && backend !== "file") throw new CliError("usage", "p2p keys backend [keychain|file]");
+        const say = (s3) => {
+          const where = s3.keys === "keychain" ? `${s3.keychain.label} (item ${s3.item?.service}, account ${s3.item?.account})` : s3.keys === "file" ? `${app.home}/cli/keys.json (0600)` : "nowhere yet (no identity here)";
+          const lines = [`Keys: ${where}${s3.keys !== "none" ? s3.readable ? ", readable" : ", NOT readable" : ""}.`, `New keys go to: ${s3.configured === "keychain" ? s3.keychain.label : "files in P2P_HOME"}.`];
+          if (s3.problem) lines.push(`Problem: ${s3.problem}`);
+          if (s3.configured === "file") lines.push(s3.keychain.available ? `To keep them in ${s3.keychain.label}: \`p2p keys backend keychain\`.` : `${s3.keychain.label} isn't available here: ${s3.keychain.why}.`);
+          return lines.join("\n");
+        };
+        if (backend === void 0) {
+          const s3 = keyStoreStatus(app.home);
+          return { json: s3, human: say(s3) };
+        }
+        const r = backend === "keychain" ? await moveKeysToKeychain(app.state.keyStore) : await moveKeysToFiles(app.state.keyStore);
+        for (const w of r.warnings) app.warn(w);
+        const s2 = keyStoreStatus(app.home);
+        const head = r.moved ? `Moved this device's keys to ${r.where}.` : `Keys are kept in ${r.where}.`;
+        const note2 = backend === "keychain" ? '\nNote: an agent sandbox that denies P2P_HOME doesn\'t cover the keychain. Anything running as you (an agent too) can ask it for the keys, and can delete or overwrite the item: on a key holder that can destroy the only copy of your identity key, and only your backup phrase brings it back. Have it saved first (`p2p backup show`). See docs/security/threat-model.md, "Keys in the OS keychain".' : "";
+        return { json: { ...r, status: s2 }, human: `${head}
+${say(s2)}${note2}` };
+      },
+      { requireIdentity: false }
+    )
+  );
   const backup = program2.command("backup").description("The 24-word backup phrase of your identity key (§2.7)");
   backup.command("show").description("Show the backup phrase (key-holding devices only)").option("--json", "JSON output").action(
     run(async (app) => {
@@ -44462,8 +45302,8 @@ Accept it with \`p2p identity rotate --resume\` (add --exclude <did> to drop a d
       return { json: r, human: `This device moved with your identity: it is now ${r.address} (${r.did}).` };
     })
   );
-  const link = program2.command("link").description("Link another device to your identity (§2.4)");
-  link.command("start").description("On a key-holding device: show a one-time link code for the new device").option("--keyholder", "Make the new device key-holding (it gets your identity key)").option("--relay <url>", "Relay for the link mailbox (default: your first relay)").option("--expect-compare <code>", "Proceed only if the answering device's compare code is this (for scripts; read it off the new device)").option("--json", "JSON output").action(
+  const link2 = program2.command("link").description("Link another device to your identity (§2.4)");
+  link2.command("start").description("On a key-holding device: show a one-time link code for the new device").option("--keyholder", "Make the new device key-holding (it gets your identity key)").option("--relay <url>", "Relay for the link mailbox (default: your first relay)").option("--expect-compare <code>", "Proceed only if the answering device's compare code is this (for scripts; read it off the new device)").option("--json", "JSON output").action(
     run(async (app, o) => {
       const expect = o.expectCompare?.trim().toLowerCase();
       if (expect === void 0 && !io2.prompt) throw new CliError("usage", "link start confirms the compare code: run it in a terminal, or pass --expect-compare <code>");
@@ -44490,7 +45330,7 @@ A device "${req.label}" answered. Its compare code: ${req.compareCode}`);
       return { json: { ...r, compareCode: shown }, human: `Linked ${r.did}${r.label ? ` (${r.label})` : ""}${r.keyholder ? " as a key holder" : ""}; your document is now version ${r.ver}.` };
     }, { noDeadline: true })
   );
-  link.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--expect-fingerprint <fingerprint>", "Proceed only if the identity is this one (for scripts; `p2p whoami` on the other device shows it); otherwise you confirm it on your terminal").option("--allow-private-relay", "Accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
+  link2.command("join <code>").description("On the new device: join with the code the other device shows").option("--label <label>", "A name for this device").option("--rotated", "This device's identity was rotated while it was offline: re-link it to the new identity (§2.8)").option("--expect-fingerprint <fingerprint>", "Proceed only if the identity is this one (for scripts; `p2p whoami` on the other device shows it); otherwise you confirm it on your terminal").option("--allow-private-relay", "Accept a code whose relay is a loopback, link-local or private address (your own relay on your network; also P2P_ALLOW_PRIVATE_RELAY=1)").option("--json", "JSON output").action(
     run(
       async (app, code2, o) => {
         if (o.rotated) {
@@ -45371,9 +46211,9 @@ async function askDefaultYes(io2, q) {
 function selfScript(deps) {
   const p = deps.scriptPath ?? process.argv[1] ?? "";
   try {
-    return realpathSync7(p);
+    return realpathSync8(p);
   } catch {
-    return resolve6(p);
+    return resolve7(p);
   }
 }
 function codexCommands(program2, deps, io2) {
@@ -45392,9 +46232,9 @@ function codexCommands(program2, deps, io2) {
   c.command("install").description("Print the Codex config (MCP server, hooks, AGENTS.md lines); --write applies it (backs up first, idempotent)").option("--write", "Edit config.toml, hooks.json and AGENTS.md in the Codex home").option("--remove", "Remove the peer2peer entries instead (with --write)").option("--codex-home <dir>", "The Codex home (default: CODEX_HOME, else ~/.codex)").option("--json", "JSON output").action(async (o) => {
     try {
       const script = selfScript(deps);
-      out(Boolean(o.json), installCommand({ env: deps.env, node: deps.nodeCommand ?? process.execPath, script, ...o.codexHome ? { codexHome: resolve6(o.codexHome) } : {}, write: o.write, remove: o.remove }));
+      out(Boolean(o.json), installCommand({ env: deps.env, node: deps.nodeCommand ?? process.execPath, script, ...o.codexHome ? { codexHome: resolve7(o.codexHome) } : {}, write: o.write, remove: o.remove }));
       if (o.write && !o.remove && !o.json && (io2.prompt || io2.select) && !ciEnv(deps.env)) {
-        const env = o.codexHome ? { ...deps.env, CODEX_HOME: resolve6(o.codexHome) } : deps.env;
+        const env = o.codexHome ? { ...deps.env, CODEX_HOME: resolve7(o.codexHome) } : deps.env;
         let here = true;
         try {
           assertPersonOutsideAgents({ env }, "codex install --write");
@@ -45464,12 +46304,12 @@ function stdoutWriter(ctl) {
     gone = true;
     ctl.abort();
   });
-  return (line) => new Promise((resolve7) => {
-    if (gone || ctl.signal.aborted) return resolve7(false);
+  return (line) => new Promise((resolve8) => {
+    if (gone || ctl.signal.aborted) return resolve8(false);
     try {
-      process.stdout.write(line + "\n", (err) => resolve7(!err && !gone));
+      process.stdout.write(line + "\n", (err) => resolve8(!err && !gone));
     } catch {
-      resolve7(false);
+      resolve8(false);
     }
   });
 }
@@ -45499,7 +46339,10 @@ async function main(argvIn, deps) {
       front,
       env,
       ...byToken && deps.front !== true ? { frontToken: token, frontFresh: !identityHere(home) } : {},
-      ...linked ? { personTokenLinked: true } : given && !front ? { personTokenStale: true } : {}
+      // A token that couldn't be checked because the keys it derives from are in a keychain that can't
+      // be read now (keystore.ts) isn't stale: the command runs without it, and one that needs the keys
+      // stops with the keychain's own error (`p2p doctor` still diagnoses).
+      ...linked ? { personTokenLinked: true } : given && !front && !keysUnreadable(home) ? { personTokenStale: true } : {}
     };
   }
   const end = argvIn.indexOf("--");
@@ -45533,7 +46376,7 @@ var STDIN_IDLE_MS = 3e3;
 var END_OF_INPUT_HINT = "reading from stdin… (end the input with Ctrl-D, or Ctrl-Z then Enter on Windows)";
 function readAll2(stream, opts = {}) {
   if (stream.isTTY) return Promise.resolve("");
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const chunks = [];
     let got = false;
     const finish2 = (v) => {
@@ -45542,7 +46385,7 @@ function readAll2(stream, opts = {}) {
       stream.removeAllListeners("end");
       stream.removeAllListeners("error");
       stream.pause();
-      resolve7(v);
+      resolve8(v);
     };
     const timer = setTimeout(
       () => {
@@ -45593,7 +46436,7 @@ function runPicker(spec, input, output, o) {
     output.write(lines.join("\r\n"));
     drawn = lines.length;
   };
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     let finished = false;
     const restore = () => {
       try {
@@ -45618,7 +46461,7 @@ function runPicker(spec, input, output, o) {
 `);
       restore();
       input.pause();
-      resolve7(state.done ? state.done : void 0);
+      resolve8(state.done ? state.done : void 0);
     };
     const onSignals = HOOKED.map((sig) => {
       const fn = () => {
@@ -45628,7 +46471,7 @@ function runPicker(spec, input, output, o) {
         output.write("\r\n");
         restore();
         input.pause();
-        resolve7(void 0);
+        resolve8(void 0);
         signals.raise(sig);
       };
       return [sig, fn];

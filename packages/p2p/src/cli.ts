@@ -30,6 +30,7 @@ import { receiving } from "./inbound.js";
 import * as rotation from "./rotation.js";
 import * as sessions from "./sessions.js";
 import * as projects from "./projects.js";
+import * as keystore from "./keystore.js";
 import { isDid } from "@peer2peer/core/v3";
 import * as ixLocal from "./ix-local.js";
 import * as sandbox from "./sandbox.js";
@@ -161,6 +162,7 @@ const PERSON_ONLY = new Map<string, string>([
   ["petname", "changes the names you know people by"],
   ["circle leave", "changes your circles"],
   ["held decline", "decides a held request for you"],
+  ["keys backend", "moves your identity and device keys"],
 ]);
 
 /** `identity rotate` options that do something beyond making or showing the plan. */
@@ -186,6 +188,9 @@ export function personOnlyOf(cmd: Command): { what: string; why: string; agentOn
       return args.length > 1 ? { what: args[1] === "on" || args[1] === "off" ? `circle hold <cid> ${args[1]}` : "circle hold", why } : undefined;
     case "ix config":
       return args.length > 0 ? { what: "ix config", why } : undefined;
+    // A bare `keys backend` only says where the keys are.
+    case "keys backend":
+      return args.length > 0 ? { what: `keys backend ${args[0] === "file" || args[0] === "keychain" ? args[0] : "<backend>"}`, why } : undefined;
     // Restore runs only on a fresh home and needs the phrase itself, typed or piped: that is the
     // person's proof outside an agent's session (a fresh home has no person token yet, and a
     // headless restore must keep working). Inside an agent's session it is refused, as `link join`.
@@ -811,6 +816,50 @@ export function buildProgram(deps: ProgramDeps): Command {
         const r = await ops.whoami(app);
         return { json: r, human: fmt.formatWhoami(r) };
       }),
+    );
+
+  const keys = program.command("keys").description("Where this device's secret keys are kept: files in P2P_HOME (the default) or the OS keychain");
+  keys
+    .command("backend [backend]")
+    .description("Show where this device's keys are kept; `keychain` moves them into the OS keychain, `file` back into P2P_HOME (only you, never an agent)")
+    .option("--json", "JSON output")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "keychain: the macOS Keychain, the Windows Credential Manager, or the Secret Service keyring (libsecret's",
+        "secret-tool) on Linux. The keys are stored, read back and compared before keys.json loses them; a move that",
+        "was interrupted finishes when run again. If the keychain can't be read later (locked, its tool missing),",
+        "commands that need the keys stop with an error: p2p never makes new keys in their place.",
+      ].join("\n"),
+    )
+    .action(
+      run(
+        async (app, backend: string | undefined) => {
+          if (backend !== undefined && backend !== "keychain" && backend !== "file") throw new CliError("usage", "p2p keys backend [keychain|file]");
+          const say = (s: keystore.KeyStoreStatus) => {
+            const where = s.keys === "keychain" ? `${s.keychain.label} (item ${s.item?.service}, account ${s.item?.account})` : s.keys === "file" ? `${app.home}/cli/keys.json (0600)` : "nowhere yet (no identity here)";
+            const lines = [`Keys: ${where}${s.keys !== "none" ? (s.readable ? ", readable" : ", NOT readable") : ""}.`, `New keys go to: ${s.configured === "keychain" ? s.keychain.label : "files in P2P_HOME"}.`];
+            if (s.problem) lines.push(`Problem: ${s.problem}`);
+            if (s.configured === "file") lines.push(s.keychain.available ? `To keep them in ${s.keychain.label}: \`p2p keys backend keychain\`.` : `${s.keychain.label} isn't available here: ${s.keychain.why}.`);
+            return lines.join("\n");
+          };
+          if (backend === undefined) {
+            const s = keystore.keyStoreStatus(app.home);
+            return { json: s, human: say(s) };
+          }
+          const r = backend === "keychain" ? await keystore.moveKeysToKeychain(app.state.keyStore) : await keystore.moveKeysToFiles(app.state.keyStore);
+          for (const w of r.warnings) app.warn(w);
+          const s = keystore.keyStoreStatus(app.home);
+          const head = r.moved ? `Moved this device's keys to ${r.where}.` : `Keys are kept in ${r.where}.`;
+          const note =
+            backend === "keychain"
+              ? "\nNote: an agent sandbox that denies P2P_HOME doesn't cover the keychain. Anything running as you (an agent too) can ask it for the keys, and can delete or overwrite the item: on a key holder that can destroy the only copy of your identity key, and only your backup phrase brings it back. Have it saved first (`p2p backup show`). See docs/security/threat-model.md, \"Keys in the OS keychain\"."
+              : "";
+          return { json: { ...r, status: s }, human: `${head}\n${say(s)}${note}` };
+        },
+        { requireIdentity: false },
+      ),
     );
 
   const backup = program.command("backup").description("The 24-word backup phrase of your identity key (§2.7)");
@@ -2430,7 +2479,10 @@ export async function main(argvIn: string[], deps: ProgramDeps): Promise<number>
       front,
       env,
       ...(byToken && deps.front !== true ? { frontToken: token, frontFresh: !projects.identityHere(home) } : {}),
-      ...(linked ? { personTokenLinked: true } : given && !front ? { personTokenStale: true } : {}),
+      // A token that couldn't be checked because the keys it derives from are in a keychain that can't
+      // be read now (keystore.ts) isn't stale: the command runs without it, and one that needs the keys
+      // stops with the keychain's own error (`p2p doctor` still diagnoses).
+      ...(linked ? { personTokenLinked: true } : given && !front && !keystore.keysUnreadable(home) ? { personTokenStale: true } : {}),
     };
   }
   // `--no-input` anywhere before `--`: no pickers, no questions (as a script would run).
